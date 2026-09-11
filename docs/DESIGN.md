@@ -111,7 +111,9 @@ slot that proves no membership and burn the note.
 note      = (pk, v: u64 capped at 2^62 - 1, rho: 32 bytes, r: 32 bytes)
 inner     = H(NOTE, pk, rho, r)
 cm        = H(CM, inner, v)
-nf        = H(NF, nk, rho, r)
+nf        = H(NF, nk, rho, r)                 real input slot
+nf_dummy  = H(NF_DUMMY, nk, rho, r)           padding input slot, tag selected in circuit
+rho_out_j = H(RHO, nf_1, nf_2, j)             a spend output's rho is derived in circuit, never chosen
 ```
 
 The 62-bit cap on `v` is a consensus rule. The no-wrap argument behind the
