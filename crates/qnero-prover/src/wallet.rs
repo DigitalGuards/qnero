@@ -1,10 +1,21 @@
 //! The wallet's proving API: a leaf per transfer, a private batch per
 //! submission.
 //!
-//! ```ignore
-//! let wallet = WalletProver::new(NUM_LEAVES)?;          // one build per process
-//! let bytes = wallet.prove_submission(vec![witness])?;  // one transaction
 //! ```
+//! # use qnero_circuit::witness::SpendWitness;
+//! # use qnero_prover::WalletProver;
+//! # const NUM_LEAVES: usize = 7;
+//! # fn submit(witness: SpendWitness) -> anyhow::Result<()> {
+//! let wallet = WalletProver::new(NUM_LEAVES)?;                // one build per process
+//! let bytes = wallet.prove_submission_bytes(vec![witness])?;  // one transaction
+//! # let _ = bytes;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Compiled rather than `ignore`d: nothing here runs (building the circuits
+//! takes seconds), but a rename of either method breaks the build instead of
+//! leaving the docs describing an API that is gone.
 //!
 //! # What a wallet actually submits
 //!

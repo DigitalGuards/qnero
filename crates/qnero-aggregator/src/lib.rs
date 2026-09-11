@@ -52,6 +52,9 @@ pub mod private_batch;
 pub mod public_batch;
 pub mod recursive;
 
+#[cfg(test)]
+mod test_fixtures;
+
 pub use config::{validate_proof_count, CircuitBinsConfig, MAX_PROOF_COUNT};
 pub use padding_proof::{
     canonical_padding_leaf_public_inputs, generate_padding_leaf_proof,

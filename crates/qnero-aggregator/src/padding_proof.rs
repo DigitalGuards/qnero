@@ -92,9 +92,33 @@ pub fn validate_padding_leaf_template(
 mod tests {
     use super::*;
     use plonky2::field::types::{Field, PrimeField64};
+    use plonky2::plonk::circuit_builder::CircuitBuilder;
+    use plonky2::plonk::circuit_data::CircuitConfig;
     use qnero_circuit::batch_layout::DIGEST_FELTS;
     use qnero_circuit::layout::{BLOCK_HASH_START, FEE_INDEX};
     use qnero_circuit::padding::PADDING_BLOCK_HASH;
+
+    use crate::test_fixtures::{leaf_circuit, leaf_proof};
+
+    /// A proof of a circuit that is not the leaf, publishing exactly the
+    /// public inputs it is handed.
+    ///
+    /// Its only constraint is that each public input equals a constant, so it
+    /// can claim any public-input vector. What it cannot do is verify against
+    /// the leaf's verifier data.
+    fn proof_of_another_circuit(public_inputs: &[F]) -> Proof {
+        let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
+        for value in public_inputs {
+            let target = builder.constant(*value);
+            builder.register_public_input(target);
+        }
+        let data = builder.build::<C>();
+        let proof = data
+            .prove(plonky2::iop::witness::PartialWitness::new())
+            .expect("the stand-in circuit proves");
+        assert_eq!(proof.public_inputs, public_inputs);
+        proof
+    }
 
     #[test]
     fn the_canonical_padding_public_inputs_carry_the_sentinel_and_no_value() {
@@ -107,5 +131,54 @@ mod tests {
             );
         }
         assert_eq!(public[FEE_INDEX], F::ZERO);
+    }
+
+    /// A real leaf proof planted where the padding template is read from is
+    /// refused.
+    ///
+    /// This is the substitution the validator exists to stop: such a template
+    /// would be cloned into every empty slot and baked into the published
+    /// all-padding private batch, so the artifact would not be what its name
+    /// says. Without this test the comparison could be inverted or deleted and
+    /// every gate would stay green.
+    #[test]
+    fn a_real_leaf_proof_is_not_the_padding_template() {
+        let (_, leaf) = leaf_circuit();
+        let verifier = leaf.verifier_data();
+        let real = leaf_proof("not-padding");
+
+        // The control: the genuine template passes.
+        let (targets, data) = leaf_circuit();
+        let padding = generate_padding_leaf_proof(data, targets).expect("the padding leaf proves");
+        validate_padding_leaf_template(&padding, &verifier)
+            .expect("the canonical padding leaf is the padding template");
+
+        let error = validate_padding_leaf_template(&real, &verifier)
+            .expect_err("a real leaf proof must not be accepted as padding");
+        assert!(
+            error.to_string().contains("canonical padding leaf"),
+            "got: {error}"
+        );
+    }
+
+    /// Matching public inputs are not enough: the proof must also be a proof
+    /// of the leaf circuit.
+    ///
+    /// This pins the verification half. A template whose public inputs were
+    /// copied from the canonical padding leaf passes the comparison and must
+    /// still be refused, otherwise the check degrades to a string match on
+    /// values an attacker chooses.
+    #[test]
+    fn canonical_public_inputs_alone_are_not_the_padding_template() {
+        let (_, leaf) = leaf_circuit();
+        let verifier = leaf.verifier_data();
+        let impostor = proof_of_another_circuit(&canonical_padding_leaf_public_inputs());
+
+        let error = validate_padding_leaf_template(&impostor, &verifier)
+            .expect_err("a proof of another circuit must not be accepted as padding");
+        assert!(
+            error.to_string().contains("failed verification"),
+            "got: {error}"
+        );
     }
 }

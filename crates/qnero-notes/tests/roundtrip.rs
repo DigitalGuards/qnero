@@ -145,3 +145,42 @@ fn ct_digest_binds_the_ciphertexts_in_order() {
     let ct_a_longer = encrypt_note(&a.ek, &note_a, b"aa", &[1u8; 32]).unwrap();
     assert_ne!(digest, ct_digest(&[ct_a_longer, ct_b]));
 }
+
+/// A note and a decrypted note are the two most linkable objects a wallet
+/// holds, and `{:?}` is how they end up in a log line or an error context.
+/// Every downstream type that carries the same values redacts them, so these
+/// two must as well: the leaf publishes `nf = H(NF, nk, rho, r)` on chain, and
+/// a log carrying `rho`, `r`, the value and the memo links a settled nullifier
+/// to the amount, the recipient key and the message.
+#[test]
+fn note_debug_does_not_leak_the_note() {
+    let mut rng = StdRng::seed_from_u64(91);
+    let recipient = sk(21).address();
+    let note = Note::random(&mut rng, recipient.pk, 123_456_789).unwrap();
+
+    let dump = format!("{note:?}");
+    assert!(dump.contains("REDACTED"), "got: {dump}");
+    assert!(!dump.contains("123456789"), "got: {dump}");
+    assert!(!dump.contains(&format!("{:?}", note.rho)), "got: {dump}");
+    assert!(!dump.contains(&format!("{:?}", note.r)), "got: {dump}");
+    assert!(!dump.contains(&format!("{:?}", note.pk)), "got: {dump}");
+}
+
+#[test]
+fn received_note_debug_does_not_leak_the_note_or_the_memo() {
+    let mut rng = StdRng::seed_from_u64(92);
+    let recipient = sk(22).address();
+    let note = Note::random(&mut rng, recipient.pk, 4242).unwrap();
+    let ct = encrypt_note(&recipient.ek, &note, b"top-secret-memo", &[9u8; 32]).unwrap();
+    let received = try_receive(&sk(22).incoming_viewing_key(), &ct, &note.commitment()).unwrap();
+
+    let dump = format!("{received:?}");
+    assert!(dump.contains("REDACTED"), "got: {dump}");
+    assert!(!dump.contains("top-secret-memo"), "got: {dump}");
+    assert!(!dump.contains("4242"), "got: {dump}");
+    // The commitment is on chain already, so it stays readable.
+    assert!(
+        dump.contains(&format!("{:?}", received.commitment)),
+        "got: {dump}"
+    );
+}

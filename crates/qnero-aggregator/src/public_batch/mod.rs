@@ -3,9 +3,15 @@
 //! # Admission boundary
 //!
 //! [`QneroPublicBatchProver::prove_batch`] verifies every inner proof against
-//! the pinned private-batch verifier, enforces the one-block rule and rejects
-//! an all-padding batch before proving, which at production sizes takes tens
-//! of seconds.
+//! the pinned private-batch verifier, enforces the one-block rule, refuses a
+//! caller-supplied padding batch and refuses two inner proofs that publish the
+//! same nullifier, all before proving, which at production sizes takes tens of
+//! seconds.
+//!
+//! The nullifier rule is the one with no circuit counterpart: comparing every
+//! inner's `2N` nullifiers against every other's is not affordable in circuit
+//! at the chain's dimensions, so this is the only place a duplicated inner is
+//! caught before the chain rejects the whole settlement.
 //!
 //! The low-level witness filler is crate-private for the same reason it is at
 //! the private batch:

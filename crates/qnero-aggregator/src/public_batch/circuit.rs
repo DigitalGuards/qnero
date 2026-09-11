@@ -249,3 +249,153 @@ fn build_public_batch_constraints(
     );
     builder.register_public_inputs(&output);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::OnceLock;
+
+    use plonky2::field::types::PrimeField64;
+    use plonky2::iop::witness::PartialWitness;
+    use plonky2::plonk::circuit_data::CircuitData;
+    use qnero_circuit::batch_layout::public_batch_inner_start;
+    use qnero_circuit::config::{
+        qnero_private_batch_circuit_config, qnero_public_batch_circuit_config,
+    };
+    use qnero_circuit::padding::PADDING_BLOCK_HASH;
+    use qnero_notes::Digest;
+
+    use super::*;
+    use crate::padding_proof::generate_padding_leaf_proof;
+    use crate::private_batch::QneroPrivateBatchProver;
+    use crate::public_batch::witness::fill_public_batch_witness;
+    use crate::test_fixtures::{leaf_circuit, leaf_proof};
+    use crate::Proof;
+
+    /// One leaf per private batch and two private batches per public batch:
+    /// the cheapest circuit that can exercise every cross-inner rule.
+    const NUM_LEAVES: usize = 1;
+    const NUM_INNER: usize = 2;
+
+    fn private_batch_prover() -> &'static QneroPrivateBatchProver {
+        static PROVER: OnceLock<QneroPrivateBatchProver> = OnceLock::new();
+        PROVER.get_or_init(|| {
+            let (targets, leaf) = leaf_circuit();
+            let padding = generate_padding_leaf_proof(leaf, targets).expect("the padding leaf");
+            QneroPrivateBatchProver::new(
+                qnero_private_batch_circuit_config(),
+                leaf.common.clone(),
+                &leaf.verifier_only,
+                NUM_LEAVES,
+                padding,
+            )
+            .expect("the private batch prover builds")
+        })
+    }
+
+    fn public_batch_circuit() -> &'static (PublicBatchTargets, CircuitData<F, C, D>) {
+        static CIRCUIT: OnceLock<(PublicBatchTargets, CircuitData<F, C, D>)> = OnceLock::new();
+        CIRCUIT.get_or_init(|| {
+            let inner = private_batch_prover().verifier_data();
+            let circuit = QneroPublicBatchCircuit::new(
+                qnero_public_batch_circuit_config(),
+                &inner.common,
+                &inner.verifier_only,
+                NUM_INNER,
+                NUM_LEAVES,
+            )
+            .expect("the public batch circuit builds");
+            let targets = circuit.targets();
+            (targets, circuit.build())
+        })
+    }
+
+    /// One real private batch anchored at the block named by `tag`.
+    fn inner_proof(tag: &str) -> Proof {
+        private_batch_prover()
+            .aggregate(vec![leaf_proof(tag)])
+            .expect("the private batch proves")
+    }
+
+    fn address() -> Digest {
+        Digest::hash_bytes(&[b"public-batch-circuit/aggregator"])
+    }
+
+    /// Fill the public batch's slots directly and prove, past the prover's
+    /// admission checks.
+    ///
+    /// That path is the point. `QneroPublicBatchCircuit` and
+    /// `PublicBatchTargets` are both public with public fields, so a caller can
+    /// reach the circuit with plonky2's own witness API and never touch
+    /// `prove_batch`. A cross-inner constraint that only the preflight enforces
+    /// would let such a caller produce a proof the chain then accepts.
+    fn prove_directly(inners: &[Proof]) -> Result<Proof> {
+        let (targets, data) = public_batch_circuit();
+        let mut pw = PartialWitness::<F>::new();
+        fill_public_batch_witness(&mut pw, targets, inners, &address())
+            .expect("witness filling must succeed, so only the circuit can reject the batch");
+        data.prove(pw)
+            .map_err(|e| anyhow::anyhow!("the public batch did not prove: {}", e))
+    }
+
+    /// Inner batches anchored at two different blocks cannot be aggregated,
+    /// and the circuit is what says so.
+    ///
+    /// The end-to-end test for this stops at `prove_batch`'s preflight, so
+    /// without this one the constraint could be deleted with every gate still
+    /// green. The chain resolves one block hash per settlement, and a batch
+    /// mixing blocks would settle notes against a tree root it never checked.
+    #[test]
+    fn the_circuit_refuses_inner_batches_from_two_blocks() {
+        let inners = [inner_proof("block-a"), inner_proof("block-b")];
+        let (_, data) = public_batch_circuit();
+        if let Ok(proof) = prove_directly(&inners) {
+            assert!(
+                data.verify(proof).is_err(),
+                "two blocks in one public batch: the circuit produced a proof that verified"
+            );
+        }
+    }
+
+    /// A padding inner's slot region is zeroed in circuit, header apart.
+    ///
+    /// The header goes through so the chain recognises a segment to skip; the
+    /// zeroing is what stops one published padding template, cloned into every
+    /// empty slot of every batch, from republishing the same nullifiers.
+    #[test]
+    fn the_circuit_zeroes_a_padding_inner_past_its_header() {
+        let padding = private_batch_prover()
+            .prove_padding_batch()
+            .expect("the all-padding private batch proves");
+        let inners = [inner_proof("masking"), padding];
+
+        let (_, data) = public_batch_circuit();
+        let proof = prove_directly(&inners).expect("a real inner plus a padding inner proves");
+        data.verify(proof.clone()).expect("and verifies");
+
+        let inner_len = private_batch_pi_len(NUM_LEAVES);
+        let start = public_batch_inner_start(1, NUM_LEAVES);
+        let segment = &proof.public_inputs[start..start + inner_len];
+
+        let sentinel: [u64; DIGEST_FELTS] =
+            core::array::from_fn(|i| segment[BLOCK_HASH_START + i].to_canonical_u64());
+        assert_eq!(
+            sentinel, PADDING_BLOCK_HASH,
+            "a padding inner keeps its sentinel header"
+        );
+        assert!(
+            segment[HEADER_LEN..]
+                .iter()
+                .all(|felt| felt.to_canonical_u64() == 0),
+            "every felt of a padding inner past the header must be zero"
+        );
+
+        // The real segment is untouched, so the masking is per inner.
+        let real = &proof.public_inputs[public_batch_inner_start(0, NUM_LEAVES)..][..inner_len];
+        assert!(
+            real[HEADER_LEN..]
+                .iter()
+                .any(|felt| felt.to_canonical_u64() != 0),
+            "the real inner segment must be forwarded unchanged"
+        );
+    }
+}

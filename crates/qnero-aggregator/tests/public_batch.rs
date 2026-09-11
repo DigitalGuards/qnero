@@ -12,8 +12,9 @@ mod common;
 use std::sync::OnceLock;
 
 use plonky2::field::types::PrimeField64;
-use qnero_aggregator::artifacts::serialize_verifier_data;
+use qnero_aggregator::artifacts::serialize_public_batch_verifier_data;
 use qnero_aggregator::private_batch::QneroPrivateBatchProver;
+use qnero_aggregator::public_batch::prover::validate_padding_private_batch_template;
 use qnero_aggregator::public_batch::{PublicBatchInputs, QneroPublicBatchProver};
 use qnero_aggregator::Proof;
 use qnero_circuit::config::{
@@ -96,8 +97,12 @@ fn public_batch() -> &'static Proof {
 /// verifies, and its segments say which is which.
 #[test]
 fn a_public_batch_over_one_real_inner_verifies() {
-    let artifact =
-        serialize_verifier_data(&public_batch_prover().verifier_data(), "public batch").unwrap();
+    let artifact = serialize_public_batch_verifier_data(
+        &public_batch_prover().verifier_data(),
+        NUM_INNER,
+        NUM_LEAVES,
+    )
+    .unwrap();
     let verifier = QneroPublicBatchVerifier::from_artifact_bytes(&artifact, NUM_INNER, NUM_LEAVES)
         .expect("the freshly built artifact passes its own profile");
 
@@ -171,8 +176,12 @@ fn a_public_batch_naming_another_aggregator_is_refused() {
 /// forged address and settlement.
 #[test]
 fn an_edited_aggregator_address_fails_verification() {
-    let artifact =
-        serialize_verifier_data(&public_batch_prover().verifier_data(), "public batch").unwrap();
+    let artifact = serialize_public_batch_verifier_data(
+        &public_batch_prover().verifier_data(),
+        NUM_INNER,
+        NUM_LEAVES,
+    )
+    .unwrap();
     let verifier =
         QneroPublicBatchVerifier::from_artifact_bytes(&artifact, NUM_INNER, NUM_LEAVES).unwrap();
 
@@ -240,8 +249,12 @@ fn a_proof_that_is_not_a_private_batch_is_refused() {
 /// built for.
 #[test]
 fn the_artifact_is_refused_under_the_wrong_dimensions() {
-    let artifact =
-        serialize_verifier_data(&public_batch_prover().verifier_data(), "public batch").unwrap();
+    let artifact = serialize_public_batch_verifier_data(
+        &public_batch_prover().verifier_data(),
+        NUM_INNER,
+        NUM_LEAVES,
+    )
+    .unwrap();
     assert!(
         QneroPublicBatchVerifier::from_artifact_bytes(&artifact, NUM_INNER + 1, NUM_LEAVES)
             .is_err()
@@ -268,5 +281,135 @@ fn each_inner_segment_is_forwarded_verbatim() {
     assert!(
         public.batches.contains(&expected),
         "the real inner proof's public inputs must appear unchanged as one segment"
+    );
+}
+
+/// The same private-batch proof in two inner slots is refused.
+///
+/// Nothing in circuit stops it: the public batch forwards each segment
+/// verbatim, and a full pairwise comparison of `n * 2N` nullifiers is not
+/// affordable at the chain's dimensions. So the batch would prove and verify
+/// while republishing one wallet's nullifiers, commitments and fee twice. The
+/// chain rejects the second copy against its settled-nullifier set and reverts
+/// the whole settlement, which means one attacker resubmitting a proof someone
+/// else paid for destroys an aggregator's entire batch. The admission check is
+/// where that is stopped, and this is the test that holds it there.
+#[test]
+fn the_same_inner_proof_twice_is_refused() {
+    let (real, _) = inner_proofs();
+    let error = public_batch_prover()
+        .prove_batch(PublicBatchInputs {
+            proofs: vec![real.clone(), real.clone()],
+            aggregator_address: aggregator_address(),
+        })
+        .expect_err("one private-batch proof in two inner slots must be refused");
+    assert!(error.to_string().contains("nullifier"), "got: {error}");
+}
+
+/// Two distinct private batches that spend the same note are refused for the
+/// same reason, so the rule is about nullifiers rather than about proof bytes.
+#[test]
+fn two_inner_batches_settling_one_note_are_refused() {
+    let block = common::block_with_notes("public-batch-shared-note", 1);
+    let one = private_batch_prover()
+        .aggregate(vec![block.transfer_proof(0)])
+        .expect("the first private batch proves");
+    let two = private_batch_prover()
+        .aggregate(vec![block.transfer_proof(0)])
+        .expect("the second private batch proves");
+    assert_ne!(
+        one.to_bytes(),
+        two.to_bytes(),
+        "the two batches are different proofs of the same spend"
+    );
+
+    let error = public_batch_prover()
+        .prove_batch(PublicBatchInputs {
+            proofs: vec![one, two],
+            aggregator_address: aggregator_address(),
+        })
+        .expect_err("two inner proofs settling one note must be refused");
+    assert!(error.to_string().contains("nullifier"), "got: {error}");
+}
+
+/// Padding is this prover's to append, never a caller's to supply.
+///
+/// The all-padding template is a published artifact anyone can download. It
+/// settles nothing, so accepting one as an input would let anyone burn an
+/// aggregator's slots with a file they did not prove.
+#[test]
+fn a_caller_supplied_padding_inner_is_refused() {
+    let (real, padding) = inner_proofs();
+    let error = public_batch_prover()
+        .prove_batch(PublicBatchInputs {
+            proofs: vec![real.clone(), padding.clone()],
+            aggregator_address: aggregator_address(),
+        })
+        .expect_err("a caller-supplied padding inner must be refused");
+    assert!(error.to_string().contains("padding"), "got: {error}");
+}
+
+/// A real private batch is not the all-padding template.
+///
+/// The template is what every empty inner slot is filled with, and the byte
+/// pin in `artifacts` covers only the `*_verifier.bin` files, so this
+/// validator is the only thing standing between a substituted
+/// `padding_private_batch_proof.bin` and every batch an aggregator proves.
+#[test]
+fn a_real_private_batch_is_not_the_padding_template() {
+    let (real, padding) = inner_proofs();
+    let verifier = private_batch_prover().verifier_data();
+
+    // The control: the genuine template passes.
+    validate_padding_private_batch_template(padding, &verifier, NUM_LEAVES)
+        .expect("the all-padding private batch is the padding template");
+
+    let error = validate_padding_private_batch_template(real, &verifier, NUM_LEAVES)
+        .expect_err("a real private batch must not be accepted as padding");
+    assert!(
+        error.to_string().contains("padding block hash"),
+        "got: {error}"
+    );
+}
+
+/// Public inputs that look like padding are not enough: the template must also
+/// be a proof of the private-batch circuit.
+///
+/// This pins the verification half of the validator. Without it the check
+/// degrades to a comparison against values an attacker chooses.
+#[test]
+fn padding_shaped_public_inputs_alone_are_not_the_padding_template() {
+    use plonky2::field::types::Field;
+    use plonky2::plonk::circuit_builder::CircuitBuilder;
+    use qnero_circuit::batch_layout::{private_batch_pi_len, BLOCK_HASH_START, BLOCK_NUMBER_INDEX};
+    use qnero_circuit::padding::PADDING_BLOCK_NUMBER;
+    use qnero_circuit::{C, D, F};
+
+    let mut public = vec![F::ZERO; private_batch_pi_len(NUM_LEAVES)];
+    for (i, limb) in PADDING_BLOCK_HASH.iter().enumerate() {
+        public[BLOCK_HASH_START + i] = F::from_canonical_u64(*limb);
+    }
+    public[BLOCK_NUMBER_INDEX] = F::from_canonical_u32(PADDING_BLOCK_NUMBER);
+
+    let mut builder =
+        CircuitBuilder::<F, D>::new(qnero_circuit::config::qnero_public_batch_circuit_config());
+    for value in &public {
+        let target = builder.constant(*value);
+        builder.register_public_input(target);
+    }
+    let data = builder.build::<C>();
+    let impostor = data
+        .prove(plonky2::iop::witness::PartialWitness::new())
+        .expect("the stand-in circuit proves");
+
+    let error = validate_padding_private_batch_template(
+        &impostor,
+        &private_batch_prover().verifier_data(),
+        NUM_LEAVES,
+    )
+    .expect_err("a proof of another circuit must not be accepted as padding");
+    assert!(
+        error.to_string().contains("failed verification"),
+        "got: {error}"
     );
 }

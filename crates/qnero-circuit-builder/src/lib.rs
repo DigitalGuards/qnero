@@ -19,10 +19,16 @@
 //! become public inputs, so a poisoned one could make a wallet publish its own
 //! spend credential.
 //!
-//! A pallet embeds the three verifier files with `include_bytes!` and includes
+//! A pallet embeds `private_batch_verifier.bin` and
+//! `public_batch_verifier.bin` with `include_bytes!` and includes
 //! `qnero_circuit_config.rs` for the dimensions to check their public-input
-//! lengths against. The two padding proofs are wallet-side and aggregator-side
-//! inputs, not runtime ones.
+//! lengths against. Those two are the only artifacts a runtime can use:
+//! `qnero-verifier`'s leaf entry points sit behind its non-default `leaf`
+//! feature, so a runtime taking the crate with default features has nothing
+//! that can name `leaf_verifier.bin`. That file is a wallet-side input, and it
+//! is what `QneroPrivateBatchProver::new_from_artifact_dir` pins its baked-in
+//! verifier key against. The two padding proofs are wallet-side and
+//! aggregator-side inputs as well.
 //!
 //! # Trust boundary
 //!
@@ -42,7 +48,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use qnero_aggregator::artifacts::{
-    canonical_public_batch_verifier_data, commit_artifact_set, serialize_verifier_data,
+    canonical_public_batch_verifier_data, commit_artifact_set,
+    serialize_public_batch_verifier_data, serialize_verifier_data,
 };
 use qnero_aggregator::private_batch::QneroPrivateBatchProver;
 use qnero_aggregator::{generate_padding_leaf_proof, CircuitBinsConfig};
@@ -51,6 +58,22 @@ use qnero_circuit::QneroSpendCircuit;
 
 /// The file a pallet's `build.rs` includes to learn the dimensions.
 pub const CIRCUIT_CONFIG_SNIPPET: &str = "qnero_circuit_config.rs";
+
+/// The chain defaults, and why they are what they are.
+///
+/// Seven leaves per private batch is a wallet-side memory decision: it is what
+/// a phone can prove. Fifty-three private batches per public batch is an
+/// aggregator-side cost decision, amortizing one on-chain verification across
+/// many wallets.
+///
+/// They live in the library rather than in the CLI so that a pallet's
+/// `build.rs`, which calls [`generate_all_artifacts`] directly and cannot
+/// depend on a bin target, reads the same numbers the CLI and the docs do.
+/// Shipping `N = 6` is an open decision (`docs/BENCH.md`), and when it lands
+/// it has to move in one place.
+pub const DEFAULT_NUM_LEAF_PROOFS: usize = 7;
+/// See [`DEFAULT_NUM_LEAF_PROOFS`].
+pub const DEFAULT_NUM_PRIVATE_BATCH_PROOFS: usize = 53;
 
 /// Generate the whole artifact set into `output_dir`.
 ///
@@ -149,7 +172,13 @@ fn generate_into(
             num_inner,
             config.num_leaf_proofs,
         )?;
-        let bytes = serialize_verifier_data(&public_batch_verifier, "public batch")?;
+        // Written with its dimension header: the public-batch profile cannot
+        // tell one dimension pair from another by itself.
+        let bytes = serialize_public_batch_verifier_data(
+            &public_batch_verifier,
+            num_inner,
+            config.num_leaf_proofs,
+        )?;
         commit_artifact_set(staging, &[("public_batch_verifier.bin", bytes)], &[])?;
     }
 

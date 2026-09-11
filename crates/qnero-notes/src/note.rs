@@ -10,7 +10,7 @@ use crate::error::NotesError;
 pub const VALUE_BITS: u32 = 62;
 pub const MAX_VALUE: u64 = (1u64 << VALUE_BITS) - 1;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Note {
     /// Recipient's note receiving key.
     pub pk: Digest,
@@ -20,6 +20,22 @@ pub struct Note {
     pub rho: Digest,
     /// Commitment randomness.
     pub r: Digest,
+}
+
+/// Redacting `Debug`: every field of a note is linkable material. The leaf
+/// publishes `nf = H(NF, nk, rho, r)` on chain, so anyone holding a log line
+/// with `rho` and `r` beside a settled nullifier learns the amount and the
+/// recipient key that nullifier belongs to. `InputNote`, `OutputNote` and the
+/// prover types redact the same values; this is where they come from.
+impl core::fmt::Debug for Note {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Note")
+            .field("pk", &"[REDACTED]")
+            .field("value", &"[REDACTED]")
+            .field("rho", &"[REDACTED]")
+            .field("r", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Note {

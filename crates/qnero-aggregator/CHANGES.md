@@ -92,3 +92,14 @@ aggregation layers; the public-input layouts and the padding rule are Qnero's.
   way. `docs/BENCH.md` reports both.
 - `prove_padding_batch`, which is the one batch proved without the admission
   checks, and the only proof the artifact builder produces at this layer.
+- The public batch refuses two inner proofs that publish the same nullifier,
+  and refuses a caller-supplied padding inner. Upstream has neither check: its
+  public batch admits any set of inner proofs that agree on a block. A full
+  cross-inner distinctness constraint is not affordable in circuit at 53 inner
+  proofs over 7 leaves, so this is an admission rule, and it is what stops one
+  attacker from resubmitting a proof another wallet paid for and making the
+  chain revert the aggregator's whole settlement.
+- `serialize_public_batch_verifier_data` is the only way the public-batch
+  artifact is written, and it prepends the dimension header
+  `qnero-verifier` requires.
+

@@ -52,14 +52,19 @@ worth it.
 # Qnero (2026-09-11)
 
 Measured on the dev workstation (20 cores, WSL2) at M3, with
-`RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --release`. Every number below
-is from an ignored test that reports its own thread count, so a rerun says
-which configuration it measured:
+`RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --release`. Every timing, size
+and gate count below is from an ignored test that prints its own `parallel`
+flag and `RAYON_NUM_THREADS`, so a rerun says which configuration it measured:
 
 ```
 cargo test -p qnero-prover  --release -- --ignored --nocapture
 cargo test -p qnero-aggregator --release [--features parallel] --test bench -- --ignored --nocapture
 ```
+
+The two peak-RSS rows are the exception: no test measures them. They come from
+wrapping the private-batch bench run in `/usr/bin/time -v` and reading
+`Maximum resident set size`, which covers the whole test process, the circuit
+build included.
 
 ## Leaf: one shielded transfer, 2 in / 2 out
 

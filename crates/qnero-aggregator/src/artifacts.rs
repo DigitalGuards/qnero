@@ -103,6 +103,23 @@ pub fn serialize_verifier_data(
         .map_err(|e| anyhow!("failed to serialize the {} verifier data: {}", label, e))
 }
 
+/// Serialize public-batch verifier data with its dimension header.
+///
+/// The public-batch profile is not injective in `(num_inner, num_leaves)`, so
+/// the artifact carries the pair it was built for and
+/// `QneroPublicBatchVerifier::from_artifact_bytes` refuses one built for
+/// another; see `qnero_verifier::public_batch_artifact_header`. This is the
+/// only way the file is ever written.
+pub fn serialize_public_batch_verifier_data(
+    verifier_data: &VerifierCircuitData<F, C, D>,
+    num_inner: usize,
+    num_leaves: usize,
+) -> Result<Vec<u8>> {
+    let mut bytes = qnero_verifier::public_batch_artifact_header(num_inner, num_leaves)?.to_vec();
+    bytes.extend_from_slice(&serialize_verifier_data(verifier_data, "public batch")?);
+    Ok(bytes)
+}
+
 /// The canonical leaf verifier data, rebuilt from source.
 pub fn canonical_leaf_verifier_data() -> VerifierCircuitData<F, C, D> {
     QneroSpendCircuit::new(qnero_leaf_circuit_config())

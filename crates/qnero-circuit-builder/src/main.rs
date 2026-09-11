@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! qnero-circuit-builder --output <dir> --num-leaf-proofs <n>
-//!                       [--num-private-batch-proofs <n>] [--skip-padding-batch]
+//!                       [--num-private-batch-proofs <n>] [--no-public-batch]
+//!                       [--skip-padding-batch]
 //! ```
 //!
 //! The flags are parsed by hand. A build-host tool that pulls in an argument
@@ -12,16 +13,9 @@
 
 use anyhow::{bail, Context, Result};
 
-use qnero_circuit_builder::generate_all_artifacts;
-
-/// The chain defaults, and why they are what they are.
-///
-/// Seven leaves per private batch is a wallet-side memory decision: it is what
-/// a phone can prove. Fifty-three private batches per public batch is an
-/// aggregator-side cost decision, amortizing one on-chain verification across
-/// many wallets.
-const DEFAULT_NUM_LEAF_PROOFS: usize = 7;
-const DEFAULT_NUM_PRIVATE_BATCH_PROOFS: usize = 53;
+use qnero_circuit_builder::{
+    generate_all_artifacts, DEFAULT_NUM_LEAF_PROOFS, DEFAULT_NUM_PRIVATE_BATCH_PROOFS,
+};
 
 /// Environment overrides, for a build script that has no command line.
 ///
@@ -34,20 +28,33 @@ const DEFAULT_NUM_PRIVATE_BATCH_PROOFS: usize = 53;
 const ENV_NUM_LEAF_PROOFS: &str = "QNERO_NUM_LEAF_PROOFS";
 const ENV_NUM_PRIVATE_BATCH_PROOFS: &str = "QNERO_NUM_PRIVATE_BATCH_PROOFS";
 
+/// How a dimension is looked up in the environment.
+///
+/// A parameter rather than a direct `std::env::var` call, because the process
+/// environment is global: a test that asserted the defaults against the real
+/// environment would have to skip itself whenever an override was exported,
+/// and a skip that reports as a pass is worse than no test. `main` passes the
+/// real lookup; the tests pass an empty one.
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// The real environment.
+fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
 /// A dimension from the environment, when it is set.
 ///
 /// A malformed value is an error. Falling back to the default would publish a
 /// set built for dimensions nobody asked for, and the mismatch would surface
 /// as a public-input length failure much later.
-fn count_from_env(name: &str) -> Result<Option<usize>> {
-    match std::env::var(name) {
-        Ok(value) => {
+fn count_from_env(env: EnvLookup<'_>, name: &str) -> Result<Option<usize>> {
+    match env(name) {
+        Some(value) => {
             Ok(Some(value.parse().with_context(|| {
                 format!("{name} expects a number, got {value}")
             })?))
         }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("failed to read {name}")),
+        None => Ok(None),
     }
 }
 
@@ -58,14 +65,17 @@ struct Args {
     include_padding_batch: bool,
 }
 
+/// The numbers are not spelled out here: they live in
+/// [`DEFAULT_NUM_LEAF_PROOFS`] and [`DEFAULT_NUM_PRIVATE_BATCH_PROOFS`], and a
+/// copy in this string would drift the moment one of them moves.
 const USAGE: &str = "\
 usage: qnero-circuit-builder [options]
 
   --output <dir>                     where to write the set (default: generated-artifacts)
-  --num-leaf-proofs <n>              leaf slots per private batch (default: 7,
-                                     or QNERO_NUM_LEAF_PROOFS)
-  --num-private-batch-proofs <n>     private batches per public batch (default: 53,
-                                     or QNERO_NUM_PRIVATE_BATCH_PROOFS)
+  --num-leaf-proofs <n>              leaf slots per private batch (default: the chain
+                                     default, or QNERO_NUM_LEAF_PROOFS)
+  --num-private-batch-proofs <n>     private batches per public batch (default: the chain
+                                     default, or QNERO_NUM_PRIVATE_BATCH_PROOFS)
   --no-public-batch                  stop at the private batch
   --skip-padding-batch               do not prove the all-padding private batch
   --help                             print this
@@ -80,12 +90,13 @@ fn parse_count(flag: &str, value: Option<String>) -> Result<usize> {
         .with_context(|| format!("{flag} expects a number, got {value}"))
 }
 
-fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>> {
+fn parse_args(mut args: impl Iterator<Item = String>, env: EnvLookup<'_>) -> Result<Option<Args>> {
     let mut parsed = Args {
         output: String::from("generated-artifacts"),
-        num_leaf_proofs: count_from_env(ENV_NUM_LEAF_PROOFS)?.unwrap_or(DEFAULT_NUM_LEAF_PROOFS),
+        num_leaf_proofs: count_from_env(env, ENV_NUM_LEAF_PROOFS)?
+            .unwrap_or(DEFAULT_NUM_LEAF_PROOFS),
         num_private_batch_proofs: Some(
-            count_from_env(ENV_NUM_PRIVATE_BATCH_PROOFS)?
+            count_from_env(env, ENV_NUM_PRIVATE_BATCH_PROOFS)?
                 .unwrap_or(DEFAULT_NUM_PRIVATE_BATCH_PROOFS),
         ),
         include_padding_batch: true,
@@ -114,7 +125,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>> {
 }
 
 fn main() -> Result<()> {
-    let Some(args) = parse_args(std::env::args().skip(1))? else {
+    let Some(args) = parse_args(std::env::args().skip(1), &process_env)? else {
         print!("{USAGE}");
         return Ok(());
     };
@@ -143,21 +154,24 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn args(values: &[&str]) -> Result<Option<Args>> {
-        parse_args(values.iter().map(|value| value.to_string()))
+    /// An environment that carries no override, whatever the real one holds.
+    fn no_env(_: &str) -> Option<String> {
+        None
     }
 
+    fn args(values: &[&str]) -> Result<Option<Args>> {
+        parse_args(values.iter().map(|value| value.to_string()), &no_env)
+    }
+
+    fn args_with_env(values: &[&str], env: EnvLookup<'_>) -> Result<Option<Args>> {
+        parse_args(values.iter().map(|value| value.to_string()), env)
+    }
+
+    /// The defaults are asserted against an empty environment, never against
+    /// the process one: a shell that exports an override must not turn this
+    /// into a silent pass.
     #[test]
     fn the_defaults_are_the_chain_defaults() {
-        // The environment overrides the defaults, so a test that asserts them
-        // has to look at an environment that carries neither. `std::env::var`
-        // is process-wide, so this reads the variables instead of setting
-        // them, and says why if it cannot.
-        if std::env::var(ENV_NUM_LEAF_PROOFS).is_ok()
-            || std::env::var(ENV_NUM_PRIVATE_BATCH_PROOFS).is_ok()
-        {
-            return;
-        }
         let parsed = args(&[]).unwrap().unwrap();
         assert_eq!(parsed.num_leaf_proofs, DEFAULT_NUM_LEAF_PROOFS);
         assert_eq!(
@@ -167,10 +181,35 @@ mod tests {
         assert!(parsed.include_padding_batch);
     }
 
+    /// The environment beats the default.
+    #[test]
+    fn the_environment_overrides_the_defaults() {
+        let env = |name: &str| match name {
+            ENV_NUM_LEAF_PROOFS => Some(String::from("6")),
+            ENV_NUM_PRIVATE_BATCH_PROOFS => Some(String::from("11")),
+            _ => None,
+        };
+        let parsed = args_with_env(&[], &env).unwrap().unwrap();
+        assert_eq!(parsed.num_leaf_proofs, 6);
+        assert_eq!(parsed.num_private_batch_proofs, Some(11));
+    }
+
+    /// A malformed override is an error rather than a silent fall back to the
+    /// default, which would publish a set built for dimensions nobody asked
+    /// for.
+    #[test]
+    fn a_malformed_environment_override_is_an_error() {
+        let env = |name: &str| (name == ENV_NUM_LEAF_PROOFS).then(|| String::from("seven"));
+        assert!(args_with_env(&[], &env).is_err());
+    }
+
     /// A flag beats the environment, and both beat the default.
     #[test]
     fn a_flag_overrides_the_environment() {
-        let parsed = args(&["--num-leaf-proofs", "3"]).unwrap().unwrap();
+        let env = |name: &str| (name == ENV_NUM_LEAF_PROOFS).then(|| String::from("6"));
+        let parsed = args_with_env(&["--num-leaf-proofs", "3"], &env)
+            .unwrap()
+            .unwrap();
         assert_eq!(parsed.num_leaf_proofs, 3);
     }
 

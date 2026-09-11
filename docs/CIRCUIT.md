@@ -429,7 +429,7 @@ bits and the search for them is a geometric random variable seeded by the
 transcript, which dominates a circuit this small: the nine samples above prove
 the identical constraint system over witnesses that differ only in `ct_digest`,
 a public input the circuit does not constrain, and they range from 138 ms to
-300 ms. Comparing one warm number against another across a circuit change
+381 ms. Comparing one warm number against another across a circuit change
 measures grinding luck. Compare means, over the same sample count.
 
 The gate count is dominated by the two Merkle paths: 16 levels each, evaluated
@@ -561,6 +561,20 @@ milliseconds instead of after the recursive proving run, and the two must be
 kept in lockstep. The circuit remains the enforcer, and `qnero-aggregator`'s
 own tests fill the witness directly, past the prover's checks, to prove it.
 
+**At the public batch, distinctness across inner proofs is an admission rule
+and not a circuit constraint.** Cross-slot distinctness inside one private
+batch is a constraint, `2N` digests compared pairwise. Across inner proofs it
+would be `n * 2N` against each other, 742 nullifiers at the chain defaults, and
+that is not affordable. So the public batch forwards each segment verbatim with
+no cross-inner check, and the same private-batch proof in two inner slots
+proves and verifies: the same nullifiers, commitments and fee are republished
+once per copy. `QneroPublicBatchProver::prove_batch` is the only thing that
+stops it, by keying every inner's `2N` nullifiers into one map before proving,
+and it refuses a caller-supplied padding inner in the same pass because padding
+is the prover's to append. Without those checks, one attacker resubmitting a
+proof another wallet already paid for would make the chain reject the whole
+settlement, destroying an aggregator's batch at no cost.
+
 ### 8.4 The padding rule
 
 A batch has a fixed number of slots, so a wallet with fewer transfers than
@@ -613,9 +627,11 @@ invariant that crosses a circuit boundary:
 - the fee and `ct_digest` become zero.
 
 At the public batch, a padding inner keeps its sentinel header, so the chain
-recognises the segment, and its whole slot region is zeroed. The zeroing is
-load bearing there: that template is a published artifact cloned into every
-empty slot, so its nullifiers would otherwise repeat across slots and batches.
+recognises the segment and skips it whole, and its slot region is zeroed. The
+zeroing is load bearing there: that template is a published artifact cloned
+into every empty slot, so its nullifiers would otherwise repeat across slots
+and batches. Zeroed nullifiers are not settleable values, which is why the skip
+is an obligation and not an optimization; section 8.6 states it.
 
 ### 8.5 Artifacts
 
@@ -645,6 +661,16 @@ pinned by hash, because its bytes are a function of the dimensions, so
 for those dimensions, the exact `CircuitConfig`, the whole `FriParams`
 recomputed from that config at the degree the artifact claims, a ceiling on
 that degree, and the artifact's index structure against its own gate list.
+
+`public_batch_verifier.bin` additionally carries a sixteen-byte header naming
+the dimension pair it was built for, checked before anything is deserialized.
+The profile alone is not injective in `(n, N)`: the public-input count is its
+only dimension-dependent check and `4 + n * (5 + 21 * N)` collides, for example
+at `n = 34, N = 1` and `n = 13, N = 3`, both 888 felts. Without the header an
+artifact from a partial redeploy would load under the other pair, verify
+genuine proofs, and the chain would then split them into segments at the wrong
+offsets and settle one inner's block hash as another's nullifier. The private
+batch needs no header: `5 + 21 * N` determines `N` from a length.
 
 The last one is not paranoia. A gate's filter is a product over its selector
 group, so a group of `0..2^40` is a verifier that never returns, and one
@@ -679,9 +705,29 @@ needs a tagged circuit to pin.
   whose per-leaf fee is below a floor and charges the submitter for the
   commitment slots consumed. Until one of the two lands, constraint 9 only
   stops a prover who holds no notes at all.
-- **Settle both nullifiers of every slot, and skip a zero commitment.** A
-  padding slot publishes two nullifiers that look like any other, by design, so
-  the chain must settle every published nullifier without trying to tell them
+- **A padding segment settles nothing at all.** This is the precondition of
+  the rule below, and it comes first. A private batch, or a public-batch
+  segment, whose `block_hash` is `PADDING_BLOCK_HASH` is skipped whole: no
+  nullifier settled, no commitment appended, no fee accounted.
+  `PrivateBatchPublicInputs::is_padding` is that check, and
+  `PublicBatchPublicInputs::settleable_batches` is the iterator that applies
+  it, so the skip is the default path rather than something to remember. Two
+  things force it. A padding inner of a public batch keeps its sentinel header
+  and has its whole slot region zeroed, so it publishes `2N` all-zero
+  nullifiers; a chain that settled those would insert the zero nullifier and
+  then reject its own next slot as a double spend, which at 53 inner slots is
+  close to every batch. And `prove_padding_batch` is a public API returning a
+  proof that verifies against the published `private_batch_verifier.bin` while
+  its prover holds no note, so a standalone padding submission must be refused
+  outright or anyone writes nullifier entries for free into permanent state,
+  settlement extrinsics being fee-free. A zero nullifier must never enter the
+  nullifier set. What makes the sentinel unclaimable by a real batch is the
+  section 1 obligation that `block_hash` is the hash of the block at
+  `block_number`.
+- **Inside a non-padding segment, settle both nullifiers of every slot, and
+  skip a zero commitment.** A padding slot of a real batch publishes two
+  nullifiers that look like any other, by design, so within such a segment the
+  chain must settle every published nullifier without trying to tell them
   apart. It must append only nonzero commitments: a zero commitment is the
   absence sentinel, and it is how a padding slot says it created no note.
 - **Pallet-side `ct_digest` recomputation.** The rule is fixed (section 1) and

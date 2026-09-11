@@ -75,10 +75,19 @@ use crate::{
 /// One leaf slot of a private batch, as the chain reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchLeafSlot {
-    /// Both nullifiers the leaf published. A padding slot carries hashes of
-    /// randomness the prover drew for this batch, so the chain settles every
-    /// slot's nullifiers by one rule and never learns which slots were
-    /// padding.
+    /// Both nullifiers the leaf published. A padding slot inside a real batch
+    /// carries hashes of randomness the prover drew for this batch, so within
+    /// such a batch the chain settles every slot's nullifiers by one rule and
+    /// never learns which slots were padding.
+    ///
+    /// That rule holds **inside a non-padding segment only**. A padding
+    /// segment of a public batch has its whole slot region zeroed
+    /// ([`PrivateBatchPublicInputs::is_padding`]), so its nullifiers are the
+    /// all-zero digest and repeat across every padding segment of every batch.
+    /// A chain that settled those would reject its own second batch as a
+    /// double spend. Skip padding segments first;
+    /// [`PublicBatchPublicInputs::settleable_batches`] is that filter, and a
+    /// zero nullifier must never enter the nullifier set.
     pub nullifiers: [[F; DIGEST_FELTS]; NUM_INPUTS],
     /// Both output commitments. Zero in a padding slot.
     pub commitments: [[F; DIGEST_FELTS]; NUM_OUTPUTS],
@@ -118,6 +127,13 @@ impl PrivateBatchPublicInputs {
     /// `true` when the whole batch is padding: it carries the padding sentinel
     /// as its block hash and settles nothing. The public batch fills its empty
     /// slots with exactly such a proof.
+    ///
+    /// **A padding batch settles nothing at all.** No nullifier of it enters
+    /// the nullifier set, no commitment of it is appended, no fee of it is
+    /// accounted. That holds for a segment inside a public batch, whose slot
+    /// region is zeroed, and for a standalone submission, which a chain must
+    /// refuse outright: `prove_padding_batch` is a public API, so anyone can
+    /// produce a padding batch that verifies while holding no note.
     pub fn is_padding(&self) -> bool {
         block_hash_is_the_padding_sentinel(&self.block_hash)
     }
@@ -132,6 +148,22 @@ pub struct PublicBatchPublicInputs {
     pub aggregator_address: [F; DIGEST_FELTS],
     /// One segment per inner private batch, in slot order.
     pub batches: Vec<PrivateBatchPublicInputs>,
+}
+
+impl PublicBatchPublicInputs {
+    /// The segments a chain settles: every inner batch that is not padding.
+    ///
+    /// This is the default settlement path, and it exists so the skip is
+    /// something a consumer gets for free rather than something it has to
+    /// rediscover. A padding segment keeps its sentinel header and has its
+    /// whole slot region zeroed, so iterating [`Self::batches`] directly and
+    /// settling every published nullifier inserts the all-zero nullifier once
+    /// per padding slot and fails on the second one. At the chain default of
+    /// 53 inner slots a partly full batch is the normal case, so that is close
+    /// to every batch after the first.
+    pub fn settleable_batches(&self) -> impl Iterator<Item = &PrivateBatchPublicInputs> {
+        self.batches.iter().filter(|batch| !batch.is_padding())
+    }
 }
 
 fn block_hash_is_the_padding_sentinel(block_hash: &[F; DIGEST_FELTS]) -> bool {
@@ -296,6 +328,70 @@ fn ensure_batch_profile(
     Ok(())
 }
 
+/// Magic bytes of the dimension header a public-batch artifact carries.
+pub const PUBLIC_BATCH_ARTIFACT_MAGIC: [u8; 8] = *b"QNROPBV1";
+
+/// Length of that header: the magic, then `num_inner` and `num_leaves` as
+/// little-endian `u32`.
+pub const PUBLIC_BATCH_ARTIFACT_HEADER_LEN: usize = 16;
+
+/// The header a public-batch artifact for these dimensions must carry.
+///
+/// The public-batch profile is otherwise **not injective** in
+/// `(num_inner, num_leaves)`. Its only dimension-dependent check is the
+/// public-input count, and `4 + n * (5 + 21 * N)` collides for supported
+/// pairs: `public_batch_pi_len(34, 1)` and `public_batch_pi_len(13, 3)` are
+/// both 888. The config is a fixed function of neither dimension, the FRI
+/// parameters are recomputed at whatever degree the artifact claims, and the
+/// degree itself is held only to a ceiling. So an artifact built for one pair
+/// loads cleanly under the other, verifies genuine proofs, and the chain then
+/// splits those proofs into segments at the wrong offsets: it would read one
+/// inner's block hash as another's nullifier and write junk into the nullifier
+/// set rather than refuse the artifact. Carrying the dimensions beside the
+/// bytes closes that, and it costs sixteen bytes.
+///
+/// The private batch needs no such header: `5 + 21 * N` determines `N`
+/// uniquely from a length, so its public-input check already binds it.
+pub fn public_batch_artifact_header(
+    num_inner: usize,
+    num_leaves: usize,
+) -> Result<[u8; PUBLIC_BATCH_ARTIFACT_HEADER_LEN]> {
+    ensure!(
+        validate_proof_count(num_inner) && validate_proof_count(num_leaves),
+        "a public batch of {} inner proofs over {} leaves is outside the supported range",
+        num_inner,
+        num_leaves
+    );
+    let mut header = [0u8; PUBLIC_BATCH_ARTIFACT_HEADER_LEN];
+    header[..8].copy_from_slice(&PUBLIC_BATCH_ARTIFACT_MAGIC);
+    header[8..12].copy_from_slice(&(num_inner as u32).to_le_bytes());
+    header[12..].copy_from_slice(&(num_leaves as u32).to_le_bytes());
+    Ok(header)
+}
+
+/// Strip the dimension header, refusing an artifact built for another pair.
+fn split_public_batch_artifact(bytes: &[u8], num_inner: usize, num_leaves: usize) -> Result<&[u8]> {
+    let expected = public_batch_artifact_header(num_inner, num_leaves)?;
+    ensure!(
+        bytes.len() > PUBLIC_BATCH_ARTIFACT_HEADER_LEN,
+        "the public-batch artifact is {} bytes, too short to carry its dimension header",
+        bytes.len()
+    );
+    let (header, body) = bytes.split_at(PUBLIC_BATCH_ARTIFACT_HEADER_LEN);
+    ensure!(
+        header[..8] == PUBLIC_BATCH_ARTIFACT_MAGIC,
+        "the public-batch artifact does not begin with its dimension header"
+    );
+    ensure!(
+        header == expected,
+        "the public-batch artifact was built for other dimensions than the {} inner proofs \
+         over {} leaves it was loaded for",
+        num_inner,
+        num_leaves
+    );
+    Ok(body)
+}
+
 fn deserialize_verifier_data(bytes: &[u8], label: &str) -> Result<VerifierCircuitData<F, C, D>> {
     ensure!(
         bytes.len() <= MAX_VERIFIER_ARTIFACT_BYTES,
@@ -444,8 +540,20 @@ impl QneroPublicBatchVerifier {
         })
     }
 
+    /// Load verifier data from its serialized form.
+    ///
+    /// The bytes carry a sixteen-byte dimension header, which is checked
+    /// before anything is deserialized: see [`public_batch_artifact_header`]
+    /// for what it closes.
     pub fn from_artifact_bytes(bytes: &[u8], num_inner: usize, num_leaves: usize) -> Result<Self> {
-        let circuit_data = deserialize_verifier_data(bytes, "public-batch")?;
+        ensure!(
+            bytes.len() <= MAX_VERIFIER_ARTIFACT_BYTES,
+            "the public-batch artifact is {} bytes, above the {} byte limit",
+            bytes.len(),
+            MAX_VERIFIER_ARTIFACT_BYTES
+        );
+        let body = split_public_batch_artifact(bytes, num_inner, num_leaves)?;
+        let circuit_data = deserialize_verifier_data(body, "public-batch")?;
         Self::new(circuit_data, num_inner, num_leaves)
     }
 
@@ -590,8 +698,65 @@ mod tests {
         let oversized = vec![0u8; MAX_VERIFIER_ARTIFACT_BYTES + 1];
         let error = QneroPrivateBatchVerifier::from_artifact_bytes(&oversized, 7).unwrap_err();
         assert!(error.to_string().contains("above the"));
+        let error = QneroPublicBatchVerifier::from_artifact_bytes(&oversized, 2, 7).unwrap_err();
+        assert!(error.to_string().contains("above the"));
         assert!(QneroPrivateBatchVerifier::from_artifact_bytes(&[0u8; 64], 7).is_err());
         assert!(QneroPublicBatchVerifier::from_artifact_bytes(&[0u8; 64], 2, 7).is_err());
+    }
+
+    /// A public-batch artifact is bound to the dimensions it was built for,
+    /// which its public-input count alone cannot do.
+    ///
+    /// `4 + 34 * 26` and `4 + 13 * 68` are both 888, and every other check in
+    /// the profile is blind to the dimensions, so without the header an
+    /// artifact built for 34 inner proofs over 1 leaf would load as one built
+    /// for 13 over 3 and every proof it verified would be split at the wrong
+    /// offsets.
+    #[test]
+    fn a_public_batch_artifact_is_bound_to_its_dimensions() {
+        assert_eq!(public_batch_pi_len(34, 1), public_batch_pi_len(13, 3));
+
+        let mut artifact = public_batch_artifact_header(34, 1).unwrap().to_vec();
+        artifact.extend_from_slice(&[0u8; 64]);
+
+        let error = QneroPublicBatchVerifier::from_artifact_bytes(&artifact, 13, 3).unwrap_err();
+        assert!(
+            error.to_string().contains("other dimensions"),
+            "got: {error}"
+        );
+
+        // Under its own dimensions the header passes and the body is what
+        // fails, which is as far as a 64-byte stand-in can get.
+        let error = QneroPublicBatchVerifier::from_artifact_bytes(&artifact, 34, 1).unwrap_err();
+        assert!(error.to_string().contains("deserialize"), "got: {error}");
+    }
+
+    /// An artifact with no header at all is refused, so a set from before the
+    /// header existed cannot be loaded as if it had one.
+    #[test]
+    fn a_public_batch_artifact_without_a_header_is_refused() {
+        let unframed = vec![7u8; 128];
+        let error = QneroPublicBatchVerifier::from_artifact_bytes(&unframed, 2, 7).unwrap_err();
+        assert!(
+            error.to_string().contains("dimension header"),
+            "got: {error}"
+        );
+    }
+
+    /// Only the non-padding segments of a public batch are settled.
+    #[test]
+    fn settleable_batches_skips_the_padding_segments() {
+        let mut felts = vec![F::ZERO; public_batch_pi_len(2, 1)];
+        // Segment 1 carries the sentinel; segment 0 does not.
+        let padding_start = public_batch_inner_start(1, 1);
+        for (i, limb) in PADDING_BLOCK_HASH.iter().enumerate() {
+            felts[padding_start + BLOCK_HASH_START + i] = F::from_canonical_u64(*limb);
+        }
+        let parsed = parse_public_batch_public_input_felts(&felts, 2, 1).unwrap();
+
+        assert_eq!(parsed.batches.len(), 2);
+        assert_eq!(parsed.settleable_batches().count(), 1);
+        assert!(parsed.settleable_batches().all(|batch| !batch.is_padding()));
     }
 
     /// The private batch is the layer that blinds. An artifact that is not

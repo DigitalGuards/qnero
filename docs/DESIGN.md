@@ -209,7 +209,7 @@ preimage, and the wrapper masks every value such a slot publishes.
 | # | Deliverable | Estimate |
 |---|---|---|
 | M1 | `qnero-notes` crate: keys, addresses, note commitment, ML-KEM note encryption, scan; KATs pinned | DONE 2026-09-11 |
-| M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (319 gates, degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
+| M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (319 gates at M2, 320 after the M3 padding sentinel; degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
 | M3 | Private and public batch aggregators on the new PI layout | DONE 2026-09-11 (private batch 5 + 21N public inputs, ZK, N = 7; public batch forwards each inner verbatim under an aggregator address; see `docs/CIRCUIT.md` section 8) |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | 2 weeks |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | 2 weeks |

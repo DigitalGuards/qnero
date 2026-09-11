@@ -1376,6 +1376,15 @@ fn leaf_gate_count() {
     let verify = verify_start.elapsed();
 
     println!("qnero leaf circuit (2 inputs, 2 outputs, MAX_DEPTH=16)");
+    // Which configuration produced these numbers. The leaf is meant to be
+    // single threaded, but `parallel` is a real feature of this crate and
+    // feature unification can turn it on from a workspace-wide invocation, so
+    // a recorded number has to say which it was.
+    println!("  parallel             : {}", cfg!(feature = "parallel"));
+    println!(
+        "  RAYON_NUM_THREADS    : {}",
+        std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| String::from("unset"))
+    );
     println!("  gates before padding : {gates}");
     println!("  degree_bits          : {}", data.common.degree_bits());
     println!("  public inputs        : {}", data.common.num_public_inputs);

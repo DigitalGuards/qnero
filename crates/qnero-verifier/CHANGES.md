@@ -86,3 +86,15 @@ plus the batch-verifier loading in `quantus-chain/pallets/wormhole`.
   before verifying, so the byte path does not clone about 100 kB of FRI
   openings per proof. `verify_ref` stays for callers that hold only a
   reference, and says in its doc what it costs.
+- The public-batch artifact carries a sixteen-byte dimension header, checked
+  before anything is deserialized. Upstream pins its leaf artifact by keccak
+  and never faces the question at the batch layers. Here the batch profile's
+  only dimension-dependent check is the public-input count, and
+  `4 + n * (5 + 21 * N)` is not injective in `(n, N)`: `n = 34, N = 1` and
+  `n = 13, N = 3` both give 888. Without the header an artifact built for one
+  pair loads under the other and every proof it verifies is then split into
+  segments at the wrong offsets.
+- `PublicBatchPublicInputs::settleable_batches` filters out padding segments,
+  so a consumer settles the right segments by default. A padding inner's slot
+  region is zeroed, so its nullifiers are the all-zero digest and repeat across
+  every batch; settling them would make a chain reject its own next batch.

@@ -84,11 +84,24 @@ pub fn ct_digest(ciphertexts: &[NoteCiphertext]) -> Digest {
 }
 
 /// A note this viewing key can read, with its memo and commitment.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReceivedNote {
     pub note: Note,
     pub memo: Vec<u8>,
     pub commitment: Digest,
+}
+
+/// Redacting `Debug`: this is the decrypted note plus its memo, which is the
+/// most linkable object a wallet holds. The commitment stays in the clear
+/// because the chain published it.
+impl core::fmt::Debug for ReceivedNote {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ReceivedNote")
+            .field("note", &self.note)
+            .field("memo", &"[REDACTED]")
+            .field("commitment", &self.commitment)
+            .finish()
+    }
 }
 
 /// Decrypt without checking against an on-chain commitment.

@@ -84,7 +84,7 @@ pub fn qnero_public_batch_circuit_config() -> CircuitConfig {
 }
 
 /// Rejects a zero-knowledge config when plonky2's randomness is not compiled
-/// in."" Without it, `blind()` panics at circuit-build time with a message about
+/// in. Without it, `blind()` panics at circuit-build time with a message about
 /// plonky2 internals, leaving the caller to guess that their config caused it.
 pub fn ensure_zk_supported(config: &CircuitConfig) -> anyhow::Result<()> {
     ensure!(

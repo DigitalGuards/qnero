@@ -4,6 +4,7 @@
 //! seconds, so it must never sit on the per-batch path, and
 //! [`QneroPublicBatchProver::prove_batch`] takes `&self`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -15,12 +16,12 @@ use plonky2::plonk::circuit_data::{
 
 use qnero_circuit::batch_layout::{
     private_batch_pi_len, public_batch_pi_len, slot_commitment_index, slot_ct_digest_index,
-    slot_fee_index, AGGREGATOR_ADDRESS_LEN, AGGREGATOR_ADDRESS_START, BLOCK_HASH_START,
-    BLOCK_NUMBER_INDEX, DIGEST_FELTS,
+    slot_fee_index, slot_nullifier_index, AGGREGATOR_ADDRESS_LEN, AGGREGATOR_ADDRESS_START,
+    BLOCK_HASH_START, BLOCK_NUMBER_INDEX, DIGEST_FELTS,
 };
 use qnero_circuit::config::qnero_public_batch_circuit_config;
 use qnero_circuit::convert::digest_to_felts;
-use qnero_circuit::layout::NUM_OUTPUTS;
+use qnero_circuit::layout::{NUM_INPUTS, NUM_OUTPUTS};
 use qnero_circuit::padding::{PADDING_BLOCK_HASH, PADDING_BLOCK_NUMBER};
 use qnero_circuit::{C, D, F};
 use qnero_notes::Digest;
@@ -249,19 +250,50 @@ impl QneroPublicBatchProver {
                 })?;
         }
 
-        ensure_inner_batch_compatible(proofs)
+        ensure_inner_batch_compatible(proofs, self.num_leaves)
     }
 }
 
-/// Mirror of the public batch's cross-proof constraints, run before proving.
-fn ensure_inner_batch_compatible(proofs: &[Proof]) -> Result<()> {
+/// Admission rules for the inner proofs of one public batch.
+///
+/// Two of them mirror circuit constraints and exist here for failure latency:
+/// every non-padding inner shares one block hash and one block number.
+///
+/// The third has no circuit counterpart and is the only thing enforcing it.
+/// **The `2N` nullifiers of one inner proof must not repeat in another.** The
+/// public batch forwards each segment verbatim with no cross-inner check, and
+/// a full pairwise comparison in circuit would be `n * 2N` digests against
+/// each other, which at the chain default of 53 inners over 7 leaves is 742
+/// nullifiers and is not affordable. So a duplicated inner proves and verifies
+/// as readily as a distinct one: the same 2N nullifiers, the same 2N
+/// commitments and the same per-leaf fee are republished once per copy. The
+/// chain's settled-nullifier set catches the second copy, and its whole
+/// settlement extrinsic then reverts, so one attacker resubmitting a proof
+/// somebody else already paid for destroys an aggregator's entire batch at no
+/// cost. This check is where that is stopped.
+///
+/// A caller-supplied padding inner is refused outright for the same reason.
+/// The padding template is a published artifact anybody can download, it
+/// settles nothing, and padding is this prover's to append. Accepting one as
+/// an input would let anyone burn an aggregator's slots with a file.
+///
+/// `docs/CIRCUIT.md` section 8.3 records which half of the distinctness rule
+/// is a circuit constraint and which is an admission rule.
+fn ensure_inner_batch_compatible(proofs: &[Proof], num_leaves: usize) -> Result<()> {
     let mut reference: Option<(usize, [u64; DIGEST_FELTS], u64)> = None;
+    let mut seen: HashMap<[u64; DIGEST_FELTS], (usize, usize, usize)> = HashMap::new();
+
     for (index, proof) in proofs.iter().enumerate() {
         let block_hash: [u64; DIGEST_FELTS] =
             core::array::from_fn(|i| proof.public_inputs[BLOCK_HASH_START + i].to_canonical_u64());
         if block_hash == PADDING_BLOCK_HASH {
-            continue;
+            bail!(
+                "private-batch proof {} carries the padding sentinel; a padding batch settles \
+                 nothing and padding is appended by this prover, never supplied by a caller",
+                index
+            );
         }
+
         let block_number = proof.public_inputs[BLOCK_NUMBER_INDEX].to_canonical_u64();
         match reference {
             None => reference = Some((index, block_hash, block_number)),
@@ -272,6 +304,30 @@ fn ensure_inner_batch_compatible(proofs: &[Proof]) -> Result<()> {
                          every non-padding inner proof of a public batch must share one block",
                         index,
                         reference_index
+                    );
+                }
+            }
+        }
+
+        for slot in 0..num_leaves {
+            for input in 0..NUM_INPUTS {
+                let nullifier: [u64; DIGEST_FELTS] = core::array::from_fn(|limb| {
+                    proof.public_inputs[slot_nullifier_index(slot, input) + limb].to_canonical_u64()
+                });
+                if let Some((previous_index, previous_slot, previous_input)) =
+                    seen.insert(nullifier, (index, slot, input))
+                {
+                    bail!(
+                        "private-batch proof {} publishes the nullifier at slot {} input {} that \
+                         proof {} already published at slot {} input {}; two inner proofs of one \
+                         public batch may not settle the same note, and a repeated inner is the \
+                         usual cause",
+                        index,
+                        slot,
+                        input,
+                        previous_index,
+                        previous_slot,
+                        previous_input
                     );
                 }
             }

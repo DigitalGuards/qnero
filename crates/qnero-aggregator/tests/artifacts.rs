@@ -91,6 +91,32 @@ fn the_artifact_set_round_trips_through_the_loaders() {
     QneroPublicBatchVerifier::from_artifact_bytes(&public_batch_artifact, NUM_INNER, NUM_LEAVES)
         .expect("the public-batch artifact passes its profile");
 
+    // The public-batch file carries the dimension pair it was built for. Its
+    // public-input count cannot stand in for that: `4 + n * (5 + 21 * N)`
+    // collides for supported pairs, so an artifact from a partial redeploy
+    // would otherwise load under the wrong dimensions and split every proof it
+    // verified at the wrong offsets.
+    assert!(
+        public_batch_artifact.starts_with(&qnero_verifier::PUBLIC_BATCH_ARTIFACT_MAGIC),
+        "the public-batch artifact must begin with its dimension header"
+    );
+    assert!(
+        QneroPublicBatchVerifier::from_artifact_bytes(
+            &public_batch_artifact,
+            NUM_INNER,
+            NUM_LEAVES + 1
+        )
+        .is_err(),
+        "the artifact must not load under dimensions it was not built for"
+    );
+    let mut flipped_header = public_batch_artifact.clone();
+    flipped_header[0] ^= 0x01;
+    assert!(
+        QneroPublicBatchVerifier::from_artifact_bytes(&flipped_header, NUM_INNER, NUM_LEAVES)
+            .is_err(),
+        "a flipped bit in the dimension header must be refused"
+    );
+
     // The published all-padding batch is a real proof of the published
     // circuit, which is what the public batch pads with.
     let padding_batch = read_artifact_file(&dir.join("padding_private_batch_proof.bin")).unwrap();
