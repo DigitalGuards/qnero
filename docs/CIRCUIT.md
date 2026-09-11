@@ -112,7 +112,18 @@ level, and a lie about the position simply yields a different root. A test
 covers exactly that.
 
 `qnero_circuit::merkle::CommitmentTree` is the off-circuit mirror of this rule
-and is what the wallet and the tests build paths with.
+and is what the tests build paths with.
+
+The wallet-side half of the rule is the path adapter. `generate_proof` returns
+`ZkMerkleProof { leaf_index, siblings }`, where each level's three siblings are
+in child-index order and no position is recorded, because the node rule sorts
+its children anyway. The circuit wants the opposite: siblings already sorted,
+plus the slot the running hash occupies. `MerklePath::from_unsorted(siblings,
+leaf)` is that conversion, and it is what a wallet calls on a proof it fetched
+from the chain. Feeding chain-ordered siblings straight into `MerklePath`
+produces a path whose root is not `zk_tree_root`, and the leaf then fails to
+prove with nothing to point at. `CommitmentTree::index_ordered_siblings`
+reproduces the chain's shape so the adapter is covered by a test.
 
 ### What `pallet-zk-tree` must change at M4
 
@@ -125,15 +136,29 @@ The fork is small and mechanical:
 
 1. `Leaves` becomes `StorageMap<_, Identity, u64, Hash256>`.
 2. `get_leaf_hash` becomes the identity read (missing leaf stays `empty_hash`).
-3. `insert_leaf` becomes `insert_leaf(commitment: Hash256)`. It must reject a
-   non-canonical commitment (every limb below the Goldilocks modulus), because
-   the 8-bytes-per-felt decode reduces mod p and a non-canonical alias would
-   commit to the same tree position as a genuine commitment.
+3. `insert_leaf` becomes `insert_leaf(commitment: Hash256)`. It must reject
+   two things. A non-canonical commitment (any limb at or above the Goldilocks
+   modulus), because the 8-bytes-per-felt decode reduces mod p and a
+   non-canonical alias would commit to the same tree position as a genuine
+   commitment. And the all-zero digest, because that is `empty_hash()`, the
+   absence sentinel the pallet returns for a missing leaf and for an empty
+   subtree at every level; once `hash_leaf`'s domain separation is dropped, a
+   zero leaf is indistinguishable from an unset slot. Nothing can produce a
+   zero commitment today, since every `cm` is a Poseidon2 output, so this is a
+   guard against a later entry point (a migration, a genesis import, a bridge
+   deposit) that accepts a caller-supplied `Hash256`. Cover it with a test that
+   `insert_leaf([0u8; 32])` errors.
 4. `hash_leaf` and `canonicalize_account_bytes` are dropped, and with them the
    non-injective-encoding invariant they carried.
-5. `tree::hash_node`, `update_range`, `grow_tree`, `generate_proof`,
-   `verify_proof`, the `Nodes` map, depth growth and the `on_finalize` root
-   publication are all unchanged.
+5. `tree::verify_proof` becomes
+   `verify_proof(leaf_hash: Hash256, proof: &ZkMerkleProof, expected_root:
+   Hash256) -> bool`, and the public wrapper `Pallet::verify_proof` follows.
+   Both take a `ZkLeaf` today and call `hash_leaf` on it, so they are the one
+   pair of signatures in this list that has to change.
+6. `tree::hash_node`, `update_range`, `grow_tree`, `generate_proof`, the
+   `Nodes` map, depth growth and the `on_finalize` root publication are all
+   unchanged. They reach a leaf only through `get_leaf_hash`, whose body
+   changes and whose signature does not.
 
 Two properties of the pallet that the wallet must respect and that do not
 change: a leaf appended in block N is only provable after that block's
@@ -163,7 +188,9 @@ attack on Poseidon2.
    binding is unconditional. This is the whole security chain: public
    `block_hash` commits to the header, the header carries `zk_tree_root`, and
    each input's path reaches that root.
-2. `depth <= MAX_DEPTH`, split into bits once and shared by both paths.
+2. `depth <= MAX_DEPTH`. The value is decomposed into bits exactly once, by
+   `split_le`, which is also what range-constrains it; the same bits carry the
+   bound and derive the 16 `level < depth` flags that both paths share.
 3. Per input: `pk = H(PK, H(AK, ask), nk)`, `cm = H(CM, H(NOTE, pk, rho, r),
    value)`, the path from `cm` reaches `zk_tree_root`, and
    `nf = H(NF, nk, rho)` is published. The root equality is gated:
@@ -183,6 +210,19 @@ attack on Poseidon2.
    integers: no wraparound can fake a balance. This is why the fee is range
    checked at all, and why the two-input shape cannot be widened to four inputs
    at 62 bits without redoing the argument.
+9. At least one input is real: the product of the `is_dummy` bits is zero.
+   Nothing else relates the two bits. With both set, a leaf proves with no
+   spend key and no note in the tree: every membership check is switched off,
+   both values are forced to zero by constraint 4, so the balance holds at zero
+   out and zero fee, constraint 5 is met by giving the two dummies different
+   `rho`, and the header can be any real block, whose preimage is public chain
+   data. That leaf would still publish two nullifiers and two output
+   commitments, which the chain writes into permanent state: two entries in the
+   nullifier set and two slots of a depth-16 tree sized for the life of the
+   chain. Settlement extrinsics are unsigned and fee-free in the pallet this
+   forks, so the leaf's own `fee` public input is the only cost, and an
+   all-dummy leaf sets it to zero. Requiring a real input bounds a leaf's cost
+   by the prover's own note supply, since each note is spendable once.
 
 ### Dummy inputs
 
@@ -209,12 +249,12 @@ development workstation, single threaded (plonky2's `parallel` feature is off
 so a prover cannot saturate a machine unasked):
 
 ```
-gates before padding : 316
+gates before padding : 315
 degree_bits          : 9
 public inputs        : 26
 zero knowledge       : false
-build                : 73 ms
-prove, warm          : 302 ms
+build                : 63 ms
+prove, warm          : 221 ms
 verify               : 2.5 ms
 proof bytes          : 105500
 ```
@@ -248,6 +288,11 @@ with a clear error unless `qnero-circuit`'s `zk` feature is on.
   already reads, it cannot be claimed by a leaf that also binds to a real
   block, and the wrapper must still mask the commitments, nullifiers and fee of
   a dummy slot, trusting no invariant that crosses a circuit boundary.
+  Constraint 9 has to be gated on that same sentinel: a padding leaf has no
+  real input, so it must stay provable, while every leaf whose `block_hash`
+  binds a real block must spend something. M4 should also require a minimum fee
+  per non-padding leaf, since a leaf with one real input can still pay zero on
+  a fee-free extrinsic.
 - **Verifier artifact pinning.** `qnero-verifier` loads verifier data from
   bytes behind a size cap, with no keccak pin yet: there is no tagged circuit
   release to pin. The first release adds the pin, and every circuit change

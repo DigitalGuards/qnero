@@ -9,10 +9,7 @@ description = "Qnero v0 shielded spend circuit (leaf): 2-in / 2-out note spend o
 qnero-notes = { workspace = true, optional = true }
 qp-plonky2 = { workspace = true, optional = true }
 qp-poseidon-core = { workspace = true, optional = true }
-anyhow = { workspace = true, optional = true }
-
-[dev-dependencies]
-rand = { workspace = true }
+anyhow = { workspace = true, features = ["std"], optional = true }
 
 [features]
 default = ["circuit"]

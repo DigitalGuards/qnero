@@ -2,13 +2,24 @@
 //!
 //! This crate depends on `qp-plonky2-verifier` and on `qnero-circuit` with its
 //! circuit feature off, so it pulls in neither the prover stack nor the note
-//! primitives. A runtime that only has to check leaf proofs and read their
-//! public inputs can take this crate alone.
+//! primitives, and it is `no_std` plus `alloc` with default features off.
+//!
+//! **A leaf proof is not the on-chain unit.** The leaf is built with
+//! `standard_recursion_config`, which does not blind, so its FRI openings leak
+//! witness structure: note values, the Merkle path, the shape of the spend
+//! credential. This crate exists for the wallet-side batch aggregator and for
+//! tests. The unit a runtime verifies is the M3 batch proof, which is where
+//! zero knowledge is applied. When the batch verifier lands, its entry point
+//! becomes the runtime-facing API and the leaf entry points here move behind a
+//! non-default feature, so a runtime cannot reach them by accident.
 //!
 //! Public inputs are read by the constant indices in
 //! [`qnero_circuit::layout`], which is the one place that layout is defined.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
 
 use anyhow::{anyhow, ensure, Result};
 use qnero_circuit::layout::{
@@ -129,26 +140,36 @@ impl QneroVerifier {
             &self.circuit_data.common,
         )
         .map_err(|e| anyhow!("failed to deserialize the proof: {}", e))?;
-        self.verify_and_parse(&proof)
+        self.verify_and_parse(proof)
     }
 
+    /// Verify a proof this caller only holds a reference to.
+    ///
+    /// `VerifierCircuitData::verify` consumes its proof, so this clones about
+    /// 100 kB of FRI openings and Merkle caps. Callers that own the proof
+    /// should use [`QneroVerifier::verify`] or
+    /// [`QneroVerifier::verify_and_parse`] instead.
     pub fn verify_ref(&self, proof: &ProofWithPublicInputs<F, C, D>) -> Result<()> {
-        self.circuit_data
-            .verify(proof.clone())
-            .map_err(|e| anyhow!("leaf proof verification failed: {}", e))
+        self.verify(proof.clone())
     }
 
     pub fn verify(&self, proof: ProofWithPublicInputs<F, C, D>) -> Result<()> {
-        self.verify_ref(&proof)
+        self.circuit_data
+            .verify(proof)
+            .map_err(|e| anyhow!("leaf proof verification failed: {}", e))
     }
 
     /// Verify and read the public inputs in one step.
+    ///
+    /// The public inputs are read first, from the proof this call owns, so the
+    /// proof can be moved into `verify` without a copy.
     pub fn verify_and_parse(
         &self,
-        proof: &ProofWithPublicInputs<F, C, D>,
+        proof: ProofWithPublicInputs<F, C, D>,
     ) -> Result<LeafPublicInputs> {
-        self.verify_ref(proof)?;
-        parse_public_inputs(proof)
+        let public = parse_public_input_felts(&proof.public_inputs)?;
+        self.verify(proof)?;
+        Ok(public)
     }
 }
 

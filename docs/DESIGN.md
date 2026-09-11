@@ -27,7 +27,7 @@ survives: the pool is the only place value lives.
 | Ed25519 spend/view keys | Hash-derived spend key, ML-KEM decapsulation key as view key | new + `clatter`/rust-crypto ML-KEM already in Quantus deps |
 | Stealth address (ECDH) | ML-KEM encapsulation per output, AEAD note ciphertext | new |
 | Pedersen commitment | Poseidon note commitment `cm = H(H(pk, rho, r), v)` | new, `qp-poseidon` |
-| Bulletproofs+ range proof | 64-bit range check inside the Plonky2 circuit | plonky2 gadget |
+| Bulletproofs+ range proof | 62-bit range check inside the Plonky2 circuit | plonky2 gadget |
 | CLSAG ring + key image | Merkle membership proof in the 4-ary Poseidon tree + nullifier `nf = H(nk, rho)` | `qp-zk-circuits` `zk_merkle`, `nullifier` fragments |
 | Ring size / decoys | Anonymity set = the whole tree (all notes ever) | `pallet-zk-tree` |
 | Transaction signature | Spend proof bound to the transaction digest as a public input | plonky2 public inputs |
@@ -61,11 +61,21 @@ Verified on this machine 2026-09-11: `cargo test -p qp-wormhole-circuit
 sk        : 32 random bytes                     (seed, backed up by the user)
 ask       = H("qnero/ask", sk)                  spend authorizing key, private
 nk        = H("qnero/nk",  sk)                  nullifier key, private
-ak        = H("qnero/ak",  ask)                 public spend commitment
-pk        = H("qnero/pk",  ak, nk)              note-receiving key, 32 bytes
+ak        = H(AK, ask)                          public spend commitment
+pk        = H(PK, ak, nk)                       note-receiving key, 32 bytes
 (ek, dk)  = ML-KEM.KeyGen(H("qnero/kem", sk))   view key pair
 address   = bech32m("qn", pk || ek)
 ```
+
+Two hash forms appear here and they are not interchangeable. `H("qnero/...",
+...)` is Poseidon2 over bytes with that ASCII string as a literal prefix, and
+it is used exactly where written: `ask`, `nk`, and the ML-KEM seed. `H(TAG,
+...)` is Poseidon2 over field elements with a one-felt domain tag as the first
+sponge input: `AK = 0x716e_0001`, `PK = 0x716e_0002`, `NOTE = 0x716e_0003`,
+`CM = 0x716e_0004`, `NF = 0x716e_0005`. Those are the values in
+`qnero_notes::digest::domain`, and the spend circuit imports them from that
+crate so the two copies cannot drift. `docs/CIRCUIT.md` section 3 is the
+authority.
 
 Address size is dominated by the ML-KEM encapsulation key: 1184 bytes at
 ML-KEM-768, 1568 at ML-KEM-1024. Decision pending: ML-KEM-1024 for level-5
@@ -80,11 +90,16 @@ outgoing note contents it authored. `nk` alone reveals which notes were spent.
 ## 5. Notes
 
 ```
-note      = (pk, v: u64, rho: 32 bytes, r: 32 bytes)
-inner     = H("qnero/note", pk, rho, r)
-cm        = H("qnero/cm", inner, v)
-nf        = H("qnero/nf", nk, rho)
+note      = (pk, v: u64 capped at 2^62 - 1, rho: 32 bytes, r: 32 bytes)
+inner     = H(NOTE, pk, rho, r)
+cm        = H(CM, inner, v)
+nf        = H(NF, nk, rho)
 ```
+
+The 62-bit cap on `v` is a consensus rule. The no-wrap argument behind the
+circuit's balance equation (`docs/CIRCUIT.md` section 5, constraint 8) holds
+only while every term is below `2^62`, so every path that creates a note,
+coinbase and deposit included, has to enforce the cap.
 
 The two-layer commitment lets a coinbase note carry a public `v` and a public
 `inner` that the chain checks against `cm` while `pk` stays hidden. Regular
@@ -115,7 +130,8 @@ Constraints:
 2. For each non-dummy input: `pk = H(ak, nk)` with `ak = H(ask)`; `cm`
    recomputed from the note; Merkle path from `cm` to `zk_tree_root`;
    `nf = H(nk, rho)`. Dummy inputs have `v = 0` and a random nullifier
-   preimage (existing dummy pattern).
+   preimage (existing dummy pattern), and at least one input must be real, so
+   a leaf always consumes a note.
 3. For each output: `cm_out` recomputed from the note; `v_out` range-checked
    to 62 bits.
 4. Balance: `v_in_1 + v_in_2 = v_out_1 + v_out_2 + fee`, all values 62-bit so
@@ -144,7 +160,7 @@ batch is the on-chain transaction unit. Public batch: unchanged in shape.
 | # | Deliverable | Estimate |
 |---|---|---|
 | M1 | `qnero-notes` crate: keys, addresses, note commitment, ML-KEM note encryption, scan; KATs pinned | DONE 2026-09-11 |
-| M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (316 gates, degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
+| M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (315 gates, degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
 | M3 | Private and public batch aggregators on the new PI layout | 1 week |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | 2 weeks |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | 2 weeks |

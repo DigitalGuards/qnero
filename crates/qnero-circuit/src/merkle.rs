@@ -107,6 +107,69 @@ impl MerklePath {
         self.siblings.len()
     }
 
+    /// Convert a chain-shaped proof into the form the circuit consumes.
+    ///
+    /// `pallet-zk-tree`'s `generate_proof` returns the three siblings of each
+    /// level in child-index order and records no position, because the node
+    /// rule sorts its children anyway. The circuit does not sort: it needs the
+    /// siblings in sorted order plus the slot the running hash occupies. This
+    /// is the adapter, and it is what a wallet uses on a proof it fetched from
+    /// the chain. Upstream ships the same conversion as
+    /// `ZkMerkleProofData::from_unsorted`.
+    ///
+    /// Non-canonical sibling bytes cannot reach here: a [`Digest`] is four
+    /// canonical limbs by construction, so the decode that would alias two
+    /// distinct byte strings onto one field element has already been rejected.
+    pub fn from_unsorted(
+        unsorted_siblings: &[[Digest; SIBLINGS_PER_LEVEL]],
+        leaf: Digest,
+    ) -> anyhow::Result<Self> {
+        ensure!(
+            unsorted_siblings.len() <= MAX_DEPTH,
+            "merkle path depth {} exceeds MAX_DEPTH {}",
+            unsorted_siblings.len(),
+            MAX_DEPTH
+        );
+
+        let mut siblings = Vec::with_capacity(unsorted_siblings.len());
+        let mut positions = Vec::with_capacity(unsorted_siblings.len());
+        let mut current = leaf;
+
+        for level_siblings in unsorted_siblings {
+            let mut children = [
+                current,
+                level_siblings[0],
+                level_siblings[1],
+                level_siblings[2],
+            ];
+            children.sort_by_key(|child| child.to_bytes());
+            // Duplicates are adjacent after sorting, so any index holding the
+            // same value reconstructs the same array.
+            let position = children
+                .iter()
+                .position(|child| *child == current)
+                .expect("the running hash is one of the four children");
+
+            let mut sorted_siblings = [empty_digest(); SIBLINGS_PER_LEVEL];
+            let mut sibling_index = 0;
+            for (slot, child) in children.iter().enumerate() {
+                if slot != position {
+                    sorted_siblings[sibling_index] = *child;
+                    sibling_index += 1;
+                }
+            }
+
+            siblings.push(sorted_siblings);
+            positions.push(position as u8);
+            current = hash_node_presorted(&children);
+        }
+
+        Ok(Self {
+            siblings,
+            positions,
+        })
+    }
+
     /// Recompute the root this path claims for `leaf`.
     pub fn root(&self, leaf: Digest) -> anyhow::Result<Digest> {
         ensure!(
@@ -221,6 +284,43 @@ impl CommitmentTree {
         self.levels[self.depth][0]
     }
 
+    /// The three siblings of each level in child-index order, with no position
+    /// hint: the shape `pallet-zk-tree`'s `generate_proof` returns.
+    ///
+    /// [`MerklePath::from_unsorted`] is what turns this into a circuit path.
+    pub fn index_ordered_siblings(
+        &self,
+        leaf_index: usize,
+    ) -> anyhow::Result<Vec<[Digest; SIBLINGS_PER_LEVEL]>> {
+        ensure!(
+            leaf_index < self.leaf_count(),
+            "leaf index {} is out of range for {} leaves",
+            leaf_index,
+            self.leaf_count()
+        );
+
+        let mut levels = Vec::with_capacity(self.depth);
+        let mut index = leaf_index;
+        for level in 0..self.depth {
+            let base = (index / ARITY) * ARITY;
+            let mut level_siblings = [empty_digest(); SIBLINGS_PER_LEVEL];
+            let mut sibling_index = 0;
+            for slot in 0..ARITY {
+                if base + slot == index {
+                    continue;
+                }
+                if let Some(value) = self.levels[level].get(base + slot) {
+                    level_siblings[sibling_index] = *value;
+                }
+                sibling_index += 1;
+            }
+            levels.push(level_siblings);
+            index /= ARITY;
+        }
+
+        Ok(levels)
+    }
+
     /// The sorted-sibling path with position hints for one leaf.
     pub fn path(&self, leaf_index: usize) -> anyhow::Result<MerklePath> {
         ensure!(
@@ -299,18 +399,29 @@ impl MerklePathTargets {
     }
 }
 
-/// `level < depth` for every level, derived from one shared bit split.
+/// `level < depth` for every level, from bits the caller already split.
 ///
-/// The split is what range-constrains `depth`, and
-/// [`crate::gadgets::enforce_target_less_than_const`] on the same target
-/// bounds it to `MAX_DEPTH`. Upstream re-splits `depth` inside every level of
-/// every path; both input notes here share one tree and therefore one depth.
+/// Splitting is what range-constrains `depth`, so the caller owns it and can
+/// reuse the same bits for the `depth <= MAX_DEPTH` bound. Upstream re-splits
+/// `depth` inside every level of every path; both input notes here share one
+/// tree and therefore one depth.
+pub fn active_level_flags_from_bits(
+    builder: &mut CircuitBuilder<F, D>,
+    depth_bits: &[BoolTarget],
+) -> [BoolTarget; MAX_DEPTH] {
+    core::array::from_fn(|level| const_less_than_bits(builder, level, depth_bits))
+}
+
+/// [`active_level_flags_from_bits`] for a caller that has not split `depth`.
+///
+/// A caller that also bounds `depth` should split once itself and use
+/// [`active_level_flags_from_bits`], or the value is decomposed twice.
 pub fn active_level_flags(
     builder: &mut CircuitBuilder<F, D>,
     depth: Target,
 ) -> [BoolTarget; MAX_DEPTH] {
     let depth_bits = builder.split_le(depth, DEPTH_BITS);
-    core::array::from_fn(|level| const_less_than_bits(builder, level, &depth_bits))
+    active_level_flags_from_bits(builder, &depth_bits)
 }
 
 /// Walk a path from `leaf_hash` to the root.
@@ -457,6 +568,31 @@ mod tests {
             hash_node(&[only, empty_digest(), empty_digest(), empty_digest()])
         );
         assert_eq!(tree.path(0).unwrap().root(only).unwrap(), tree.root());
+    }
+
+    /// The chain hands out index-ordered siblings with no position hint. The
+    /// adapter is the wallet-side half of the leaf rule: without it a path
+    /// fetched from the pallet reaches the wrong root and the leaf simply fails
+    /// to prove.
+    #[test]
+    fn the_adapter_rebuilds_a_circuit_path_from_chain_order_siblings() {
+        let leaves: Vec<Digest> = (0..37u8).map(|i| leaf(&[i])).collect();
+        let depth = CommitmentTree::depth_for(leaves.len()).unwrap();
+        let tree = CommitmentTree::new(&leaves, depth).unwrap();
+
+        for (index, commitment) in leaves.iter().enumerate() {
+            let chain_order = tree.index_ordered_siblings(index).unwrap();
+            let path = MerklePath::from_unsorted(&chain_order, *commitment).unwrap();
+            assert_eq!(path.depth(), depth);
+            assert_eq!(path.root(*commitment).unwrap(), tree.root());
+            assert_eq!(path, tree.path(index).unwrap());
+        }
+    }
+
+    #[test]
+    fn the_adapter_rejects_a_path_deeper_than_max_depth() {
+        let siblings = vec![[empty_digest(); SIBLINGS_PER_LEVEL]; MAX_DEPTH + 1];
+        assert!(MerklePath::from_unsorted(&siblings, leaf(b"x")).is_err());
     }
 
     #[test]

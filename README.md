@@ -35,6 +35,19 @@ cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 ```
 
+Two configurations the workspace gate does not reach, because `cargo test
+--workspace` unifies features and always turns `qnero-circuit`'s defaults on:
+
+```
+cargo check -p qnero-circuit --no-default-features
+cargo check -p qnero-verifier --no-default-features
+cargo test -p qnero-prover --release --features zk
+```
+
+The first two are the layout-only and `no_std` builds the M4 runtime depends
+on; the third is the only run that exercises plonky2 row blinding, since the
+feature gate's own unit test passes vacuously when the feature is off.
+
 Proving needs `--release`; a leaf takes minutes in a debug build and about a
 third of a second in a release one. The leaf's size is reported by an ignored
 test:

@@ -14,3 +14,11 @@ Upstream shape is `qp-wormhole-verifier` (Quantus-Network/qp-zk-circuits, MIT).
 - One shared layout module, `qnero_circuit::layout`. Upstream keeps a separate
   inputs crate and the aggregator restates the same indices under different
   names.
+- `no_std` plus `alloc` with default features off, matching upstream. This is
+  what lets the M4 `pallet-shielded` runtime link it into a wasm build, the way
+  `pallet-wormhole` takes `qp-wormhole-verifier` today. Gated by
+  `cargo check -p qnero-verifier --no-default-features`.
+- `verify_and_parse` takes the proof by value and reads the public inputs
+  before verifying, so the byte path does not clone about 100 kB of FRI
+  openings per proof. `verify_ref` stays for callers that hold only a
+  reference, and says in its doc what it costs.

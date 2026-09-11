@@ -7,10 +7,16 @@ description = "Prover for the Qnero v0 shielded spend leaf circuit"
 
 [dependencies]
 qnero-circuit = { workspace = true }
-qnero-notes = { workspace = true }
 qp-plonky2 = { workspace = true }
-anyhow = { workspace = true }
+anyhow = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+qnero-notes = { workspace = true }
 qnero-verifier = { workspace = true }
-rand = { workspace = true }
+
+[features]
+default = []
+# Build and prove the leaf with plonky2 row blinding on. Not a production
+# configuration: zero knowledge belongs at the private batch. It exists so the
+# ZK path stays compiled and exercised.
+zk = ["qnero-circuit/zk"]

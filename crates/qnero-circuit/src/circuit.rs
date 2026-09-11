@@ -27,11 +27,11 @@ use plonky2::plonk::circuit_data::{
 use qnero_notes::VALUE_BITS;
 
 use crate::config::{ensure_zk_supported, qnero_leaf_circuit_config, validate_circuit_config};
-use crate::gadgets::{digests_are_equal, enforce_target_less_than_const};
+use crate::gadgets::{const_less_than_bits, digests_are_equal};
 use crate::header::{constrain_header, HeaderTargets};
 use crate::layout::{NUM_INPUTS, NUM_OUTPUTS};
 use crate::merkle::{
-    active_level_flags, merkle_root_from_path, MerklePathTargets, DEPTH_BITS, MAX_DEPTH,
+    active_level_flags_from_bits, merkle_root_from_path, MerklePathTargets, DEPTH_BITS, MAX_DEPTH,
 };
 use crate::note_gadget::{derive_pk, note_commitment, note_inner, note_nullifier};
 use crate::{C, D, F};
@@ -153,11 +153,15 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
     // 1. block_hash == H(header preimage), and the header carries zk_tree_root.
     constrain_header(builder, targets.block_hash, &targets.header);
 
-    // 2. The tree depth is shared by both paths. `enforce_target_less_than_const`
-    // bounds it to MAX_DEPTH and `active_level_flags` splits it into the bits
-    // every level flag is derived from.
-    enforce_target_less_than_const(builder, targets.depth, MAX_DEPTH + 1, DEPTH_BITS);
-    let active_levels = active_level_flags(builder, targets.depth);
+    // 2. The tree depth is shared by both paths, and split into bits exactly
+    // once. The split is what range-constrains `depth`; the same bits then
+    // bound it to MAX_DEPTH and derive the 16 level flags. Splitting a second
+    // time for the bound would add a BaseSumGate and a second comparison chain
+    // over a value the first split already determines.
+    let depth_bits = builder.split_le(targets.depth, DEPTH_BITS);
+    let depth_over_max = const_less_than_bits(builder, MAX_DEPTH, &depth_bits);
+    builder.connect(depth_over_max.target, zero);
+    let active_levels = active_level_flags_from_bits(builder, &depth_bits);
 
     // 3 and 4. Input notes.
     let mut input_values = Vec::with_capacity(NUM_INPUTS);
@@ -205,6 +209,29 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
         targets.nullifiers[1].elements,
     );
     builder.connect(nullifiers_equal.target, zero);
+
+    // 9. At least one input must be real.
+    //
+    // Nothing else relates the two `is_dummy` bits. With both set, a leaf
+    // proves with no spend key and no note in the tree: every membership check
+    // is switched off, both values are forced to zero, so the balance holds at
+    // zero out and zero fee, and the header can be any real block, whose
+    // preimage is public chain data. That leaf still publishes two nullifiers
+    // and two output commitments, which the chain writes into permanent state:
+    // two entries in the nullifier set and two slots of a depth-16 tree that is
+    // sized for the life of the chain. Settlement extrinsics are fee-free, so
+    // the leaf's own `fee` public input is the only cost, and an all-dummy leaf
+    // sets it to zero. Requiring a real input bounds the cost by the prover's
+    // own note supply, since each note is spendable once.
+    //
+    // For M3: when the batch layer picks its padding sentinel, gate this
+    // product on the same flag that gates the header binding, so a padding leaf
+    // stays provable while every leaf bound to a real block spends something.
+    let mut all_dummy = targets.inputs[0].is_dummy.target;
+    for input in &targets.inputs[1..] {
+        all_dummy = builder.mul(all_dummy, input.is_dummy.target);
+    }
+    builder.connect(all_dummy, zero);
 
     // 6. Output notes.
     let mut output_values = Vec::with_capacity(NUM_OUTPUTS + 1);

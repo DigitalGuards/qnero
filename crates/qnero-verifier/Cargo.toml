@@ -11,3 +11,10 @@ description = "Verifier for the Qnero v0 shielded spend leaf circuit"
 qnero-circuit = { path = "../qnero-circuit", version = "0.1.0", default-features = false }
 qp-plonky2-verifier = { workspace = true }
 anyhow = { workspace = true }
+
+[features]
+# On by default for the wallet-side aggregator and the tests. A runtime takes
+# this crate with default features off: everything here is `no_std` + `alloc`,
+# which is what lets `pallet-shielded` link it into a wasm runtime at M4.
+default = ["std"]
+std = ["anyhow/std", "qp-plonky2-verifier/std"]

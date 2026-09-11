@@ -22,8 +22,8 @@ qnero-prover = { path = "crates/qnero-prover" }
 qnero-verifier = { path = "crates/qnero-verifier" }
 qp-poseidon-core = { version = "3.1.0", default-features = false, features = ["std"] }
 qp-plonky2 = { version = "=1.5.5", default-features = false, features = ["std"] }
-qp-plonky2-verifier = { version = "=1.5.5", default-features = false, features = ["std"] }
-anyhow = "1.0"
+qp-plonky2-verifier = { version = "=1.5.5", default-features = false }
+anyhow = { version = "1.0", default-features = false }
 bech32 = "0.9"
 zeroize = { version = "1.8", features = ["derive"] }
 rand = "0.9"

@@ -143,18 +143,27 @@ fn prove_with_shared_circuit(
 /// to verify. Which of the two depends on where the constraint bites, and a
 /// test that demanded one specific failure mode would pin an implementation
 /// detail of plonky2 and miss the property.
+///
+/// What this must never accept is a rejection that came from the front door.
+/// `SpendWitness::validate` and `fill_witness` run before plonky2 does, so if a
+/// later hardening pass moved a value range or the dummy contract into
+/// `validate`, every negative test here would keep passing while the in-circuit
+/// checks they exist to protect went unexercised. Both are therefore asserted
+/// to succeed, and only `prove` may reject.
 fn assert_rejected(witness: &SpendWitness, what: &str) {
-    let (_, data) = circuit();
-    match prove_with_shared_circuit(witness) {
-        Err(error) => {
-            eprintln!("rejected [{what}]: {error}");
-        }
-        Ok(proof) => {
-            assert!(
-                data.verify(proof).is_err(),
-                "{what}: an invalid witness produced a proof that verified"
-            );
-        }
+    let (targets, data) = circuit();
+    witness
+        .validate()
+        .expect("the fixture must be structurally valid, so only the circuit can reject it");
+    let mut pw = PartialWitness::<F>::new();
+    fill_witness(&mut pw, witness, targets)
+        .expect("witness filling must succeed, so only the circuit can reject the fixture");
+
+    if let Ok(proof) = data.prove(pw) {
+        assert!(
+            data.verify(proof).is_err(),
+            "{what}: an invalid witness produced a proof that verified"
+        );
     }
 }
 
@@ -255,6 +264,145 @@ fn one_real_input_and_one_dummy_prove_and_verify() {
         digest_to_felts(&qnero_notes::nullifier(&keys.nk, &digest("dummy-rho")))
     );
     assert_ne!(public.nullifiers[0], public.nullifiers[1]);
+}
+
+/// A leaf with every input marked dummy proves nothing: no spend key, no note
+/// in the tree, zero value, zero fee. It would still publish two nullifiers and
+/// two output commitments, which the chain writes into permanent state, and
+/// settlement extrinsics are fee-free, so nothing else would charge for it.
+/// Constraint 9 is what bounds a leaf's cost by the prover's own notes.
+#[test]
+fn both_inputs_dummy_cannot_prove() {
+    let keys = sender_keys();
+    // The header is an honest block's: its preimage is public chain data, so an
+    // attacker can always supply one. Everything else in this witness is junk
+    // and every other constraint is satisfied by it: values balance at zero,
+    // the two nullifiers differ because the dummies get different `rho`, and
+    // the paths are empty because no membership is checked.
+    let honest = two_real_inputs();
+    let witness = SpendWitness {
+        header: honest.header.clone(),
+        depth: honest.depth,
+        inputs: [
+            InputNote::dummy(
+                &keys,
+                digest("all-dummy-rho-1"),
+                digest("all-dummy-r-1"),
+                honest.depth,
+            ),
+            InputNote::dummy(
+                &keys,
+                digest("all-dummy-rho-2"),
+                digest("all-dummy-r-2"),
+                honest.depth,
+            ),
+        ],
+        outputs: [
+            OutputNote {
+                pk: recipient_pk(),
+                value: 0,
+                rho: digest("all-dummy-out-rho-1"),
+                r: digest("all-dummy-out-r-1"),
+            },
+            OutputNote {
+                pk: recipient_pk(),
+                value: 0,
+                rho: digest("all-dummy-out-rho-2"),
+                r: digest("all-dummy-out-r-2"),
+            },
+        ],
+        fee: 0,
+        ct_digest: digest("ciphertexts-all-dummy"),
+    };
+
+    assert_rejected(&witness, "both inputs dummy");
+}
+
+/// The 62-bit range check on an *input* value. The output and fee checks have
+/// their own tests; without this one, deleting the input check leaves the whole
+/// suite green while the no-wrap argument behind constraint 8 loses its
+/// circuit-side half.
+#[test]
+fn an_input_value_of_two_to_the_62_cannot_prove() {
+    let keys = sender_keys();
+    // Built field by field, because `Note::new` caps the value at MAX_VALUE.
+    // The tree is then seeded with the commitment this out-of-range value
+    // produces, so pk derivation, membership and the nullifier all pass and
+    // only the range check can reject the leaf.
+    let mut over_range = InputNote {
+        ask: keys.ask,
+        nk: keys.nk,
+        value: MAX_VALUE + 1,
+        rho: digest("rho-in-over"),
+        r: digest("r-in-over"),
+        path: MerklePath::dummy(1),
+        is_dummy: false,
+    };
+    let second = Note::new(keys.pk(), 0, digest("rho-in-zero"), digest("r-in-zero")).unwrap();
+    let (tree, indices) = tree_with(&[over_range.commitment(), second.commitment()]);
+    over_range.path = tree.path(indices[0]).unwrap();
+
+    let witness = SpendWitness {
+        header: header_for(tree.root()),
+        depth: tree.depth(),
+        inputs: [
+            over_range,
+            InputNote::real(&keys, &second, tree.path(indices[1]).unwrap()).unwrap(),
+        ],
+        outputs: [
+            OutputNote {
+                pk: recipient_pk(),
+                value: MAX_VALUE,
+                rho: digest("rho-in-out-1"),
+                r: digest("r-in-out-1"),
+            },
+            OutputNote {
+                pk: keys.pk(),
+                value: 1,
+                rho: digest("rho-in-out-2"),
+                r: digest("r-in-out-2"),
+            },
+        ],
+        fee: 0,
+        ct_digest: digest("ciphertexts-input-range"),
+    };
+
+    assert_eq!(
+        witness.inputs.iter().map(|i| i.value as u128).sum::<u128>(),
+        witness
+            .outputs
+            .iter()
+            .map(|o| o.value as u128)
+            .sum::<u128>()
+            + witness.fee as u128,
+        "the fixture must balance over the integers, so only the input range check can reject it"
+    );
+    assert_rejected(&witness, "input value 2^62");
+}
+
+/// A failed proof is the routine outcome of a stale Merkle path or an index off
+/// by one, so a wallet will log it. Plonky2 names the two conflicting field
+/// elements in that error, which are note values and Merkle node limbs.
+#[test]
+fn a_failed_proof_does_not_leak_the_witness() {
+    let mut witness = two_real_inputs();
+    // Off by one on the fee: structurally valid, so it reaches plonky2 and
+    // fails there on the balance equation.
+    witness.fee += 1;
+
+    let error = QneroProver::new(qnero_leaf_circuit_config())
+        .unwrap()
+        .commit(&witness)
+        .expect("a structurally valid witness commits")
+        .prove()
+        .expect_err("an unbalanced leaf cannot prove");
+
+    let message = format!("{error:#}");
+    assert_eq!(message, "failed to prove the leaf");
+    assert!(
+        !message.chars().any(|c| c.is_ascii_digit()),
+        "the proving error carries witness field elements: {message}"
+    );
 }
 
 #[test]
@@ -531,6 +679,32 @@ fn a_path_of_the_wrong_depth_is_rejected() {
     let mut witness = two_real_inputs();
     witness.inputs[0].path = MerklePath::dummy(witness.depth + 1);
     assert!(fill_witness(&mut PartialWitness::<F>::new(), &witness, &circuit().0).is_err());
+}
+
+/// The ZK leaf config is not a production configuration: privacy is applied one
+/// layer up, at the private batch. The plumbing still has to stay alive, and
+/// `zk_config_is_gated_by_the_feature` passes vacuously when the feature is
+/// off, so this is the test that actually exercises plonky2's row blinding.
+/// Run with `cargo test -p qnero-prover --release --features zk`.
+#[cfg(feature = "zk")]
+#[test]
+fn a_zero_knowledge_leaf_proves_and_verifies() {
+    use qnero_circuit::config::qnero_leaf_zk_circuit_config;
+
+    let config = qnero_leaf_zk_circuit_config();
+    assert!(config.zero_knowledge);
+
+    let circuit = QneroSpendCircuit::new(config).expect("the zk config builds with the feature on");
+    let targets = circuit.targets();
+    let data = circuit.build();
+
+    let witness = two_real_inputs();
+    let mut pw = PartialWitness::<F>::new();
+    fill_witness(&mut pw, &witness, &targets).unwrap();
+    let proof = data.prove(pw).expect("a blinded leaf proves");
+
+    assert_eq!(proof.public_inputs, witness.public_inputs());
+    data.verify(proof).expect("a blinded leaf verifies");
 }
 
 /// Reports the leaf's size. Ignored by default because it is a measurement,

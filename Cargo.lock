@@ -654,7 +654,6 @@ dependencies = [
  "qnero-notes",
  "qp-plonky2",
  "qp-poseidon-core",
- "rand 0.9.5",
 ]
 
 [[package]]
@@ -708,7 +707,6 @@ dependencies = [
  "qnero-notes",
  "qnero-verifier",
  "qp-plonky2",
- "rand 0.9.5",
 ]
 
 [[package]]

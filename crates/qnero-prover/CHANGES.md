@@ -21,3 +21,11 @@ Upstream shape is `qp-wormhole-prover` (Quantus-Network/qp-zk-circuits, MIT).
   padding leaves.
 - `prove` on an uncommitted prover is an error with that wording. Upstream
   reaches plonky2 with an empty witness and fails there.
+- `commit` and `prove` drop the underlying plonky2 error. An unsatisfied copy
+  constraint is reported as `Partition containing Wire(..) was set twice with
+  different values: <a> != <b>`, and both values are witness material: a note's
+  plaintext amount, or the limbs of a Merkle node that place the note in the
+  tree. A witness desync is routine for a wallet, so a logged error would write
+  the spent note's amount and position next to the nullifier about to be
+  published. Structural errors from `SpendWitness::validate` (depths, path
+  lengths, arity) are still returned verbatim.

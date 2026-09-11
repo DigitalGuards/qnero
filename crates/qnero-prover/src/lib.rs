@@ -65,22 +65,39 @@ impl QneroProver {
     }
 
     /// Fill the witness. Consuming, so a prover cannot be committed twice.
+    ///
+    /// Structural problems (a path of the wrong depth, a position outside the
+    /// arity) are reported verbatim: those messages carry lengths and indices,
+    /// never note contents. Anything plonky2 reports from witness filling is
+    /// replaced, because it names the conflicting field elements.
     pub fn commit(mut self, witness: &SpendWitness) -> Result<Self> {
         let Some(targets) = self.targets.take() else {
             bail!("prover has already committed to a witness");
         };
-        fill_witness(&mut self.partial_witness, witness, &targets)?;
+        witness.validate()?;
+        fill_witness(&mut self.partial_witness, witness, &targets)
+            .map_err(|_| anyhow::anyhow!("failed to fill the leaf witness"))?;
         Ok(self)
     }
 
     /// Prove. Requires a prior [`QneroProver::commit`].
+    ///
+    /// The underlying error is deliberately dropped. Plonky2 reports an
+    /// unsatisfied copy constraint as `Partition containing Wire(..) was set
+    /// twice with different values: <a> != <b>`, and both values are witness
+    /// material: a note's plaintext amount, or the limbs of a Merkle node that
+    /// place the note in the tree. A witness desync is routine for a wallet (a
+    /// stale path after a reorg, an index off by one), so the normal reflex of
+    /// logging the error would write the spent note's amount and position next
+    /// to the nullifier that is about to be published. Everything else in this
+    /// crate redacts; this returns nothing to redact.
     pub fn prove(self) -> Result<ProofWithPublicInputs<F, C, D>> {
         if self.targets.is_some() {
             bail!("prover has not committed to a witness");
         }
         self.circuit_data
             .prove(self.partial_witness)
-            .map_err(|e| anyhow::anyhow!("failed to prove the leaf: {}", e))
+            .map_err(|_| anyhow::anyhow!("failed to prove the leaf"))
     }
 }
 

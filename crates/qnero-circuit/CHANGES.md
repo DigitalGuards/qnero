@@ -41,6 +41,21 @@ circuit; the note fragments replace the Wormhole transfer fragments.
   flag is a different mechanism; the batch padding sentinel is an M3 decision,
   recorded in `docs/CIRCUIT.md`.
 
+## Added
+
+- At least one input must be real (constraint 9): the product of the `is_dummy`
+  bits is zero. Upstream has a single input and no equivalent. Without it a leaf
+  with both inputs dummy proves with no spend key and no note in the tree, and
+  still publishes two nullifiers and two commitments the chain writes into
+  permanent state, at zero fee on a fee-free extrinsic.
+- `nf_1 != nf_2` (constraint 5), for the same reason: upstream's leaf has one
+  nullifier, so intra-leaf double spending is not a shape it can have.
+- `MerklePath::from_unsorted`, ported from upstream's
+  `ZkMerkleProofData::from_unsorted`: the chain hands out siblings in
+  child-index order with no position hint, and the circuit needs them sorted
+  with one. `CommitmentTree::index_ordered_siblings` reproduces the chain's
+  shape so the adapter is covered by a test.
+
 ## Kept
 
 - The 4-ary sorted-children Merkle gadget, including the position-hint select
