@@ -3,7 +3,7 @@
 use qp_poseidon_core::serialization::{bytes_to_digest, digest_to_bytes};
 use qp_poseidon_core::{hash_bytes, hash_to_felts, Goldilocks, POSEIDON2_OUTPUT};
 
-use crate::error::NotesError;
+use crate::error::NoteError;
 
 pub type Felt = Goldilocks;
 
@@ -15,16 +15,16 @@ pub struct Digest(pub [Felt; POSEIDON2_OUTPUT]);
 impl Digest {
     pub const LEN: usize = 32;
 
-    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, NotesError> {
+    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, NoteError> {
         bytes_to_digest(bytes)
             .map(Digest)
-            .map_err(|_| NotesError::NonCanonicalDigest)
+            .map_err(|_| NoteError::NonCanonicalDigest)
     }
 
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, NotesError> {
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, NoteError> {
         let arr: [u8; 32] = bytes
             .try_into()
-            .map_err(|_| NotesError::NonCanonicalDigest)?;
+            .map_err(|_| NoteError::NonCanonicalDigest)?;
         Self::from_bytes(&arr)
     }
 
@@ -103,6 +103,17 @@ pub mod domain {
     /// settles a padding slot's nullifiers at all is an open decision,
     /// `docs/CIRCUIT.md` section 8.6.
     pub const NF_BATCH_PADDING: Felt = Felt::new(0x716e_0008);
+    /// `rho` of a note created outside a spend proof: a shield at M4, a
+    /// coinbase at M6.
+    ///
+    /// Inside a spend the circuit derives `rho_out_j = H(RHO, nf_1, nf_2, j)`
+    /// from the nullifiers the leaf publishes, so a sender has no choice to
+    /// abuse. An entry has no spent nullifier to derive from, so it takes a
+    /// tag of its own over a unique on-chain identifier; [`super::entry_rho`]
+    /// is the rule. It must not reuse `NF_BATCH_PADDING`, which is the value
+    /// immediately below it: that would put a padding slot's emitted
+    /// nullifier and an entry note's `rho` in one image.
+    pub const RHO_ENTRY: Felt = Felt::new(0x716e_0009);
 }
 
 #[cfg(test)]
@@ -119,7 +130,7 @@ mod tests {
     /// commitment. So the list is checked as a list.
     #[test]
     fn domain_tags_are_pairwise_distinct() {
-        let tags: [(&str, Felt); 8] = [
+        let tags: [(&str, Felt); 9] = [
             ("AK", domain::AK),
             ("PK", domain::PK),
             ("NOTE", domain::NOTE),
@@ -128,6 +139,7 @@ mod tests {
             ("RHO", domain::RHO),
             ("NF_DUMMY", domain::NF_DUMMY),
             ("NF_BATCH_PADDING", domain::NF_BATCH_PADDING),
+            ("RHO_ENTRY", domain::RHO_ENTRY),
         ];
         for (i, (name_a, a)) in tags.iter().enumerate() {
             for (name_b, b) in tags.iter().skip(i + 1) {
@@ -142,7 +154,7 @@ mod tests {
     /// it displaced, so the range is pinned too.
     #[test]
     fn domain_tags_occupy_the_documented_range() {
-        let expected: [(&str, u64); 8] = [
+        let expected: [(&str, u64); 9] = [
             ("AK", 0x716e_0001),
             ("PK", 0x716e_0002),
             ("NOTE", 0x716e_0003),
@@ -151,6 +163,7 @@ mod tests {
             ("RHO", 0x716e_0006),
             ("NF_DUMMY", 0x716e_0007),
             ("NF_BATCH_PADDING", 0x716e_0008),
+            ("RHO_ENTRY", 0x716e_0009),
         ];
         let actual = [
             domain::AK,
@@ -161,6 +174,7 @@ mod tests {
             domain::RHO,
             domain::NF_DUMMY,
             domain::NF_BATCH_PADDING,
+            domain::RHO_ENTRY,
         ];
         for ((name, want), got) in expected.iter().zip(actual.iter()) {
             assert_eq!(

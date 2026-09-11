@@ -6011,6 +6011,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-shielded"
+version = "0.1.0"
+dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "hex",
+ "lazy_static",
+ "log",
+ "pallet-balances",
+ "pallet-zk-tree",
+ "parity-scale-codec",
+ "qnero-circuit",
+ "qnero-circuit-builder",
+ "qnero-note-core",
+ "qnero-prover",
+ "qnero-verifier",
+ "qp-dilithium-crypto",
+ "qp-header",
+ "qp-plonky2-verifier",
+ "qp-poseidon-core",
+ "qp-wormhole",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+]
+
+[[package]]
 name = "pallet-timestamp"
 version = "44.0.0"
 dependencies = [
@@ -7244,6 +7273,73 @@ dependencies = [
 ]
 
 [[package]]
+name = "qnero-aggregator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "qnero-circuit",
+ "qnero-note-core",
+ "qnero-verifier",
+ "qp-plonky2",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qnero-circuit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "qnero-note-core",
+ "qp-plonky2",
+ "qp-poseidon-core",
+ "rand_core 0.9.3",
+ "zeroize",
+]
+
+[[package]]
+name = "qnero-circuit-builder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "qnero-aggregator",
+ "qnero-circuit",
+ "qnero-verifier",
+ "qp-plonky2",
+ "rand 0.9.5",
+]
+
+[[package]]
+name = "qnero-note-core"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "qp-poseidon-core",
+ "rand_core 0.9.3",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "qnero-prover"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "qnero-aggregator",
+ "qnero-circuit",
+ "qp-plonky2",
+]
+
+[[package]]
+name = "qnero-verifier"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "qnero-circuit",
+ "qp-plonky2-verifier",
+]
+
+[[package]]
 name = "qp-dilithium-crypto"
 version = "0.7.0"
 dependencies = [
@@ -7653,6 +7749,7 @@ dependencies = [
  "pallet-referenda",
  "pallet-reversible-transfers",
  "pallet-scheduler",
+ "pallet-shielded",
  "pallet-timestamp",
  "pallet-transaction-payment",
  "pallet-transaction-payment-rpc-runtime-api",

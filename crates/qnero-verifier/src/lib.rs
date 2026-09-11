@@ -39,6 +39,14 @@ pub mod batch;
 #[cfg(feature = "leaf")]
 pub mod leaf;
 
+/// The rules a chain evaluates natively, re-exported so a runtime that links
+/// only this crate reaches them: `ct_digest`, which binds a leaf's output
+/// ciphertexts to its proof, and `commitment`, the outer half of a note
+/// commitment for a note created outside a spend proof. Both are defined once,
+/// in `qnero-circuit`'s layout-only surface, and a wallet calls the same
+/// functions.
+pub use qnero_circuit::chain;
+
 pub use batch::{
     parse_private_batch_public_input_felts, parse_private_batch_public_inputs,
     parse_public_batch_public_input_felts, parse_public_batch_public_inputs,

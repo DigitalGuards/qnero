@@ -1,11 +1,11 @@
 use thiserror::Error;
 
+/// The wallet tier's errors: everything [`qnero_note_core::NoteError`] can
+/// produce, plus what only address decoding and note encryption reach.
 #[derive(Debug, Error)]
 pub enum NotesError {
-    #[error("value {0} exceeds the {bits}-bit note value bound", bits = crate::note::VALUE_BITS)]
-    ValueTooLarge(u64),
-    #[error("digest limb is not a canonical Goldilocks element")]
-    NonCanonicalDigest,
+    #[error(transparent)]
+    Note(#[from] qnero_note_core::NoteError),
     #[error("invalid address: {0}")]
     InvalidAddress(String),
     #[error("crypto error: {0}")]

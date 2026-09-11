@@ -8,7 +8,7 @@ use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 
 use qnero_circuit::convert::digest_to_felts;
 use qnero_circuit::F;
-use qnero_notes::Digest;
+use qnero_note_core::Digest;
 
 use crate::artifacts::ensure_proof_shape_matches_targets;
 use crate::public_batch::circuit::PublicBatchTargets;

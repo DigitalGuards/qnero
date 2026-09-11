@@ -835,3 +835,55 @@ impl pallet_zk_tree::Config for Runtime {
 	type AssetId = AssetId;
 	type Balance = Balance;
 }
+
+parameter_types! {
+	/// How far back a shielded settlement may anchor: 256 blocks, about 51
+	/// minutes at a 12 second target.
+	///
+	/// Two bounds meet here. A proof names the header of one block and the
+	/// chain resolves that hash from `frame_system::BlockHash`, which keeps
+	/// `BlockHashCount` (4096) entries, so this is the tighter of the two on
+	/// purpose: a proof built against a much older block saw a smaller
+	/// commitment tree, and settling it would tell an observer roughly how old
+	/// the anonymity set the prover used was. It also has to be wide enough
+	/// that a wallet can finish proving: about 20 seconds single threaded at
+	/// `N = 6`, plus propagation.
+	pub const ShieldedBlockHashWindow: BlockNumber = 256;
+	/// Minimum fee per real leaf slot, in pool quanta: one quantum, 0.01 QTC.
+	///
+	/// The anti-spam mechanism, and the only one. The leaf circuit requires a
+	/// real input, which does not bound how many leaves a prover can produce:
+	/// one note of any value spent with a dummy in the other slot mints two
+	/// spendable notes and can be repeated every block, each repetition writing
+	/// two nullifier entries and two tree slots into permanent state. Settlement
+	/// extrinsics are unsigned and fee free, so the leaf's own fee is the only
+	/// cost there is.
+	pub const ShieldedMinLeafFee: u64 = 1;
+	/// Half of a settled fee is burned, half is minted to the block author. The
+	/// same split `pallet-wormhole` applies to its volume fee.
+	pub const ShieldedFeeBurnRate: Permill = Permill::from_percent(50);
+	/// Size cap on one note ciphertext: an ML-KEM-1024 encapsulation (1568
+	/// bytes) plus two AEAD payloads, with room for a memo.
+	pub const ShieldedMaxCiphertextBytes: u32 = 4096;
+}
+
+impl pallet_shielded::Config for Runtime {
+	type Currency = Balances;
+	/// The same tree instance the wormhole appends to. There is one
+	/// `zk_tree_root` in the header, and that root is what every shielded spend
+	/// proof anchors at, so a second instance would be a root no proof could
+	/// reach. The two leaf kinds cannot be confused: a wormhole leaf hashes an
+	/// 8-felt typed preimage and a shielded leaf is a note commitment, a
+	/// Poseidon2 output over a 6-felt preimage led by the `CM` domain tag, so
+	/// passing one off as the other is a preimage attack on Poseidon2.
+	type ZkTree = ZkTree;
+	/// The block author's fee share is minted to a QPoW-derived account with no
+	/// signing key, so it needs the wormhole leaf that is its only spend path.
+	type ProofRecorder = Wormhole;
+	type MintingAccount = MintingAccount;
+	type BlockHashWindow = ShieldedBlockHashWindow;
+	type MinLeafFee = ShieldedMinLeafFee;
+	type FeeBurnRate = ShieldedFeeBurnRate;
+	type MaxCiphertextBytes = ShieldedMaxCiphertextBytes;
+	type WeightInfo = pallet_shielded::weights::SubstrateWeight<Runtime>;
+}

@@ -17,7 +17,7 @@ use plonky2::hash::hash_types::HashOutTarget;
 use plonky2::hash::poseidon2::Poseidon2Hash;
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::plonk::circuit_builder::CircuitBuilder;
-use qnero_notes::digest::{domain, Felt as NoteFelt};
+use qnero_note_core::digest::{domain, Felt as NoteFelt};
 
 use crate::convert::felt_to_plonky2;
 use crate::{D, F};
@@ -105,7 +105,7 @@ pub fn note_commitment(
 /// `rho = H(RHO, nf_1, nf_2, index)`: the nullifier seed of output note
 /// `index`.
 ///
-/// The mirror of `qnero_notes::output_rho`. An output's `rho` is derived from
+/// The mirror of `qnero_note_core::output_rho`. An output's `rho` is derived from
 /// both nullifiers the leaf publishes, so a sender cannot hand two notes the
 /// same `rho` and strand one of them; see that function for the griefing
 /// vector this closes and for why both nullifiers are in the preimage.
@@ -136,9 +136,9 @@ pub fn note_nullifier(
 
 /// `nf = H(tag, nk, rho, r)` with the domain tag supplied as a wire.
 ///
-/// The mirror of `qnero_notes::nullifier` and `qnero_notes::dummy_nullifier`,
+/// The mirror of `qnero_note_core::nullifier` and `qnero_note_core::dummy_nullifier`,
 /// which differ only in that tag. `r` is in the preimage so that `nk` alone
-/// does not link a wallet's spends; see `qnero_notes::nullifier`.
+/// does not link a wallet's spends; see `qnero_note_core::nullifier`.
 pub fn note_nullifier_tagged(
     builder: &mut CircuitBuilder<F, D>,
     domain_tag: Target,
@@ -161,7 +161,7 @@ mod tests {
     use crate::config::qnero_leaf_circuit_config;
     use crate::convert::{digest_to_felts, digest_to_hashout};
     use crate::C;
-    use qnero_notes::{dummy_nullifier, nullifier, Digest};
+    use qnero_note_core::{dummy_nullifier, nullifier, Digest};
 
     /// Both nullifier tags, pinned against `qnero-notes`.
     ///

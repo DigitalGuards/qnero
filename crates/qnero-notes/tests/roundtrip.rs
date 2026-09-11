@@ -1,5 +1,7 @@
+use qnero_circuit::chain::ct_digest;
 use qnero_notes::{
-    ct_digest, encrypt_note, try_receive, Address, Note, NotesError, SpendingKey, MAX_VALUE,
+    encrypt_note, try_receive, Address, Note, NoteCiphertext, NoteError, NotesError, SpendingKey,
+    MAX_VALUE,
 };
 use qnero_pqcrypto::note_encryption::NotePlaintext;
 use rand::rngs::StdRng;
@@ -100,7 +102,7 @@ fn value_bound() {
     assert!(Note::new(pk, MAX_VALUE, d, d).is_ok());
     assert!(matches!(
         Note::new(pk, MAX_VALUE + 1, d, d),
-        Err(NotesError::ValueTooLarge(_))
+        Err(NoteError::ValueTooLarge(_))
     ));
 }
 
@@ -134,17 +136,25 @@ fn ct_digest_binds_the_ciphertexts_in_order() {
     let ct_a = encrypt_note(&a.ek, &note_a, b"a", &[1u8; 32]).unwrap();
     let ct_b = encrypt_note(&b.ek, &note_b, b"bb", &[2u8; 32]).unwrap();
 
-    let digest = ct_digest(&[ct_a.clone(), ct_b.clone()]);
-    assert_eq!(digest, ct_digest(&[ct_a.clone(), ct_b.clone()]));
-    assert_ne!(digest, ct_digest(&[ct_b.clone(), ct_a.clone()]));
-    assert_ne!(digest, ct_digest(std::slice::from_ref(&ct_a)));
-    assert_ne!(digest, ct_digest(&[]));
+    // The rule takes ciphertext bytes, in output order. This is the
+    // conversion a wallet does and the one `pallet-shielded` does.
+    fn digest_of(cts: &[&NoteCiphertext]) -> [u8; 32] {
+        let bytes: Vec<Vec<u8>> = cts.iter().map(|ct| ct.to_bytes()).collect();
+        let parts: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
+        ct_digest(&parts)
+    }
+
+    let digest = digest_of(&[&ct_a, &ct_b]);
+    assert_eq!(digest, digest_of(&[&ct_a, &ct_b]));
+    assert_ne!(digest, digest_of(&[&ct_b, &ct_a]));
+    assert_ne!(digest, digest_of(&[&ct_a]));
+    assert_ne!(digest, digest_of(&[]));
 
     // A memo one byte longer is a different ciphertext and a different digest,
     // which is what stops a relayer from swapping the payloads attached to a
     // settled leaf.
     let ct_a_longer = encrypt_note(&a.ek, &note_a, b"aa", &[1u8; 32]).unwrap();
-    assert_ne!(digest, ct_digest(&[ct_a_longer, ct_b]));
+    assert_ne!(digest, digest_of(&[&ct_a_longer, &ct_b]));
 }
 
 /// A note and a decrypted note are the two most linkable objects a wallet

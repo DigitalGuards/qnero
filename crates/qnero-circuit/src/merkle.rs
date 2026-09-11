@@ -23,7 +23,7 @@ use plonky2::hash::hash_types::HashOutTarget;
 use plonky2::hash::poseidon2::Poseidon2Hash;
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::plonk::circuit_builder::CircuitBuilder;
-use qnero_notes::{Digest, Felt};
+use qnero_note_core::{Digest, Felt};
 
 use crate::gadgets::const_less_than_bits;
 use crate::{D, F};

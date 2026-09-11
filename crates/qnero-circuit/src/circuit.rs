@@ -31,7 +31,7 @@ use plonky2::plonk::circuit_builder::CircuitBuilder;
 use plonky2::plonk::circuit_data::{
     CircuitConfig, CircuitData, ProverCircuitData, VerifierCircuitData,
 };
-use qnero_notes::VALUE_BITS;
+use qnero_note_core::VALUE_BITS;
 
 use crate::config::{ensure_zk_supported, qnero_leaf_circuit_config, validate_circuit_config};
 use crate::gadgets::{const_less_than_bits, digests_are_equal};

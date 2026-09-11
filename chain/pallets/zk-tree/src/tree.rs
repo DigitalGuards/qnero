@@ -185,11 +185,12 @@ pub fn empty_hash() -> Hash256 {
 }
 
 /// Get the hash of a leaf by index, or empty hash if not present.
-fn get_leaf_hash<T: Config>(index: u64) -> Hash256 {
-	match crate::Leaves::<T>::get(index) {
-		Some(leaf) => hash_leaf::<T>(&leaf),
-		None => empty_hash(),
-	}
+///
+/// An identity read: `Leaves` stores the hash. A shielded leaf's hash is the
+/// note commitment itself and has no preimage to recompute; a wormhole
+/// transfer leaf was hashed by [`hash_leaf`] at insert time.
+pub fn get_leaf_hash<T: Config>(index: u64) -> Hash256 {
+	crate::Leaves::<T>::get(index).unwrap_or_else(empty_hash)
 }
 
 /// Get the hash of a node at (level, index), or empty hash if not present.
@@ -331,12 +332,8 @@ pub fn generate_proof<T: Config>(leaf_index: u64, depth: u8) -> Result<ZkMerkleP
 ///
 /// No path indices needed - we combine current hash with siblings, sort all 4,
 /// and hash. This works because `hash_node` sorts children before hashing.
-pub fn verify_proof<T: Config>(
-	leaf: &ZkLeaf<AccountIdOf<T>, T::AssetId, T::Balance>,
-	proof: &ZkMerkleProof,
-	expected_root: Hash256,
-) -> bool {
-	let mut current_hash = hash_leaf::<T>(leaf);
+pub fn verify_proof(leaf_hash: Hash256, proof: &ZkMerkleProof, expected_root: Hash256) -> bool {
+	let mut current_hash = leaf_hash;
 
 	for level_siblings in &proof.siblings {
 		// Combine current hash with 3 siblings to get all 4 children

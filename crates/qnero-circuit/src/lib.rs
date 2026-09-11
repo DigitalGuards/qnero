@@ -9,16 +9,20 @@
 //!
 //! Layout and the tree leaf rule are documented in `docs/CIRCUIT.md`; the
 //! public-input indices live in [`layout`], the batch layouts M3 wraps them in
-//! in [`batch_layout`], the padding sentinel in [`padding`] and the
-//! proof-system parameters a verifier must insist on in [`params`]. All four
-//! compile on their own, so a verifier reads them without the prover stack.
+//! in [`batch_layout`], the padding sentinel in [`padding`], the rules the
+//! chain evaluates natively in [`chain`] and the proof-system parameters a
+//! verifier must insist on in [`params`]. All five compile on their own, so a
+//! verifier and a runtime read them without the prover stack.
 //!
 //! Forked from Quantus-Network/qp-zk-circuits (MIT); see NOTICE and CHANGES.md.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(not(feature = "circuit"), no_std)]
 
+extern crate alloc;
+
 pub mod batch_layout;
+pub mod chain;
 pub mod layout;
 pub mod padding;
 pub mod params;

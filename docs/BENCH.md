@@ -127,9 +127,10 @@ Reading these:
 - **`N = 7` sits just past a degree boundary.** Blinding adds about 9000 rows
   at this size, so a batch fits in `degree_bits = 15` only below about 23700
   gates, and seven recursive verifiers are 24324. Six leaves fit; seven do not,
-  and pay 2x in proving time and about 2x in memory for it. Whether to ship
-  `N = 6` is an M4 decision, and it is a real one: it would halve the wallet's
-  proving time and memory at the cost of one slot per batch.
+  and pay 2x in proving time and about 2x in memory for it. **M4 shipped
+  `N = 6`**: the halved wallet proving time and memory is the difference
+  between a phone that can prove and one that cannot, and the slot it costs is
+  amortized across a batch where the memory is paid by every user.
 - **Phone-class memory.** About 2 GiB peak. Upstream's own guidance is that
   `degree_bits = 16` limits proving to 6 GB+ devices, which matches.
 
@@ -138,3 +139,30 @@ The tests exercise it at 2 inner proofs over 2-leaf batches, which says nothing
 useful about its cost at production size. Upstream's 53-batch number is about
 21 s of proving on 20 threads, and the Qnero public batch is the same shape
 with a wider forwarded region.
+
+## M4: the artifact set a runtime embeds (2026-09-12)
+
+`chain/pallets/shielded`'s build script generates the whole set on every clean
+build of the pallet, so this is a build cost every contributor pays once and CI
+pays per cache miss. Measured at the chain defaults with
+`RAYON_NUM_THREADS=4 nice -n 19`, plonky2's `parallel` feature off, wrapping the
+builder in `/usr/bin/time -v`:
+
+| | `N = 6`, `n = 53` |
+|---|---:|
+| wall clock, generation only | 52.6 s |
+| wall clock, including the builder's own compile | 71.7 s |
+| peak RSS | 5.4 GiB |
+| `leaf_verifier.bin` | 1609 bytes |
+| `padding_leaf_proof.bin` | 105500 bytes |
+| `private_batch_verifier.bin` | 1749 bytes |
+| `public_batch_verifier.bin` | 1905 bytes |
+
+`padding_private_batch_proof.bin` is not generated for a runtime: it is an input
+a public-batch *prover* needs, and proving it costs a full recursive run.
+
+This is the first time the public batch has been built at `n = 53`. It is still
+not *timed* at that size: the builder writes a verifier, which needs the circuit
+built but no proof produced. The pallet's weight for a public-batch verify is a
+ceiling chosen to be wrong in the safe direction, and `chain/pallets/shielded/src/weights.rs`
+says so at the constant.

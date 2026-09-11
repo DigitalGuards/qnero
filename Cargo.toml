@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/qnero-pqcrypto",
+    "crates/qnero-note-core",
     "crates/qnero-notes",
     "crates/qnero-circuit",
     "crates/qnero-prover",
@@ -9,6 +10,10 @@ members = [
     "crates/qnero-aggregator",
     "crates/qnero-circuit-builder",
 ]
+# The chain fork is its own workspace with its own toolchain and lock file, and
+# it lives inside this directory only because it is a git subtree. Excluding it
+# is what stops Cargo from claiming its members as ours.
+exclude = ["chain"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,13 +23,16 @@ repository = "https://github.com/DigitalGuards/qnero"
 
 [workspace.dependencies]
 qnero-pqcrypto = { path = "crates/qnero-pqcrypto" }
+qnero-note-core = { path = "crates/qnero-note-core" }
 qnero-notes = { path = "crates/qnero-notes" }
 qnero-circuit = { path = "crates/qnero-circuit" }
 qnero-prover = { path = "crates/qnero-prover" }
 qnero-verifier = { path = "crates/qnero-verifier" }
 qnero-aggregator = { path = "crates/qnero-aggregator" }
 qnero-circuit-builder = { path = "crates/qnero-circuit-builder" }
-qp-poseidon-core = { version = "3.1.0", default-features = false, features = ["std"] }
+# no_std, and its `std` feature is empty, so nothing here asks for it: the
+# runtime links this crate through `qnero-circuit` on wasm.
+qp-poseidon-core = { version = "3.1.0", default-features = false }
 qp-plonky2 = { version = "=1.5.5", default-features = false, features = ["std"] }
 qp-plonky2-verifier = { version = "=1.5.5", default-features = false }
 anyhow = { version = "1.0", default-features = false }

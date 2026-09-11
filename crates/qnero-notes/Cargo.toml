@@ -6,6 +6,7 @@ license.workspace = true
 description = "Qnero shielded note primitives: keys, addresses, Poseidon commitments, nullifiers, ML-KEM note encryption"
 
 [dependencies]
+qnero-note-core = { workspace = true }
 qnero-pqcrypto = { workspace = true }
 qp-poseidon-core = { workspace = true }
 bech32 = { workspace = true }
@@ -16,6 +17,10 @@ thiserror = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
+# A dev-dependency cycle, which Cargo allows. `ct_digest` is defined once, in
+# the crate a runtime can link without the prover stack, and the round-trip
+# test that covers it needs real `NoteCiphertext` values, which live here.
+qnero-circuit = { path = "../qnero-circuit", default-features = false }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

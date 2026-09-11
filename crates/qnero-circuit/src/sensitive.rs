@@ -22,7 +22,7 @@
 //! rate-aligned buffer `hash_no_pad` allocates for a sponge input, are not
 //! reachable from here and would need upstream support to scrub.
 
-use qnero_notes::{Digest, NotesError};
+use qnero_note_core::{Digest, NoteError};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// A spend-credential digest, zeroized when it drops.
@@ -57,7 +57,7 @@ impl Secret {
     ///
     /// The source is scrubbed on the error path too: a non-canonical digest is
     /// useless to the caller, and leaving it readable would defeat the point.
-    pub fn new(bytes: &mut [u8; Digest::LEN]) -> Result<Self, NotesError> {
+    pub fn new(bytes: &mut [u8; Digest::LEN]) -> Result<Self, NoteError> {
         let validated = Digest::from_bytes(bytes).map(|_| Self(*bytes));
         bytes.zeroize();
         validated

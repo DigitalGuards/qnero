@@ -5,51 +5,14 @@ use qnero_pqcrypto::traits::KemKeyPair;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+pub use qnero_note_core::keys::{derive_ak, derive_pk, DerivedKeys};
+use qnero_note_core::Digest;
+
 use crate::address::Address;
-use crate::digest::{domain, Digest};
 
 const DS_ASK: &[u8] = b"qnero/ask";
 const DS_NK: &[u8] = b"qnero/nk";
 const DS_KEM: &[u8] = b"qnero/kem";
-
-/// `ak = H(AK, ask)`. Split out from [`SpendingKey`] because the spend
-/// circuit derives `pk` from `(ask, nk)` in circuit and its off-circuit mirror
-/// must use this exact rule.
-pub fn derive_ak(ask: &Digest) -> Digest {
-    Digest::hash_felts(domain::AK, &[ask.felts()])
-}
-
-/// `pk = H(PK, H(AK, ask), nk)`.
-pub fn derive_pk(ask: &Digest, nk: &Digest) -> Digest {
-    let ak = derive_ak(ask);
-    Digest::hash_felts(domain::PK, &[ak.felts(), nk.felts()])
-}
-
-/// The spend credential: the authorizing key and the nullifier key.
-///
-/// Redacting `Debug`: together these two spend every note that pays their
-/// `pk`.
-#[derive(Clone, Copy)]
-pub struct DerivedKeys {
-    pub ask: Digest,
-    pub nk: Digest,
-}
-
-impl core::fmt::Debug for DerivedKeys {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("DerivedKeys")
-            .field("ask", &"[REDACTED]")
-            .field("nk", &"[REDACTED]")
-            .finish()
-    }
-}
-
-impl DerivedKeys {
-    /// The note receiving key these keys own.
-    pub fn pk(&self) -> Digest {
-        derive_pk(&self.ask, &self.nk)
-    }
-}
 
 /// The 32-byte seed. Everything else derives from it.
 #[derive(Zeroize, ZeroizeOnDrop)]

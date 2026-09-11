@@ -66,7 +66,7 @@ use qnero_circuit::layout::{
 };
 use qnero_circuit::padding::{padding_block_hash_target, PADDING_BLOCK_NUMBER};
 use qnero_circuit::{C, D, F};
-use qnero_notes::digest::domain;
+use qnero_note_core::digest::domain;
 
 use crate::config::validate_proof_count;
 use crate::recursive::add_recursive_verifiers;

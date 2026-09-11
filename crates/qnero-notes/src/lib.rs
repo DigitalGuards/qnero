@@ -29,22 +29,22 @@
 #![forbid(unsafe_code)]
 
 pub mod address;
-pub mod digest;
 pub mod encrypt;
 pub mod error;
 pub mod keys;
-pub mod note;
+
+/// The primitives that carry no lattice dependency, re-exported so a wallet
+/// keeps one import. `qnero-circuit`, `qnero-aggregator` and
+/// `pallet-shielded` take that crate directly: none of them encrypts
+/// anything, and an unused edge to `ml-kem` is one a Cargo lock file still
+/// resolves.
+pub use qnero_note_core::{digest, error as note_error, note, NoteError};
 
 pub use address::{Address, ADDRESS_HRP, ADDRESS_VERSION};
-pub use digest::{Digest, Felt};
-pub use encrypt::{
-    ct_digest, decrypt_note, encrypt_note, try_receive, NoteCiphertext, ReceivedNote,
-};
+pub use encrypt::{decrypt_note, encrypt_note, try_receive, NoteCiphertext, ReceivedNote};
 pub use error::NotesError;
-pub use keys::{
-    derive_ak, derive_pk, DerivedKeys, FullViewingKey, IncomingViewingKey, SpendingKey,
-};
-pub use note::{
-    commitment_from_inner, dummy_nullifier, note_inner, nullifier, output_rho, Note, MAX_VALUE,
-    VALUE_BITS,
+pub use keys::{FullViewingKey, IncomingViewingKey, SpendingKey};
+pub use qnero_note_core::{
+    commitment_from_inner, derive_ak, derive_pk, dummy_nullifier, entry_rho, note_inner, nullifier,
+    output_rho, DerivedKeys, Digest, Felt, Note, MAX_VALUE, VALUE_BITS,
 };

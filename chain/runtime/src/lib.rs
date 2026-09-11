@@ -314,4 +314,13 @@ mod runtime {
 	// non-Root tech-referenda tracks, e.g. `FastUpgrade`.
 	#[runtime::pallet_index(23)]
 	pub type Origins = pallet_custom_origins;
+
+	// The Qnero shielded pool. It appends to the same `ZkTree` instance the
+	// wormhole uses, because the leaf circuit anchors at `zk_tree_root` and the
+	// header carries exactly one of those. Leaves are appended during extrinsic
+	// execution, so this pallet has no `on_finalize` and its position relative
+	// to `ZkTree` in the fold order does not matter; `ZkTree` still has to stay
+	// declared after every pallet that inserts from a hook.
+	#[runtime::pallet_index(24)]
+	pub type Shielded = pallet_shielded;
 }

@@ -11,7 +11,7 @@ description = "Qnero batch aggregation (M3): the zero-knowledge private batch ov
 # unless its randomness is compiled in, so a build without it would be a
 # privacy failure that only surfaces when a wallet tries to prove.
 qnero-circuit = { workspace = true, features = ["zk"] }
-qnero-notes = { workspace = true }
+qnero-note-core = { workspace = true }
 # The leaf entry points are behind a non-default feature so a runtime cannot
 # reach them; the aggregator is the one caller that legitimately needs them.
 qnero-verifier = { workspace = true, features = ["leaf"] }
@@ -23,6 +23,10 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 qnero-circuit = { workspace = true, features = ["zk", "test-support"] }
+# The wallet tier, for fixtures that build a spending key. It is a
+# dev-dependency so the aggregator's own dependency graph, which a chain
+# resolves, carries no lattice cryptography.
+qnero-notes = { workspace = true }
 qnero-verifier = { workspace = true, features = ["leaf"] }
 # A dev-dependency cycle, which Cargo allows: the builder is what turns these
 # circuits into the artifact set, and the artifact round-trip test belongs

@@ -1,0 +1,80 @@
+[package]
+authors.workspace = true
+description = "Qnero shielded pool: settles private and public batch proofs into the commitment tree and the nullifier set"
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+name = "pallet-shielded"
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+codec = { workspace = true, default-features = false, features = ["derive"] }
+frame-benchmarking = { workspace = true, optional = true }
+frame-support.workspace = true
+frame-system.workspace = true
+lazy_static.workspace = true
+log.workspace = true
+pallet-balances.workspace = true
+pallet-zk-tree.workspace = true
+# Layout constants and the two rules the chain evaluates natively: `ct_digest`
+# and the entry-note commitment. The circuit feature stays off, so this brings
+# in neither plonky2 nor the note primitives.
+qnero-circuit = { workspace = true, default-features = false }
+qnero-verifier = { workspace = true, default-features = false }
+qp-plonky2-verifier = { workspace = true, default-features = false }
+qp-wormhole.workspace = true
+scale-info = { workspace = true, default-features = false, features = ["derive"] }
+sp-core.workspace = true
+sp-io.workspace = true
+sp-runtime.workspace = true
+
+[build-dependencies]
+qnero-circuit-builder.workspace = true
+
+[dev-dependencies]
+hex = { workspace = true, features = ["alloc"] }
+qp-dilithium-crypto = { workspace = true, features = ["std"] }
+# The tests build real batch proofs, so the test build carries the prover
+# stack. `parallel` is deliberately off: a test run must not saturate the
+# machine it is on, and the proofs are identical either way.
+qnero-circuit = { workspace = true, features = ["circuit"] }
+qnero-note-core.workspace = true
+qnero-prover.workspace = true
+qp-header = { workspace = true, features = ["serde"] }
+qp-poseidon-core.workspace = true
+sp-io.workspace = true
+
+[features]
+default = ["std"]
+runtime-benchmarks = [
+	"dep:frame-benchmarking",
+	"frame-benchmarking/runtime-benchmarks",
+	"frame-support/runtime-benchmarks",
+	"frame-system/runtime-benchmarks",
+	"pallet-balances/runtime-benchmarks",
+]
+std = [
+	"codec/std",
+	"frame-benchmarking?/std",
+	"frame-support/std",
+	"frame-system/std",
+	"lazy_static/spin_no_std",
+	"log/std",
+	"pallet-balances/std",
+	"pallet-zk-tree/std",
+	"qnero-verifier/std",
+	"qp-plonky2-verifier/std",
+	"qp-wormhole/std",
+	"scale-info/std",
+	"sp-core/std",
+	"sp-io/std",
+	"sp-runtime/std",
+]
+try-runtime = [
+	"frame-support/try-runtime",
+	"frame-system/try-runtime",
+	"pallet-balances/try-runtime",
+	"pallet-zk-tree/try-runtime",
+	"sp-runtime/try-runtime",
+]

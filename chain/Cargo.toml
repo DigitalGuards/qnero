@@ -43,6 +43,7 @@ members = [
 	"pallets/referenda",
 	"pallets/reversible-transfers",
 	"pallets/scheduler",
+	"pallets/shielded",
 	"pallets/timestamp",
 	"pallets/transaction-payment",
 	"pallets/transaction-payment-rpc",
@@ -257,6 +258,7 @@ pallet-multisig = { path = "./pallets/multisig", default-features = false }
 pallet-qpow = { path = "./pallets/qpow", default-features = false }
 pallet-reversible-transfers = { path = "./pallets/reversible-transfers", default-features = false }
 pallet-scheduler = { path = "./pallets/scheduler", default-features = false }
+pallet-shielded = { path = "./pallets/shielded", default-features = false }
 pallet-wormhole = { path = "./pallets/wormhole", default-features = false }
 pallet-zk-tree = { path = "./pallets/zk-tree", default-features = false }
 qp-dilithium-crypto = { path = "./primitives/dilithium-crypto", version = "0.7.0", default-features = false }
@@ -283,6 +285,18 @@ qp-wormhole-inputs = { version = "=4.3.0", default-features = false }
 qp-wormhole-prover = { version = "=4.3.0", default-features = false }
 qp-wormhole-verifier = { version = "=4.3.0", default-features = false }
 qp-zk-circuits-common = { version = "=4.3.0", default-features = false }
+
+# Qnero shielded-pool crates, by path into the parent workspace. They are
+# members of `../Cargo.toml`, which excludes this directory, so each resolves
+# its own `workspace = true` dependencies there. The qp-* pins agree with the
+# ones above: both workspaces take qp-plonky2 and qp-plonky2-verifier 1.5.5 and
+# qp-poseidon-core 3.1.0.
+qnero-circuit = { path = "../crates/qnero-circuit", default-features = false }
+qnero-verifier = { path = "../crates/qnero-verifier", default-features = false }
+qnero-circuit-builder = { path = "../crates/qnero-circuit-builder" }
+qnero-aggregator = { path = "../crates/qnero-aggregator" }
+qnero-note-core = { path = "../crates/qnero-note-core" }
+qnero-prover = { path = "../crates/qnero-prover" }
 
 # polkadot-sdk dependencies
 frame = { version = "0.14.0", package = "polkadot-sdk-frame", default-features = false }

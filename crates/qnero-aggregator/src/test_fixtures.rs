@@ -14,7 +14,7 @@ use qnero_circuit::header::{HeaderInputs, DIGEST_LOGS_SIZE};
 use qnero_circuit::merkle::CommitmentTree;
 use qnero_circuit::witness::{fill_witness, InputNote, OutputNote, SpendWitness};
 use qnero_circuit::{C, D, F};
-use qnero_notes::{Digest, Note, SpendingKey};
+use qnero_note_core::{DerivedKeys, Digest, Note};
 
 use crate::Proof;
 
@@ -39,7 +39,10 @@ fn digest(label: &str, tag: &str) -> Digest {
 /// A real transfer: one note spent in a block named by `tag`, one fresh dummy
 /// input, two outputs and a fee.
 pub fn leaf_witness(tag: &str) -> SpendWitness {
-    let keys = SpendingKey::from_bytes([7u8; 32]).derived();
+    let keys = DerivedKeys {
+        ask: Digest::hash_bytes(&[b"qnero-aggregator-fixture/ask"]),
+        nk: Digest::hash_bytes(&[b"qnero-aggregator-fixture/nk"]),
+    };
     let note = Note::new(keys.pk(), 100, digest("rho", tag), digest("r", tag))
         .expect("the note value is in range");
     let leaves = [digest("decoy", tag), note.commitment()];

@@ -45,44 +45,13 @@ pub fn encrypt_note(
     )?)
 }
 
-/// Domain prefix of the ciphertext digest. Byte-mode hashing uses an ASCII
-/// prefix where field-mode hashing uses a one-felt tag; `ct_digest` is never
-/// recomputed inside a circuit, so it stays on the byte-mode sponge.
-const CT_DIGEST_PREFIX: &[u8] = b"qnero/ct";
-
-/// `ct_digest`: the leaf public input that binds a spend proof to the
-/// ciphertexts submitted with it.
+/// `ct_digest`, the leaf public input that binds a spend proof to the
+/// ciphertexts submitted with it, is **not** here. It is
+/// `qnero_circuit::chain::ct_digest`, which takes ciphertext bytes and
+/// compiles without the circuit feature, so `pallet-shielded` and a wallet
+/// call one function, where two copies of one rule could drift. Feed it
+/// [`NoteCiphertext::to_bytes`] in output order.
 ///
-/// ```text
-/// ct_digest = H_bytes("qnero/ct" || u32_le(count)
-///                     || u32_le(len_1) || ct_1 || ... || u32_le(len_n) || ct_n)
-/// ```
-///
-/// The circuit treats `ct_digest` as a free public input: hashing kilobytes of
-/// ML-KEM and AEAD ciphertext in circuit would dominate the proof, so the
-/// chain recomputes this digest from the bytes it was handed and compares.
-/// That comparison binds the ciphertexts only while the rule is unambiguous,
-/// which is what the count and the per-ciphertext length prefixes are for. A
-/// bare concatenation would let two different output pairs share a preimage,
-/// and a relayer could then swap the ciphertexts attached to a settled leaf
-/// for a colliding pair, leaving the recipient unable to decrypt a note whose
-/// commitment is already in the tree.
-///
-/// Both sides call this function. A wallet computes it over the ciphertexts it
-/// is about to submit, in output order; the chain recomputes it over the
-/// ciphertexts in the extrinsic, in the same order.
-pub fn ct_digest(ciphertexts: &[NoteCiphertext]) -> Digest {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(CT_DIGEST_PREFIX);
-    buf.extend_from_slice(&(ciphertexts.len() as u32).to_le_bytes());
-    for ct in ciphertexts {
-        let bytes = ct.to_bytes();
-        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&bytes);
-    }
-    Digest::hash_bytes(&[&buf])
-}
-
 /// A note this viewing key can read, with its memo and commitment.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReceivedNote {

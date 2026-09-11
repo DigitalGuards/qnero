@@ -2,7 +2,7 @@
 
 use crate::{self as pallet_zk_tree, tree, *};
 use frame_support::{
-	construct_runtime, parameter_types,
+	assert_noop, construct_runtime, parameter_types,
 	traits::{ConstU32, Everything, Hooks},
 };
 use sp_core::{crypto::AccountId32, H256};
@@ -217,12 +217,12 @@ fn insert_first_leaf_works() {
 		assert_ne!(ZkTree::root(), [0u8; 32]);
 		assert_eq!(ZkTree::depth(), 1);
 
-		// Check leaf was stored
+		// Check the leaf hash was stored. The tree holds hashes, so the typed
+		// leaf is reconstructed here and hashed to compare.
 		let leaf = ZkTree::leaf(0).unwrap();
-		assert_eq!(leaf.to, to);
-		assert_eq!(leaf.transfer_count, 0);
-		assert_eq!(leaf.asset_id, 0);
-		assert_eq!(leaf.amount, 100);
+		let expected =
+			ZkLeaf { to: to.clone(), transfer_count: 0u64, asset_id: 0u32, amount: 100u128 };
+		assert_eq!(leaf, tree::hash_leaf::<Test>(&expected));
 	});
 }
 
@@ -303,7 +303,7 @@ fn merkle_proof_works() {
 
 		// Verify the proof
 		let leaf = ZkTree::leaf(0).unwrap();
-		assert!(ZkTree::verify_proof(&leaf, &proof));
+		assert!(ZkTree::verify_proof(leaf, &proof));
 	});
 }
 
@@ -321,7 +321,7 @@ fn merkle_proof_all_leaves() {
 		for i in 0..10 {
 			let proof = ZkTree::get_merkle_proof(i).unwrap();
 			let leaf = ZkTree::leaf(i).unwrap();
-			assert!(ZkTree::verify_proof(&leaf, &proof), "Proof failed for leaf {}", i);
+			assert!(ZkTree::verify_proof(leaf, &proof), "Proof failed for leaf {}", i);
 		}
 	});
 }
@@ -342,7 +342,7 @@ fn invalid_proof_fails() {
 		// Try to verify with wrong leaf data
 		let wrong_leaf =
 			ZkLeaf { to: make_account(99), transfer_count: 0, asset_id: 0u32, amount: 100u128 };
-		assert!(!ZkTree::verify_proof(&wrong_leaf, &proof));
+		assert!(!ZkTree::verify_proof(tree::hash_leaf::<Test>(&wrong_leaf), &proof));
 	});
 }
 
@@ -471,7 +471,7 @@ fn integration_many_transfers_updates_root() {
 		for idx in 0..3 {
 			let proof = ZkTree::get_merkle_proof(idx).expect("proof should exist");
 			let leaf = ZkTree::leaf(idx).expect("leaf should exist");
-			assert!(ZkTree::verify_proof(&leaf, &proof), "proof {} should verify", idx);
+			assert!(ZkTree::verify_proof(leaf, &proof), "proof {} should verify", idx);
 		}
 
 		// Second block: 5 more transfers - the batch spans the depth-1 capacity
@@ -493,7 +493,7 @@ fn integration_many_transfers_updates_root() {
 		for idx in 0..8 {
 			let proof = ZkTree::get_merkle_proof(idx).expect("proof should exist");
 			let leaf = ZkTree::leaf(idx).expect("leaf should exist");
-			assert!(ZkTree::verify_proof(&leaf, &proof), "proof {} should verify", idx);
+			assert!(ZkTree::verify_proof(leaf, &proof), "proof {} should verify", idx);
 		}
 
 		// Third block: 10 more transfers (total 18, tree needs depth 3 for capacity 64)
@@ -512,25 +512,30 @@ fn integration_many_transfers_updates_root() {
 		for idx in 0..18 {
 			let proof = ZkTree::get_merkle_proof(idx).expect("proof should exist");
 			let leaf = ZkTree::leaf(idx).expect("leaf should exist");
-			assert!(
-				ZkTree::verify_proof(&leaf, &proof),
-				"proof {} should verify after growth",
-				idx
-			);
+			assert!(ZkTree::verify_proof(leaf, &proof), "proof {} should verify after growth", idx);
 		}
 
 		// === Verify specific leaf data ===
-		let leaf_0 = ZkTree::leaf(0).expect("leaf 0 should exist");
-		assert_eq!(leaf_0.to, alice);
-		assert_eq!(leaf_0.transfer_count, 0);
-		assert_eq!(leaf_0.asset_id, 0);
-		assert_eq!(leaf_0.amount, 1000);
+		assert_eq!(
+			ZkTree::leaf(0).expect("leaf 0 should exist"),
+			tree::hash_leaf::<Test>(&ZkLeaf {
+				to: alice.clone(),
+				transfer_count: 0u64,
+				asset_id: 0u32,
+				amount: 1000u128
+			})
+		);
 
-		let leaf_6 = ZkTree::leaf(6).expect("leaf 6 should exist");
-		assert_eq!(leaf_6.to, alice);
-		assert_eq!(leaf_6.transfer_count, 2);
-		assert_eq!(leaf_6.asset_id, 1); // Different asset
-		assert_eq!(leaf_6.amount, 100);
+		assert_eq!(
+			ZkTree::leaf(6).expect("leaf 6 should exist"),
+			tree::hash_leaf::<Test>(&ZkLeaf {
+				to: alice.clone(),
+				transfer_count: 2u64,
+				// Different asset
+				asset_id: 1u32,
+				amount: 100u128
+			})
+		);
 
 		// === Finally verify root is set in frame_system on finalize ===
 		ZkTree::on_finalize(1);
@@ -609,7 +614,7 @@ fn integration_proof_siblings_at_correct_depth() {
 
 			// Verify the proof works
 			let leaf = ZkTree::leaf(i).unwrap();
-			assert!(ZkTree::verify_proof(&leaf, &proof), "proof for leaf {} should verify", i);
+			assert!(ZkTree::verify_proof(leaf, &proof), "proof for leaf {} should verify", i);
 		}
 	});
 }
@@ -728,7 +733,7 @@ fn root_is_independent_of_block_grouping() {
 				let proof = ZkTree::get_merkle_proof(i).expect("proof should exist");
 				let leaf = ZkTree::leaf(i).expect("leaf should exist");
 				assert!(
-					ZkTree::verify_proof(&leaf, &proof),
+					ZkTree::verify_proof(leaf, &proof),
 					"proof {i} should verify (split={split})"
 				);
 			}
@@ -774,4 +779,103 @@ fn growth_boundary_settlements_are_consistent() {
 
 	assert_eq!(at_boundary, reference);
 	assert_eq!(spanning, reference);
+}
+
+// ============================================================================
+// Raw commitment leaves (the shielded pool's door into the tree)
+// ============================================================================
+
+/// `insert_commitment` with its error widened to `DispatchError`, which is what
+/// `assert_noop!` and `assert_eq!` compare against.
+fn insert(commitment: Hash256) -> Result<u64, sp_runtime::DispatchError> {
+	ZkTree::insert_commitment(commitment).map_err(Into::into)
+}
+
+#[test]
+fn insert_commitment_stores_the_commitment_as_the_leaf_hash() {
+	new_test_ext().execute_with(|| {
+		let cm = qp_poseidon_core::hash_bytes(b"a note commitment");
+		let index = ZkTree::insert_commitment(cm).expect("a canonical nonzero commitment");
+		assert_eq!(index, 0);
+		// leaf_hash = cm: nothing is recomputed, which is what lets the spend
+		// circuit feed its computed `cm` straight into level 0 of a path.
+		assert_eq!(ZkTree::leaf(0), Some(cm));
+		settle();
+		let proof = ZkTree::get_merkle_proof(0).expect("settled leaf is provable");
+		assert!(ZkTree::verify_proof(cm, &proof));
+	});
+}
+
+/// The all-zero digest is `empty_hash()`, the absence sentinel for a missing
+/// leaf and for an empty subtree at every level. Once the leaf rule is
+/// `leaf_hash = cm` there is no domain separation left to tell a zero leaf
+/// from an unset slot, so the append is refused. Nothing can produce a zero
+/// commitment today, since every `cm` is a Poseidon2 output; this guards the
+/// later entry point that takes one from a caller.
+#[test]
+fn insert_commitment_refuses_the_zero_digest() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(insert([0u8; 32]), Error::<Test>::ZeroCommitment);
+		assert_eq!(ZkTree::leaf_count(), 0);
+	});
+}
+
+/// The 8-bytes-per-felt decode reduces mod p, so a limb at or above the
+/// modulus is an alias: it would commit to the same tree position as a genuine
+/// commitment while being a different 32-byte value.
+#[test]
+fn insert_commitment_refuses_a_non_canonical_limb() {
+	new_test_ext().execute_with(|| {
+		let mut alias = qp_poseidon_core::hash_bytes(b"a note commitment");
+		alias[..8].copy_from_slice(&tree::GOLDILOCKS_P.to_le_bytes());
+		assert_noop!(insert(alias), Error::<Test>::NonCanonicalCommitment);
+		assert_eq!(ZkTree::leaf_count(), 0);
+
+		// One below the modulus is canonical and accepted.
+		let mut canonical = alias;
+		canonical[..8].copy_from_slice(&(tree::GOLDILOCKS_P - 1).to_le_bytes());
+		assert!(ZkTree::insert_commitment(canonical).is_ok());
+	});
+}
+
+/// The circuit proves a fixed number of Merkle levels. A tree one level deeper
+/// makes every note already in it unprovable, with no error and no migration
+/// back, so growth stops at the door, before `process_pending_leaves` ever
+/// sees the leaf.
+#[test]
+fn insert_commitment_refuses_an_append_past_the_depth_the_circuit_can_prove() {
+	new_test_ext().execute_with(|| {
+		let capacity = tree::capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH);
+		// Jump the counter; inserting 4^16 leaves is not a test.
+		crate::LeafCount::<Test>::put(capacity - 1);
+		assert_eq!(ZkTree::remaining_capacity(), 1);
+
+		let last = qp_poseidon_core::hash_bytes(b"the last leaf that fits");
+		assert_eq!(insert(last), Ok(capacity - 1));
+		assert_eq!(ZkTree::remaining_capacity(), 0);
+
+		let over = qp_poseidon_core::hash_bytes(b"one leaf too many");
+		assert_noop!(insert(over), Error::<Test>::TreeFull);
+		assert_eq!(ZkTree::leaf_count(), capacity);
+	});
+}
+
+/// The growth loop's own bound. `insert_commitment` is what should stop the
+/// tree reaching this, so the loop is the second line: it clamps at the depth
+/// the circuit can prove, where `MAX_TREE_DEPTH` is the storage cap and would
+/// let the tree outgrow every path already issued.
+#[test]
+fn process_pending_leaves_clamps_at_the_circuit_depth() {
+	new_test_ext().execute_with(|| {
+		// A state only a bug could produce: more leaves than the circuit depth
+		// holds. The fold must not grow past `CIRCUIT_MAX_TREE_DEPTH`.
+		let capacity = tree::capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH);
+		crate::LeafCount::<Test>::put(capacity + 1);
+		crate::UnprocessedLeaves::<Test>::put(1);
+		crate::Depth::<Test>::put(CIRCUIT_MAX_TREE_DEPTH);
+
+		ZkTree::process_pending_leaves();
+
+		assert_eq!(ZkTree::depth(), CIRCUIT_MAX_TREE_DEPTH);
+	});
 }

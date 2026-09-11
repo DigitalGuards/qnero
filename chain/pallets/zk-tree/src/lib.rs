@@ -228,11 +228,16 @@ pub mod pallet {
 	/// Account ID type alias for convenience.
 	pub type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
 
-	/// Leaf data stored by index.
+	/// Leaf hashes stored by index.
+	///
+	/// The tree stores the hash. A shielded note commitment
+	/// *is* its leaf hash (`docs/CIRCUIT.md` section 4), so there is no
+	/// preimage to reconstruct; a wormhole transfer leaf is hashed by
+	/// [`tree::hash_leaf`] at insert time and stored the same way. One storage
+	/// type serves both, and [`tree::get_leaf_hash`] is an identity read.
 	#[pallet::storage]
 	#[pallet::getter(fn leaf)]
-	pub type Leaves<T: Config> =
-		StorageMap<_, Identity, u64, ZkLeaf<AccountIdOf<T>, T::AssetId, T::Balance>, OptionQuery>;
+	pub type Leaves<T: Config> = StorageMap<_, Identity, u64, Hash256, OptionQuery>;
 
 	/// Internal tree nodes: (level, index) -> hash.
 	/// Level 0 is unused (leaves are hashed on-demand).
@@ -288,6 +293,18 @@ pub mod pallet {
 		/// Leaf was appended this block and is not yet folded into the root; it
 		/// becomes provable once the block is finalized.
 		LeafNotYetSettled,
+		/// A commitment limb is at or above the Goldilocks modulus. The
+		/// 8-bytes-per-felt decode reduces mod p, so a non-canonical alias
+		/// would commit to the same tree position as a genuine commitment.
+		NonCanonicalCommitment,
+		/// The all-zero digest is `tree::empty_hash()`, the absence sentinel
+		/// for a missing leaf and for an empty subtree at every level. A leaf
+		/// equal to it is indistinguishable from an unset slot.
+		ZeroCommitment,
+		/// The append would take the tree past `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)`.
+		/// Beyond that every note needs a path deeper than the circuit can
+		/// prove, and the whole pool becomes unspendable.
+		TreeFull,
 	}
 
 	#[pallet::hooks]
@@ -332,10 +349,50 @@ pub mod pallet {
 			amount: T::Balance,
 		) -> u64 {
 			let leaf = ZkLeaf { to, transfer_count, asset_id, amount };
+			Self::append_leaf_hash(tree::hash_leaf::<T>(&leaf))
+		}
+
+		/// Append a note commitment as a raw leaf.
+		///
+		/// This is the shielded pool's door into the tree, and the leaf rule is
+		/// `leaf_hash = cm` (`docs/CIRCUIT.md` section 4): `cm` is a Poseidon2
+		/// output, four canonical Goldilocks limbs, which is exactly the
+		/// `Hash256` the 4-ary tree hashes, so the spend circuit feeds its
+		/// computed `cm` straight into level 0 of a path.
+		///
+		/// Unlike [`Self::insert_leaf`], whose argument is typed and whose hash
+		/// this pallet computes, `commitment` is caller supplied, so all three
+		/// of its preconditions are checked here; nothing upstream establishes
+		/// them.
+		pub fn insert_commitment(commitment: Hash256) -> Result<u64, Error<T>> {
+			ensure!(commitment != tree::empty_hash(), Error::<T>::ZeroCommitment);
+			ensure!(
+				commitment.chunks_exact(8).all(|limb| u64::from_le_bytes(
+					limb.try_into().expect("32 bytes is four 8-byte limbs")
+				) < tree::GOLDILOCKS_P),
+				Error::<T>::NonCanonicalCommitment
+			);
+			ensure!(Self::remaining_capacity() > 0, Error::<T>::TreeFull);
+			Ok(Self::append_leaf_hash(commitment))
+		}
+
+		/// Leaves that still fit under `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)`.
+		///
+		/// A settlement that would append more than this must be refused whole,
+		/// before any state changes: the circuit fixes the tree at
+		/// `CIRCUIT_MAX_TREE_DEPTH` levels, and a tree that grew past it would
+		/// need a deeper path for every existing note.
+		pub fn remaining_capacity() -> u64 {
+			tree::capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH).saturating_sub(LeafCount::<T>::get())
+		}
+
+		/// Append one leaf hash and return its index. The root is not
+		/// recomputed here; see [`Self::process_pending_leaves`].
+		fn append_leaf_hash(leaf_hash: Hash256) -> u64 {
 			let leaf_index = LeafCount::<T>::get();
 
-			Leaves::<T>::insert(leaf_index, leaf);
-			LeafCount::<T>::put(leaf_index + 1);
+			Leaves::<T>::insert(leaf_index, leaf_hash);
+			LeafCount::<T>::put(leaf_index.saturating_add(1));
 			UnprocessedLeaves::<T>::mutate(|pending| *pending = pending.saturating_add(1));
 
 			Self::deposit_event(Event::LeafInserted { index: leaf_index });
@@ -361,12 +418,21 @@ pub mod pallet {
 			// far beyond any practical blockchain state.
 			let old_depth = Depth::<T>::get();
 			let mut depth = old_depth;
-			while tree::capacity_at_depth(depth) < leaf_count {
+			while tree::capacity_at_depth(depth) < leaf_count && depth < CIRCUIT_MAX_TREE_DEPTH {
 				depth = depth.saturating_add(1);
 			}
+			// The clamp is `CIRCUIT_MAX_TREE_DEPTH`, not `MAX_TREE_DEPTH`. The
+			// circuit proves a fixed number of Merkle levels, so a tree that
+			// grew one level further would need a deeper path for every note
+			// already in it, and the whole pool would become unspendable with
+			// no error from the chain and no migration back. Growth is refused
+			// at the door instead: `insert_commitment` rejects an append past
+			// `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)`, and a settlement
+			// extrinsic checks the whole batch fits before it mutates
+			// anything, so this loop should never meet its own bound.
 			debug_assert!(
-				depth <= MAX_TREE_DEPTH,
-				"ZK tree exceeded max depth - this should never happen in practice"
+				tree::capacity_at_depth(depth) >= leaf_count,
+				"ZK tree exceeded the depth the circuit can prove"
 			);
 			if depth > old_depth {
 				tree::grow_tree::<T>(old_depth);
@@ -407,12 +473,13 @@ pub mod pallet {
 		}
 
 		/// Verify a Merkle proof against the current root.
-		pub fn verify_proof(
-			leaf: &ZkLeaf<AccountIdOf<T>, T::AssetId, T::Balance>,
-			proof: &ZkMerkleProof,
-		) -> bool {
+		///
+		/// Takes the leaf hash: for a shielded leaf that is the note
+		/// commitment itself, and for a wormhole transfer leaf it is
+		/// [`tree::hash_leaf`] of the typed leaf.
+		pub fn verify_proof(leaf_hash: Hash256, proof: &ZkMerkleProof) -> bool {
 			let root = Root::<T>::get();
-			tree::verify_proof::<T>(leaf, proof, root)
+			tree::verify_proof(leaf_hash, proof, root)
 		}
 	}
 }
@@ -448,6 +515,53 @@ impl<AccountId, AssetId, Balance> ZkTreeRecorder<AccountId, AssetId, Balance> fo
 	}
 }
 
+/// Trait for appending a raw note commitment as a leaf.
+///
+/// This is the shielded pool's seam. It is separate from [`ZkTreeRecorder`]
+/// because the two differ in more than their argument: a commitment is caller
+/// supplied and its append is fallible (non-canonical, zero, or past the depth
+/// the circuit can prove), where a transfer leaf is built by the recorder
+/// itself and cannot fail.
+pub trait ZkCommitmentRecorder {
+	/// Append `commitment` as a leaf and return its index.
+	fn insert_commitment(commitment: Hash256) -> Result<u64, sp_runtime::DispatchError>;
+
+	/// Leaves that still fit under the depth the circuit can prove. A caller
+	/// that appends `n` leaves atomically must check this first.
+	fn remaining_capacity() -> u64;
+
+	/// Number of leaves in the tree, which is the index the next append takes.
+	fn leaf_count() -> u64;
+}
+
+impl ZkCommitmentRecorder for () {
+	fn insert_commitment(_commitment: Hash256) -> Result<u64, sp_runtime::DispatchError> {
+		Ok(0)
+	}
+
+	fn remaining_capacity() -> u64 {
+		0
+	}
+
+	fn leaf_count() -> u64 {
+		0
+	}
+}
+
+impl<T: Config> ZkCommitmentRecorder for Pallet<T> {
+	fn insert_commitment(commitment: Hash256) -> Result<u64, sp_runtime::DispatchError> {
+		Self::insert_commitment(commitment).map_err(Into::into)
+	}
+
+	fn remaining_capacity() -> u64 {
+		Self::remaining_capacity()
+	}
+
+	fn leaf_count() -> u64 {
+		LeafCount::<T>::get()
+	}
+}
+
 impl<T: Config> ZkTreeRecorder<T::AccountId, T::AssetId, T::Balance> for Pallet<T> {
 	fn record_transfer(
 		to: T::AccountId,
@@ -473,7 +587,9 @@ impl<T: Config> ZkTreeRecorder<T::AccountId, T::AssetId, T::Balance> for Pallet<
 pub struct ZkMerkleProofRpc {
 	/// Index of the leaf (for reference, not needed for verification)
 	pub leaf_index: u64,
-	/// The leaf data (encoded ZkLeaf)
+	/// The leaf as the tree stores it: the 32-byte leaf hash. For a shielded
+	/// leaf that is the note commitment itself, so this and `leaf_hash` are
+	/// the same bytes. The field is kept so the RPC shape does not change.
 	pub leaf_data: Vec<u8>,
 	/// Leaf hash
 	pub leaf_hash: Hash256,

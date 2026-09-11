@@ -12,11 +12,11 @@ use core::fmt::Arguments;
 use plonky2::field::types::{Field as _, Field64 as _};
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 use plonky2::plonk::circuit_data::CircuitConfig;
-use qnero_notes::keys::{derive_pk, DerivedKeys};
-use qnero_notes::note::{
+use qnero_note_core::keys::{derive_pk, DerivedKeys};
+use qnero_note_core::note::{
     commitment_from_inner, dummy_nullifier, note_inner, nullifier, output_rho,
 };
-use qnero_notes::{Digest, Note};
+use qnero_note_core::{Digest, Note};
 use rand_core::{CryptoRng, RngCore};
 
 use crate::circuit::{QneroSpendCircuit, SpendTargets};
@@ -108,7 +108,7 @@ impl InputNote {
     /// A padding input with fresh randomness, the constructor a wallet should
     /// use.
     ///
-    /// `rho` and `r` are drawn the way [`qnero_notes::Note::random`] draws
+    /// `rho` and `r` are drawn the way [`qnero_note_core::Note::random`] draws
     /// them: bytes from the RNG, hashed so the results are canonical digests.
     pub fn dummy_random<R: RngCore + CryptoRng + ?Sized>(
         rng: &mut R,
@@ -203,7 +203,7 @@ pub struct SpendWitness {
     pub inputs: [InputNote; NUM_INPUTS],
     pub outputs: [OutputNote; NUM_OUTPUTS],
     pub fee: u64,
-    /// Digest of the output ciphertexts, from [`qnero_notes::ct_digest`]. The
+    /// Digest of the output ciphertexts, from [`qnero_note_core::ct_digest`]. The
     /// circuit passes it through; the chain recomputes it with that same
     /// function from the ciphertexts it was handed and compares.
     pub ct_digest: Digest,

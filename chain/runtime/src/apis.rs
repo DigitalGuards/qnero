@@ -182,26 +182,24 @@ impl_runtime_apis! {
 		}
 
 		fn get_merkle_proof(leaf_index: u64) -> Option<pallet_zk_tree::ZkMerkleProofRpc> {
-			use codec::Encode;
-
 			// Window/canonicality cannot be enforced here: the execution block is
 			// `state_call`'s third argument, not a parameter, and this historical
 			// state cannot see the live tip. The node applies the same
 			// `resolve_proof_block` guard to `state_call` before the executor
 			// loads state (`node/src/zktree_rpc.rs`).
 
-			// Get the leaf
-			let leaf = ZkTree::leaf(leaf_index)?;
+			// The leaf as the tree stores it: the leaf hash. Nothing is
+			// recomputed here, which is what keeps the RPC's `leaf_hash` equal
+			// to what the tree actually hashed. For a shielded leaf it is the
+			// note commitment itself (`docs/CIRCUIT.md` section 4).
+			let leaf_hash = ZkTree::leaf(leaf_index)?;
 
 			// Generate the proof
 			let proof = ZkTree::get_merkle_proof(leaf_index).ok()?;
 
-			// Compute leaf hash
-			let leaf_hash = pallet_zk_tree::tree::hash_leaf::<Runtime>(&leaf);
-
 			Some(pallet_zk_tree::ZkMerkleProofRpc {
 				leaf_index,
-				leaf_data: leaf.encode(),
+				leaf_data: leaf_hash.to_vec(),
 				leaf_hash,
 				siblings: proof.siblings,
 				root: ZkTree::root(),

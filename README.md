@@ -7,7 +7,20 @@ Poseidon Merkle commitment tree, nullifier set.
 See `docs/DESIGN.md` for the design and `docs/CIRCUIT.md` for the implemented
 spend-circuit specification (public-input layout, tree leaf rule, constraints).
 
-Reference checkouts (gitignored, clone locally):
+`chain/` is the forked Quantus chain, carried as a **git subtree** of
+Quantus-Network/chain at `f1176ce` (v1.0.1) so upstream merges stay possible:
+
+```
+git subtree pull --prefix chain https://github.com/Quantus-Network/chain main --squash
+```
+
+It is its own Cargo workspace with its own toolchain and lock file, excluded
+from this one, and it takes the Qnero crates as path dependencies on
+`../crates/*`. `docs/OPS-DEV.md` is how to build it and run a dev chain.
+`chain/pallets/shielded` is the M4 pallet.
+
+Reference checkouts (gitignored, clone locally; `quantus-chain` is the
+pre-subtree reference and is no longer what the fork is built from):
 
 ```
 git clone --depth 50 https://github.com/Quantus-Network/chain quantus-chain
@@ -20,12 +33,22 @@ git clone https://github.com/monero-project/monero monero
 | Crate | What | Origin |
 |---|---|---|
 | `crates/qnero-pqcrypto` | ML-KEM-1024, ML-DSA, SLH-DSA wrappers and ML-KEM + ChaCha20-Poly1305 note encryption | vendored from Hegemon `crypto/` (MIT), see its NOTICE |
-| `crates/qnero-notes` | Spending key hierarchy, bech32m addresses, Poseidon2 note commitments and nullifiers, note scan | Qnero, hashes via `qp-poseidon-core` (Quantus) |
+| `crates/qnero-note-core` | Digests and domain tags, note commitments, nullifiers, the spend credential. No lattice dependency, which is what lets the circuit, the aggregators and `pallet-shielded` take it | Qnero, hashes via `qp-poseidon-core` (Quantus) |
+| `crates/qnero-notes` | The wallet tier on top of the core: ML-KEM viewing keys, bech32m addresses, note encryption and scan. Re-exports the core so a wallet keeps one import | Qnero |
 | `crates/qnero-circuit` | v0 spend leaf: 2 inputs, 2 outputs, 4-ary Merkle membership, balance; plus the off-circuit commitment tree | forked from `qp-zk-circuits` (MIT), see its NOTICE and CHANGES.md |
 | `crates/qnero-prover` | Builds the leaf circuit from source and proves one spend; `WalletProver` is the wallet's path from notes to a submittable transaction | same fork |
 | `crates/qnero-verifier` | Verifies the private and public batch proofs a runtime settles, and behind a non-default feature a leaf proof; depends on the plonky2 verifier only | same fork |
 | `crates/qnero-aggregator` | The two recursive layers: the zero-knowledge private batch over N leaves, and the public batch over n private batches | forked from `qp-zk-circuits` (MIT), see its NOTICE and CHANGES.md |
 | `crates/qnero-circuit-builder` | Writes the artifact set a pallet embeds and a wallet loads | same fork |
+
+The split between `qnero-note-core` and `qnero-notes` is a dependency
+boundary. A Cargo lock file resolves optional dependencies too,
+so a workspace that linked only `qnero-verifier` still pulled `ml-kem` into its
+graph through the circuit's note dependency, where it collided with the
+`ml-kem` the chain's post-quantum Noise transport pins: the two are
+semver-adjacent (`0.2.x` against `0.3.x`) and require incompatible versions of
+`kem`, which Cargo cannot hold two of. Nothing between a note commitment and a
+verified proof encrypts anything, so the edge was reachable and never used.
 
 The `circuit_parity` test pins the off-circuit Poseidon2 to Plonky2's
 `Poseidon2Hash::hash_no_pad`, so wallet-side commitments equal what the spend
@@ -83,5 +106,8 @@ cargo run -p qnero-circuit-builder --release -- --output generated-artifacts \
 ```
 
 Both dimensions also read from `QNERO_NUM_LEAF_PROOFS` and
-`QNERO_NUM_PRIVATE_BATCH_PROOFS`, which is how the M4 pallet's build script
-will set them.
+`QNERO_NUM_PRIVATE_BATCH_PROOFS`, which is how `chain/pallets/shielded`'s build
+script sets them. The chain defaults are `N = 6` and `n = 53`, and
+`docs/CIRCUIT.md` section 9.1 says why six, where the builder's own default is
+seven. Generating the set at those dimensions takes about 53 seconds
+and peaks around 5.4 GiB.

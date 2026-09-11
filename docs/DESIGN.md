@@ -227,9 +227,17 @@ shape.
    as Wormhole does today.
 5. Settlement of one public batch is all or nothing, and a nullifier repeated
    across segments aborts it before any state change.
-6. Entry in v0: Wormhole-style deposit from a transparent account into a note
-   (public `v`, coinbase-style commitment). Exit in v0: a leaf whose output
-   is a transparent account with public `v`. Both removed in v1.
+6. Entry in v0: `shield(value, inner, ciphertext)`, a signed extrinsic that
+   burns transparent value and appends `cm = H(CM, inner, value)`. There is no
+   exit in v0: value that enters the pool moves only between notes. Both go at
+   v1, when a coinbase mints straight into a note.
+
+Built at M4, in `chain/pallets/shielded`. Two rules the pallet owns that this
+section did not spell out: a minimum fee per real leaf slot, which is the only
+thing bounding how many leaves a prover can produce, and a `rho` rule for a note
+created outside a spend proof, `rho = H(RHO_ENTRY, block_number, entry_index)`
+under a domain tag of its own. `docs/CIRCUIT.md` section 9 is the contract as
+built, including the open decisions it closed.
 
 ## 8. Milestones
 
@@ -238,7 +246,7 @@ shape.
 | M1 | `qnero-notes` crate: keys, addresses, note commitment, ML-KEM note encryption, scan; KATs pinned | DONE 2026-09-11 |
 | M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (319 gates at M2, 320 after the M3 padding sentinel; degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
 | M3 | Private and public batch aggregators on the new PI layout | DONE 2026-09-11 (private batch 5 + 21N public inputs, ZK, N = 7; public batch forwards each inner verbatim under an aggregator address and refuses a repeated inner in circuit; see `docs/CIRCUIT.md` section 8) |
-| M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | 2 weeks |
+| M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | DONE 2026-09-12 (chain forked as a git subtree at `chain/`; `pallet-shielded` settles private and public batches, `shield` is the only v0 entry, `pallet-zk-tree` stores raw `Hash256` leaves; N = 6, n = 53; see `docs/CIRCUIT.md` section 9 and `docs/OPS-DEV.md`) |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | 2 weeks |
 | M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | 2 weeks |
 

@@ -249,10 +249,9 @@ mod wormhole_tests {
 			Wormhole::record_transfer(0u32, &from, &canonical, amount);
 			Wormhole::record_transfer(0u32, &from, &alias, amount);
 
-			let leaf0 = ZkTree::leaf(0).expect("first deposit must insert a leaf");
-			let leaf1 = ZkTree::leaf(1).expect("second deposit must insert a leaf");
-			let hash0 = pallet_zk_tree::tree::hash_leaf::<Test>(&leaf0);
-			let hash1 = pallet_zk_tree::tree::hash_leaf::<Test>(&leaf1);
+			// The tree stores leaf hashes.
+			let hash0 = ZkTree::leaf(0).expect("first deposit must insert a leaf");
+			let hash1 = ZkTree::leaf(1).expect("second deposit must insert a leaf");
 			assert_ne!(
 				hash0, hash1,
 				"a deposit to a non-canonical alias must not produce the same leaf \
@@ -261,16 +260,18 @@ mod wormhole_tests {
 
 			// The alias shares the canonical recipient's count sequence: both deposits
 			// are recorded under the canonical key, and the second leaf continues the
-			// sequence rather than restarting at 0.
+			// sequence rather than restarting at 0. Both leaves commit to the
+			// canonical recipient, which is what the hash actually covers.
 			assert_eq!(Wormhole::transfer_count(&canonical), 2);
 			assert_eq!(Wormhole::transfer_count(&alias), 0);
-			assert_eq!(leaf0.transfer_count, 0);
-			assert_eq!(leaf1.transfer_count, 1);
-
-			// Both leaves store the canonical recipient (what the hash actually
-			// commits to), so leaf data is consistent with the leaf hash.
-			assert_eq!(leaf0.to, canonical);
-			assert_eq!(leaf1.to, canonical);
+			let leaf_of = |transfer_count| pallet_zk_tree::ZkLeaf {
+				to: canonical.clone(),
+				transfer_count,
+				asset_id: 0u32,
+				amount,
+			};
+			assert_eq!(hash0, pallet_zk_tree::tree::hash_leaf::<Test>(&leaf_of(0)));
+			assert_eq!(hash1, pallet_zk_tree::tree::hash_leaf::<Test>(&leaf_of(1)));
 		});
 	}
 

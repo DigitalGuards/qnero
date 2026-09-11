@@ -6,9 +6,12 @@ license.workspace = true
 description = "Qnero v0 shielded spend circuit (leaf): 2-in / 2-out note spend over Poseidon2 and Plonky2"
 
 [dependencies]
-qnero-notes = { workspace = true, optional = true }
+qnero-note-core = { workspace = true, optional = true }
 qp-plonky2 = { workspace = true, optional = true }
-qp-poseidon-core = { workspace = true, optional = true }
+# Not optional: `chain` holds the rules a runtime evaluates natively and must
+# compile with the circuit feature off. The crate is `no_std` with no
+# dependencies of its own, and its `std` feature is empty.
+qp-poseidon-core = { workspace = true }
 rand_core = { workspace = true, optional = true }
 anyhow = { workspace = true, features = ["std"], optional = true }
 zeroize = { workspace = true, optional = true }
@@ -18,9 +21,8 @@ default = ["circuit"]
 # The circuit itself. Without it only `layout` compiles, which is all a
 # verifier needs to read a proof's public inputs.
 circuit = [
-    "dep:qnero-notes",
+    "dep:qnero-note-core",
     "dep:qp-plonky2",
-    "dep:qp-poseidon-core",
     "dep:rand_core",
     "dep:anyhow",
     "dep:zeroize",

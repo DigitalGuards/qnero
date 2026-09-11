@@ -34,7 +34,7 @@ use plonky2::hash::poseidon2::Poseidon2Hash;
 use plonky2::iop::target::Target;
 use plonky2::plonk::circuit_builder::CircuitBuilder;
 use plonky2::plonk::config::Hasher;
-use qnero_notes::Digest;
+use qnero_note_core::Digest;
 use qp_poseidon_core::serialization::bytes_to_digest_lossy;
 
 use crate::convert::{digest_from_felts, digest_to_felts};

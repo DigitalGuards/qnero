@@ -493,6 +493,23 @@ impl QneroPrivateBatchVerifier {
         self.num_leaves
     }
 
+    /// Read a serialized proof's public inputs **without verifying it**.
+    ///
+    /// This is the cheap half of admission: the size cap, the canonical
+    /// encoding round trip and the layout parse, and none of the recursive
+    /// verification. A chain admitting unsigned, fee-free settlements to its
+    /// transaction pool runs this on every gossiped candidate and keeps
+    /// [`Self::verify_proof_bytes`] for the block-inclusion gate, so a byte
+    /// variant of one proof cannot force a verify per variant.
+    ///
+    /// What comes back is attacker controlled until a verify succeeds. Treat it
+    /// as a claim about what the proof says, which only a verify establishes.
+    pub fn parse_proof_bytes(&self, proof_bytes: &[u8]) -> Result<PrivateBatchPublicInputs> {
+        let proof =
+            decode_canonical_proof(proof_bytes, &self.circuit_data.common, "private-batch")?;
+        parse_private_batch_public_inputs(&proof, self.num_leaves)
+    }
+
     /// Verify a serialized proof and read its public inputs.
     pub fn verify_proof_bytes(&self, proof_bytes: &[u8]) -> Result<PrivateBatchPublicInputs> {
         let proof =
@@ -607,6 +624,14 @@ impl QneroPublicBatchVerifier {
 
     pub fn num_leaves(&self) -> usize {
         self.num_leaves
+    }
+
+    /// Read a serialized proof's public inputs **without verifying it**. See
+    /// [`QneroPrivateBatchVerifier::parse_proof_bytes`] for what that is for
+    /// and what it does not establish.
+    pub fn parse_proof_bytes(&self, proof_bytes: &[u8]) -> Result<PublicBatchPublicInputs> {
+        let proof = decode_canonical_proof(proof_bytes, &self.circuit_data.common, "public-batch")?;
+        parse_public_batch_public_inputs(&proof, self.num_inner, self.num_leaves)
     }
 
     pub fn verify_proof_bytes(&self, proof_bytes: &[u8]) -> Result<PublicBatchPublicInputs> {

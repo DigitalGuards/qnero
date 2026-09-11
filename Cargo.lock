@@ -682,6 +682,7 @@ dependencies = [
  "anyhow",
  "qnero-circuit",
  "qnero-circuit-builder",
+ "qnero-note-core",
  "qnero-notes",
  "qnero-verifier",
  "qp-plonky2",
@@ -696,7 +697,7 @@ name = "qnero-circuit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "qnero-notes",
+ "qnero-note-core",
  "qp-plonky2",
  "qp-poseidon-core",
  "rand_core 0.9.5",
@@ -716,11 +717,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "qnero-note-core"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "qp-poseidon-core",
+ "rand_core 0.9.5",
+ "thiserror",
+]
+
+[[package]]
 name = "qnero-notes"
 version = "0.1.0"
 dependencies = [
  "bech32",
  "hex",
+ "qnero-circuit",
+ "qnero-note-core",
  "qnero-pqcrypto",
  "qp-plonky2",
  "qp-poseidon-core",

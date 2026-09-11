@@ -3,7 +3,7 @@
 use rand_core::{CryptoRng, RngCore};
 
 use crate::digest::{domain, Digest, Felt};
-use crate::error::NotesError;
+use crate::error::NoteError;
 
 /// Values are range-checked to 62 bits inside the circuit so that a sum of
 /// four of them can never wrap the 64-bit Goldilocks field.
@@ -39,9 +39,9 @@ impl core::fmt::Debug for Note {
 }
 
 impl Note {
-    pub fn new(pk: Digest, value: u64, rho: Digest, r: Digest) -> Result<Self, NotesError> {
+    pub fn new(pk: Digest, value: u64, rho: Digest, r: Digest) -> Result<Self, NoteError> {
         if value > MAX_VALUE {
-            return Err(NotesError::ValueTooLarge(value));
+            return Err(NoteError::ValueTooLarge(value));
         }
         Ok(Self { pk, value, rho, r })
     }
@@ -51,7 +51,7 @@ impl Note {
         rng: &mut R,
         pk: Digest,
         value: u64,
-    ) -> Result<Self, NotesError> {
+    ) -> Result<Self, NoteError> {
         let mut seed = [0u8; 32];
         rng.fill_bytes(&mut seed);
         let rho = Digest::hash_bytes(&[b"qnero/rho", &seed]);
@@ -146,5 +146,42 @@ pub fn output_rho(nf_1: &Digest, nf_2: &Digest, index: u64) -> Digest {
     Digest::hash_felts(
         domain::RHO,
         &[nf_1.felts(), nf_2.felts(), &[Felt::new(index)]],
+    )
+}
+
+/// `rho` of a note created outside a spend proof: a shield at M4, a coinbase
+/// at M6.
+///
+/// ```text
+/// rho = H(RHO_ENTRY, block_number, entry_index_hi, entry_index_lo)
+/// ```
+///
+/// [`output_rho`] derives a spend output's `rho` from the nullifiers the leaf
+/// publishes, which removes the sender's choice. An entry has no spent
+/// nullifier to derive from, so it derives from a unique on-chain identifier
+/// instead: `entry_index` is a chain-wide monotone counter over pool entries,
+/// so the pair `(block_number, entry_index)` never repeats and neither does
+/// `rho`.
+///
+/// **The chain cannot check this.** `inner = H(NOTE, pk, rho, r)` is opaque by
+/// construction, which is what keeps a shielded entry's recipient private
+/// while its value is public, so what the chain owes is the identifier:
+/// `pallet-shielded` publishes `block_number` and `entry_index` with every
+/// shield, and the recipient recomputes `rho` from them; reading it out of the
+/// ciphertext would trust the sender to have followed the rule. A shielder that ignores the rule can only strand its
+/// own note, since computing anyone else's nullifier needs their `nk`. A
+/// wallet should refuse a received note whose nullifier duplicates one it
+/// already holds or one already settled.
+pub fn entry_rho(block_number: u32, entry_index: u64) -> Digest {
+    // Two 32-bit limbs, high then low: the same split the chain's own
+    // `u64_to_felts` makes, so a `u64` never reaches the field as one element
+    // that could exceed the modulus.
+    let index = [
+        Felt::new(entry_index >> 32),
+        Felt::new(entry_index & 0xFFFF_FFFF),
+    ];
+    Digest::hash_felts(
+        domain::RHO_ENTRY,
+        &[&[Felt::new(block_number as u64)], &index],
     )
 }

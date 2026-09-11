@@ -57,7 +57,7 @@ pub const PADDING_BLOCK_HASH: [u64; 4] = [
 #[cfg(feature = "circuit")]
 mod with_circuit {
     use anyhow::Result;
-    use qnero_notes::Digest;
+    use qnero_note_core::Digest;
 
     use crate::header::{HeaderInputs, DIGEST_LOGS_SIZE};
     use crate::layout::{NUM_INPUTS, NUM_OUTPUTS};
@@ -117,7 +117,7 @@ mod with_circuit {
     pub fn padding_leaf_witness() -> SpendWitness {
         let ask = Digest::hash_bytes(&[PADDING_ASK_DOMAIN]);
         let nk = Digest::hash_bytes(&[PADDING_NK_DOMAIN]);
-        let keys = qnero_notes::keys::DerivedKeys { ask, nk };
+        let keys = qnero_note_core::keys::DerivedKeys { ask, nk };
         let pk = Digest::hash_bytes(&[PADDING_PK_DOMAIN]);
 
         let depth = 1;
@@ -196,7 +196,7 @@ pub use gadget::{is_padding_block_hash, padding_block_hash_target};
 #[cfg(all(test, feature = "circuit"))]
 mod tests {
     use super::*;
-    use qnero_notes::Digest;
+    use qnero_note_core::Digest;
 
     /// The pinned constant is what the padding header actually hashes to.
     ///

@@ -224,7 +224,40 @@ produces a path whose root is not `zk_tree_root`, and the leaf then fails to
 prove with nothing to point at. `CommitmentTree::index_ordered_siblings`
 reproduces the chain's shape so the adapter is covered by a test.
 
-### What `pallet-zk-tree` must change at M4
+### What `pallet-zk-tree` changed at M4
+
+Done, with two deviations from the list below, both because the fork keeps
+`pallet-wormhole` working beside the shielded pool on one tree instance.
+
+Item 4 is partial. `hash_leaf` and `canonicalize_account_bytes` are still in
+`tree.rs`, because a wormhole transfer leaf still has a typed preimage and
+something has to hash it. What changed is where they sit in the flow:
+`insert_leaf` hashes the typed leaf at insert time and stores the hash, so the
+tree itself no longer knows the leaf type, and `get_leaf_hash` is the identity
+read item 2 asks for.
+
+Item 6 is additive. `ZkTreeRecorder::record_transfer` keeps its four arguments,
+so the wormhole path is untouched, and a second trait `ZkCommitmentRecorder`
+carries the shielded pool's door: `insert_commitment(Hash256) ->
+Result<u64, DispatchError>`, `remaining_capacity()` and `leaf_count()`. The two
+differ in more than their argument. A commitment is caller supplied and its
+append is fallible in three ways (non-canonical, zero, past the depth the
+circuit can prove), where a transfer leaf is built by the recorder itself and
+cannot fail, and folding the fallible case into the existing signature would
+have made every wormhole call site handle an error it cannot produce.
+
+Item 8 landed in two places, which is what the item asks for. The growth loop
+clamps at `CIRCUIT_MAX_TREE_DEPTH`, and `insert_commitment` refuses an append
+past `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)` so the clamp is never reached;
+`pallet-shielded` additionally checks that a whole batch fits before it writes
+anything, because a settlement that ran out of capacity halfway would otherwise
+depend on the dispatch layer's rollback to stay consistent.
+
+Everything else is as listed. The original list follows.
+
+### The original list
+
+
 
 Today `Leaves` is `StorageMap<_, Identity, u64, ZkLeaf<AccountId, AssetId,
 Balance>>` and `get_leaf_hash` always recomputes `hash_leaf` from those four
@@ -749,7 +782,7 @@ reserves vector capacity from length fields before they are proven consistent.
 The keccak pin on a tagged release is still the thing neither has, and it still
 needs a tagged circuit to pin.
 
-### 8.6 What M4 still has to decide
+### 8.6 The settlement contract, and what M4 decided
 
 - **Minimum fee per non-padding leaf.** This is the anti-spam mechanism, and
   after the correction to constraint 9 it is the only one. A leaf consumes at
@@ -835,3 +868,243 @@ needs a tagged circuit to pin.
 - **A keccak pin on a tagged release.** Both the leaf floor and the batch
   profile stand in for provenance, which they are not. The pin lands with the
   first tagged circuit, and every circuit change after that invalidates it.
+
+## 9. The M4 settlement contract as built
+
+`pallet-shielded` in the chain fork (`chain/pallets/shielded`) is the
+implementation. This section records what section 8.6 left open, and the rules
+that are the pallet's alone because no circuit enforces them. `pallet-zk-tree`'s
+side of it is in section 4.
+
+### 9.1 Chain defaults
+
+`N = 6` leaf slots per private batch, `n = 53` private batches per public batch,
+both from `chain/pallets/shielded/build.rs` and both overridable with
+`QNERO_NUM_LEAF_PROOFS` / `QNERO_NUM_PRIVATE_BATCH_PROOFS`, which the build
+script declares with `cargo:rerun-if-env-changed` so Cargo cannot reuse an
+`OUT_DIR` built for other dimensions.
+
+`N = 6`, where M3 measured seven. Blinding adds about 9000 rows at this
+size, so a private batch fits `degree_bits = 15` only below about 23700 gates,
+and seven recursive verifiers are 24324. Six fits; seven pays about 2x in
+proving time and about 2x in peak memory, 2.1 GiB against roughly half that, for
+one more slot per batch. That is the difference between a phone that can prove
+and one that cannot, and it is a wallet-side cost paid by every user, where the
+slot it buys back is amortized across a batch. `n = 53` is unchanged: an
+aggregator's proving cost is paid on a server.
+
+Generating the set at those dimensions takes about 53 seconds and peaks around
+5.4 GiB, once per clean build of the pallet.
+
+### 9.2 One crate boundary the pallet forced
+
+`qnero-notes` was split at M4. `qnero-note-core` holds the digests, the domain
+tags, the note commitment and nullifier rules and the spend credential;
+`qnero-notes` keeps the ML-KEM viewing keys, the bech32m address and note
+encryption on top, and re-exports the core so a wallet keeps one import.
+`qnero-circuit`, `qnero-aggregator` and `pallet-shielded` take the core.
+
+This is a dependency boundary. A Cargo lock file resolves optional dependencies
+too, so the chain's lock pulled `ml-kem 0.3.2` into its graph through
+`qnero-verifier` to `qnero-circuit` to the note primitives, where it met the
+`ml-kem 0.2.1` the chain's post-quantum Noise transport pins through `clatter`.
+The two require incompatible versions of `kem` (`=0.3.0-pre.0` against `^0.3`),
+Cargo cannot resolve two versions inside one `0.3.x` compatibility range, and
+the node build failed compiling a crate neither Qnero nor the pallet uses.
+Cutting the edge at the package level is what removes it, and it removes a real
+surface as well: nothing between a note commitment and a verified proof needs
+lattice cryptography, so a runtime linking the verifier should not have it in
+its graph at all.
+
+### 9.3 Ciphertexts on the wire
+
+One `ShieldedOutput` per real leaf slot, in settlement order: every real slot of
+every settleable segment, segments in order, slots in slot order. It carries the
+two `NoteCiphertext::to_bytes` blobs of that slot, `ct_1` first, so `ct_1`
+belongs to `cm_1`.
+
+The rule is section 1's, unchanged, and it has one implementation now where it
+had two: `qnero_circuit::chain::ct_digest` takes ciphertext bytes and compiles
+without the circuit feature, so the chain reaches it through `qnero-verifier`'s
+dependency and a wallet calls the same function. `qnero_notes::ct_digest` is
+gone; there is no second copy to drift.
+
+```text
+ct_digest = H_bytes("qnero/ct" || u32_le(count)
+                    || u32_le(len_1) || ct_1 || ... || u32_le(len_n) || ct_n)
+```
+
+The chain recomputes it per slot, over exactly two ciphertexts, and rejects the
+slot when it differs. The count of `ShieldedOutput`s must equal the count of
+real slots exactly: a trailing extra would otherwise ride along bound by
+nothing.
+
+### 9.4 Padding
+
+A padding segment settles nothing, and a submission with no other segment is
+refused with `NothingToSettle`. This covers both cases section 8.6 names: a
+standalone all-padding private batch, which `prove_padding_batch` produces
+without holding a note, and a public batch whose inners are all padding.
+
+Inside a settleable segment, a padding slot is dropped at the parse.
+`SettlementBundle` carries only real slots, where real means the slot's
+commitment pair is nonzero. **This resolves the open decision on a padding
+slot's nullifiers: the chain does not settle them.** They are hashes of
+randomness drawn for one proving run, so settling one is inert, and at `N = 6` a
+one-transfer batch would otherwise write ten inert entries into permanent state
+forever. The slot is identifiable either way, because the wrapper zeroes its
+commitments and the chain needs that to know what to append, so skipping the
+nullifiers costs no privacy that was not already lost.
+
+The other half of that decision, whether the real-transfer count should be
+hidden at all, stays open. It is a circuit change and a settlement-format change
+together, and it is the only version that makes the batch shuffle buy anything.
+
+### 9.5 Nullifiers
+
+Both published nullifiers of every real slot are settled, a dummy input's
+included: inside a real slot the chain cannot tell a dummy from a real one and
+must not try, and a note spent from input slot 1 is marked used only if slot 1's
+nullifier is settled.
+
+Every nullifier of every settleable segment goes into one set before anything is
+written. A repeat, against `UsedNullifiers` or against the submission itself,
+aborts the whole submission. The private-batch circuit already forbids a repeat
+inside one batch; nothing in the public-batch circuit compares two different
+inners, which is why this is a chain rule.
+
+The all-zero nullifier is refused outright. It cannot reach here through the
+padding filter, and the check is what keeps that true if the filter ever moves.
+
+### 9.6 Block anchoring
+
+Per segment, in this order: the padding sentinel is filtered first, then the
+block lookup. A padding segment carries `PADDING_BLOCK_HASH` at block number
+zero and would otherwise be refused as a missing block by accident, where the
+rule is what should refuse it.
+
+A settleable segment must name a block that is already finished
+(`block_number < current`), inside `BlockHashWindow` (256 blocks in the runtime,
+about 51 minutes), present in `frame_system::BlockHash`, and whose hash equals
+the segment's `block_hash` public input. The public input arrives as four
+canonical Goldilocks limbs and the chain's header hash is a Poseidon2 output
+stored in the same 32-byte little-endian-per-limb form, so the comparison is
+lossless.
+
+`BlockHashWindow` is tighter than `BlockHashCount` on purpose. A proof built
+against a much older block saw a smaller commitment tree, and settling it tells
+an observer roughly how old the anonymity set its prover used was.
+
+### 9.7 Fees
+
+Each real slot's fee is a 62-bit field element counted in pool quanta
+(`POOL_QUANTUM = 10^10` planck, the same quantum `pallet-zk-tree` uses for a
+wormhole leaf amount). The pallet sums them in `u128`, which is why the circuit
+does not sum them: six 62-bit fees overflow Goldilocks.
+
+Every real slot must carry at least `MinLeafFee`, one quantum in the runtime.
+This is the anti-spam mechanism and it is the only one, for the reason section
+8.6 gives.
+
+The sum leaves the pool. `FeeBurnRate` of it (half in the runtime, rounded up
+against the author) is simply not minted back, which is what makes it a burn:
+the value left issuance when it was shielded. The rest is minted to the QPoW
+block author, taken from the pre-runtime digest the same way
+`pallet-mining-rewards` takes it, and recorded as a wormhole leaf through
+`TransferProofRecorder`. Without that leaf the credit would be frozen: a
+QPoW-derived author account has no signing key, and a wormhole leaf is its only
+spend path. With no author in the digest, or a mint that fails below the
+existential deposit, the share stays unminted and the settlement stands.
+
+### 9.8 Entry: the shield extrinsic, and `rho` outside a spend
+
+`shield(value, inner, ciphertext)` is signed, and it is the only way into the
+pool at v0. There is no exit.
+
+It burns `value` from the signer, which must be a positive whole number of pool
+quanta, range checks `value / POOL_QUANTUM` to 62 bits, computes
+`cm = H(CM, inner, quanta)` with `qnero_circuit::chain::commitment`, appends
+`cm`, stores the ciphertext against its leaf index and emits it.
+
+Burning is the simpler of the two entries the design left open, and it is the
+consistent one: value inside the pool moves only through proofs, so an
+account balance standing in for it would be a second book to keep in step, and
+at v0 there is no exit to draw from it. `PoolValue` is the pallet's own record
+of what issuance the pool stands in for, and it is what an unshield path would
+have to draw from at v1.
+
+`inner = H(NOTE, pk, rho, r)` stays opaque, which is what keeps the recipient
+and the note's randomness private while its value is public.
+
+**The `rho` rule for a note created outside a spend proof.** Inside a spend the
+circuit derives `rho_out_j = H(RHO, nf_1, nf_2, j)` and a sender has no choice
+to abuse. An entry has no spent nullifier to derive from, so:
+
+```text
+rho = H(RHO_ENTRY, block_number, entry_index_hi, entry_index_lo)
+```
+
+with `RHO_ENTRY = 0x716e_0009`, the next free domain tag above
+`NF_BATCH_PADDING`, and `entry_index` the chain-wide `EntryCount` at the time of
+the shield. `qnero_notes::entry_rho` is the implementation, beside `output_rho`
+which is the in-circuit rule it stands in for, and a wallet calls it. Both
+halves of the identifier are in the `Shielded` event, so a recipient recomputes
+`rho` from chain data; reading it out of the ciphertext would trust the sender
+to have followed the rule.
+
+The chain does not evaluate this rule and does not link the crate that holds
+it. The only note rule the chain evaluates is `cm = H(CM, inner, value)`, in
+`qnero_circuit::chain`, which is what `pallet-shielded` reaches through
+`qnero-verifier` without the prover stack or the note primitives.
+
+The chain cannot check the rule, because `inner` is opaque by construction. What
+it owes is the identifier, and the pair `(block_number, entry_index)` never
+repeats. A shielder that ignores the rule can only strand its own note:
+computing anyone else's nullifier needs their `nk`. The recipient is the last
+line, and a wallet should refuse a received note whose nullifier duplicates one
+it already holds or one already settled. At M6 a coinbase note takes the same
+rule with the coinbase's own identifier.
+
+### 9.9 One tree, two leaf kinds
+
+`pallet-shielded` and `pallet-wormhole` append to the same `pallet-zk-tree`
+instance, because the leaf circuit anchors at `zk_tree_root` and the block
+header carries exactly one of those. A second instance would be a root no
+shielded proof could reach.
+
+The two kinds cannot be confused. A wormhole transfer leaf is a Poseidon2 hash
+of an 8-felt preimage that starts with a limb of the recipient account; a
+shielded leaf is a note commitment, a Poseidon2 output over a 6-felt preimage
+that starts with the `CM` domain tag. The lengths differ, so the sponge padding
+differs, and passing one off as the other additionally requires a note whose
+`cm` equals a given transfer-leaf hash, which is a preimage attack on Poseidon2.
+This is the same argument section 4 makes for leaf against internal node.
+
+What the sharing does cost is capacity and anonymity-set composition: wormhole
+traffic consumes tree slots a shielded note could have used, and a shielded
+spend's anonymity set is every leaf in the tree, wormhole leaves included, which
+are not notes anyone can spend. Neither is a soundness problem and both go away
+at M6, when the transparent layer is removed.
+
+### 9.10 Admission
+
+`validate_unsigned` does the cheap work: the size gate before anything is
+copied, deserialization against the embedded verifier's circuit data, the
+canonical-encoding round trip, the public-input parse, and the whole settlement
+check short of the ZK verify. `pre_dispatch` runs the verify and is the
+block-inclusion gate.
+
+The split is upstream's and it is deliberate. Pool admission runs on every
+gossiped candidate, and settlement extrinsics are unsigned and fee free, so a
+`validate_unsigned` that verified would let one proof's byte variants force a
+verify each. The canonical-encoding round trip is what bounds those variants in
+the first place: plonky2's reader ignores trailing bytes and accepts
+non-canonical field limbs, so without it one proof has unlimited distinct
+transaction identities.
+
+The pool tag is a Blake2 hash of the submission's nullifiers, sorted within each
+segment, with the segment boundaries in the preimage. Priority is the constant
+`UNSIGNED_SETTLEMENT_PRIORITY = 1`: an amount-derived priority combined with a
+nullifier-derived tag would let junk with inflated public inputs usurp a
+victim's same-tag settlement, because the pool replaces on strictly higher
+priority.

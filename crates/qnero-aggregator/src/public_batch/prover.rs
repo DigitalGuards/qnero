@@ -24,7 +24,7 @@ use qnero_circuit::convert::digest_to_felts;
 use qnero_circuit::layout::{NUM_INPUTS, NUM_OUTPUTS};
 use qnero_circuit::padding::{PADDING_BLOCK_HASH, PADDING_BLOCK_NUMBER};
 use qnero_circuit::{C, D, F};
-use qnero_notes::Digest;
+use qnero_note_core::Digest;
 
 use crate::artifacts::{
     ensure_proof_public_input_len, load_canonical_private_batch_verifier_data, read_artifact_file,

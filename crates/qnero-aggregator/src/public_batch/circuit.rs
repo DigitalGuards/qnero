@@ -313,7 +313,7 @@ mod tests {
         qnero_private_batch_circuit_config, qnero_public_batch_circuit_config,
     };
     use qnero_circuit::padding::PADDING_BLOCK_HASH;
-    use qnero_notes::Digest;
+    use qnero_note_core::Digest;
 
     use super::*;
     use crate::padding_proof::generate_padding_leaf_proof;

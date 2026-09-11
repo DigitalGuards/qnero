@@ -94,6 +94,21 @@ pub trait TransferProofRecorder<AccountId, AssetId, Balance> {
 	) -> bool;
 }
 
+/// No-op recorder, for a mock or a runtime that records nothing.
+///
+/// Returns `false`: nothing was recorded, so a caller reconciling weight
+/// against recorded work charges nothing for it.
+impl<AccountId, AssetId, Balance> TransferProofRecorder<AccountId, AssetId, Balance> for () {
+	fn record_transfer_proof(
+		_asset_id: Option<AssetId>,
+		_from: AccountId,
+		_to: AccountId,
+		_amount: Balance,
+	) -> bool {
+		false
+	}
+}
+
 /// Derive a wormhole address from a 32-byte inner_digest (already hashed).
 ///
 /// This hashes the inner_digest using Poseidon to get the wormhole account address.

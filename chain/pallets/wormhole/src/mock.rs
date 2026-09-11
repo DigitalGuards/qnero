@@ -176,15 +176,16 @@ pub fn assert_exitable_native_leaf(to: &AccountId, amount: Balance) {
 		amount > 0 && amount.is_multiple_of(crate::SCALE_DOWN_FACTOR),
 		"credited amount {amount} must be a positive whole number of quanta"
 	);
-	let matching: Vec<u64> = System::events()
+	let matching: Vec<(u64, u64)> = System::events()
 		.into_iter()
 		.filter_map(|r| match r.event {
 			RuntimeEvent::Wormhole(crate::Event::<Test>::NativeTransferred {
 				to: event_to,
 				amount: event_amount,
+				transfer_count,
 				leaf_index,
 				..
-			}) if event_to == *to && event_amount == amount => Some(leaf_index),
+			}) if event_to == *to && event_amount == amount => Some((leaf_index, transfer_count)),
 			_ => None,
 		})
 		.collect();
@@ -194,15 +195,21 @@ pub fn assert_exitable_native_leaf(to: &AccountId, amount: Balance) {
 		"expected exactly one NativeTransferred of {amount} to {to:?} (got {})",
 		matching.len()
 	);
-	let leaf = ZkTree::leaf(matching[0]).expect("recorded leaf_index must exist in the zk-tree");
-	assert_eq!(leaf.amount, amount, "leaf amount must match the credited balance");
-	assert_eq!(leaf.asset_id, 0, "fee credits are native");
-	let zeroed = pallet_zk_tree::ZkLeaf {
-		to: leaf.to.clone(),
-		transfer_count: leaf.transfer_count,
-		asset_id: leaf.asset_id,
-		amount: 0,
-	};
+	let (leaf_index, transfer_count) = matching[0];
+	// The tree stores leaf hashes, so the typed leaf is reconstructed from the
+	// event and hashed. The recipient is keyed on its canonical form, which is
+	// what `record_transfer` inserted.
+	let leaf_to: AccountId = pallet_zk_tree::tree::canonicalize_account_bytes(
+		<[u8; 32]>::try_from(to.as_ref()).unwrap(),
+	)
+	.into();
+	let leaf = pallet_zk_tree::ZkLeaf { to: leaf_to, transfer_count, asset_id: 0u32, amount };
+	assert_eq!(
+		ZkTree::leaf(leaf_index).expect("recorded leaf_index must exist in the zk-tree"),
+		pallet_zk_tree::tree::hash_leaf::<Test>(&leaf),
+		"stored leaf hash must be the hash of the credited transfer"
+	);
+	let zeroed = pallet_zk_tree::ZkLeaf { amount: 0, ..leaf.clone() };
 	assert_ne!(
 		pallet_zk_tree::tree::hash_leaf::<Test>(&leaf),
 		pallet_zk_tree::tree::hash_leaf::<Test>(&zeroed),

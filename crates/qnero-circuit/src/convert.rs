@@ -8,7 +8,7 @@
 
 use plonky2::field::types::Field;
 use plonky2::hash::hash_types::HashOut;
-use qnero_notes::{Digest, Felt as NoteFelt};
+use qnero_note_core::{Digest, Felt as NoteFelt};
 
 use crate::F;
 
