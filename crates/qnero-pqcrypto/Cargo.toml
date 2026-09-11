@@ -1,0 +1,54 @@
+[package]
+name = "qnero-pqcrypto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Hashing
+sha2 = { version = "0.10", default-features = false }
+blake2 = { version = "0.10", default-features = false }
+blake3 = { version = "1", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+
+# RNG - deterministic only by default, no OS randomness in no_std
+rand = { version = "0.9", default-features = false }
+rand_chacha = { version = "0.9", default-features = false }
+rand_core = { version = "0.9", default-features = false }
+
+# REAL Post-Quantum Cryptography (FIPS 203/204/205)
+ml-kem = { version = "0.3.2", default-features = false }
+ml-dsa = { version = "0.1.0", default-features = false }
+slh-dsa = { version = "0.2.0-rc.5", default-features = false }
+
+# AEAD for note encryption
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+
+# Utilities
+thiserror = { version = "1", optional = true }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+zeroize = { version = "1.8", default-features = false, features = ["derive"] }
+hybrid-array = { version = "0.2", default-features = false }
+subtle = { version = "2", default-features = false }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["std"]
+std = [
+    "rand/std",
+    "rand/std_rng",
+    "rand/os_rng",  # OS randomness only available in std builds
+    "rand_chacha/std",
+    "rand_core/std",
+    "sha2/std",
+    "sha3/std",
+    "blake3/std",
+    "hex/std",
+    "ml-kem/alloc",
+    "ml-dsa/alloc",
+    "slh-dsa/default",
+    "thiserror",
+]
+

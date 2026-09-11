@@ -1,0 +1,630 @@
+//! Note encryption for shielded transactions
+//!
+//! This module provides ML-KEM + ChaCha20Poly1305 encryption for notes.
+//! It is used by both the wallet (for regular transactions) and the node
+//! (for coinbase note encryption).
+//!
+//! The encryption scheme:
+//! 1. Encapsulate a shared secret to recipient's pk_enc using ML-KEM
+//! 2. Derive AEAD key and nonce from shared secret + label
+//! 3. Encrypt note payload with ChaCha20Poly1305
+//! 4. Encrypt memo separately with same scheme
+
+use alloc::vec::Vec;
+use chacha20poly1305::{
+    aead::{Aead, Payload},
+    ChaCha20Poly1305, KeyInit,
+};
+use zeroize::Zeroizing;
+
+use crate::{
+    deterministic::expand_to_length,
+    ml_kem::{
+        MlKemCiphertext, MlKemPublicKey, MlKemSecretKey, MlKemSharedSecret, ML_KEM_CIPHERTEXT_LEN,
+    },
+    traits::KemPublicKey,
+    CryptoError,
+};
+
+const AEAD_KEY_SIZE: usize = 32;
+const AEAD_NONCE_SIZE: usize = 12;
+
+/// Note plaintext data
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotePlaintext {
+    pub value: u64,
+    pub asset_id: u64,
+    pub rho: [u8; 32],
+    pub r: [u8; 32],
+    pub memo: Vec<u8>,
+}
+
+impl NotePlaintext {
+    /// Create a new note with the given values
+    pub fn new(value: u64, asset_id: u64, rho: [u8; 32], r: [u8; 32], memo: Vec<u8>) -> Self {
+        Self {
+            value,
+            asset_id,
+            rho,
+            r,
+            memo,
+        }
+    }
+
+    /// Create a coinbase note with deterministic rho/r derived from seed
+    pub fn coinbase(value: u64, seed: &[u8; 32]) -> Self {
+        let rho = derive_coinbase_rho(seed);
+        let r = derive_coinbase_r(seed);
+        Self {
+            value,
+            asset_id: 0, // Native asset
+            rho,
+            r,
+            memo: Vec::new(),
+        }
+    }
+}
+
+/// Derive rho for coinbase from seed
+pub fn derive_coinbase_rho(seed: &[u8; 32]) -> [u8; 32] {
+    let bytes = expand_to_length(b"coinbase-rho", seed, 32);
+    let mut rho = [0u8; 32];
+    rho.copy_from_slice(&bytes);
+    rho
+}
+
+/// Derive r for coinbase from seed
+pub fn derive_coinbase_r(seed: &[u8; 32]) -> [u8; 32] {
+    let bytes = expand_to_length(b"coinbase-r", seed, 32);
+    let mut r = [0u8; 32];
+    r.copy_from_slice(&bytes);
+    r
+}
+
+/// Encrypted note ciphertext
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoteCiphertext {
+    pub version: u8,
+    pub crypto_suite: u16,
+    pub diversifier_index: u32,
+    pub kem_ciphertext: Vec<u8>,
+    pub note_payload: Vec<u8>,
+    pub memo_payload: Vec<u8>,
+}
+
+/// Internal payload structure for serialization
+#[derive(Clone, Debug)]
+struct NotePayload {
+    value: u64,
+    asset_id: u64,
+    rho: [u8; 32],
+    r: [u8; 32],
+    pk_recipient: [u8; 32],
+}
+
+impl NotePayload {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + 8 + 32 + 32 + 32);
+        out.extend_from_slice(&self.value.to_le_bytes());
+        out.extend_from_slice(&self.asset_id.to_le_bytes());
+        out.extend_from_slice(&self.rho);
+        out.extend_from_slice(&self.r);
+        out.extend_from_slice(&self.pk_recipient);
+        out
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() != 8 + 8 + 32 + 32 + 32 {
+            return Err(CryptoError::InvalidLength {
+                expected: 8 + 8 + 32 + 32 + 32,
+                actual: bytes.len(),
+            });
+        }
+        let value = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let asset_id = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let mut rho = [0u8; 32];
+        rho.copy_from_slice(&bytes[16..48]);
+        let mut r = [0u8; 32];
+        r.copy_from_slice(&bytes[48..80]);
+        let mut pk_recipient = [0u8; 32];
+        pk_recipient.copy_from_slice(&bytes[80..112]);
+        Ok(Self {
+            value,
+            asset_id,
+            rho,
+            r,
+            pk_recipient,
+        })
+    }
+}
+
+impl NoteCiphertext {
+    /// Encrypt a note to a recipient's public key
+    ///
+    /// # Arguments
+    /// * `pk_enc` - Recipient's ML-KEM public key
+    /// * `pk_recipient` - Recipient's 32-byte recipient key (for commitment)
+    /// * `version` - Address version byte
+    /// * `crypto_suite` - Crypto suite identifier
+    /// * `diversifier_index` - Address diversifier index
+    /// * `note` - Note plaintext to encrypt
+    /// * `kem_randomness` - 32 bytes of randomness for KEM encapsulation
+    pub fn encrypt(
+        pk_enc: &MlKemPublicKey,
+        pk_recipient: [u8; 32],
+        version: u8,
+        crypto_suite: u16,
+        diversifier_index: u32,
+        note: &NotePlaintext,
+        kem_randomness: &[u8; 32],
+    ) -> Result<Self, CryptoError> {
+        // Encapsulate shared secret
+        let (kem_ct, shared) = pk_enc.encapsulate(kem_randomness);
+
+        // Build payload
+        let payload = NotePayload {
+            value: note.value,
+            asset_id: note.asset_id,
+            rho: note.rho,
+            r: note.r,
+            pk_recipient,
+        };
+        let payload_bytes = payload.to_bytes();
+
+        // Build AAD
+        let aad = build_aad(version, crypto_suite, diversifier_index);
+
+        // Encrypt note payload
+        let note_payload =
+            encrypt_payload(&shared, b"note-aead", crypto_suite, &payload_bytes, &aad)?;
+
+        // Encrypt memo
+        let memo_payload = encrypt_payload(&shared, b"memo-aead", crypto_suite, &note.memo, &aad)?;
+
+        Ok(Self {
+            version,
+            crypto_suite,
+            diversifier_index,
+            kem_ciphertext: kem_ct.to_bytes().to_vec(),
+            note_payload,
+            memo_payload,
+        })
+    }
+
+    /// Decrypt a note using the recipient's secret key
+    ///
+    /// # Arguments
+    /// * `sk_enc` - Recipient's ML-KEM secret key
+    /// * `expected_pk_recipient` - Expected pk_recipient to verify against
+    /// * `expected_diversifier_index` - Expected diversifier index
+    pub fn decrypt(
+        &self,
+        sk_enc: &MlKemSecretKey,
+        expected_pk_recipient: [u8; 32],
+        expected_diversifier_index: u32,
+    ) -> Result<NotePlaintext, CryptoError> {
+        // Verify diversifier index
+        if self.diversifier_index != expected_diversifier_index {
+            return Err(CryptoError::DecryptionFailed(
+                "diversifier index mismatch".into(),
+            ));
+        }
+
+        // Decapsulate shared secret
+        let kem_ct = MlKemCiphertext::from_bytes(&self.kem_ciphertext)?;
+        let shared = sk_enc.decapsulate(&kem_ct)?;
+
+        // Build AAD
+        let aad = build_aad(self.version, self.crypto_suite, self.diversifier_index);
+
+        // Decrypt note payload
+        let payload_bytes = decrypt_payload(
+            &shared,
+            b"note-aead",
+            self.crypto_suite,
+            &self.note_payload,
+            &aad,
+        )?;
+        let payload = NotePayload::from_bytes(&payload_bytes)?;
+
+        // Verify pk_recipient
+        if payload.pk_recipient != expected_pk_recipient {
+            return Err(CryptoError::DecryptionFailed(
+                "pk_recipient mismatch".into(),
+            ));
+        }
+
+        // Decrypt memo
+        let memo = decrypt_payload(
+            &shared,
+            b"memo-aead",
+            self.crypto_suite,
+            &self.memo_payload,
+            &aad,
+        )?;
+
+        Ok(NotePlaintext {
+            value: payload.value,
+            asset_id: payload.asset_id,
+            rho: payload.rho,
+            r: payload.r,
+            memo,
+        })
+    }
+
+    /// Serialize to bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(self.version);
+        out.extend_from_slice(&self.crypto_suite.to_le_bytes());
+        out.extend_from_slice(&self.diversifier_index.to_le_bytes());
+        out.extend_from_slice(&(self.kem_ciphertext.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.kem_ciphertext);
+        out.extend_from_slice(&(self.note_payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.note_payload);
+        out.extend_from_slice(&(self.memo_payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.memo_payload);
+        out
+    }
+
+    /// Deserialize from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        let mut offset = 0;
+        let version = read_u8(bytes, &mut offset)?;
+        let crypto_suite = read_u16(bytes, &mut offset)?;
+        let diversifier_index = read_u32(bytes, &mut offset)?;
+
+        let kem_len = read_u32(bytes, &mut offset)? as usize;
+        if kem_len != ML_KEM_CIPHERTEXT_LEN {
+            return Err(CryptoError::InvalidLength {
+                expected: ML_KEM_CIPHERTEXT_LEN,
+                actual: kem_len,
+            });
+        }
+        let kem_ciphertext = take_bytes(bytes, &mut offset, kem_len)?.to_vec();
+
+        let note_len = read_u32(bytes, &mut offset)? as usize;
+        let note_payload = take_bytes(bytes, &mut offset, note_len)?.to_vec();
+
+        let memo_len = read_u32(bytes, &mut offset)? as usize;
+        let memo_payload = take_bytes(bytes, &mut offset, memo_len)?.to_vec();
+        if bytes.len() != offset {
+            return Err(CryptoError::InvalidLength {
+                expected: offset,
+                actual: bytes.len(),
+            });
+        }
+
+        Ok(Self {
+            version,
+            crypto_suite,
+            diversifier_index,
+            kem_ciphertext,
+            note_payload,
+            memo_payload,
+        })
+    }
+}
+
+fn take_bytes<'a>(
+    bytes: &'a [u8],
+    offset: &mut usize,
+    len: usize,
+) -> Result<&'a [u8], CryptoError> {
+    let end = offset.checked_add(len).ok_or(CryptoError::InvalidLength {
+        expected: usize::MAX,
+        actual: bytes.len(),
+    })?;
+    if bytes.len() < end {
+        return Err(CryptoError::InvalidLength {
+            expected: end,
+            actual: bytes.len(),
+        });
+    }
+    let out = &bytes[*offset..end];
+    *offset = end;
+    Ok(out)
+}
+
+fn read_u8(bytes: &[u8], offset: &mut usize) -> Result<u8, CryptoError> {
+    Ok(take_bytes(bytes, offset, 1)?[0])
+}
+
+fn read_u16(bytes: &[u8], offset: &mut usize) -> Result<u16, CryptoError> {
+    let raw = take_bytes(bytes, offset, 2)?;
+    Ok(u16::from_le_bytes([raw[0], raw[1]]))
+}
+
+fn read_u32(bytes: &[u8], offset: &mut usize) -> Result<u32, CryptoError> {
+    let raw = take_bytes(bytes, offset, 4)?;
+    Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+fn encrypt_payload(
+    shared: &MlKemSharedSecret,
+    label: &[u8],
+    crypto_suite: u16,
+    data: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let (key, nonce) = derive_aead_material(shared, label, crypto_suite);
+    let cipher = ChaCha20Poly1305::new(&key.into());
+    cipher
+        .encrypt(&nonce.into(), Payload { msg: data, aad })
+        .map_err(|_| CryptoError::EncryptionFailed)
+}
+
+fn decrypt_payload(
+    shared: &MlKemSharedSecret,
+    label: &[u8],
+    crypto_suite: u16,
+    data: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let (key, nonce) = derive_aead_material(shared, label, crypto_suite);
+    let cipher = ChaCha20Poly1305::new(&key.into());
+    cipher
+        .decrypt(&nonce.into(), Payload { msg: data, aad })
+        .map_err(|_| CryptoError::DecryptionFailed("AEAD decryption failed".into()))
+}
+
+fn derive_aead_material(
+    shared: &MlKemSharedSecret,
+    label: &[u8],
+    crypto_suite: u16,
+) -> ([u8; AEAD_KEY_SIZE], [u8; AEAD_NONCE_SIZE]) {
+    let mut material = Zeroizing::new(Vec::with_capacity(
+        shared.as_bytes().len() + label.len() + core::mem::size_of::<u16>(),
+    ));
+    material.extend_from_slice(shared.as_bytes());
+    material.extend_from_slice(label);
+    material.extend_from_slice(&crypto_suite.to_le_bytes());
+    let bytes = expand_to_length(b"wallet-aead", &material, AEAD_KEY_SIZE + AEAD_NONCE_SIZE);
+    let mut key = [0u8; AEAD_KEY_SIZE];
+    let mut nonce = [0u8; AEAD_NONCE_SIZE];
+    key.copy_from_slice(&bytes[..AEAD_KEY_SIZE]);
+    nonce.copy_from_slice(&bytes[AEAD_KEY_SIZE..]);
+    (key, nonce)
+}
+
+fn build_aad(version: u8, crypto_suite: u16, index: u32) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(1 + 2 + 4);
+    aad.push(version);
+    aad.extend_from_slice(&crypto_suite.to_le_bytes());
+    aad.extend_from_slice(&index.to_le_bytes());
+    aad
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ml_kem::MlKemKeyPair;
+    use crate::traits::KemKeyPair;
+
+    fn sample_ciphertext(seed: &[u8], pk_recipient: [u8; 32]) -> (MlKemKeyPair, NoteCiphertext) {
+        let keypair = MlKemKeyPair::generate_deterministic(seed);
+        let pk_enc = keypair.public_key();
+        let note = NotePlaintext::new(321, 4, [11u8; 32], [12u8; 32], b"memo".to_vec());
+        let ciphertext =
+            NoteCiphertext::encrypt(&pk_enc, pk_recipient, 2, 3, 7, &note, &[13u8; 32]).unwrap();
+        (keypair, ciphertext)
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        let keypair = MlKemKeyPair::generate_deterministic(b"test-keypair-seed-1234");
+        let pk_enc = keypair.public_key();
+        let sk_enc = keypair.secret_key();
+
+        let pk_recipient = [42u8; 32];
+        let version = 1u8;
+        let crypto_suite = 3u16;
+        let diversifier_index = 0u32;
+
+        let note = NotePlaintext::new(1000, 0, [1u8; 32], [2u8; 32], b"test memo".to_vec());
+
+        let kem_randomness = [99u8; 32];
+
+        let ciphertext = NoteCiphertext::encrypt(
+            &pk_enc,
+            pk_recipient,
+            version,
+            crypto_suite,
+            diversifier_index,
+            &note,
+            &kem_randomness,
+        )
+        .unwrap();
+
+        let decrypted = ciphertext
+            .decrypt(&sk_enc, pk_recipient, diversifier_index)
+            .unwrap();
+
+        assert_eq!(decrypted.value, note.value);
+        assert_eq!(decrypted.asset_id, note.asset_id);
+        assert_eq!(decrypted.rho, note.rho);
+        assert_eq!(decrypted.r, note.r);
+        assert_eq!(decrypted.memo, note.memo);
+    }
+
+    #[test]
+    fn test_coinbase_note() {
+        let seed = [123u8; 32];
+        let note = NotePlaintext::coinbase(5_000_000_000, &seed);
+
+        assert_eq!(note.value, 5_000_000_000);
+        assert_eq!(note.asset_id, 0);
+        assert_eq!(note.rho, derive_coinbase_rho(&seed));
+        assert_eq!(note.r, derive_coinbase_r(&seed));
+        assert!(note.memo.is_empty());
+    }
+
+    #[test]
+    fn test_serialization_roundtrip() {
+        let keypair = MlKemKeyPair::generate_deterministic(b"test-keypair-seed-5678");
+        let pk_enc = keypair.public_key();
+
+        let note = NotePlaintext::new(500, 1, [3u8; 32], [4u8; 32], b"memo".to_vec());
+
+        let ciphertext =
+            NoteCiphertext::encrypt(&pk_enc, [5u8; 32], 1, 3, 0, &note, &[7u8; 32]).unwrap();
+
+        let bytes = ciphertext.to_bytes();
+        let recovered = NoteCiphertext::from_bytes(&bytes).unwrap();
+
+        assert_eq!(recovered.version, ciphertext.version);
+        assert_eq!(recovered.crypto_suite, ciphertext.crypto_suite);
+        assert_eq!(recovered.diversifier_index, ciphertext.diversifier_index);
+        assert_eq!(recovered.kem_ciphertext, ciphertext.kem_ciphertext);
+        assert_eq!(recovered.note_payload, ciphertext.note_payload);
+        assert_eq!(recovered.memo_payload, ciphertext.memo_payload);
+    }
+
+    #[test]
+    fn test_decrypt_rejects_crypto_suite_tamper() {
+        let keypair = MlKemKeyPair::generate_deterministic(b"test-keypair-suite-tamper");
+        let pk_enc = keypair.public_key();
+        let sk_enc = keypair.secret_key();
+
+        let note = NotePlaintext::new(777, 1, [7u8; 32], [8u8; 32], b"memo".to_vec());
+        let ciphertext =
+            NoteCiphertext::encrypt(&pk_enc, [1u8; 32], 2, 3, 0, &note, &[9u8; 32]).unwrap();
+
+        let mut tampered = ciphertext.clone();
+        tampered.crypto_suite = ciphertext.crypto_suite.wrapping_add(1);
+
+        let result = tampered.decrypt(&sk_enc, [1u8; 32], 0);
+        assert!(result.is_err(), "tampered crypto_suite must fail");
+    }
+
+    #[test]
+    fn test_decrypt_rejects_diversifier_tamper() {
+        let keypair = MlKemKeyPair::generate_deterministic(b"test-keypair-div-tamper");
+        let pk_enc = keypair.public_key();
+        let sk_enc = keypair.secret_key();
+
+        let note = NotePlaintext::new(123, 2, [9u8; 32], [10u8; 32], b"memo".to_vec());
+        let ciphertext =
+            NoteCiphertext::encrypt(&pk_enc, [2u8; 32], 2, 3, 7, &note, &[3u8; 32]).unwrap();
+
+        let mut tampered = ciphertext.clone();
+        tampered.diversifier_index = tampered.diversifier_index.wrapping_add(1);
+
+        let result = tampered.decrypt(&sk_enc, [2u8; 32], 7);
+        assert!(result.is_err(), "tampered diversifier_index must fail");
+    }
+
+    #[test]
+    fn test_decrypt_rejects_wrong_expected_pk_recipient() {
+        let (keypair, ciphertext) = sample_ciphertext(b"test-keypair-wrong-recipient", [6u8; 32]);
+
+        let result = ciphertext.decrypt(keypair.secret_key(), [7u8; 32], 7);
+        assert!(result.is_err(), "wrong expected recipient must fail");
+    }
+
+    #[test]
+    fn test_decrypt_rejects_wrong_secret_key() {
+        let (_, ciphertext) = sample_ciphertext(b"test-keypair-right-secret", [8u8; 32]);
+        let wrong_keypair = MlKemKeyPair::generate_deterministic(b"test-keypair-wrong-secret");
+
+        let result = ciphertext.decrypt(wrong_keypair.secret_key(), [8u8; 32], 7);
+        assert!(result.is_err(), "wrong ML-KEM secret key must fail");
+    }
+
+    #[test]
+    fn test_decrypt_rejects_version_tamper() {
+        let (keypair, mut ciphertext) =
+            sample_ciphertext(b"test-keypair-version-tamper", [9u8; 32]);
+        ciphertext.version = ciphertext.version.wrapping_add(1);
+
+        let result = ciphertext.decrypt(keypair.secret_key(), [9u8; 32], 7);
+        assert!(result.is_err(), "tampered version must fail");
+    }
+
+    #[test]
+    fn test_decrypt_rejects_kem_ciphertext_malleation() {
+        let (keypair, mut ciphertext) =
+            sample_ciphertext(b"test-keypair-kem-malleation", [10u8; 32]);
+        ciphertext.kem_ciphertext[0] ^= 0x01;
+
+        let result = ciphertext.decrypt(keypair.secret_key(), [10u8; 32], 7);
+        assert!(result.is_err(), "malleated KEM ciphertext must fail");
+    }
+
+    #[test]
+    fn test_decrypt_rejects_note_payload_malleation() {
+        let (keypair, mut ciphertext) =
+            sample_ciphertext(b"test-keypair-note-malleation", [14u8; 32]);
+        assert!(!ciphertext.note_payload.is_empty());
+        ciphertext.note_payload[0] ^= 0x01;
+
+        let result = ciphertext.decrypt(keypair.secret_key(), [14u8; 32], 7);
+        assert!(result.is_err(), "malleated note payload must fail");
+    }
+
+    #[test]
+    fn test_decrypt_rejects_memo_payload_malleation() {
+        let (keypair, mut ciphertext) =
+            sample_ciphertext(b"test-keypair-memo-malleation", [15u8; 32]);
+        assert!(!ciphertext.memo_payload.is_empty());
+        ciphertext.memo_payload[0] ^= 0x01;
+
+        let result = ciphertext.decrypt(keypair.secret_key(), [15u8; 32], 7);
+        assert!(result.is_err(), "malleated memo payload must fail");
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_trailing_bytes() {
+        let keypair = MlKemKeyPair::generate_deterministic(b"test-keypair-trailing");
+        let pk_enc = keypair.public_key();
+        let note = NotePlaintext::new(42, 0, [1u8; 32], [2u8; 32], b"memo".to_vec());
+        let mut bytes = NoteCiphertext::encrypt(&pk_enc, [3u8; 32], 1, 3, 0, &note, &[4u8; 32])
+            .unwrap()
+            .to_bytes();
+        bytes.push(0x99);
+
+        let err = NoteCiphertext::from_bytes(&bytes).expect_err("trailing bytes must be rejected");
+        assert!(matches!(err, CryptoError::InvalidLength { .. }));
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_invalid_kem_length() {
+        let ciphertext = NoteCiphertext {
+            version: 1,
+            crypto_suite: 3,
+            diversifier_index: 0,
+            kem_ciphertext: vec![0u8; ML_KEM_CIPHERTEXT_LEN - 1],
+            note_payload: vec![1, 2, 3],
+            memo_payload: vec![4, 5, 6],
+        };
+
+        let err = NoteCiphertext::from_bytes(&ciphertext.to_bytes())
+            .expect_err("wrong ML-KEM ciphertext length must be rejected");
+        assert_eq!(
+            err,
+            CryptoError::InvalidLength {
+                expected: ML_KEM_CIPHERTEXT_LEN,
+                actual: ML_KEM_CIPHERTEXT_LEN - 1,
+            }
+        );
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_truncated_prefixes_without_panic() {
+        let keypair = MlKemKeyPair::generate_deterministic(b"test-keypair-truncated");
+        let pk_enc = keypair.public_key();
+        let note = NotePlaintext::new(99, 2, [7u8; 32], [8u8; 32], b"memo".to_vec());
+        let bytes = NoteCiphertext::encrypt(&pk_enc, [9u8; 32], 1, 3, 0, &note, &[10u8; 32])
+            .unwrap()
+            .to_bytes();
+
+        for len in 0..bytes.len() {
+            let result = std::panic::catch_unwind(|| NoteCiphertext::from_bytes(&bytes[..len]));
+            assert!(result.is_ok(), "from_bytes panicked on prefix length {len}");
+            assert!(
+                result.unwrap().is_err(),
+                "truncated prefix length {len} unexpectedly decoded"
+            );
+        }
+    }
+}

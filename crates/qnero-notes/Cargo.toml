@@ -1,0 +1,22 @@
+[package]
+name = "qnero-notes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qnero shielded note primitives: keys, addresses, Poseidon commitments, nullifiers, ML-KEM note encryption"
+
+[dependencies]
+qnero-pqcrypto = { workspace = true }
+qp-poseidon-core = { workspace = true }
+bech32 = { workspace = true }
+zeroize = { workspace = true }
+rand_core = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+qp-plonky2 = { version = "=1.5.5", default-features = false, features = ["std"] }

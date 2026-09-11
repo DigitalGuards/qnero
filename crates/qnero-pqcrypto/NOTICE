@@ -1,0 +1,4 @@
+qnero-pqcrypto is a vendored copy of the `crypto` crate from Pauli-Group/Hegemon
+(https://github.com/Pauli-Group/Hegemon, MIT License, see LICENSE.hegemon),
+taken at commit b819911 on 2026-09-11. Package renamed; examples dropped.
+Local changes are listed in CHANGES.md.

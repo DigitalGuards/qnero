@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/qnero-pqcrypto", "crates/qnero-notes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/DigitalGuards/qnero"
+
+[workspace.dependencies]
+qnero-pqcrypto = { path = "crates/qnero-pqcrypto" }
+qp-poseidon-core = { version = "3.1.0", default-features = false, features = ["std"] }
+bech32 = "0.9"
+zeroize = { version = "1.8", features = ["derive"] }
+rand = "0.9"
+rand_core = "0.9"
+subtle = "2"
+thiserror = "1"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

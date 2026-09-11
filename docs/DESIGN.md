@@ -139,7 +139,7 @@ batch is the on-chain transaction unit. Public batch: unchanged in shape.
 
 | # | Deliverable | Estimate |
 |---|---|---|
-| M1 | `qnero-notes` crate: keys, addresses, note commitment, ML-KEM note encryption, scan; KATs pinned | 1 week |
+| M1 | `qnero-notes` crate: keys, addresses, note commitment, ML-KEM note encryption, scan; KATs pinned | DONE 2026-09-11 |
 | M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | 2 to 3 weeks |
 | M3 | Private and public batch aggregators on the new PI layout | 1 week |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | 2 weeks |
@@ -152,7 +152,7 @@ is wallet-side proving time and memory for a 2-in/2-out leaf plus a
 
 ## 9. Open questions
 
-1. ML-KEM-768 vs ML-KEM-1024 for addresses.
+1. ML-KEM-1024 chosen for addresses (level-5 parity with ML-DSA-87, same as Hegemon). Encoded address is 2571 characters.
 2. Proof size and verify weight for the private batch under the new PI
    layout; Wormhole's numbers are the baseline.
 3. Whether to keep QPoW or bring RandomX; unrelated to privacy, defer.
