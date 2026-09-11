@@ -104,3 +104,71 @@ pub mod domain {
     /// `docs/CIRCUIT.md` section 8.6.
     pub const NF_BATCH_PADDING: Felt = Felt::new(0x716e_0008);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::domain;
+    use super::Felt;
+
+    /// Every domain tag names one rule. Two rules sharing a tag is a silent
+    /// failure: the hashes still compute, the tests of each rule still pass,
+    /// and what breaks is the separation between them. `NF` and
+    /// `NF_BATCH_PADDING` colliding would let a padding slot of a private
+    /// batch publish a real note's nullifier and burn it; `CM` and `NOTE`
+    /// colliding would let a note's inner commitment be passed off as a
+    /// commitment. So the list is checked as a list.
+    #[test]
+    fn domain_tags_are_pairwise_distinct() {
+        let tags: [(&str, Felt); 8] = [
+            ("AK", domain::AK),
+            ("PK", domain::PK),
+            ("NOTE", domain::NOTE),
+            ("CM", domain::CM),
+            ("NF", domain::NF),
+            ("RHO", domain::RHO),
+            ("NF_DUMMY", domain::NF_DUMMY),
+            ("NF_BATCH_PADDING", domain::NF_BATCH_PADDING),
+        ];
+        for (i, (name_a, a)) in tags.iter().enumerate() {
+            for (name_b, b) in tags.iter().skip(i + 1) {
+                assert_ne!(a, b, "domain tags {} and {} collide", name_a, name_b);
+            }
+        }
+    }
+
+    /// The tags are a contiguous block from `0x716e_0001`, and the next free
+    /// value is what a new rule takes. A rule added on top of an existing
+    /// value would pass the distinctness check above only by removing the one
+    /// it displaced, so the range is pinned too.
+    #[test]
+    fn domain_tags_occupy_the_documented_range() {
+        let expected: [(&str, u64); 8] = [
+            ("AK", 0x716e_0001),
+            ("PK", 0x716e_0002),
+            ("NOTE", 0x716e_0003),
+            ("CM", 0x716e_0004),
+            ("NF", 0x716e_0005),
+            ("RHO", 0x716e_0006),
+            ("NF_DUMMY", 0x716e_0007),
+            ("NF_BATCH_PADDING", 0x716e_0008),
+        ];
+        let actual = [
+            domain::AK,
+            domain::PK,
+            domain::NOTE,
+            domain::CM,
+            domain::NF,
+            domain::RHO,
+            domain::NF_DUMMY,
+            domain::NF_BATCH_PADDING,
+        ];
+        for ((name, want), got) in expected.iter().zip(actual.iter()) {
+            assert_eq!(
+                Felt::new(*want),
+                *got,
+                "domain tag {} moved off its documented value",
+                name
+            );
+        }
+    }
+}

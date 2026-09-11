@@ -104,7 +104,23 @@ cm        = H(CM,       inner, value)
 nf        = H(NF,       nk, rho, r)          real input slot
 nf_dummy  = H(NF_DUMMY, nk, rho, r)          padding input slot
 rho_out_j = H(RHO,      nf_1, nf_2, j)
+nf_pad    = H(NF_BATCH_PADDING, preimage)    padding slot of a private batch
 ```
+
+`nf_pad` is the one rule in that list the leaf circuit never evaluates. The
+private-batch wrapper emits it in place of a padding slot's leaf nullifiers,
+over fresh randomness drawn per slot per proving run, so the chain settles
+every published nullifier of a segment by one rule and a padding one is inert.
+Section 8.4 is the rule; the tag is here because it shares the nullifier
+namespace and must stay outside the image of both functions above.
+
+The tags themselves: `AK = 0x716e_0001`, `PK = 0x716e_0002`,
+`NOTE = 0x716e_0003`, `CM = 0x716e_0004`, `NF = 0x716e_0005`,
+`RHO = 0x716e_0006`, `NF_DUMMY = 0x716e_0007`,
+`NF_BATCH_PADDING = 0x716e_0008`. A note created outside a spend proof, a
+shield at M4 and a coinbase at M6, takes the next free value: `0x716e_0009` is
+`RHO_ENTRY`, section 9. Reusing `NF_BATCH_PADDING` for it would put a padding
+slot's emitted nullifier and an entry note's `rho` in one image.
 
 `H(tag, parts...)` is Poseidon2 over the concatenation with the one-felt domain
 tag first. `value` is a single field element over its full 62-bit range, not

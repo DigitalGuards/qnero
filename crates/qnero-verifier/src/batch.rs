@@ -521,6 +521,30 @@ impl QneroPrivateBatchVerifier {
 }
 
 /// Verifier for public-batch proofs over one fixed pair of dimensions.
+///
+/// [`QneroPublicBatchVerifier::from_artifact_bytes`] is the only way to build
+/// one, because it is the call that checks the sixteen-byte dimension header
+/// before anything is deserialized. The profile a verifier is held to is not
+/// injective in `(num_inner, num_leaves)`: `public_batch_pi_len(34, 1)` and
+/// `public_batch_pi_len(13, 3)` are both 888 felts, so an artifact built for
+/// one pair passes every profile check under the other, verifies genuine
+/// proofs, and leaves a chain splitting them into segments at the wrong
+/// offsets. The header is what closes that, so the constructor that skips it
+/// is crate private:
+///
+/// ```compile_fail
+/// use qnero_verifier::QneroPublicBatchVerifier;
+/// // `new` takes already-deserialized verifier data, so it has no header to
+/// // check. It is not callable from outside the crate.
+/// let _ = QneroPublicBatchVerifier::new;
+/// ```
+///
+/// The public door is reachable, and takes the dimensions it checks:
+///
+/// ```
+/// use qnero_verifier::QneroPublicBatchVerifier;
+/// let _ = QneroPublicBatchVerifier::from_artifact_bytes;
+/// ```
 #[derive(Debug)]
 pub struct QneroPublicBatchVerifier {
     pub circuit_data: VerifierCircuitData<F, C, D>,
@@ -529,7 +553,14 @@ pub struct QneroPublicBatchVerifier {
 }
 
 impl QneroPublicBatchVerifier {
-    pub fn new(
+    /// Wrap verifier data, holding it to the public-batch profile for
+    /// `(num_inner, num_leaves)`.
+    ///
+    /// Crate private on purpose: the profile does not pin the dimension pair,
+    /// so every caller has to arrive through
+    /// [`QneroPublicBatchVerifier::from_artifact_bytes`], which checks the
+    /// header that does.
+    pub(crate) fn new(
         circuit_data: VerifierCircuitData<F, C, D>,
         num_inner: usize,
         num_leaves: usize,

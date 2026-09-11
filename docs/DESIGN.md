@@ -79,11 +79,19 @@ it is used exactly where written: `ask`, `nk`, and the ML-KEM seed. `H(TAG,
 ...)` is Poseidon2 over field elements with a one-felt domain tag as the first
 sponge input: `AK = 0x716e_0001`, `PK = 0x716e_0002`, `NOTE = 0x716e_0003`,
 `CM = 0x716e_0004`, `NF = 0x716e_0005`, `RHO = 0x716e_0006` (hashes the two
-nullifiers a spend publishes and an output index, derived in circuit) and
-`NF_DUMMY = 0x716e_0007` (the nullifier a padding input slot publishes). Those
-are the values in `qnero_notes::digest::domain`, and the spend circuit imports
-them from that crate so the two copies cannot drift. `docs/CIRCUIT.md` section
-3 is the authority.
+nullifiers a spend publishes and an output index, derived in circuit),
+`NF_DUMMY = 0x716e_0007` (the nullifier a padding input slot publishes) and
+`NF_BATCH_PADDING = 0x716e_0008` (the nullifier the private-batch wrapper
+emits for a padding slot, over randomness it draws per slot per proving run,
+`docs/CIRCUIT.md` section 8.4). Those are the values in
+`qnero_notes::digest::domain`, and the spend circuit imports them from that
+crate so the two copies cannot drift. A test in that module asserts the tags
+are pairwise distinct, because two rules sharing a tag is the failure that has
+no symptom until someone finds the collision. `docs/CIRCUIT.md` section 3 is
+the authority.
+
+`0x716e_0008` is taken. A note created outside a spend proof, a shield today
+and a coinbase at M6, needs a tag of its own at `0x716e_0009` or above.
 
 Address size is dominated by the ML-KEM encapsulation key: 1184 bytes at
 ML-KEM-768, 1568 at ML-KEM-1024. Decision pending: ML-KEM-1024 for level-5
