@@ -1,0 +1,6 @@
+# upstream reference checkouts, never tracked here
+/monero/
+/quantus-chain/
+/qp-zk-circuits/
+target/
+CLAUDE.md
