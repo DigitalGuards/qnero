@@ -13,6 +13,10 @@ anyhow = { workspace = true, features = ["std"] }
 [dev-dependencies]
 qnero-notes = { workspace = true }
 qnero-verifier = { workspace = true }
+# The negative tests write a public target that disagrees with the witness
+# beside it; see `qnero_circuit::witness::PublicOverrides`.
+qnero-circuit = { workspace = true, features = ["test-support"] }
+rand = { workspace = true }
 
 [features]
 default = []

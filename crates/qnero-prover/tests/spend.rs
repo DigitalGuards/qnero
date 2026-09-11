@@ -18,10 +18,13 @@ use qnero_circuit::layout::{
     PUBLIC_INPUT_LEN,
 };
 use qnero_circuit::merkle::{CommitmentTree, MerklePath};
-use qnero_circuit::witness::{fill_witness, InputNote, OutputNote, SpendWitness};
+use qnero_circuit::witness::{
+    fill_witness, fill_witness_with_public_overrides, InputNote, OutputNote, PublicOverrides,
+    SpendWitness,
+};
 use qnero_circuit::{C, D, F};
 use qnero_notes::keys::DerivedKeys;
-use qnero_notes::{output_rho, Digest, Note, SpendingKey, MAX_VALUE};
+use qnero_notes::{dummy_nullifier, nullifier, output_rho, Digest, Note, SpendingKey, MAX_VALUE};
 use qnero_prover::{prove_leaf, QneroProver};
 use qnero_verifier::{parse_public_input_felts, LeafPublicInputs, QneroVerifier};
 
@@ -57,8 +60,12 @@ fn sender_keys() -> DerivedKeys {
     SpendingKey::from_bytes([7u8; 32]).derived()
 }
 
+fn recipient() -> SpendingKey {
+    SpendingKey::from_bytes([9u8; 32])
+}
+
 fn recipient_pk() -> Digest {
-    SpendingKey::from_bytes([9u8; 32]).pk()
+    recipient().pk()
 }
 
 /// A tree holding `owned` at known indices, padded with decoys.
@@ -171,6 +178,27 @@ fn assert_rejected(witness: &SpendWitness, what: &str) {
     }
 }
 
+/// The same, for a witness whose public values were written to disagree with
+/// the private ones beside them.
+///
+/// This is the only way to exercise the constraints that bind a published
+/// value to its in-circuit recomputation. `fill_witness` writes both sides
+/// from the same `qnero-notes` call, so a test that compares them is comparing
+/// a value to itself and stays green when the binding is deleted.
+fn assert_override_rejected(witness: &SpendWitness, overrides: &PublicOverrides, what: &str) {
+    let (targets, data) = circuit();
+    let mut pw = PartialWitness::<F>::new();
+    fill_witness_with_public_overrides(&mut pw, witness, targets, overrides)
+        .expect("witness filling must succeed, so only the circuit can reject the fixture");
+
+    if let Ok(proof) = data.prove(pw) {
+        assert!(
+            data.verify(proof).is_err(),
+            "{what}: a published value the circuit never recomputed was accepted"
+        );
+    }
+}
+
 #[test]
 fn two_real_inputs_prove_and_verify() {
     let witness = two_real_inputs();
@@ -213,10 +241,23 @@ fn published_nullifiers_and_commitments_match_qnero_notes() {
 
     let witness = two_real_inputs();
     // The output notes as `qnero-notes` sees them, carrying the `rho` the leaf
-    // derives.
+    // derives from both nullifiers it publishes.
     let nf_1 = note_a.nullifier(&keys.nk);
-    let payment = Note::new(recipient_pk(), 700, output_rho(&nf_1, 0), digest("r-out")).unwrap();
-    let change = Note::new(keys.pk(), 90, output_rho(&nf_1, 1), digest("r-change")).unwrap();
+    let nf_2 = note_b.nullifier(&keys.nk);
+    let payment = Note::new(
+        recipient_pk(),
+        700,
+        output_rho(&nf_1, &nf_2, 0),
+        digest("r-out"),
+    )
+    .unwrap();
+    let change = Note::new(
+        keys.pk(),
+        90,
+        output_rho(&nf_1, &nf_2, 1),
+        digest("r-change"),
+    )
+    .unwrap();
     let proof = prove_with_shared_circuit(&witness).expect("leaf proves");
     let public = public_of(&proof);
 
@@ -252,6 +293,14 @@ fn published_nullifiers_and_commitments_match_qnero_notes() {
         proof.public_inputs[CT_DIGEST_START..CT_DIGEST_START + 4],
         digest_to_felts(&witness.ct_digest)
     );
+
+    // `r` is in the nullifier preimage. Without it, `nk` plus the publicly
+    // derivable `rho` of every output note would be a pool-wide
+    // spend-linkability key.
+    assert_ne!(
+        public.nullifiers[0],
+        digest_to_felts(&nullifier(&keys.nk, &note_a.rho, &digest("a-different-r")))
+    );
 }
 
 #[test]
@@ -268,7 +317,11 @@ fn one_real_input_and_one_dummy_prove_and_verify() {
     let keys = sender_keys();
     assert_eq!(
         public.nullifiers[1],
-        digest_to_felts(&qnero_notes::nullifier(&keys.nk, &digest("dummy-rho")))
+        digest_to_felts(&dummy_nullifier(
+            &keys.nk,
+            &digest("dummy-rho"),
+            &digest("dummy-r")
+        ))
     );
     assert_ne!(public.nullifiers[0], public.nullifiers[1]);
 }
@@ -685,18 +738,19 @@ fn a_zero_knowledge_leaf_proves_and_verifies() {
     data.verify(proof).expect("a blinded leaf verifies");
 }
 
-/// An output's `rho` is derived from the leaf's first published nullifier, so
-/// a sender cannot choose it and cannot repeat one.
+/// An output's `rho` is derived from the nullifiers the leaf publishes, so a
+/// sender cannot choose it and cannot repeat one.
 ///
-/// A free `rho` is a griefing vector, because `nf = H(NF, nk, rho)` does not
-/// depend on the note's value or on `r`: a sender paying one recipient twice
-/// with the same `rho` creates two notes that share a nullifier, of which the
-/// recipient can spend exactly one. The circuit's distinctness check
-/// (constraint 5) catches that only inside a single leaf, and the chain's
-/// used-nullifier set catches it only after the victim has already spent one
-/// of the two, by which point the other is stranded for good.
+/// A free `rho` is a griefing vector, because `nf = H(NF, nk, rho, r)` does not
+/// depend on the note's value, and a sender picks `rho` and `r` for a note it
+/// creates: paying one recipient twice with the same pair creates two notes
+/// that share a nullifier, of which the recipient can spend exactly one. The
+/// circuit's distinctness check (constraint 5) catches that only inside a
+/// single leaf, and the chain's used-nullifier set catches it only after the
+/// victim has already spent one of the two, by which point the other is
+/// stranded for good.
 #[test]
-fn output_rho_is_derived_from_the_published_nullifier() {
+fn output_rho_is_derived_from_the_published_nullifiers() {
     let witness = two_real_inputs();
     let proof = prove_with_shared_circuit(&witness).expect("leaf proves");
     let public = public_of(&proof);
@@ -704,8 +758,12 @@ fn output_rho_is_derived_from_the_published_nullifier() {
     // The rule, stated against `qnero-notes` as well as against the witness
     // helper, so both copies of it are pinned.
     let nf_1 = witness.inputs[0].nullifier();
+    let nf_2 = witness.inputs[1].nullifier();
     for index in 0..2 {
-        assert_eq!(witness.output_rho(index), output_rho(&nf_1, index as u64));
+        assert_eq!(
+            witness.output_rho(index),
+            output_rho(&nf_1, &nf_2, index as u64)
+        );
 
         let derived = Note::new(
             witness.outputs[index].pk,
@@ -779,14 +837,19 @@ fn a_value_at_or_above_the_field_modulus_is_rejected() {
         );
     }
 
-    // One below the modulus still reaches the circuit, which rejects it on the
-    // 62-bit range check. The front door bounds nothing the circuit can see.
+    // One below the modulus is canonical, so the front door passes it through
+    // and the circuit is left to reject it. Which constraint does the
+    // rejecting is not asserted here: a value that large also moves the note's
+    // commitment out of the tree and breaks the balance equation, so the leaf
+    // has three independent reasons to fail and the assertion would not
+    // isolate the range check. The isolated coverage of the 62-bit input bound
+    // is `an_input_value_of_two_to_the_62_cannot_prove`, which seeds the tree
+    // with the out-of-range commitment and balances over the integers.
     let mut witness = two_real_inputs();
     witness.inputs[0].value = ORDER - 1;
     witness
         .validate()
         .expect("a canonical value is the circuit\'s business");
-    assert_rejected(&witness, "input value just below the modulus");
 }
 
 /// Verifier artifacts arrive as bytes, and a public-input count of 26 says
@@ -869,17 +932,272 @@ fn only_the_canonical_proof_encoding_is_accepted() {
     );
 }
 
+/// A dummy input slot cannot publish a real note's nullifier, so a holder of
+/// someone else's `nk` cannot burn their notes.
+///
+/// A dummy slot proves no membership and carries no `ask`, so whatever it
+/// publishes is unauthenticated by construction. Under the real nullifier tag
+/// that would be a complete burn primitive: read a leaf's nullifiers off
+/// chain, recompute the `rho` of the note it paid out (that derivation is
+/// public), put the victim's `(nk, rho, r)` in a dummy slot of a leaf of your
+/// own, and the chain settles the victim's nullifier for a note nobody spent.
+/// The note is then permanently unspendable and the attack repeats every
+/// block. `NF_DUMMY` is what puts every dummy slot's value outside the image
+/// of the real nullifier function.
+#[test]
+fn a_dummy_slot_cannot_publish_a_real_notes_nullifier() {
+    // Leaf 1: an ordinary spend that pays the victim 700.
+    let paying = two_real_inputs();
+    let proof = prove_with_shared_circuit(&paying).expect("leaf proves");
+    let public = public_of(&proof);
+
+    let victim = recipient();
+    let victim_note = paying.output_note(0).expect("the payment note is in range");
+    assert_eq!(victim_note.pk, victim.pk());
+
+    // Everything the attacker needs beyond `nk`: `rho` is public chain data,
+    // recomputed from the two nullifiers this leaf published, and `r` reaches
+    // the recipient in the ciphertext. Giving the attacker both is the worst
+    // case, and it is still not enough.
+    assert_eq!(
+        digest_to_felts(&victim_note.rho),
+        digest_to_felts(&output_rho(
+            &paying.inputs[0].nullifier(),
+            &paying.inputs[1].nullifier(),
+            0
+        ))
+    );
+    assert_eq!(
+        public.nullifiers[0],
+        digest_to_felts(&paying.inputs[0].nullifier())
+    );
+
+    // Leaf 2: a real spend of the attacker's own note, with the victim's key
+    // material in the dummy slot. Every other constraint is satisfied, so the
+    // leaf proves; only the domain tag stands between it and the burn.
+    let mut burn = one_real_one_dummy();
+    burn.inputs[1] = InputNote {
+        ask: digest("not-the-victims-ask"),
+        nk: victim.nk(),
+        value: 0,
+        rho: victim_note.rho,
+        r: victim_note.r,
+        path: MerklePath::dummy(burn.depth),
+        is_dummy: true,
+    };
+
+    let burn_proof = prove_with_shared_circuit(&burn)
+        .expect("nothing forbids a dummy slot carrying someone else's key material");
+    circuit().1.verify(burn_proof.clone()).unwrap();
+    let burned = public_of(&burn_proof);
+
+    let real = digest_to_felts(&victim_note.nullifier(&victim.nk()));
+    assert_ne!(
+        burned.nullifiers[1], real,
+        "a dummy slot published a real note's nullifier: settling it would burn the note"
+    );
+    assert_ne!(burned.nullifiers[0], real);
+    assert_eq!(
+        burned.nullifiers[1],
+        digest_to_felts(&dummy_nullifier(
+            &victim.nk(),
+            &victim_note.rho,
+            &victim_note.r
+        )),
+        "a dummy slot must publish under the dummy domain tag"
+    );
+}
+
+/// An output's `rho` is derived from both published nullifiers, so it is
+/// unique whichever slot holds the dummy.
+///
+/// Slot 0 may be the dummy: constraint 9 only forbids both slots being dummies.
+/// Deriving from slot 0 alone would then make `rho` a function of a
+/// prover-chosen `(nk, rho, r)`, and a sender could pay one recipient from two
+/// leaves that reuse the same dummy, handing them two notes with the same
+/// `rho` of which only one is ever spendable.
+#[test]
+fn output_rho_depends_on_both_published_nullifiers() {
+    let keys = sender_keys();
+    let dummy_rho = digest("shared-dummy-rho");
+    let dummy_r = digest("shared-dummy-r");
+
+    // Two leaves that share slot 0's dummy exactly and differ only in the real
+    // note they spend from slot 1.
+    let leaf = |tag: &str, value: u64| {
+        let note = Note::new(
+            keys.pk(),
+            value,
+            digest(&format!("{tag}-rho")),
+            digest(&format!("{tag}-r")),
+        )
+        .unwrap();
+        let (tree, indices) = tree_with(&[note.commitment()]);
+        SpendWitness {
+            header: header_for(tree.root()),
+            depth: tree.depth(),
+            inputs: [
+                InputNote::dummy(&keys, dummy_rho, dummy_r, tree.depth()),
+                InputNote::real(&keys, &note, tree.path(indices[0]).unwrap()).unwrap(),
+            ],
+            outputs: [
+                OutputNote::new(recipient_pk(), value, digest(&format!("{tag}-out"))),
+                OutputNote::new(keys.pk(), 0, digest(&format!("{tag}-change"))),
+            ],
+            fee: 0,
+            ct_digest: digest(tag),
+        }
+    };
+
+    let a = leaf("slot0-dummy-a", 500);
+    let b = leaf("slot0-dummy-b", 300);
+
+    // A dummy in slot 0 is a provable shape, so the case is reachable.
+    let proof = prove_with_shared_circuit(&a).expect("a leaf with its dummy in slot 0 proves");
+    circuit().1.verify(proof).unwrap();
+
+    assert_eq!(a.inputs[0].nullifier(), b.inputs[0].nullifier());
+    for index in 0..2 {
+        assert_eq!(
+            a.output_rho(index),
+            output_rho(
+                &a.inputs[0].nullifier(),
+                &a.inputs[1].nullifier(),
+                index as u64
+            )
+        );
+        assert_ne!(
+            a.output_rho(index),
+            b.output_rho(index),
+            "output {index} reused a nullifier seed across two leaves with the same dummy"
+        );
+    }
+}
+
+/// `InputNote::dummy_random` is the constructor a wallet should use for a
+/// padding slot.
+///
+/// A dummy publishes a nullifier like any other input, so a repeated
+/// `(nk, rho, r)` publishes one the chain has already settled and the
+/// settlement extrinsic is rejected, naming a value the wallet cannot map to
+/// any note it holds. Nothing in the type system enforces freshness, so the
+/// randomized constructor is what makes the easy path the correct one.
+#[test]
+fn a_randomized_dummy_is_fresh_and_proves() {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    let keys = sender_keys();
+    let mut rng = StdRng::seed_from_u64(2026);
+
+    let mut witness = one_real_one_dummy();
+    witness.inputs[1] = InputNote::dummy_random(&mut rng, &keys, witness.depth);
+    let second = InputNote::dummy_random(&mut rng, &keys, witness.depth);
+
+    assert_ne!(witness.inputs[1].rho, second.rho);
+    assert_ne!(witness.inputs[1].r, second.r);
+    assert_ne!(witness.inputs[1].nullifier(), second.nullifier());
+    assert_eq!(witness.inputs[1].value, 0);
+
+    let proof = prove_with_shared_circuit(&witness).expect("a randomized dummy proves");
+    circuit().1.verify(proof.clone()).unwrap();
+    assert_eq!(
+        public_of(&proof).nullifiers[1],
+        digest_to_felts(&dummy_nullifier(
+            &keys.nk,
+            &witness.inputs[1].rho,
+            &witness.inputs[1].r
+        ))
+    );
+}
+
+/// A published output commitment must be the one the circuit recomputes.
+///
+/// Without that binding a leaf that balances at 500 in and 500 out can publish
+/// a commitment to any value at all, which the chain appends to the tree: an
+/// unbounded mint. The range check and the balance equation only ever see the
+/// witnessed value target, so neither of them notices.
+#[test]
+fn a_published_commitment_the_circuit_did_not_compute_is_rejected() {
+    let witness = two_real_inputs();
+    let minted = OutputNote::new(witness.outputs[0].pk, MAX_VALUE, witness.outputs[0].r)
+        .commitment_with_rho(&witness.output_rho(0));
+    assert_ne!(minted, witness.output_commitment(0));
+
+    let overrides = PublicOverrides {
+        commitments: [Some(minted), None],
+        ..PublicOverrides::default()
+    };
+    assert_override_rejected(&witness, &overrides, "a minted output commitment");
+}
+
+/// A published nullifier must be the one the circuit recomputes.
+///
+/// Without that binding a prover publishes a freshly invented nullifier on
+/// every spend of the same note, so the chain's used-nullifier set never
+/// collides and the note can be spent without limit.
+#[test]
+fn a_published_nullifier_the_circuit_did_not_compute_is_rejected() {
+    let witness = two_real_inputs();
+    let keys = sender_keys();
+    let invented = nullifier(&keys.nk, &digest("invented-rho"), &digest("invented-r"));
+    assert_ne!(invented, witness.inputs[0].nullifier());
+
+    // The output commitments are recomputed over the seed the forged nullifier
+    // would derive, so the commitment binding is satisfied and the nullifier
+    // binding is the only constraint left to reject the leaf.
+    let nf_2 = witness.inputs[1].nullifier();
+    let commitments = core::array::from_fn(|j| {
+        Some(witness.outputs[j].commitment_with_rho(&output_rho(&invented, &nf_2, j as u64)))
+    });
+
+    let overrides = PublicOverrides {
+        nullifiers: [Some(invented), None],
+        commitments,
+        ..PublicOverrides::default()
+    };
+    assert_override_rejected(&witness, &overrides, "an invented nullifier");
+}
+
+/// A published block hash must be the hash of the witnessed header.
+///
+/// It is the root of the whole security chain: `block_hash` commits to the
+/// header, the header carries `zk_tree_root`, and each input's path reaches
+/// that root. A leaf free to publish an unrelated block hash proves membership
+/// in a tree of its own and presents it as a tree the chain built.
+#[test]
+fn a_published_block_hash_the_circuit_did_not_compute_is_rejected() {
+    let witness = two_real_inputs();
+    let overrides = PublicOverrides {
+        block_hash: Some(digest("a-block-hash-from-somewhere-else")),
+        ..PublicOverrides::default()
+    };
+    assert_override_rejected(&witness, &overrides, "an unrelated block hash");
+}
+
 /// Reports the leaf's size. Ignored by default because it is a measurement,
 /// not an assertion: run it with
 /// `cargo test -p qnero-prover --release -- --ignored --nocapture`.
 ///
 /// One circuit instance throughout. Proving through the shared `OnceLock`
-/// circuit would build a second copy inside the cold timer, so the first
-/// number would be a build plus a prove, and the proof would then be verified
-/// against a different instance than it was produced by.
+/// circuit would build a second copy inside the timer, so the first number
+/// would be a build plus a prove, and the proof would then be verified against
+/// a different instance than it was produced by.
+///
+/// Proving time is reported over several proofs because a single one says very
+/// little. The FRI challenge carries 16 grinding bits, and the search for them
+/// is a geometric random variable seeded by the transcript, so two proofs of
+/// the same circuit over witnesses that differ only in a free public input
+/// measure anywhere from about 140 ms to about 380 ms on this workstation. The
+/// samples below differ only in `ct_digest`, which the circuit does not
+/// constrain, so every one of them proves the identical constraint system and
+/// the spread is entirely the grind. Comparing one warm number against another
+/// across a circuit change measures grinding luck. Compare means.
 #[test]
 #[ignore]
 fn leaf_gate_count() {
+    const SAMPLES: usize = 9;
+
     let build_start = std::time::Instant::now();
     let circuit = QneroSpendCircuit::default();
     let gates = circuit.num_gates();
@@ -887,19 +1205,23 @@ fn leaf_gate_count() {
     let data = circuit.build();
     let build = build_start.elapsed();
 
-    let witness = two_real_inputs();
-    let prove_once = || {
+    let mut proof = None;
+    let mut timings = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES {
+        let mut witness = two_real_inputs();
+        witness.ct_digest = digest(&format!("ciphertexts-sample-{sample}"));
         let mut pw = PartialWitness::<F>::new();
         fill_witness(&mut pw, &witness, &targets).unwrap();
-        data.prove(pw).unwrap()
-    };
 
-    let cold_start = std::time::Instant::now();
-    let _cold_proof = prove_once();
-    let cold = cold_start.elapsed();
-    let warm_start = std::time::Instant::now();
-    let proof = prove_once();
-    let warm = warm_start.elapsed();
+        let start = std::time::Instant::now();
+        let produced = data.prove(pw).unwrap();
+        timings.push(start.elapsed());
+        proof = Some(produced);
+    }
+    let proof = proof.expect("at least one sample");
+    timings.sort();
+    let total: std::time::Duration = timings.iter().sum();
+    let mean = total / SAMPLES as u32;
 
     let verify_start = std::time::Instant::now();
     data.verify(proof.clone()).unwrap();
@@ -914,8 +1236,10 @@ fn leaf_gate_count() {
         data.common.config.zero_knowledge
     );
     println!("  build                : {build:?}");
-    println!("  prove, cold          : {cold:?}");
-    println!("  prove, warm          : {warm:?}");
+    println!("  prove, mean of {SAMPLES}     : {mean:?}");
+    println!("  prove, min           : {:?}", timings[0]);
+    println!("  prove, median        : {:?}", timings[SAMPLES / 2]);
+    println!("  prove, max           : {:?}", timings[SAMPLES - 1]);
     println!("  verify               : {verify:?}");
     println!("  proof bytes          : {}", proof.to_bytes().len());
 }

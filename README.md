@@ -41,16 +41,22 @@ Two configurations the workspace gate does not reach, because `cargo test
 ```
 cargo check -p qnero-circuit --no-default-features
 cargo check -p qnero-verifier --no-default-features
+cargo check -p qnero-verifier --no-default-features --target wasm32v1-none
 cargo test -p qnero-prover --release --features zk
 ```
 
 The first two are the layout-only and `no_std` builds the M4 runtime depends
-on; the third is the only run that exercises plonky2 row blinding, since the
-feature gate's own unit test passes vacuously when the feature is off.
+on. The third is what actually proves the verifier's dependency graph links on
+a bare-metal wasm target: the host `no_std` check covers only this workspace's
+own code, so a dependency bump that pulls in std stays green on x86 and
+surfaces when M4 builds the runtime. The fourth is the only run that exercises
+plonky2 row blinding, since the feature gate's own unit test passes vacuously
+when the feature is off.
 
-Proving needs `--release`; a leaf takes minutes in a debug build and about a
-third of a second in a release one. The leaf's size is reported by an ignored
-test:
+Proving needs `--release`; a leaf takes minutes in a debug build and about
+0.2 s in a release one, with a wide spread because the FRI grind dominates a
+circuit this small (`docs/CIRCUIT.md` section 6). The leaf's size is reported
+by an ignored test, which proves nine samples and reports the mean:
 
 ```
 cargo test -p qnero-prover --release -- --ignored --nocapture

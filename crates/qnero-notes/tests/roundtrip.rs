@@ -1,4 +1,6 @@
-use qnero_notes::{encrypt_note, try_receive, Address, Note, NotesError, SpendingKey, MAX_VALUE};
+use qnero_notes::{
+    ct_digest, encrypt_note, try_receive, Address, Note, NotesError, SpendingKey, MAX_VALUE,
+};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -114,4 +116,32 @@ fn coinbase_public_opening() {
         qnero_notes::note::commitment_from_inner(&inner, 12_346),
         note.commitment()
     );
+}
+
+/// `ct_digest` is the one leaf public input the circuit does not constrain:
+/// the chain recomputes it from the ciphertexts in the extrinsic and compares.
+/// That comparison binds the ciphertexts only while the rule is injective, so
+/// the count and the per-ciphertext lengths are in the preimage and a reorder
+/// or a swap is a different digest.
+#[test]
+fn ct_digest_binds_the_ciphertexts_in_order() {
+    let mut rng = StdRng::seed_from_u64(77);
+    let a = sk(11).address();
+    let b = sk(12).address();
+    let note_a = Note::random(&mut rng, a.pk, 100).unwrap();
+    let note_b = Note::random(&mut rng, b.pk, 200).unwrap();
+    let ct_a = encrypt_note(&a.ek, &note_a, b"a", &[1u8; 32]).unwrap();
+    let ct_b = encrypt_note(&b.ek, &note_b, b"bb", &[2u8; 32]).unwrap();
+
+    let digest = ct_digest(&[ct_a.clone(), ct_b.clone()]);
+    assert_eq!(digest, ct_digest(&[ct_a.clone(), ct_b.clone()]));
+    assert_ne!(digest, ct_digest(&[ct_b.clone(), ct_a.clone()]));
+    assert_ne!(digest, ct_digest(std::slice::from_ref(&ct_a)));
+    assert_ne!(digest, ct_digest(&[]));
+
+    // A memo one byte longer is a different ciphertext and a different digest,
+    // which is what stops a relayer from swapping the payloads attached to a
+    // settled leaf.
+    let ct_a_longer = encrypt_note(&a.ek, &note_a, b"aa", &[1u8; 32]).unwrap();
+    assert_ne!(digest, ct_digest(&[ct_a_longer, ct_b]));
 }

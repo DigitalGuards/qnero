@@ -53,9 +53,9 @@ impl Note {
         commitment_from_inner(&self.inner(), self.value)
     }
 
-    /// `nf = H(NF, nk, rho)`. Published when the note is spent.
+    /// `nf = H(NF, nk, rho, r)`. Published when the note is spent.
     pub fn nullifier(&self, nk: &Digest) -> Digest {
-        nullifier(nk, &self.rho)
+        nullifier(nk, &self.rho, &self.r)
     }
 }
 
@@ -69,9 +69,33 @@ pub fn note_inner(pk: &Digest, rho: &Digest, r: &Digest) -> Digest {
     Digest::hash_felts(domain::NOTE, &[pk.felts(), rho.felts(), r.felts()])
 }
 
-/// `nf = H(NF, nk, rho)`, on loose fields.
-pub fn nullifier(nk: &Digest, rho: &Digest) -> Digest {
-    Digest::hash_felts(domain::NF, &[nk.felts(), rho.felts()])
+/// `nf = H(NF, nk, rho, r)`, on loose fields.
+///
+/// `r` is in the preimage so that `nk` alone is not a spend-linkability key
+/// for the whole pool. An output's `rho` is a public function of the leaf that
+/// created it (see [`output_rho`]), so the candidate `rho` set for the entire
+/// chain is public data; were the nullifier a function of `(nk, rho)` only, a
+/// holder of `nk` could hash every published pair against every leaf and
+/// recover exactly which notes that wallet spent, with no viewing key and no
+/// decryption. `r` is known only to the note's sender and holder, which is the
+/// same role Orchard gives `psi`. It also means a leaked `nk` cannot be used
+/// to compute a victim's nullifier from public data alone.
+pub fn nullifier(nk: &Digest, rho: &Digest, r: &Digest) -> Digest {
+    Digest::hash_felts(domain::NF, &[nk.felts(), rho.felts(), r.felts()])
+}
+
+/// `nf = H(NF_DUMMY, nk, rho, r)`: the nullifier a padding input slot
+/// publishes.
+///
+/// Same shape as [`nullifier`] under a different domain tag. A dummy slot
+/// proves no membership and carries no `ask`, so whatever it publishes is
+/// unauthenticated; the separate tag is what keeps that value out of the image
+/// of the real nullifier function. Without it, a holder of a victim's `nk`
+/// could put the victim's nullifier in a dummy slot of their own leaf and have
+/// the chain settle it, which burns the victim's note permanently while
+/// proving nothing about it.
+pub fn dummy_nullifier(nk: &Digest, rho: &Digest, r: &Digest) -> Digest {
+    Digest::hash_felts(domain::NF_DUMMY, &[nk.felts(), rho.felts(), r.felts()])
 }
 
 /// Recompute a commitment from its public opening. Used by the chain for
@@ -81,20 +105,30 @@ pub fn commitment_from_inner(inner: &Digest, value: u64) -> Digest {
     Digest::hash_felts(domain::CM, &[inner.felts(), &[Felt::new(value)]])
 }
 
-/// `rho = H(RHO, nf, index)`: the nullifier seed of output note `index` of a
-/// spend whose first published nullifier is `nf`.
+/// `rho = H(RHO, nf_1, nf_2, index)`: the nullifier seed of output note
+/// `index` of a spend that published `nf_1` and `nf_2`.
 ///
 /// A sender does not choose an output's `rho`. The spend circuit derives it
-/// from the nullifier it publishes for its first input, so that every note
-/// the pool ever creates has a distinct `rho`: the chain refuses a nullifier
-/// it has already seen, which makes `nf` unique over the life of the chain,
-/// and `index` separates the two outputs of one spend.
+/// from both nullifiers the leaf publishes, so that every note the pool ever
+/// creates has a distinct `rho`, and `index` separates the two outputs of one
+/// spend.
 ///
-/// A freely chosen `rho` is a griefing vector. `nf = H(NF, nk, rho)` depends
-/// only on the recipient's key and `rho`, so a sender who pays the same
-/// recipient twice with one `rho` creates two notes that share a nullifier,
-/// of which the recipient can spend exactly one; the other is stranded for
-/// good, at the cost of the smaller note.
-pub fn output_rho(nf: &Digest, index: u64) -> Digest {
-    Digest::hash_felts(domain::RHO, &[nf.felts(), &[Felt::new(index)]])
+/// Both nullifiers are in the preimage because a leaf may carry its real
+/// input in either slot. At least one input is real,
+/// a real note's nullifier is settled exactly once over the life of the chain,
+/// and the chain refuses a nullifier it has already seen, so the pair
+/// `(nf_1, nf_2)` can never repeat no matter which slot holds the dummy.
+/// Deriving from slot 0 alone would rest the whole uniqueness argument on a
+/// prover-chosen value whenever slot 0 is the dummy.
+///
+/// A freely chosen `rho` is a griefing vector. `nf` depends on the recipient's
+/// key, `rho` and `r`, and a sender picks all three for a note it creates, so
+/// a sender who pays the same recipient twice with one `(rho, r)` creates two
+/// notes that share a nullifier, of which the recipient can spend exactly one;
+/// the other is stranded for good, at the cost of the smaller note.
+pub fn output_rho(nf_1: &Digest, nf_2: &Digest, index: u64) -> Digest {
+    Digest::hash_felts(
+        domain::RHO,
+        &[nf_1.felts(), nf_2.felts(), &[Felt::new(index)]],
+    )
 }

@@ -11,7 +11,8 @@
 //! carries a private `zk_tree_root`. Each input note's commitment is
 //! recomputed from a spend key the prover holds, and a Merkle path takes that
 //! commitment to `zk_tree_root`. Each input's nullifier is recomputed from the
-//! same nullifier key and note seed and published. Each output's commitment is
+//! same nullifier key and note randomness and published, under a domain tag
+//! that says whether the slot was real. Each output's commitment is
 //! recomputed and published. Values balance as a field equation over 62-bit
 //! terms. The chain then only has to check that `block_hash` is a block it
 //! produced, that neither nullifier has been seen, and that the ciphertexts it
@@ -33,7 +34,9 @@ use crate::layout::{NUM_INPUTS, NUM_OUTPUTS};
 use crate::merkle::{
     active_level_flags_from_bits, merkle_root_from_path, MerklePathTargets, DEPTH_BITS, MAX_DEPTH,
 };
-use crate::note_gadget::{derive_pk, note_commitment, note_inner, note_nullifier, output_rho};
+use crate::note_gadget::{
+    derive_pk, note_commitment, note_inner, note_nullifier_tagged, nullifier_domain_tag, output_rho,
+};
 use crate::{C, D, F};
 
 /// Private targets for one input note.
@@ -49,8 +52,10 @@ pub struct InputNoteTargets {
     pub r: HashOutTarget,
     pub value: Target,
     pub path: MerklePathTargets,
-    /// Witnessed. A dummy input carries value 0 and skips membership; its
-    /// nullifier is still published, so it must be unique.
+    /// Witnessed. A dummy input carries value 0, skips membership, and
+    /// publishes its nullifier under the `NF_DUMMY` domain tag so the value
+    /// cannot collide with any real note's nullifier. It is still published,
+    /// so it must be unique.
     pub is_dummy: BoolTarget,
 }
 
@@ -71,7 +76,7 @@ impl InputNoteTargets {
 /// Private targets for one output note.
 ///
 /// There is no `rho` target. An output's nullifier seed is derived in circuit
-/// from the leaf's first published nullifier, so a sender cannot choose it;
+/// from both nullifiers the leaf publishes, so a sender cannot choose it;
 /// see [`crate::note_gadget::output_rho`].
 #[derive(Debug, Clone)]
 pub struct OutputNoteTargets {
@@ -160,6 +165,14 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
     // bound it to MAX_DEPTH and derive the 16 level flags. Splitting a second
     // time for the bound would add a BaseSumGate and a second comparison chain
     // over a value the first split already determines.
+    //
+    // The MAX_DEPTH bound is defensive: it rejects no witness that the level
+    // flags would otherwise accept. `split_le` over DEPTH_BITS already pins
+    // `depth` below 32, and the flags only ask
+    // `level < depth` for levels 0..MAX_DEPTH, so every depth in
+    // `MAX_DEPTH..32` produces the same all-true flags as `MAX_DEPTH` itself.
+    // It is kept so that a later change to the flag derivation, or anything
+    // that indexes by `depth`, cannot silently inherit an unbounded value.
     let depth_bits = builder.split_le(targets.depth, DEPTH_BITS);
     let depth_over_max = const_less_than_bits(builder, MAX_DEPTH, &depth_bits);
     builder.connect(depth_over_max.target, zero);
@@ -194,8 +207,22 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
         }
 
         // Published for every input, dummy or not, so a dummy is
-        // indistinguishable from a real spend in the public inputs.
-        let nullifier = note_nullifier(builder, input.nk, input.rho);
+        // indistinguishable from a real spend in the public inputs: both are
+        // uniform 4-felt Poseidon2 outputs.
+        //
+        // The domain tag is chosen in circuit by the `is_dummy` bit. A dummy
+        // slot proves no membership and carries no `ask`, so whatever it
+        // publishes is unauthenticated; under the real tag it would be an
+        // arbitrary nullifier of the prover's choosing. A holder of a victim's
+        // `nk` and of the victim note's `(rho, r)` could then publish that
+        // victim's nullifier from a dummy slot of their own leaf and have the
+        // chain settle it, burning the note permanently while proving nothing
+        // about it. `NF_DUMMY` puts every dummy slot's value outside the image
+        // of the real nullifier function, so no leaf can ever settle a real
+        // note's nullifier without the membership proof and the spend key that
+        // go with it.
+        let nullifier_tag = nullifier_domain_tag(builder, input.is_dummy);
+        let nullifier = note_nullifier_tagged(builder, nullifier_tag, input.nk, input.rho, input.r);
         builder.connect_hashes(nullifier, targets.nullifiers[index]);
 
         input_values.push(input.value);
@@ -244,24 +271,32 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
     }
     builder.connect(all_dummy, zero);
 
-    // 6. Output notes. `rho` is derived from the first published nullifier.
-    // The reason: `nf = H(NF, nk, rho)` is a function of the recipient's
-    // key and `rho` alone, so a sender free to repeat a `rho` could pay one
-    // recipient twice with notes that share a nullifier and strand whichever
-    // of the two the recipient does not spend first. `nf_1` is unique over the
-    // life of the chain, because the chain refuses a nullifier it has already
-    // settled, and the output index separates the two outputs of one leaf.
+    // 6. Output notes. `rho` is derived from both published nullifiers.
+    // The reason: `nf = H(NF, nk, rho, r)` is a function of the recipient's
+    // key and of values the sender picks for a note it creates, so a sender
+    // free to repeat a `(rho, r)` could pay one recipient twice with notes
+    // that share a nullifier and strand whichever of the two the recipient
+    // does not spend first. The output index separates the two outputs of one
+    // leaf.
     //
-    // This holds when input 0 is a dummy as well: a dummy publishes a
-    // nullifier like any other input, and the chain settles it like any other,
-    // so a second leaf reusing that dummy's `rho` is rejected on chain. It
-    // does require the chain to settle both published nullifiers without
-    // trying to tell a dummy slot from a real one, which is exactly what it
-    // cannot do; `docs/CIRCUIT.md` section 4 states it as an M4 obligation.
+    // Both nullifiers are in the preimage because either slot may hold the
+    // dummy. Constraint 9 guarantees at least one input is real; a real note's
+    // nullifier is settled exactly once over the life of the chain, since the
+    // chain must refuse a repeat to stop double spends, so the pair can never
+    // repeat whichever slot is real. Deriving from slot 0 alone would rest the
+    // whole uniqueness argument on a prover-chosen value in every leaf whose
+    // slot 0 is a dummy, and would make the chain's settlement of dummy
+    // nullifiers load bearing for uniqueness as well as for double-spend
+    // safety.
     let mut output_values = Vec::with_capacity(NUM_OUTPUTS + 1);
     for (index, output) in targets.outputs.iter().enumerate() {
         builder.range_check(output.value, VALUE_BITS as usize);
-        let rho = output_rho(builder, targets.nullifiers[0], index as u64);
+        let rho = output_rho(
+            builder,
+            targets.nullifiers[0],
+            targets.nullifiers[1],
+            index as u64,
+        );
         let inner = note_inner(builder, output.pk, rho, output.r);
         let commitment = note_commitment(builder, inner, output.value);
         builder.connect_hashes(commitment, targets.commitments[index]);

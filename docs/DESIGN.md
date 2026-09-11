@@ -72,10 +72,12 @@ Two hash forms appear here and they are not interchangeable. `H("qnero/...",
 it is used exactly where written: `ask`, `nk`, and the ML-KEM seed. `H(TAG,
 ...)` is Poseidon2 over field elements with a one-felt domain tag as the first
 sponge input: `AK = 0x716e_0001`, `PK = 0x716e_0002`, `NOTE = 0x716e_0003`,
-`CM = 0x716e_0004`, `NF = 0x716e_0005`. Those are the values in
-`qnero_notes::digest::domain`, and the spend circuit imports them from that
-crate so the two copies cannot drift. `docs/CIRCUIT.md` section 3 is the
-authority.
+`CM = 0x716e_0004`, `NF = 0x716e_0005`, `RHO = 0x716e_0006` (hashes the two
+nullifiers a spend publishes and an output index, derived in circuit) and
+`NF_DUMMY = 0x716e_0007` (the nullifier a padding input slot publishes). Those
+are the values in `qnero_notes::digest::domain`, and the spend circuit imports
+them from that crate so the two copies cannot drift. `docs/CIRCUIT.md` section
+3 is the authority.
 
 Address size is dominated by the ML-KEM encapsulation key: 1184 bytes at
 ML-KEM-768, 1568 at ML-KEM-1024. Decision pending: ML-KEM-1024 for level-5
@@ -84,8 +86,18 @@ addresses are QR-code sized, the same trade-off the QRL Connect protocol
 already made.
 
 Viewing: `dk` alone lets a wallet detect and decrypt incoming notes and see
-outgoing note contents it authored. `nk` alone reveals which notes were spent.
-`ask` is needed to spend. This matches Monero's view-key / spend-key split.
+outgoing note contents it authored. `nk` tells the holder of a note whether it
+has been spent. `ask` is needed to spend. This matches Monero's view-key /
+spend-key split.
+
+`nk` is a viewing-tier secret and confers nothing beyond detection. Two
+properties of the spend circuit keep it that way, both in `docs/CIRCUIT.md`
+section 3. The nullifier hashes `(nk, rho, r)`, and `r` reaches only the note's
+sender and its holder, so `nk` plus the publicly derivable `rho` of every
+output note is still not enough to compute anyone's nullifiers and link their
+spends pool-wide. And a padding input slot's nullifier is domain separated, so
+a holder of someone else's `nk` cannot publish that person's nullifier from a
+slot that proves no membership and burn the note.
 
 ## 5. Notes
 
@@ -93,7 +105,7 @@ outgoing note contents it authored. `nk` alone reveals which notes were spent.
 note      = (pk, v: u64 capped at 2^62 - 1, rho: 32 bytes, r: 32 bytes)
 inner     = H(NOTE, pk, rho, r)
 cm        = H(CM, inner, v)
-nf        = H(NF, nk, rho)
+nf        = H(NF, nk, rho, r)
 ```
 
 The 62-bit cap on `v` is a consensus rule. The no-wrap argument behind the
@@ -106,9 +118,22 @@ The two-layer commitment lets a coinbase note carry a public `v` and a public
 notes keep both layers private.
 
 Output on chain: `cm` (32 bytes), ML-KEM ciphertext (1088 or 1568 bytes),
-AEAD ciphertext of `(v, rho, r, memo)` keyed by `H(shared_secret, cm)`.
-Recipients scan every output by decapsulating and attempting decryption,
-the same linear scan Monero wallets do.
+AEAD ciphertext of `(v, rho, r, memo)`. Recipients scan every output by
+decapsulating and attempting decryption, the same linear scan Monero wallets
+do. The leaf's `ct_digest` public input binds the ciphertexts to the proof;
+`qnero_notes::ct_digest` is the rule and `docs/CIRCUIT.md` section 1 states it.
+
+The AEAD key and nonce come from the KEM shared secret, a per-payload label and
+the crypto suite (`qnero_pqcrypto::note_encryption`), with the version, suite
+and diversifier index as associated data. The commitment is not an input to
+that derivation, so key separation between two outputs rests entirely on the
+KEM randomness being fresh per output. `encrypt_note` documents the
+requirement and nothing enforces it, so reusing `kem_randomness` across two
+outputs to one recipient encrypts both payloads under one ChaCha20-Poly1305 key
+and nonce, which leaks the XOR of the two plaintexts and the Poly1305
+authentication key. M5 owns two things here: make per-output freshness an
+invariant a wallet cannot violate, and decide whether to feed `cm` into the
+derivation so that a reuse bug is survivable.
 
 ## 6. v0 spend circuit (leaf)
 
@@ -122,7 +147,7 @@ Private inputs: for each input, `(v, rho, r)` plus `ask`, `nk`, a Merkle path
 to `zk_tree_root` and a dummy flag; for each output, `pk`, `v` and `r`. An
 input's `pk` is derived in circuit from `ask` and `nk`, so a wrong credential
 yields a commitment that is not in the tree, and an
-output's `rho` is derived from the leaf's first published nullifier, so a
+output's `rho` is derived from both nullifiers the leaf publishes, so a
 sender cannot hand two notes the same nullifier seed.
 
 Public inputs (felts): `block_hash(4)`, `block_number(1)`, `nf_1(4)`,
@@ -133,11 +158,11 @@ Constraints:
    (existing fragment).
 2. For each non-dummy input: `pk = H(ak, nk)` with `ak = H(ask)`; `cm`
    recomputed from the note; Merkle path from `cm` to `zk_tree_root`;
-   `nf = H(nk, rho)`. Dummy inputs have `v = 0` and a random nullifier
-   preimage (existing dummy pattern), and at least one input must be real, so
-   a leaf always consumes a note.
-3. For each output: `rho` derived as `H(RHO, nf_1, j)`; `cm_out` recomputed
-   from the note; `v_out` range-checked to 62 bits.
+   `nf = H(NF, nk, rho, r)`. Dummy inputs have `v = 0` and a random nullifier
+   preimage under a separate domain tag (`NF_DUMMY`), and at least one input
+   must be real, so a leaf always consumes a note.
+3. For each output: `rho` derived as `H(RHO, nf_1, nf_2, j)`; `cm_out`
+   recomputed from the note; `v_out` range-checked to 62 bits.
 4. Balance: `v_in_1 + v_in_2 = v_out_1 + v_out_2 + fee`, all values 62-bit so
    no field wrap.
 5. `ct_digest` is a free public input. The chain recomputes
@@ -151,7 +176,9 @@ batch is the on-chain transaction unit. Public batch: unchanged in shape.
 
 1. Parse the new PI layout; keep the block-hash-at-height check and nullifier
    dedupe.
-2. For each real leaf: mark both nullifiers used, append `cm_out_1`,
+2. For each real leaf: mark both published nullifiers used, including a dummy
+   slot's, which the chain cannot and must not try to tell apart; append
+   `cm_out_1`,
    `cm_out_2` to `pallet-zk-tree`, emit the ciphertexts in an event and store
    them by leaf index for wallet sync.
 3. Fee: sum of leaf fees, split burn / block author as Wormhole does today.
@@ -164,7 +191,7 @@ batch is the on-chain transaction unit. Public batch: unchanged in shape.
 | # | Deliverable | Estimate |
 |---|---|---|
 | M1 | `qnero-notes` crate: keys, addresses, note commitment, ML-KEM note encryption, scan; KATs pinned | DONE 2026-09-11 |
-| M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (317 gates, degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
+| M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (319 gates, degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
 | M3 | Private and public batch aggregators on the new PI layout | 1 week |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | 2 weeks |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | 2 weeks |

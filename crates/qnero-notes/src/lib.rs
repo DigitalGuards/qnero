@@ -17,8 +17,9 @@
 //!
 //! inner     = H(NOTE, pk, rho, r)
 //! cm        = H(CM, inner, v)
-//! nf        = H(NF, nk, rho)
-//! rho_out_j = H(RHO, nf_1, j)                   seed of output j of a spend
+//! nf        = H(NF, nk, rho, r)
+//! nf_dummy  = H(NF_DUMMY, nk, rho, r)           padding input slot
+//! rho_out_j = H(RHO, nf_1, nf_2, j)             seed of output j of a spend
 //! ```
 //!
 //! `H` is Poseidon2 over field elements with a one-felt domain tag; `H_bytes`
@@ -36,11 +37,14 @@ pub mod note;
 
 pub use address::{Address, ADDRESS_HRP, ADDRESS_VERSION};
 pub use digest::{Digest, Felt};
-pub use encrypt::{decrypt_note, encrypt_note, try_receive, NoteCiphertext, ReceivedNote};
+pub use encrypt::{
+    ct_digest, decrypt_note, encrypt_note, try_receive, NoteCiphertext, ReceivedNote,
+};
 pub use error::NotesError;
 pub use keys::{
     derive_ak, derive_pk, DerivedKeys, FullViewingKey, IncomingViewingKey, SpendingKey,
 };
 pub use note::{
-    commitment_from_inner, note_inner, nullifier, output_rho, Note, MAX_VALUE, VALUE_BITS,
+    commitment_from_inner, dummy_nullifier, note_inner, nullifier, output_rho, Note, MAX_VALUE,
+    VALUE_BITS,
 };

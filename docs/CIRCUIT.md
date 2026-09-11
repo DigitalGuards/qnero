@@ -30,7 +30,7 @@ circuit's `num_public_inputs` against `PUBLIC_INPUT_LEN`.
 | 13..17 | 4 | `cm_out_1` | commitment of output note 1 |
 | 17..21 | 4 | `cm_out_2` | commitment of output note 2 |
 | 21 | 1 | `fee` | public fee, 62 bits |
-| 22..26 | 4 | `ct_digest` | digest of the output ciphertexts |
+| 22..26 | 4 | `ct_digest` | digest of the output ciphertexts, see below |
 
 This is the layout `docs/DESIGN.md` section 6 specified, with no deviation.
 
@@ -42,8 +42,28 @@ recompute the digest of the ciphertexts in the extrinsic and compare it to
 
 `ct_digest` is deliberately unconstrained inside the circuit. Hashing
 kilobytes of ML-KEM and AEAD ciphertext in circuit would dominate the proof;
-the chain recomputes the digest from the bytes it was handed, which binds them
-to this proof just as tightly.
+the chain recomputes the digest from the bytes it was handed and compares.
+
+That comparison binds the ciphertexts only while the rule is unambiguous, so
+the rule is fixed here and implemented once, in `qnero_notes::ct_digest`, which
+both the wallet and `pallet-shielded` call:
+
+```text
+ct_digest = H_bytes("qnero/ct" || u32_le(count)
+                    || u32_le(len_1) || ct_1 || ... || u32_le(len_n) || ct_n)
+```
+
+`H_bytes` is the byte-mode Poseidon2 sponge, with the ASCII prefix as the
+domain separator the way `H("qnero/ask", sk)` uses one; `ct_digest` is never
+recomputed in circuit, so it does not need the field-mode tag. `ct_i` is
+`NoteCiphertext::to_bytes`, in output order, so `ct_1` belongs to `cm_out_1`.
+
+The count and the per-ciphertext lengths are what make it injective. A
+`NoteCiphertext` is an ML-KEM ciphertext plus two variable-length AEAD
+payloads, so a bare concatenation would let two different output pairs share a
+preimage; a relayer could then swap the ciphertexts attached to a settled leaf
+for a colliding pair, pass the chain's comparison, and leave the recipient
+unable to decrypt a note whose commitment is already in the tree.
 
 ## 2. Private witness
 
@@ -74,36 +94,62 @@ what the circuit publishes against `Note::commitment` and `Note::nullifier`
 for the same witness.
 
 ```text
-ak        = H(AK,   ask)
-pk        = H(PK,   ak, nk)
-inner     = H(NOTE, pk, rho, r)
-cm        = H(CM,   inner, value)
-nf        = H(NF,   nk, rho)
-rho_out_j = H(RHO,  nf_1, j)
+ak        = H(AK,       ask)
+pk        = H(PK,       ak, nk)
+inner     = H(NOTE,     pk, rho, r)
+cm        = H(CM,       inner, value)
+nf        = H(NF,       nk, rho, r)          real input slot
+nf_dummy  = H(NF_DUMMY, nk, rho, r)          padding input slot
+rho_out_j = H(RHO,      nf_1, nf_2, j)
 ```
 
 `H(tag, parts...)` is Poseidon2 over the concatenation with the one-felt domain
 tag first. `value` is a single field element over its full 62-bit range, not
 the two 32-bit limbs the Wormhole leaf uses for a `u64`.
 
-**An output's `rho` is derived by the circuit.** `rho_out_j = H(RHO, nf_1, j)`,
-where `nf_1` is the nullifier the leaf publishes for input slot 0 and `j` is
-the output index. A sender who could pick `rho` freely could grief a
-recipient: `nf = H(NF, nk, rho)` depends on the recipient's key and `rho`
-alone, so paying one recipient twice with one `rho` creates two notes that
-share a nullifier, of which the recipient can spend exactly one, and the other
-is stranded permanently. Constraint 5 catches that only inside a single leaf,
-and the chain's used-nullifier set catches it only after the victim has spent
-one of the two. Deriving `rho` removes the choice: `nf_1` is settled once over
-the life of the chain, so `(nf_1, j)` is unique. This is the same binding
-Sapling and Orchard make between an output's `rho` and a spent nullifier.
+**The nullifier binds `r` as well as `(nk, rho)`.** Every output note's `rho` is
+a public function of the leaf that created it, so the candidate `rho` set for
+the whole chain is public data. Were the nullifier `H(NF, nk, rho)`, a holder
+of `nk` alone could hash it against every published `rho` and recover exactly
+which notes that wallet spent and which leaf minted each one, with no incoming
+viewing key, no ML-KEM decapsulation key and no ciphertext. `r` is known only
+to a note's sender and its holder, which is the role Orchard gives `psi`. So
+`nk` grants spend **detection** for notes a wallet can already see, and never
+pool-wide linkability or the ability to compute someone's nullifier from
+public data.
 
-It holds for a dummy input slot too, and it is where the leaf leans on the
-chain: a dummy publishes a nullifier like any other input, so a second leaf
-reusing that dummy's `rho` is refused only if the chain settles **both**
-published nullifiers without trying to tell a dummy from a real spend. It
-cannot tell them apart, which is the point of publishing both; section 4
-records this as an M4 obligation.
+**A dummy input slot's nullifier is domain separated.** A dummy proves no
+membership and carries no `ask`, so whatever it publishes is unauthenticated by
+construction: the circuit computes it from two free witness targets. Under the
+real tag that is a burn primitive. An attacker holding a victim's `nk` and the
+victim note's `(rho, r)` could put them in a dummy slot of a leaf of their own,
+the chain would settle the victim's nullifier for a note nobody spent, and the
+note would be permanently unspendable at the cost of one leaf. `NF_DUMMY` puts
+every dummy slot's value outside the image of the real nullifier function, so
+no leaf can settle a real note's nullifier without the membership proof and the
+spend credential that go with it. A dummy nullifier is still a uniform 4-felt
+Poseidon2 output, so which slots were real stays invisible in the public
+inputs, and the chain still settles both without telling them apart.
+
+**An output's `rho` is derived by the circuit.**
+`rho_out_j = H(RHO, nf_1, nf_2, j)` over both nullifiers the leaf publishes and
+the output index. A sender who could pick `rho` freely could grief a recipient:
+`nf` does not depend on the note's value, and a sender picks `rho` and `r` for
+a note it creates, so paying one recipient twice with one pair creates two
+notes that share a nullifier, of which the recipient can spend exactly one, and
+the other is stranded permanently. Constraint 5 catches that only inside a
+single leaf, and the chain's used-nullifier set catches it only after the
+victim has spent one of the two. Deriving `rho` removes the choice. This is the
+same binding Sapling and Orchard make between an output's `rho` and a spent
+nullifier.
+
+Both nullifiers are in the preimage because either slot may hold the dummy:
+constraint 9 only forbids both slots being dummies. Constraint 9 guarantees at
+least one input is real, a real note's nullifier is settled exactly once over
+the life of the chain because the chain must refuse a repeat to stop double
+spends, so the pair `(nf_1, nf_2)` can never repeat whichever slot is real.
+Deriving from slot 0 alone would rest the whole uniqueness argument on a
+prover-chosen value in every leaf whose slot 0 is a dummy.
 
 The header hash keeps the chain's preimage order:
 
@@ -228,10 +274,16 @@ item 8 above is what actually enforces.
 
 One obligation the circuit places on `pallet-shielded`: **settle both published
 nullifiers of every leaf.** A dummy input slot publishes a nullifier like a
-real one, by design, so the chain cannot tell them apart and must not try. It
-is also what makes the derived output `rho` of section 3 unique, since a second
-leaf reusing a dummy's `rho` is refused only because its `nf_1` was already
-settled.
+real one, by design, so the chain cannot tell them apart and must not try. Both
+values are needed for double-spend safety: a note spent from slot 1 is marked
+used only if slot 1's nullifier is settled. Uniqueness of the derived output
+`rho` does **not** depend on this, since `rho_out_j` is derived from both
+nullifiers and at least one of them belongs to a real note (section 3).
+
+The same obligation reaches the pallet through M3, so section 8 states it as a
+forwarding contract on the batch wrapper as well. A wrapper that forwards one
+nullifier per leaf, which is the shape upstream's private batch has, drops
+every leaf's `nf_2` before the pallet ever sees it.
 
 ### Why not pack a commitment into the existing typed leaf
 
@@ -259,19 +311,32 @@ attack on Poseidon2.
 2. `depth <= MAX_DEPTH`. The value is decomposed into bits exactly once, by
    `split_le`, which is also what range-constrains it; the same bits carry the
    bound and derive the 16 `level < depth` flags that both paths share.
+
+   The `MAX_DEPTH` comparison is defensive, and it rejects no witness that the
+   level flags would otherwise accept. `split_le` over `DEPTH_BITS` already
+   pins `depth` below 32, and the flags only ask `level < depth` for levels
+   `0..MAX_DEPTH`, so every depth in `MAX_DEPTH..32` produces the same all-true
+   flags as `MAX_DEPTH` itself. What bounds the tree today is the flag
+   derivation. The comparison is kept so that a later change to that
+   derivation, or anything that indexes by `depth`, cannot silently inherit an
+   unbounded value.
 3. Per input: `pk = H(PK, H(AK, ask), nk)`, `cm = H(CM, H(NOTE, pk, rho, r),
-   value)`, the path from `cm` reaches `zk_tree_root`, and
-   `nf = H(NF, nk, rho)` is published. The root equality is gated:
-   `(root_limb - zk_tree_root_limb) * (1 - is_dummy) == 0`.
+   value)`, the path from `cm` reaches `zk_tree_root`, and a nullifier over
+   `(nk, rho, r)` is published. The root equality is gated:
+   `(root_limb - zk_tree_root_limb) * (1 - is_dummy) == 0`. The nullifier's
+   domain tag is selected in circuit by the same bit: `NF` for a real slot,
+   `NF_DUMMY` for a dummy, so a slot that proves no membership can never
+   publish a value in the image of the real nullifier function. See section 3
+   for both properties.
 4. Per input: `value * is_dummy == 0`, and `value < 2^62`.
 5. `nf_1 != nf_2`. Equal nullifiers would be the same note spent twice inside
    one leaf, which a chain that inserts both nullifiers from one transaction
    without intra-transaction dedup would not catch. This is an addition over
    the Wormhole leaf, which has a single nullifier.
-6. Per output: `rho = H(RHO, nf_1, j)` derived from the leaf's first published
-   nullifier and the output index, `cm_out = H(CM, H(NOTE, pk, rho, r), value)`
-   bound to the public commitment, and `value < 2^62`. See section 3 for why
-   `rho` is derived here.
+6. Per output: `rho = H(RHO, nf_1, nf_2, j)` derived from both published
+   nullifiers and the output index, `cm_out = H(CM, H(NOTE, pk, rho, r),
+   value)` bound to the public commitment, and `value < 2^62`. See section 3
+   for why `rho` is derived here and why both nullifiers are in it.
 7. `fee < 2^62`.
 8. `v_in_1 + v_in_2 == v_out_1 + v_out_2 + fee`, as a field equation. Every
    term is below `2^62`, so the left side is below `2^63` and the right side
@@ -306,15 +371,19 @@ attack on Poseidon2.
 
 `is_dummy` is a witnessed bit. The circuit does not derive it from the public
 inputs the way the Wormhole leaf derives its dummy-leaf sentinel. Setting it
-forces the input's value to zero and skips only the membership check; the nullifier is
-still computed from the witnessed `nk` and `rho` and published, so a dummy slot
-is not visible in the public inputs. Claiming `is_dummy` for a note one does
-own gains nothing: the value is zeroed, so the spender only loses the note's
-value from the balance.
+forces the input's value to zero, skips the membership check, and swaps the
+nullifier's domain tag to `NF_DUMMY`. The nullifier is still computed from the
+witnessed `(nk, rho, r)` and published, and it is still a uniform Poseidon2
+output, so a dummy slot is invisible in the public inputs. Claiming `is_dummy`
+for a note one does own gains nothing: the value is zeroed, so the spender only
+loses the note's value from the balance.
 
-The wallet must give every dummy a fresh `rho`, both because two dummies with
-the same `(nk, rho)` would collide under constraint 5, and because a repeated
+The wallet must give every dummy a fresh `(rho, r)`, both because two dummies
+with the same pair would collide under constraint 5, and because a repeated
 dummy nullifier would be rejected on chain as already used.
+`InputNote::dummy_random` is the constructor that draws them, and it is the one
+a wallet should call; `InputNote::dummy` takes them from the caller and leaves
+freshness to it.
 
 This is a different mechanism from the Wormhole leaf's dummy, which marks a
 whole leaf as padding for the batch and makes the header binding conditional on
@@ -327,15 +396,27 @@ development workstation, single threaded (plonky2's `parallel` feature is off
 so a prover cannot saturate a machine unasked):
 
 ```
-gates before padding : 317
+gates before padding : 319
 degree_bits          : 9
 public inputs        : 26
 zero knowledge       : false
-build                : 62 ms
-prove, warm          : 155 ms
+build                : 61 ms
+prove, mean of 9     : 195 ms
+prove, min           : 138 ms
+prove, median        : 178 ms
+prove, max           : 300 ms
 verify               : 2.3 ms
 proof bytes          : 105500
 ```
+
+Proving time is a mean over nine proofs, and the spread is the measurement, so
+a single warm number would be misleading. The FRI challenge carries 16 grinding
+bits and the search for them is a geometric random variable seeded by the
+transcript, which dominates a circuit this small: the nine samples above prove
+the identical constraint system over witnesses that differ only in `ct_digest`,
+a public input the circuit does not constrain, and they range from 138 ms to
+300 ms. Comparing one warm number against another across a circuit change
+measures grinding luck. Compare means, over the same sample count.
 
 The gate count is dominated by the two Merkle paths: 16 levels each, evaluated
 unconditionally so the cost does not leak the tree's real depth, at three
@@ -357,6 +438,23 @@ with a clear error unless `qnero-circuit`'s `zk` feature is on.
 
 ## 8. What M3 and M4 still have to decide
 
+- **Per-leaf forwarding contract for the batch wrapper.** Every non-padding
+  slot's two nullifiers, two output commitments, fee and `ct_digest` must reach
+  the aggregated public inputs, and the wrapper must constrain all `2N` real
+  nullifiers pairwise distinct. This is the one place a mechanical fork of
+  upstream's private batch goes wrong quietly. Upstream's leaf has a single
+  nullifier, so its wrapper carries `nullifiers_count(N) = N` and an aggregated
+  layout of one nullifier per leaf; the visibly required edits when porting are
+  the leaf-side constants (`LEAF_PI_LEN` 22 to 26, `NULLIFIER_START` 4 to 5),
+  and making only those drops every leaf's `nf_2` at the batch boundary. A note
+  spent from input slot 1 would then never be marked used and could be spent
+  again without limit. Upstream also constrains only `N` nullifiers pairwise
+  distinct; at two per leaf that has to become `2N`, or one leaf proof replayed
+  across slots aggregates twice against a single settled nullifier. Sizing, so
+  the fork is known to fit: at `N = 7` the wrapper needs 5 shared felts
+  (`block_hash` 4, `block_number` 1) plus 21 per leaf (two nullifiers, two
+  commitments, fee, `ct_digest`), against the `26 * 7 + 8 = 190` that
+  upstream's `pi_len()` formula yields at 26 felts per leaf.
 - **Batch padding sentinel.** A private batch of N leaves needs dummy leaves
   when fewer than N real ones are available. The Wormhole wrapper recognises a
   dummy by an all-zero `block_hash` and re-masks every field it reads from a
@@ -394,18 +492,26 @@ with a clear error unless `qnero-circuit`'s `zk` feature is on.
   than three routed wires. Provenance is a separate question. The keccak pin on
   the artifact bytes still needs a tagged circuit release to pin, and every
   circuit change after that invalidates it.
+- **Pallet-side `ct_digest` recomputation.** The rule is fixed (section 1) and
+  implemented once in `qnero_notes::ct_digest`. What M4 owes is the call:
+  recompute the digest over the ciphertexts in the settlement extrinsic, in
+  output order, and reject the leaf when it differs from the public input.
+  Without that call the ciphertexts are attached to a proof that says nothing
+  about them.
 - **Coinbase and deposit range checks.** Every value that enters the pool
   outside a spend must be range checked to 62 bits by the pallet, or the
   balance argument in constraint 8 does not hold for notes created that way.
 - **Nullifier seed uniqueness outside a spend.** Inside a spend this is
-  settled: `rho_out_j = H(RHO, nf_1, j)` is derived in circuit, so a sender has
-  no choice to abuse (section 3). Every other path that creates a note still
+  settled: `rho_out_j = H(RHO, nf_1, nf_2, j)` is derived in circuit, so a
+  sender has no choice to abuse (section 3). Every other path that creates a note still
   has to pick one. A deposit or a coinbase note has no spent nullifier to
   derive from, so M4 must give those a rule of their own, for example a
   per-block counter or the deposit's own unique identifier, and must reject a
   repeat. The recipient is the last line: a wallet should refuse a received
   note whose nullifier duplicates one it already holds or one already settled.
 - **Witness zeroization.** `ask` and `nk` live in plain `Digest` values inside
-  `InputNote`, protected only by redacting `Debug`. Upstream wraps the
-  equivalent material in a zeroize-on-drop container. Worth doing before a
-  wallet holds real keys.
+  `InputNote`, protected only by redacting `Debug`, and `DerivedKeys` is
+  `Copy`. Upstream wraps the equivalent material in a zeroize-on-drop
+  container. Worth doing before a wallet holds real keys. `nk` is a viewing-tier
+  secret: with `r` in the nullifier preimage it confers spend detection for
+  notes the holder can already see, and nothing beyond that (section 3).

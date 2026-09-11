@@ -50,14 +50,39 @@ circuit; the note fragments replace the Wormhole transfer fragments.
   permanent state, at zero fee on a fee-free extrinsic.
 - `nf_1 != nf_2` (constraint 5), for the same reason: upstream's leaf has one
   nullifier, so intra-leaf double spending is not a shape it can have.
-- An output note's `rho` is a derived value, `H(RHO, nf_1, j)` over the leaf's
-  first published nullifier and the output index. Upstream has no note outputs
-  at all. A freely chosen `rho` lets a sender pay one recipient
+- An output note's `rho` is a derived value, `H(RHO, nf_1, nf_2, j)` over both
+  nullifiers the leaf publishes and the output index. Upstream has no note
+  outputs at all. A freely chosen `rho` lets a sender pay one recipient
   twice with notes that share a nullifier, of which the recipient can spend
   exactly one; the other is stranded permanently. Sapling and Orchard bind an
-  output's `rho` to a spent nullifier for the same reason. Costs two Poseidon2
-  permutations, and places one obligation on the chain: settle both published
-  nullifiers of every leaf, including a dummy slot's.
+  output's `rho` to a spent nullifier for the same reason. Both nullifiers are
+  in the preimage because either slot may hold the dummy, and constraint 9 only
+  guarantees that one of the two is real; a real note's nullifier is settled
+  exactly once chain-wide, so the pair never repeats. Costs four Poseidon2
+  permutations.
+- A dummy input slot's nullifier is domain separated, `H(NF_DUMMY, nk, rho, r)`
+  against `H(NF, nk, rho, r)` for a real slot, with the tag selected in circuit
+  by the same `is_dummy` bit that gates membership. Upstream's leaf has no
+  per-input dummy. A dummy proves no membership and carries no `ask`, so what
+  it publishes is unauthenticated: under the real tag, a holder of a victim's
+  `nk` and the victim note's `(rho, r)` could have the chain settle the
+  victim's nullifier for a note nobody spent and burn it permanently. Costs one
+  select per input and no extra permutation.
+- The nullifier preimage carries the note's `r`. Upstream's nullifier is over a
+  secret and a transfer count. Every Qnero output's `rho` is a public function
+  of the leaf that created it, so without `r` a holder of `nk` alone could hash
+  the public candidate set against the on-chain nullifiers and link a wallet's
+  spends pool-wide; `r` reaches only the note's sender and its holder, the role
+  Orchard gives `psi`. The preimage grows from 9 to 13 felts, which is the same
+  two permutations.
+- `InputNote::dummy_random`, which draws a padding slot's `(rho, r)` from a
+  CSPRNG. A repeated dummy publishes a nullifier the chain has already settled.
+- A `test-support` feature exposing `fill_witness_with_public_overrides`, which
+  writes a public target that disagrees with the private witness beside it.
+  Without it the constraints binding a published value to its in-circuit
+  recomputation are untestable: `fill_witness` writes both sides from the same
+  `qnero-notes` call, so a test comparing them compares a value to itself and
+  stays green when the binding is deleted.
 - `SpendWitness::validate` rejects a note value or fee at or above the
   Goldilocks modulus. It is the one range the circuit cannot police, because
   the witness carries such a value as its reduction, which is below `2^32` and

@@ -2,7 +2,7 @@
 //! qnero-notes --test kat` and review the diff; any change here is a
 //! consensus-breaking change to key or note derivation.
 
-use qnero_notes::{output_rho, Digest, Note, SpendingKey};
+use qnero_notes::{dummy_nullifier, output_rho, Digest, Note, SpendingKey};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -18,9 +18,13 @@ struct Vector {
     inner: String,
     cm: String,
     nf: String,
-    /// `rho` the spend circuit derives for output 0 of a leaf whose first
-    /// nullifier is `nf`. Consensus-critical: the circuit computes it from the
-    /// same rule and a note whose `rho` does not match is not the note the
+    /// What a padding input slot carrying the same `(nk, rho, r)` would
+    /// publish. Consensus-critical: it must never equal `nf`, or a slot that
+    /// proves no membership could settle a real note's nullifier.
+    nf_dummy: String,
+    /// `rho` the spend circuit derives for output 0 of a leaf that published
+    /// `nf` and `nf_dummy`. Consensus-critical: the circuit computes it from
+    /// the same rule and a note whose `rho` does not match is not the note the
     /// leaf committed to.
     output_rho_0: String,
 }
@@ -44,7 +48,13 @@ fn make(seed_byte: u8) -> Vector {
         inner: note.inner().to_hex(),
         cm: note.commitment().to_hex(),
         nf: note.nullifier(&sk.nk()).to_hex(),
-        output_rho_0: output_rho(&note.nullifier(&sk.nk()), 0).to_hex(),
+        nf_dummy: dummy_nullifier(&sk.nk(), &rho, &r).to_hex(),
+        output_rho_0: output_rho(
+            &note.nullifier(&sk.nk()),
+            &dummy_nullifier(&sk.nk(), &rho, &r),
+            0,
+        )
+        .to_hex(),
     }
 }
 

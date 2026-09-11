@@ -7,7 +7,7 @@ use plonky2::field::types::{Field, PrimeField64};
 use plonky2::hash::poseidon2::Poseidon2Hash;
 use plonky2::plonk::config::Hasher;
 use qnero_notes::digest::domain;
-use qnero_notes::{output_rho, Digest, Felt, Note, SpendingKey};
+use qnero_notes::{dummy_nullifier, nullifier, output_rho, Digest, Felt, Note, SpendingKey};
 
 fn to_p2(f: &Felt) -> GoldilocksField {
     GoldilocksField::from_canonical_u64(f.as_canonical_u64())
@@ -53,12 +53,52 @@ fn commitment_and_nullifier_match_plonky2_poseidon2() {
     let nf = note.nullifier(&nk);
     assert_eq!(
         as_u64s(&nf),
-        plonky2_hash(domain::NF, &[nk.felts(), rho.felts()])
+        plonky2_hash(domain::NF, &[nk.felts(), rho.felts(), r.felts()])
     );
+    let nf_dummy = dummy_nullifier(&nk, &rho, &r);
+    assert_eq!(
+        as_u64s(&nf_dummy),
+        plonky2_hash(domain::NF_DUMMY, &[nk.felts(), rho.felts(), r.felts()])
+    );
+    let nf_2 = Note::new(sk.pk(), 8, Digest::hash_bytes(&[b"parity/rho2"]), r)
+        .unwrap()
+        .nullifier(&nk);
     for index in 0..2u64 {
         assert_eq!(
-            as_u64s(&output_rho(&nf, index)),
-            plonky2_hash(domain::RHO, &[nf.felts(), &[Felt::new(index)]])
+            as_u64s(&output_rho(&nf, &nf_2, index)),
+            plonky2_hash(
+                domain::RHO,
+                &[nf.felts(), nf_2.felts(), &[Felt::new(index)]]
+            )
         );
     }
+}
+
+/// `r` is in the nullifier preimage, so `nk` plus a publicly derivable `rho`
+/// is not enough to recompute a note's nullifier. Every output note's `rho` is
+/// a public function of the leaf that created it, so without `r` a leaked `nk`
+/// would link every spend of that wallet to the leaf that funded it.
+#[test]
+fn the_nullifier_binds_the_commitment_randomness() {
+    let sk = SpendingKey::from_bytes([12u8; 32]);
+    let nk = sk.nk();
+    let rho = Digest::hash_bytes(&[b"binding/rho"]);
+    let r_a = Digest::hash_bytes(&[b"binding/r-a"]);
+    let r_b = Digest::hash_bytes(&[b"binding/r-b"]);
+
+    assert_ne!(nullifier(&nk, &rho, &r_a), nullifier(&nk, &rho, &r_b));
+}
+
+/// A dummy input slot's nullifier is domain separated from a real one, so a
+/// value published by a slot that proves no membership can never equal the
+/// nullifier of a note in the tree. Both are uniform Poseidon2 outputs, so the
+/// separation costs no distinguishability in the public inputs.
+#[test]
+fn a_dummy_nullifier_is_never_a_real_one() {
+    let sk = SpendingKey::from_bytes([13u8; 32]);
+    let nk = sk.nk();
+    let rho = Digest::hash_bytes(&[b"dummy-sep/rho"]);
+    let r = Digest::hash_bytes(&[b"dummy-sep/r"]);
+
+    assert_ne!(nullifier(&nk, &rho, &r), dummy_nullifier(&nk, &rho, &r));
 }

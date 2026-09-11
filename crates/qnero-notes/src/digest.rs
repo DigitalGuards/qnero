@@ -77,8 +77,15 @@ pub mod domain {
     pub const NOTE: Felt = Felt::new(0x716e_0003);
     pub const CM: Felt = Felt::new(0x716e_0004);
     pub const NF: Felt = Felt::new(0x716e_0005);
-    /// Seed of an output note's `rho`. The circuit derives it from the leaf's
-    /// first published nullifier, so two outputs can never carry the same
+    /// Seed of an output note's `rho`. The circuit derives it from both
+    /// nullifiers the leaf publishes, so two outputs can never carry the same
     /// `rho`.
     pub const RHO: Felt = Felt::new(0x716e_0006);
+    /// Nullifier of a padding input slot. A dummy slot publishes a nullifier
+    /// like a real one, so the public inputs do not show which slots were
+    /// real, and this tag keeps that published value out of the image of the
+    /// real nullifier function. Without it a dummy slot is an unauthenticated
+    /// nullifier: anyone holding a victim's `nk` could publish the victim's
+    /// nullifier from a slot that proves no membership and burn the note.
+    pub const NF_DUMMY: Felt = Felt::new(0x716e_0007);
 }

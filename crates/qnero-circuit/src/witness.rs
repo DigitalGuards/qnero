@@ -13,8 +13,11 @@ use plonky2::field::types::{Field as _, Field64 as _};
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 use plonky2::plonk::circuit_data::CircuitConfig;
 use qnero_notes::keys::{derive_pk, DerivedKeys};
-use qnero_notes::note::{commitment_from_inner, note_inner, nullifier, output_rho};
+use qnero_notes::note::{
+    commitment_from_inner, dummy_nullifier, note_inner, nullifier, output_rho,
+};
 use qnero_notes::{Digest, Note};
+use rand_core::{CryptoRng, RngCore};
 
 use crate::circuit::{QneroSpendCircuit, SpendTargets};
 use crate::convert::{digest_to_felts, digest_to_hashout};
@@ -37,7 +40,8 @@ pub struct InputNote {
     /// Path from this note's commitment to the header's `zk_tree_root`.
     pub path: MerklePath,
     /// A dummy input proves nothing about membership and must carry value 0.
-    /// Its nullifier is still published, so `rho` must be fresh.
+    /// Its nullifier is still published, under the `NF_DUMMY` domain tag, so
+    /// `(rho, r)` must be fresh.
     pub is_dummy: bool,
 }
 
@@ -77,8 +81,14 @@ impl InputNote {
         })
     }
 
-    /// A padding input. It carries no value and skips the membership check;
-    /// `rho` must be fresh so its published nullifier is unique.
+    /// A padding input with caller-supplied randomness. It carries no value
+    /// and skips the membership check.
+    ///
+    /// The caller owns freshness of `(rho, r)`. A dummy publishes a nullifier
+    /// like any other input, so repeating a pair publishes a nullifier the
+    /// chain has already settled and the settlement extrinsic is rejected,
+    /// naming a value the wallet cannot map to any note it holds. Prefer
+    /// [`InputNote::dummy_random`], which draws both from a CSPRNG.
     pub fn dummy(keys: &DerivedKeys, rho: Digest, r: Digest, depth: usize) -> Self {
         Self {
             ask: keys.ask,
@@ -91,14 +101,41 @@ impl InputNote {
         }
     }
 
+    /// A padding input with fresh randomness, the constructor a wallet should
+    /// use.
+    ///
+    /// `rho` and `r` are drawn the way [`qnero_notes::Note::random`] draws
+    /// them: bytes from the RNG, hashed so the results are canonical digests.
+    pub fn dummy_random<R: RngCore + CryptoRng + ?Sized>(
+        rng: &mut R,
+        keys: &DerivedKeys,
+        depth: usize,
+    ) -> Self {
+        let mut seed = [0u8; 32];
+        rng.fill_bytes(&mut seed);
+        let rho = Digest::hash_bytes(&[b"qnero/dummy-rho", &seed]);
+        let r = Digest::hash_bytes(&[b"qnero/dummy-r", &seed]);
+        Self::dummy(keys, rho, r, depth)
+    }
+
     /// The note receiving key these spend keys own.
     pub fn pk(&self) -> Digest {
         derive_pk(&self.ask, &self.nk)
     }
 
-    /// `nf = H(NF, nk, rho)`.
+    /// The nullifier this slot publishes.
+    ///
+    /// `H(NF, nk, rho, r)` for a real input, `H(NF_DUMMY, nk, rho, r)` for a
+    /// dummy. The circuit selects the same tag from the same bit, so the two
+    /// must branch together; the published value is a uniform Poseidon2 output
+    /// either way, which is what keeps a dummy slot invisible in the public
+    /// inputs.
     pub fn nullifier(&self) -> Digest {
-        nullifier(&self.nk, &self.rho)
+        if self.is_dummy {
+            dummy_nullifier(&self.nk, &self.rho, &self.r)
+        } else {
+            nullifier(&self.nk, &self.rho, &self.r)
+        }
     }
 
     /// The commitment this input claims membership for.
@@ -113,9 +150,9 @@ impl InputNote {
 /// One output note. The circuit knows nothing about the recipient beyond
 /// `pk`.
 ///
-/// There is no `rho` field. An output's nullifier seed is a function of the
-/// leaf it is created in, [`SpendWitness::output_rho`], so it cannot be
-/// supplied here and cannot be repeated across two notes.
+/// There is no `rho` field. An output's nullifier seed is a function of both
+/// nullifiers its leaf publishes, [`SpendWitness::output_rho`], so it cannot
+/// be supplied here and cannot be repeated across two notes.
 #[derive(Clone)]
 pub struct OutputNote {
     pub pk: Digest,
@@ -158,8 +195,9 @@ pub struct SpendWitness {
     pub inputs: [InputNote; NUM_INPUTS],
     pub outputs: [OutputNote; NUM_OUTPUTS],
     pub fee: u64,
-    /// Digest of the output ciphertexts. The circuit passes it through; the
-    /// chain recomputes it from the ciphertexts it was handed.
+    /// Digest of the output ciphertexts, from [`qnero_notes::ct_digest`]. The
+    /// circuit passes it through; the chain recomputes it with that same
+    /// function from the ciphertexts it was handed and compares.
     pub ct_digest: Digest,
 }
 
@@ -232,11 +270,15 @@ impl SpendWitness {
 
     /// `rho` of output note `index`, as the circuit derives it.
     ///
-    /// `rho = H(RHO, nf_1, index)` where `nf_1` is the nullifier published for
-    /// input slot 0. A wallet needs this to build the ciphertext the recipient
+    /// `rho = H(RHO, nf_1, nf_2, index)` over both nullifiers the leaf
+    /// publishes. A wallet needs this to build the ciphertext the recipient
     /// decrypts, since `rho` is part of the note plaintext.
     pub fn output_rho(&self, index: usize) -> Digest {
-        output_rho(&self.inputs[0].nullifier(), index as u64)
+        output_rho(
+            &self.inputs[0].nullifier(),
+            &self.inputs[1].nullifier(),
+            index as u64,
+        )
     }
 
     /// The commitment output note `index` publishes.
@@ -293,6 +335,45 @@ fn ensure_canonical(value: u64, what: Arguments<'_>) -> Result<()> {
     Ok(())
 }
 
+/// The public values a witness implies, as written to the public targets.
+struct PublicValues {
+    block_hash: Digest,
+    nullifiers: [Digest; NUM_INPUTS],
+    commitments: [Digest; NUM_OUTPUTS],
+}
+
+impl PublicValues {
+    fn from_witness(witness: &SpendWitness) -> Self {
+        Self {
+            block_hash: witness.header.block_hash(),
+            nullifiers: core::array::from_fn(|i| witness.inputs[i].nullifier()),
+            commitments: core::array::from_fn(|j| witness.output_commitment(j)),
+        }
+    }
+}
+
+/// Public values the circuit recomputes, written in place of the ones the
+/// witness implies.
+///
+/// A negative-testing seam, and nothing else: it exists so a test can write a
+/// public target that disagrees with the private witness beside it and check
+/// that the circuit refuses to prove. Every constraint that binds a published
+/// value to its in-circuit recomputation is otherwise untestable, because
+/// [`fill_witness`] writes both sides from the same `qnero-notes` call, so a
+/// test comparing them is comparing a value to itself.
+///
+/// This is not a capability the seam grants. Every field of [`SpendTargets`]
+/// is public and a `PartialWitness` can always be built by hand, so any
+/// caller could already write a disagreeing pair. What they cannot do is
+/// produce a proof from one.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, Default)]
+pub struct PublicOverrides {
+    pub block_hash: Option<Digest>,
+    pub nullifiers: [Option<Digest>; NUM_INPUTS],
+    pub commitments: [Option<Digest>; NUM_OUTPUTS],
+}
+
 /// Write a witness into the circuit's targets.
 ///
 /// This is the single source of truth for witness filling. Anything that
@@ -303,31 +384,65 @@ pub fn fill_witness(
     targets: &SpendTargets,
 ) -> Result<()> {
     witness.validate()?;
+    fill_public(pw, targets, witness, &PublicValues::from_witness(witness))?;
+    fill_private(pw, witness, targets)
+}
 
-    // Public.
-    pw.set_hash_target(
-        targets.block_hash,
-        digest_to_hashout(&witness.header.block_hash()),
-    )?;
+/// [`fill_witness`], with some public values replaced. See
+/// [`PublicOverrides`].
+#[cfg(feature = "test-support")]
+pub fn fill_witness_with_public_overrides(
+    pw: &mut PartialWitness<F>,
+    witness: &SpendWitness,
+    targets: &SpendTargets,
+    overrides: &PublicOverrides,
+) -> Result<()> {
+    witness.validate()?;
+    let mut public = PublicValues::from_witness(witness);
+    if let Some(block_hash) = overrides.block_hash {
+        public.block_hash = block_hash;
+    }
+    for (index, nullifier) in overrides.nullifiers.iter().enumerate() {
+        if let Some(nullifier) = nullifier {
+            public.nullifiers[index] = *nullifier;
+        }
+    }
+    for (index, commitment) in overrides.commitments.iter().enumerate() {
+        if let Some(commitment) = commitment {
+            public.commitments[index] = *commitment;
+        }
+    }
+    fill_public(pw, targets, witness, &public)?;
+    fill_private(pw, witness, targets)
+}
+
+fn fill_public(
+    pw: &mut PartialWitness<F>,
+    targets: &SpendTargets,
+    witness: &SpendWitness,
+    public: &PublicValues,
+) -> Result<()> {
+    pw.set_hash_target(targets.block_hash, digest_to_hashout(&public.block_hash))?;
     pw.set_target(
         targets.block_number,
         F::from_canonical_u32(witness.header.block_number),
     )?;
-    for (index, input) in witness.inputs.iter().enumerate() {
-        pw.set_hash_target(
-            targets.nullifiers[index],
-            digest_to_hashout(&input.nullifier()),
-        )?;
+    for (index, nullifier) in public.nullifiers.iter().enumerate() {
+        pw.set_hash_target(targets.nullifiers[index], digest_to_hashout(nullifier))?;
     }
-    for index in 0..NUM_OUTPUTS {
-        pw.set_hash_target(
-            targets.commitments[index],
-            digest_to_hashout(&witness.output_commitment(index)),
-        )?;
+    for (index, commitment) in public.commitments.iter().enumerate() {
+        pw.set_hash_target(targets.commitments[index], digest_to_hashout(commitment))?;
     }
     pw.set_target(targets.fee, F::from_noncanonical_u64(witness.fee))?;
     pw.set_hash_target(targets.ct_digest, digest_to_hashout(&witness.ct_digest))?;
+    Ok(())
+}
 
+fn fill_private(
+    pw: &mut PartialWitness<F>,
+    witness: &SpendWitness,
+    targets: &SpendTargets,
+) -> Result<()> {
     // Header, private part.
     pw.set_hash_target(
         targets.header.parent_hash,

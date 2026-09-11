@@ -34,7 +34,12 @@ Upstream shape is `qp-wormhole-verifier` (Quantus-Network/qp-zk-circuits, MIT).
 - `no_std` plus `alloc` with default features off, matching upstream. This is
   what lets the M4 `pallet-shielded` runtime link it into a wasm build, the way
   `pallet-wormhole` takes `qp-wormhole-verifier` today. Gated by
-  `cargo check -p qnero-verifier --no-default-features`.
+  `cargo check -p qnero-verifier --no-default-features` on the host and by the
+  same check `--target wasm32v1-none`. The host check proves only that this
+  crate's own code compiles under `#![no_std]`; a dependency that reaches for
+  std or an OS facility still links there and would surface at M4, after the
+  circuit is tagged and the verifier artifact pinned. The toolchain file
+  already installs the target for exactly this.
 - `verify_and_parse` takes the proof by value and reads the public inputs
   before verifying, so the byte path does not clone about 100 kB of FRI
   openings per proof. `verify_ref` stays for callers that hold only a
