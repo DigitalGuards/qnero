@@ -1,0 +1,26 @@
+//! The public batch: `n_inner` private batches into one proof.
+//!
+//! # Admission boundary
+//!
+//! [`QneroPublicBatchProver::prove_batch`] verifies every inner proof against
+//! the pinned private-batch verifier, enforces the one-block rule and rejects
+//! an all-padding batch before proving, which at production sizes takes tens
+//! of seconds.
+//!
+//! The low-level witness filler is crate-private for the same reason it is at
+//! the private batch:
+//!
+//! ```compile_fail
+//! use qnero_aggregator::public_batch::witness::fill_public_batch_witness;
+//! ```
+//!
+//! ```
+//! use qnero_aggregator::public_batch::QneroPublicBatchProver;
+//! ```
+
+pub mod circuit;
+pub mod prover;
+pub(crate) mod witness;
+
+pub use circuit::{PublicBatchTargets, QneroPublicBatchCircuit};
+pub use prover::{PublicBatchInputs, QneroPublicBatchProver};

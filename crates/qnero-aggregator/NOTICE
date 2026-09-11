@@ -1,0 +1,14 @@
+qnero-aggregator is derived from Quantus-Network/qp-zk-circuits
+(https://github.com/Quantus-Network/qp-zk-circuits, MIT License), read at
+version 4.4.0 on 2026-09-11. The derived parts are:
+
+- src/recursive.rs              from wormhole/aggregator/src/common/recursive.rs
+- src/artifacts.rs              from wormhole/aggregator/src/common/utils.rs
+- src/config.rs                 from wormhole/aggregator/src/config.rs
+- src/private_batch/*           structure and security properties, from
+                                wormhole/aggregator/src/private_batch/*
+- src/public_batch/*            structure and security properties, from
+                                wormhole/aggregator/src/public_batch/*
+
+The public-input layouts, the padding rule and the forwarding contract are
+Qnero's own; see CHANGES.md and docs/CIRCUIT.md section 8.

@@ -3,7 +3,7 @@ name = "qnero-verifier"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Verifier for the Qnero v0 shielded spend leaf circuit"
+description = "Verifier for Qnero proofs: the private and public batch artifacts a runtime settles, and behind a feature the spend leaf"
 
 [dependencies]
 # Layout constants only: the circuit feature stays off so this crate does not
@@ -13,8 +13,13 @@ qp-plonky2-verifier = { workspace = true }
 anyhow = { workspace = true }
 
 [features]
-# On by default for the wallet-side aggregator and the tests. A runtime takes
-# this crate with default features off: everything here is `no_std` + `alloc`,
-# which is what lets `pallet-shielded` link it into a wasm runtime at M4.
+# `std` is on by default for the wallet-side aggregator and the tests. A
+# runtime takes this crate with default features off: everything here is
+# `no_std` + `alloc`, which is what lets `pallet-shielded` link it into a wasm
+# runtime at M4.
 default = ["std"]
 std = ["anyhow/std", "qp-plonky2-verifier/std"]
+# The leaf entry points. Deliberately not a default feature: a leaf proof does
+# not blind and is not a transaction, so a runtime must not be able to name a
+# leaf verifier. The wallet-side aggregator turns it on.
+leaf = []

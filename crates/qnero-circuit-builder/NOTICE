@@ -1,0 +1,4 @@
+The shape of this crate (staged whole-directory artifact generation for a
+recursive circuit stack, committed by rename) follows
+Quantus-Network/qp-zk-circuits `wormhole/circuit-builder` (MIT), read at
+version 4.4.0 on 2026-09-11. No code is copied verbatim; see CHANGES.md.

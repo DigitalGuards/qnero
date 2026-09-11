@@ -1,8 +1,43 @@
 # Changes from upstream
 
-Upstream shape is `qp-wormhole-verifier` (Quantus-Network/qp-zk-circuits, MIT).
+Upstream shape is `qp-wormhole-verifier` (Quantus-Network/qp-zk-circuits, MIT)
+plus the batch-verifier loading in `quantus-chain/pallets/wormhole`.
 
-- No keccak pin, and no disk path. Upstream reads `verifier.bin` and
+- The batch verifiers are the runtime-facing API, and the leaf entry points sit
+  behind the non-default `leaf` feature (M3). A leaf proof does not blind and
+  is not a transaction; it is an input to the wallet's own aggregator. A
+  runtime takes this crate with default features off and cannot name a leaf
+  verifier at all.
+- Batch artifacts cannot be hash-pinned, because their bytes are a function of
+  the batch dimensions. In their place: the exact public-input count for those
+  dimensions, the exact `CircuitConfig` (which catches a private-batch artifact
+  whose `zero_knowledge` is false, an artifact that would verify every proof
+  while quietly ending the privacy the layer exists for), the whole `FriParams`
+  recomputed from that config at the degree the artifact claims, and a ceiling
+  on that degree. Recomputing `FriParams` is what pins `reduction_arity_bits`
+  and `leaf_hiding`, which live only in the second copy and which no config
+  comparison reaches. `pallet-wormhole` compares the config and the
+  public-input count and leaves the rest.
+- The leaf floor also pins the two values that live only in the artifact's
+  second FRI copy, the folding schedule and the blinding flag, which M2 left
+  open. Both are recomputed from the canonical config at the canonical degree.
+  Comparing the schedule exactly costs the floor nothing: it is a function of
+  the rate, the cap height and the degree, all of which the floor already pins
+  exactly, so an artifact that legitimately carried more query rounds still
+  produces the same schedule.
+- Both loaders refuse an artifact whose index structure does not describe its
+  own gate list. A gate's filter is a product over its selector group, so a
+  group of `0..2^40` is not a wrong answer but a verifier that never returns,
+  and one flipped bit in a length byte produces exactly that. Nothing else
+  catches it: the circuit digest does not cover the selector layout. Upstream
+  relies on its keccak pin, which a batch artifact cannot have.
+- The expected batch configs are restated here from `qnero_circuit::params`,
+  because `qnero-circuit`'s own constructors live behind its circuit feature
+  and pull in plonky2's prover, which cannot be compiled into a runtime.
+  `qnero-aggregator`, which sees both sides, carries the test that they agree.
+  `pallet-wormhole` has the same duplication for the same reason.
+
+- No keccak pin at any layer, and no disk path. Upstream reads `verifier.bin` and
   `common.bin` from disk behind a size cap and a keccak256 pin of the
   byte-exact canonical artifacts. Qnero has no released circuit yet, so every
   pin would be a placeholder that a circuit edit invalidates; artifacts are

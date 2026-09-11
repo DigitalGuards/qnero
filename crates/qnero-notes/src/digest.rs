@@ -88,4 +88,12 @@ pub mod domain {
     /// nullifier: anyone holding a victim's `nk` could publish the victim's
     /// nullifier from a slot that proves no membership and burn the note.
     pub const NF_DUMMY: Felt = Felt::new(0x716e_0007);
+    /// Nullifier a padding slot of a private batch publishes. The batch
+    /// wrapper hashes a fresh random preimage under this tag and emits the
+    /// result in place of the padding leaf's own nullifiers, so the chain can
+    /// settle every published nullifier by one rule without learning which
+    /// slots were padding. Its own tag keeps that prover-chosen value outside
+    /// the image of both leaf nullifier functions: a padding slot must never
+    /// be able to settle a nullifier that belongs to a note.
+    pub const NF_BATCH_PADDING: Felt = Felt::new(0x716e_0008);
 }

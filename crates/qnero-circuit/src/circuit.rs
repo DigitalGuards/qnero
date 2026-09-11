@@ -17,6 +17,12 @@
 //! terms. The chain then only has to check that `block_hash` is a block it
 //! produced, that neither nullifier has been seen, and that the ciphertexts it
 //! was handed hash to `ct_digest`.
+//!
+//! One leaf is not a real transfer: the batch padding leaf, whose `block_hash`
+//! is the fixed sentinel in [`crate::padding`]. It is the only leaf allowed to
+//! consume no note, and the balance equation then forces its fee and both
+//! output values to zero. Everything it publishes is masked by the batch
+//! wrapper one layer up.
 
 use anyhow::Result;
 use plonky2::hash::hash_types::HashOutTarget;
@@ -37,6 +43,7 @@ use crate::merkle::{
 use crate::note_gadget::{
     derive_pk, note_commitment, note_inner, note_nullifier_tagged, nullifier_domain_tag, output_rho,
 };
+use crate::padding::is_padding_block_hash;
 use crate::{C, D, F};
 
 /// Private targets for one input note.
@@ -239,7 +246,8 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
     );
     builder.connect(nullifiers_equal.target, zero);
 
-    // 9. At least one input must be real.
+    // 9. Every leaf that binds a real block must consume a note: at least one
+    // input is real, unless this leaf is the batch's padding.
     //
     // Nothing else relates the two `is_dummy` bits. With both set, a leaf
     // proves with no spend key and no note in the tree: every membership check
@@ -262,14 +270,24 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
     // leaf, charged at M4, is what bounds leaf count; see `docs/CIRCUIT.md`
     // section 8.
     //
-    // For M3: when the batch layer picks its padding sentinel, gate this
-    // product on the same flag that gates the header binding, so a padding leaf
-    // stays provable while every leaf bound to a real block spends something.
+    // The exemption is the batch padding sentinel (M3). A private batch
+    // aggregates a fixed number of leaves, so a wallet with fewer transfers
+    // than slots has to fill the rest with leaves that consume nothing, and
+    // those leaves must still be proofs of this circuit. `is_padding` is
+    // derived here from the public `block_hash` and a constant, never
+    // witnessed: a leaf is padding exactly when it binds the one fixed padding
+    // header preimage, whose `zk_tree_root` is the empty tree. So the
+    // exemption cannot be claimed by a leaf that binds a real block, and
+    // constraint 1 stays unconditional for every leaf, padding included.
+    // `crate::padding` carries the whole rule and the reasoning.
+    let is_padding = is_padding_block_hash(builder, targets.block_hash);
+    let is_real_leaf = builder.not(is_padding);
     let mut all_dummy = targets.inputs[0].is_dummy.target;
     for input in &targets.inputs[1..] {
         all_dummy = builder.mul(all_dummy, input.is_dummy.target);
     }
-    builder.connect(all_dummy, zero);
+    let all_dummy_in_a_real_leaf = builder.mul(all_dummy, is_real_leaf.target);
+    builder.connect(all_dummy_in_a_real_leaf, zero);
 
     // 6. Output notes. `rho` is derived from both published nullifiers.
     // The reason: `nf = H(NF, nk, rho, r)` is a function of the recipient's

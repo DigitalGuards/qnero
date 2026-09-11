@@ -29,3 +29,15 @@ Upstream shape is `qp-wormhole-prover` (Quantus-Network/qp-zk-circuits, MIT).
   the spent note's amount and position next to the nullifier about to be
   published. Structural errors from `SpendWitness::validate` (depths, path
   lengths, arity) are still returned verbatim.
+
+## Added
+
+- `wallet::WalletProver` (M3): the API a wallet uses. It builds the leaf and
+  private-batch circuits once, proves a leaf per transfer, aggregates them into
+  the private batch that is the transaction, and hands back the canonical
+  proof bytes. The leaf proofs never leave it, which is the point: a leaf proof
+  does not blind. Upstream's prover crate stops at the leaf and leaves the
+  aggregation to its caller.
+- An opt-in `parallel` feature, which turns on plonky2's rayon support for this
+  crate and the aggregator. Off by default so a wallet cannot saturate a
+  machine unasked; the proofs are identical either way.

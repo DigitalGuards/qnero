@@ -7,12 +7,15 @@ description = "Prover for the Qnero v0 shielded spend leaf circuit"
 
 [dependencies]
 qnero-circuit = { workspace = true }
+qnero-aggregator = { workspace = true }
 qp-plonky2 = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 qnero-notes = { workspace = true }
-qnero-verifier = { workspace = true }
+# The leaf entry points are behind a non-default feature; the tests here are
+# exactly the callers that legitimately verify a raw leaf proof.
+qnero-verifier = { workspace = true, features = ["leaf"] }
 # The negative tests write a public target that disagrees with the witness
 # beside it; see `qnero_circuit::witness::PublicOverrides`.
 qnero-circuit = { workspace = true, features = ["test-support"] }
@@ -24,3 +27,7 @@ default = []
 # configuration: zero knowledge belongs at the private batch. It exists so the
 # ZK path stays compiled and exercised.
 zk = ["qnero-circuit/zk"]
+# Let plonky2 use rayon. Off by default so a wallet cannot saturate a machine
+# unasked; a caller that turns it on should bound the pool with
+# RAYON_NUM_THREADS. The proofs are identical either way.
+parallel = ["qp-plonky2/parallel", "qnero-aggregator/parallel"]

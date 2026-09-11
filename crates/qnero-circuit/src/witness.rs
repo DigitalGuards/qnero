@@ -23,17 +23,21 @@ use crate::circuit::{QneroSpendCircuit, SpendTargets};
 use crate::convert::{digest_to_felts, digest_to_hashout};
 use crate::layout::{NUM_INPUTS, NUM_OUTPUTS, PUBLIC_INPUT_LEN};
 use crate::merkle::{empty_digest, MerklePath, ARITY, MAX_DEPTH, SIBLINGS_PER_LEVEL};
+use crate::sensitive::Secret;
 use crate::F;
 
 pub use crate::header::HeaderInputs;
 
 /// One input note, with the keys that authorize spending it.
-#[derive(Clone)]
+///
+/// Not `Clone`: `ask` and `nk` live in a move-only, zeroize-on-drop
+/// [`Secret`], so duplicating the spend credential takes an explicitly named
+/// `expose_digest` call that review can grep for.
 pub struct InputNote {
     /// Spend authorizing key.
-    pub ask: Digest,
+    pub ask: Secret,
     /// Nullifier key.
-    pub nk: Digest,
+    pub nk: Secret,
     pub value: u64,
     pub rho: Digest,
     pub r: Digest,
@@ -71,8 +75,8 @@ impl InputNote {
             "input note pk does not match the supplied spend keys"
         );
         Ok(Self {
-            ask: keys.ask,
-            nk: keys.nk,
+            ask: Secret::from(keys.ask),
+            nk: Secret::from(keys.nk),
             value: note.value,
             rho: note.rho,
             r: note.r,
@@ -91,8 +95,8 @@ impl InputNote {
     /// [`InputNote::dummy_random`], which draws both from a CSPRNG.
     pub fn dummy(keys: &DerivedKeys, rho: Digest, r: Digest, depth: usize) -> Self {
         Self {
-            ask: keys.ask,
-            nk: keys.nk,
+            ask: Secret::from(keys.ask),
+            nk: Secret::from(keys.nk),
             value: 0,
             rho,
             r,
@@ -120,7 +124,7 @@ impl InputNote {
 
     /// The note receiving key these spend keys own.
     pub fn pk(&self) -> Digest {
-        derive_pk(&self.ask, &self.nk)
+        derive_pk(&self.ask.expose_digest(), &self.nk.expose_digest())
     }
 
     /// The nullifier this slot publishes.
@@ -131,10 +135,11 @@ impl InputNote {
     /// either way, which is what keeps a dummy slot invisible in the public
     /// inputs.
     pub fn nullifier(&self) -> Digest {
+        let nk = self.nk.expose_digest();
         if self.is_dummy {
-            dummy_nullifier(&self.nk, &self.rho, &self.r)
+            dummy_nullifier(&nk, &self.rho, &self.r)
         } else {
-            nullifier(&self.nk, &self.rho, &self.r)
+            nullifier(&nk, &self.rho, &self.r)
         }
     }
 
@@ -187,7 +192,10 @@ impl OutputNote {
 }
 
 /// Everything one leaf proof is built from.
-#[derive(Clone, Debug)]
+///
+/// Not `Clone`, because [`InputNote`] is not: the spend credential is held in
+/// a move-only zeroize-on-drop container.
+#[derive(Debug)]
 pub struct SpendWitness {
     pub header: HeaderInputs,
     /// Depth of the commitment tree the header's root belongs to.
@@ -467,8 +475,18 @@ fn fill_private(
     // Input notes.
     for (index, input) in witness.inputs.iter().enumerate() {
         let input_targets = &targets.inputs[index];
-        pw.set_hash_target(input_targets.ask, digest_to_hashout(&input.ask))?;
-        pw.set_hash_target(input_targets.nk, digest_to_hashout(&input.nk))?;
+        // The two `expose_digest` calls are the deliberate duplication out of
+        // the zeroize-on-drop container: the field elements they return are
+        // transient here and are consumed by the witness writer, whose own
+        // copies are plonky2's to scrub.
+        pw.set_hash_target(
+            input_targets.ask,
+            digest_to_hashout(&input.ask.expose_digest()),
+        )?;
+        pw.set_hash_target(
+            input_targets.nk,
+            digest_to_hashout(&input.nk.expose_digest()),
+        )?;
         pw.set_hash_target(input_targets.rho, digest_to_hashout(&input.rho))?;
         pw.set_hash_target(input_targets.r, digest_to_hashout(&input.r))?;
         pw.set_target(input_targets.value, F::from_noncanonical_u64(input.value))?;

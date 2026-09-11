@@ -6,6 +6,8 @@ members = [
     "crates/qnero-circuit",
     "crates/qnero-prover",
     "crates/qnero-verifier",
+    "crates/qnero-aggregator",
+    "crates/qnero-circuit-builder",
 ]
 
 [workspace.package]
@@ -20,6 +22,8 @@ qnero-notes = { path = "crates/qnero-notes" }
 qnero-circuit = { path = "crates/qnero-circuit" }
 qnero-prover = { path = "crates/qnero-prover" }
 qnero-verifier = { path = "crates/qnero-verifier" }
+qnero-aggregator = { path = "crates/qnero-aggregator" }
+qnero-circuit-builder = { path = "crates/qnero-circuit-builder" }
 qp-poseidon-core = { version = "3.1.0", default-features = false, features = ["std"] }
 qp-plonky2 = { version = "=1.5.5", default-features = false, features = ["std"] }
 qp-plonky2-verifier = { version = "=1.5.5", default-features = false }

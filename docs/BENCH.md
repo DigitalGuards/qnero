@@ -48,3 +48,87 @@ worth it.
   facing cost.
 - Peak memory. Needed before deciding whether phones can prove; measure with
   `wormhole/memprof`.
+
+# Qnero (2026-09-11)
+
+Measured on the dev workstation (20 cores, WSL2) at M3, with
+`RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --release`. Every number below
+is from an ignored test that reports its own thread count, so a rerun says
+which configuration it measured:
+
+```
+cargo test -p qnero-prover  --release -- --ignored --nocapture
+cargo test -p qnero-aggregator --release [--features parallel] --test bench -- --ignored --nocapture
+```
+
+## Leaf: one shielded transfer, 2 in / 2 out
+
+Single threaded. Plonky2's `parallel` feature is off by default so a wallet
+cannot saturate a machine unasked.
+
+| | |
+|---|---|
+| gates before padding | 320 |
+| degree_bits | 9 |
+| public inputs | 26 |
+| zero knowledge | no |
+| build | 64 ms |
+| prove, mean of 9 | 183 ms |
+| prove, min / median / max | 138 / 169 / 381 ms |
+| verify | 2.2 ms |
+| proof bytes | 105500 |
+
+The spread is the measurement, not noise. The FRI challenge carries 16 grinding
+bits and the search for them is a geometric random variable seeded by the
+transcript, which dominates a circuit this small. Compare means over the same
+sample count, never one warm number against another.
+
+## Private batch: N = 7 leaf slots, one real transfer and six padding
+
+This is the transaction a wallet submits, and the shape it submits most often.
+Zero knowledge, so these numbers include row blinding. Mean of 3 proofs.
+
+| | single threaded | `--features parallel`, `RAYON_NUM_THREADS=4` |
+|---|---:|---:|
+| build | 8.8 s | 4.8 s |
+| prove, mean of 3 | 19.9 s | 6.3 s |
+| prove, min / max | 19.8 / 20.3 s | 6.2 / 6.4 s |
+| verify | 4.2 ms | 4.2 ms |
+| peak RSS of the run | 1.82 GiB | 2.08 GiB |
+
+| | |
+|---|---|
+| gates before padding | 24538 |
+| degree_bits | 16 |
+| padded gates | 65536 |
+| public inputs | 152 |
+| proof bytes | 157476 |
+| verifier artifact | 1749 bytes |
+
+Reading these:
+
+- **Verify is flat and cheap.** 4.2 ms for a batch that settles up to seven
+  transfers, against 2.2 ms for one leaf. That is the whole point of recursion,
+  and it is what the chain pays.
+- **Proof size is a property of the FRI config, not of `N`.** 157 KB carries up
+  to seven transfers, where Hegemon reports about 105 KB per transaction. At
+  seven real transfers that is 22 KB each; at one real transfer it is worse
+  than theirs, which is the cost of a fixed-size anonymity shape.
+- **The recursive verifiers are the circuit.** 24324 of the 24538 gates are the
+  seven recursive verifications; the wrapper's own constraints are 214 gates,
+  including the `2N` pairwise nullifier comparisons. Nothing in the wrapper is
+  worth optimizing.
+- **`N = 7` sits just past a degree boundary.** Blinding adds about 9000 rows
+  at this size, so a batch fits in `degree_bits = 15` only below about 23700
+  gates, and seven recursive verifiers are 24324. Six leaves fit; seven do not,
+  and pay 2x in proving time and about 2x in memory for it. Whether to ship
+  `N = 6` is an M4 decision, and it is a real one: it would halve the wallet's
+  proving time and memory at the cost of one slot per batch.
+- **Phone-class memory.** About 2 GiB peak. Upstream's own guidance is that
+  `degree_bits = 16` limits proving to 6 GB+ devices, which matches.
+
+Not measured yet: the public batch at the chain default of 53 inner proofs.
+The tests exercise it at 2 inner proofs over 2-leaf batches, which says nothing
+useful about its cost at production size. Upstream's 53-batch number is about
+21 s of proving on 20 threads, and the Qnero public batch is the same shape
+with a wider forwarded region.

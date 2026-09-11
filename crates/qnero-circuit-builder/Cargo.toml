@@ -1,0 +1,19 @@
+[package]
+name = "qnero-circuit-builder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generates the Qnero circuit artifact set a pallet build script embeds"
+
+[dependencies]
+qnero-aggregator = { workspace = true }
+qnero-circuit = { workspace = true, features = ["zk"] }
+qp-plonky2 = { workspace = true }
+anyhow = { workspace = true, features = ["std"] }
+rand = { workspace = true }
+
+[features]
+default = []
+# Let plonky2 use rayon while generating artifacts. Off by default; a CI host
+# that turns it on should bound the pool with RAYON_NUM_THREADS.
+parallel = ["qnero-aggregator/parallel", "qp-plonky2/parallel"]

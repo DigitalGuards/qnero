@@ -36,10 +36,11 @@ circuit; the note fragments replace the Wormhole transfer fragments.
   given by `layout.rs`, with `PUBLIC_INPUT_LEN` asserted in a test. Upstream
   spreads registration across each fragment's `Targets::new` and depends on
   their call order.
-- The block-hash binding is unconditional (upstream makes it conditional on an
-  in-circuit dummy-leaf sentinel for batch padding). Qnero's per-input dummy
-  flag is a different mechanism; the batch padding sentinel is an M3 decision,
-  recorded in `docs/CIRCUIT.md`.
+- The block-hash binding is unconditional, at every layer, where upstream makes
+  it conditional on an in-circuit dummy-leaf sentinel so a batch can be padded.
+  Qnero's padding leaf binds a real header preimage instead, the fixed one in
+  `padding`, so nothing has to be switched off for padding to prove. See
+  "Added" below and `docs/CIRCUIT.md` section 8.
 
 ## Added
 
@@ -99,6 +100,24 @@ circuit; the note fragments replace the Wormhole transfer fragments.
   `layout` and compiled without the circuit feature. `qnero-verifier` holds an
   artifact to them; upstream pins a keccak hash of the artifact instead, which
   Qnero cannot do until there is a tagged release.
+- `padding` (M3): the fixed header preimage a padding leaf binds to, the block
+  hash it produces, pinned as limbs in a dependency-free module so a verifier
+  and the chain can recognise padding without the prover stack, and the
+  deterministic padding witness the artifact builder proves once. Constraint 9
+  is gated on that sentinel and nothing else is: a padding leaf's balance
+  equation then forces its fee and both output values to zero on its own. The
+  batch wrapper masks every value a padding slot publishes regardless, because
+  it trusts no invariant that crosses a circuit boundary.
+- `batch_layout` (M3): the public-input layouts of the private and public
+  batches, beside `layout` and compiled without the circuit feature, so
+  `qnero-verifier` and the chain read a batch proof without plonky2's prover.
+- `qnero_private_batch_circuit_config` and `qnero_public_batch_circuit_config`,
+  next to the leaf configs. The private batch is the only layer that blinds.
+- `sensitive::Secret` (M3), ported from upstream's `wormhole/circuit/src/sensitive.rs`
+  and narrowed to one digest: `ask` and `nk` are now held in a move-only,
+  zeroize-on-drop container with no `Debug`, so duplicating the spend
+  credential takes an explicitly named `expose_digest` call. `InputNote` and
+  `SpendWitness` lose `Clone` as a result, which is the point.
 - `MerklePath::from_unsorted`, ported from upstream's
   `ZkMerkleProofData::from_unsorted`: the chain hands out siblings in
   child-index order with no position hint, and the circuit needs them sorted

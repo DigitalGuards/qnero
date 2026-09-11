@@ -9,9 +9,15 @@
 //! applies here with more force, because the witness holds `ask` and `nk`.
 //!
 //! Leaf proofs are non-ZK. They are inputs to the wallet's own private-batch
-//! aggregator and must not leave it.
+//! aggregator and must not leave it. [`wallet::WalletProver`] is the API a
+//! wallet should use: it builds both circuits once, keeps the leaf proofs
+//! inside, and hands back the private-batch proof that is the transaction.
 
 #![forbid(unsafe_code)]
+
+pub mod wallet;
+
+pub use wallet::WalletProver;
 
 use anyhow::{bail, Result};
 use plonky2::iop::witness::PartialWitness;

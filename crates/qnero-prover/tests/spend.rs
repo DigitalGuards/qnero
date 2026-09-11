@@ -372,6 +372,90 @@ fn both_inputs_dummy_cannot_prove() {
     assert_rejected(&witness, "both inputs dummy");
 }
 
+/// The batch padding leaf is the one leaf allowed to consume no note, and it
+/// proves.
+///
+/// Without this, a wallet with fewer transfers than batch slots has nothing to
+/// fill them with: every leaf proof in a private batch is checked against the
+/// same baked-in leaf verifier key, so padding has to be a proof of this exact
+/// circuit.
+#[test]
+fn the_padding_leaf_proves_and_publishes_the_sentinel() {
+    let witness = qnero_circuit::padding::padding_leaf_witness();
+    let proof = prove_with_shared_circuit(&witness).expect("the padding leaf proves");
+    circuit().1.verify(proof.clone()).expect("and verifies");
+
+    let public = public_of(&proof);
+    let sentinel: [F; 4] = core::array::from_fn(|i| {
+        F::from_canonical_u64(qnero_circuit::padding::PADDING_BLOCK_HASH[i])
+    });
+    assert_eq!(public.block_hash, sentinel);
+    assert_eq!(
+        public.block_number,
+        F::from_canonical_u32(qnero_circuit::padding::PADDING_BLOCK_NUMBER)
+    );
+    assert_eq!(public.fee, F::ZERO);
+}
+
+/// A padding leaf cannot pay itself a fee.
+///
+/// Constraint 9's exemption switches off the requirement to consume a note,
+/// and nothing else: both inputs are dummies, so constraint 4 forces their
+/// values to zero, and the balance equation then has zero on its left side.
+/// A nonzero fee makes the right side nonzero and the leaf unprovable. The
+/// batch wrapper masks a padding slot's fee anyway; this is the leaf-side half
+/// of that pair, and it is what makes the mask a second line rather than the
+/// only one.
+#[test]
+fn a_padding_leaf_cannot_carry_a_fee() {
+    let mut witness = qnero_circuit::padding::padding_leaf_witness();
+    witness.fee = 1;
+    assert_rejected(&witness, "padding leaf with a fee");
+}
+
+/// A padding leaf cannot mint value either: an output worth something breaks
+/// the same balance equation.
+#[test]
+fn a_padding_leaf_cannot_carry_an_output_value() {
+    let mut witness = qnero_circuit::padding::padding_leaf_witness();
+    witness.outputs[0].value = 1;
+    assert_rejected(&witness, "padding leaf with a nonzero output");
+}
+
+/// A leaf that spends real notes cannot claim the padding sentinel.
+///
+/// The sentinel is derived in circuit from the published `block_hash`, and the
+/// header binding is unconditional, so claiming it means hashing the padding
+/// header preimage. This witness binds a real block's header and publishes the
+/// sentinel instead, which is exactly the substitution an attacker would want:
+/// it would make the batch wrapper mask a slot that spends real notes, or, one
+/// layer down, unlock the constraint 9 exemption for a leaf anchored at a real
+/// tree.
+#[test]
+fn a_real_leaf_cannot_claim_the_padding_sentinel() {
+    let witness = two_real_inputs();
+    let sentinel = Digest::from_bytes(&{
+        let mut bytes = [0u8; 32];
+        for (i, limb) in qnero_circuit::padding::PADDING_BLOCK_HASH
+            .iter()
+            .enumerate()
+        {
+            bytes[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+        }
+        bytes
+    })
+    .expect("the sentinel limbs are canonical");
+
+    assert_override_rejected(
+        &witness,
+        &PublicOverrides {
+            block_hash: Some(sentinel),
+            ..PublicOverrides::default()
+        },
+        "real leaf claiming the padding sentinel",
+    );
+}
+
 /// The 62-bit range check on an *input* value. The output and fee checks have
 /// their own tests; without this one, deleting the input check leaves the whole
 /// suite green while the no-wrap argument behind constraint 8 loses its
@@ -384,8 +468,8 @@ fn an_input_value_of_two_to_the_62_cannot_prove() {
     // produces, so pk derivation, membership and the nullifier all pass and
     // only the range check can reject the leaf.
     let mut over_range = InputNote {
-        ask: keys.ask,
-        nk: keys.nk,
+        ask: keys.ask.into(),
+        nk: keys.nk.into(),
         value: MAX_VALUE + 1,
         rho: digest("rho-in-over"),
         r: digest("r-in-over"),
@@ -452,14 +536,14 @@ fn a_failed_proof_does_not_leak_the_witness() {
 #[test]
 fn a_wrong_ask_cannot_prove() {
     let mut witness = two_real_inputs();
-    witness.inputs[0].ask = digest("not-the-spend-key");
+    witness.inputs[0].ask = digest("not-the-spend-key").into();
     assert_rejected(&witness, "wrong ask");
 }
 
 #[test]
 fn a_wrong_nullifier_key_cannot_prove() {
     let mut witness = two_real_inputs();
-    witness.inputs[1].nk = digest("not-the-nullifier-key");
+    witness.inputs[1].nk = digest("not-the-nullifier-key").into();
     assert_rejected(&witness, "wrong nk");
 }
 
@@ -1041,8 +1125,8 @@ fn a_dummy_slot_cannot_publish_a_real_notes_nullifier() {
     // leaf proves; only the domain tag stands between it and the burn.
     let mut burn = one_real_one_dummy();
     burn.inputs[1] = InputNote {
-        ask: digest("not-the-victims-ask"),
-        nk: victim.nk(),
+        ask: digest("not-the-victims-ask").into(),
+        nk: victim.nk().into(),
         value: 0,
         rho: victim_note.rho,
         r: victim_note.r,

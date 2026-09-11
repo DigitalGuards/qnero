@@ -49,3 +49,24 @@ pub const FRI_PROOF_OF_WORK_BITS: u32 = 16;
 /// to regenerate any verifier artifact. It describes the canonical non-ZK
 /// leaf: the `zk` config blinds rows and is not a production artifact.
 pub const LEAF_DEGREE_BITS: usize = 9;
+
+/// Wire columns of the private-batch circuit.
+///
+/// 135 is the Poseidon gate's floor. A verifier holds a private-batch artifact
+/// to this exact value, because a config that differs is not the circuit the
+/// prover was built from.
+pub const PRIVATE_BATCH_NUM_WIRES: usize = 135;
+
+/// Routed wire columns of the private-batch circuit.
+pub const PRIVATE_BATCH_NUM_ROUTED_WIRES: usize = 60;
+
+/// Ceiling on a batch artifact's committed-polynomial degree, in bits.
+///
+/// Unlike [`LEAF_DEGREE_BITS`], a batch circuit's degree is a function of how
+/// many proofs it aggregates, so a verifier cannot pin it to one value. What
+/// it can do is refuse an artifact whose degree is larger than any supported
+/// batch: `2^20` rows is far above the private batch at 64 leaves, and the
+/// bound keeps a malformed artifact from driving an LDE allocation of
+/// `1 << (degree_bits + rate_bits)` field elements per committed polynomial
+/// before verification fails for an unrelated reason.
+pub const MAX_BATCH_DEGREE_BITS: usize = 20;

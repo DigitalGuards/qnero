@@ -180,6 +180,16 @@ Constraints:
 Private batch: 7 leaves as today, ZK enabled, produced by the wallet. The
 batch is the on-chain transaction unit. Public batch: unchanged in shape.
 
+Built at M3, and two things about it are not "unchanged in shape". The private
+batch forwards **both** nullifiers of every leaf, where the Wormhole wrapper
+carries one per leaf, and it constrains all `2N` of them pairwise distinct: a
+wrapper that kept upstream's shape would drop each leaf's second nullifier and
+leave a note spent from input slot 1 spendable again. And it does not sum fees
+in circuit, because seven 62-bit fees overflow Goldilocks; the pallet sums them
+natively. `docs/CIRCUIT.md` section 8 is the specification, including the
+padding rule: a padding leaf is one that binds a fixed, publicly known header
+preimage, and the wrapper masks every value such a slot publishes.
+
 ## 7. Pallet changes (`pallet-shielded`, forked from `pallet-wormhole`)
 
 1. Parse the new PI layout; keep the block-hash-at-height check and nullifier
@@ -200,7 +210,7 @@ batch is the on-chain transaction unit. Public batch: unchanged in shape.
 |---|---|---|
 | M1 | `qnero-notes` crate: keys, addresses, note commitment, ML-KEM note encryption, scan; KATs pinned | DONE 2026-09-11 |
 | M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (319 gates, degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
-| M3 | Private and public batch aggregators on the new PI layout | 1 week |
+| M3 | Private and public batch aggregators on the new PI layout | DONE 2026-09-11 (private batch 5 + 21N public inputs, ZK, N = 7; public batch forwards each inner verbatim under an aggregator address; see `docs/CIRCUIT.md` section 8) |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | 2 weeks |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | 2 weeks |
 | M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | 2 weeks |

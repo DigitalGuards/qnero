@@ -1,0 +1,38 @@
+[package]
+name = "qnero-aggregator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qnero batch aggregation (M3): the zero-knowledge private batch over N spend leaves, and the public batch over N private batches"
+
+[dependencies]
+# The `zk` feature is not optional here. The private batch is the only layer
+# that blinds, and plonky2 panics at build time on a zero-knowledge config
+# unless its randomness is compiled in, so a build without it would be a
+# privacy failure that only surfaces when a wallet tries to prove.
+qnero-circuit = { workspace = true, features = ["zk"] }
+qnero-notes = { workspace = true }
+# The leaf entry points are behind a non-default feature so a runtime cannot
+# reach them; the aggregator is the one caller that legitimately needs them.
+qnero-verifier = { workspace = true, features = ["leaf"] }
+qp-plonky2 = { workspace = true }
+anyhow = { workspace = true, features = ["std"] }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+qnero-circuit = { workspace = true, features = ["zk", "test-support"] }
+qnero-verifier = { workspace = true, features = ["leaf"] }
+# A dev-dependency cycle, which Cargo allows: the builder is what turns these
+# circuits into the artifact set, and the artifact round-trip test belongs
+# beside the fixtures the other batch tests use.
+qnero-circuit-builder = { workspace = true }
+rand = { workspace = true }
+
+[features]
+default = []
+# Let plonky2 use rayon. Off by default so a prover cannot saturate a machine
+# unasked; a caller that turns it on should bound the pool with
+# RAYON_NUM_THREADS. The proofs are identical either way.
+parallel = ["qp-plonky2/parallel"]

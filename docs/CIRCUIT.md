@@ -1,13 +1,16 @@
-# Qnero v0 spend circuit (M2)
+# Qnero v0 spend circuit (M2) and batch aggregation (M3)
 
 Status: implemented and tested, 2026-09-11. Crates: `qnero-circuit`,
-`qnero-prover`, `qnero-verifier`. Forked from Quantus-Network/qp-zk-circuits
-(MIT); each crate carries a NOTICE and a CHANGES.md.
+`qnero-prover`, `qnero-verifier`, `qnero-aggregator`, `qnero-circuit-builder`.
+Forked from Quantus-Network/qp-zk-circuits (MIT); each crate carries a NOTICE
+and a CHANGES.md.
 
 One leaf is one shielded transfer: up to two input notes, exactly two output
 notes, a public fee, and a digest that binds the output ciphertexts. M3 wraps
-leaves in a private batch, which is the layer that provides zero knowledge and
-the on-chain transaction unit. M4 consumes this layout in `pallet-shielded`.
+`N` leaves in a private batch, which is the layer that provides zero knowledge
+and the on-chain transaction unit, and wraps `n` private batches in a public
+batch. Sections 1 to 7 are the leaf. Section 8 is the batch layers and the
+rules M3 settled. M4 consumes both layouts in `pallet-shielded`.
 
 Field: Goldilocks. Hash: Poseidon2 (`qp-poseidon-core` off circuit,
 `hash_n_to_hash_no_pad_p2::<Poseidon2Hash>` in circuit, the same sponge).
@@ -345,7 +348,9 @@ attack on Poseidon2.
    integers: no wraparound can fake a balance. This is why the fee is range
    checked at all, and why the two-input shape cannot be widened to four inputs
    at 62 bits without redoing the argument.
-9. At least one input is real: the product of the `is_dummy` bits is zero.
+9. At least one input is real, unless the leaf is batch padding: the product
+   of the `is_dummy` bits times `1 - is_padding` is zero, where `is_padding` is
+   `block_hash == PADDING_BLOCK_HASH` (section 8).
    Nothing else relates the two bits. With both set, a leaf proves with no
    spend key and no note in the tree: every membership check is switched off,
    both values are forced to zero by constraint 4, so the balance holds at zero
@@ -358,9 +363,13 @@ attack on Poseidon2.
    forks, so the leaf's own `fee` public input is the only cost, and an
    all-dummy leaf sets it to zero.
 
-   What the constraint achieves is exactly this: every leaf must consume a note
-   already in the tree, under a spend credential the prover holds, so a leaf
-   cannot be produced with no key and no note at all. It is **not** a bound on
+   What the constraint achieves is exactly this: every leaf that binds a real
+   block must consume a note already in the tree, under a spend credential the
+   prover holds, so such a leaf cannot be produced with no key and no note at
+   all. The exemption is the padding leaf, which binds the one fixed padding
+   header whose `zk_tree_root` is the empty tree, so it cannot be claimed by a
+   leaf anchored at a real block, and section 8 covers what stops a padding
+   leaf from settling anything. It is **not** a bound on
    how many leaves a prover can produce. A leaf consumes at most two notes and
    always mints two, so one real input of any value, including zero, plus a
    dummy leaves the prover with one more spendable note than they started with.
@@ -387,7 +396,8 @@ freshness to it.
 
 This is a different mechanism from the Wormhole leaf's dummy, which marks a
 whole leaf as padding for the batch and makes the header binding conditional on
-an in-circuit sentinel. Qnero's leaf is always a real leaf.
+an in-circuit sentinel. A Qnero leaf is a real leaf unless it is the batch
+padding leaf, and the header it binds is what decides which: see section 8.
 
 ## 6. Measured size
 
@@ -396,18 +406,22 @@ development workstation, single threaded (plonky2's `parallel` feature is off
 so a prover cannot saturate a machine unasked):
 
 ```
-gates before padding : 319
+gates before padding : 320
 degree_bits          : 9
 public inputs        : 26
 zero knowledge       : false
-build                : 61 ms
-prove, mean of 9     : 195 ms
+build                : 64 ms
+prove, mean of 9     : 183 ms
 prove, min           : 138 ms
-prove, median        : 178 ms
-prove, max           : 300 ms
-verify               : 2.3 ms
+prove, median        : 169 ms
+prove, max           : 381 ms
+verify               : 2.2 ms
 proof bytes          : 105500
 ```
+
+M3 added one gate: the padding sentinel is a four-limb comparison against a
+constant and a single multiplication, and at 60 routed wires an arithmetic gate
+packs fifteen of those operations.
 
 Proving time is a mean over nine proofs, and the spread is the measurement, so
 a single warm number would be misleading. The FRI challenge carries 16 grinding
@@ -429,44 +443,228 @@ amortizes.
 The leaf is non-ZK, exactly as the Wormhole leaf is. A leaf proof is an input
 to the wallet's own private-batch aggregator and must never cross a trust
 boundary: `standard_recursion_config` does not blind, so the proof bytes leak
-witness structure. Privacy is applied one layer up.
+witness structure. Privacy is applied one layer up, at the private batch
+(section 8), which is the only layer that blinds and the only proof that
+leaves a wallet. Two things enforce that shape rather than describe it:
+`qnero-verifier`'s leaf entry points are behind a non-default feature, so a
+runtime cannot reach them, and `qnero_prover::WalletProver` keeps its leaf
+proofs inside and hands back the batch.
 
 The plumbing for a ZK leaf is kept: `qnero_leaf_zk_circuit_config()` returns
 the row-blinding config, and `QneroSpendCircuit::new` accepts it. Plonky2
 compiles its blinding randomness out by default, so a ZK config is rejected
-with a clear error unless `qnero-circuit`'s `zk` feature is on.
+with a clear error unless `qnero-circuit`'s `zk` feature is on. The aggregator
+enables it unconditionally, because a private batch that could not blind would
+be a privacy failure that compiles.
 
-## 8. What M3 and M4 still have to decide
+## 8. Batch aggregation (M3)
 
-- **Per-leaf forwarding contract for the batch wrapper.** Every non-padding
-  slot's two nullifiers, two output commitments, fee and `ct_digest` must reach
-  the aggregated public inputs, and the wrapper must constrain all `2N` real
-  nullifiers pairwise distinct. This is the one place a mechanical fork of
-  upstream's private batch goes wrong quietly. Upstream's leaf has a single
-  nullifier, so its wrapper carries `nullifiers_count(N) = N` and an aggregated
-  layout of one nullifier per leaf; the visibly required edits when porting are
-  the leaf-side constants (`LEAF_PI_LEN` 22 to 26, `NULLIFIER_START` 4 to 5),
-  and making only those drops every leaf's `nf_2` at the batch boundary. A note
-  spent from input slot 1 would then never be marked used and could be spent
-  again without limit. Upstream also constrains only `N` nullifiers pairwise
-  distinct; at two per leaf that has to become `2N`, or one leaf proof replayed
-  across slots aggregates twice against a single settled nullifier. Sizing, so
-  the fork is known to fit: at `N = 7` the wrapper needs 5 shared felts
-  (`block_hash` 4, `block_number` 1) plus 21 per leaf (two nullifiers, two
-  commitments, fee, `ct_digest`), against the `26 * 7 + 8 = 190` that
-  upstream's `pi_len()` formula yields at 26 felts per leaf.
-- **Batch padding sentinel.** A private batch of N leaves needs dummy leaves
-  when fewer than N real ones are available. The Wormhole wrapper recognises a
-  dummy by an all-zero `block_hash` and re-masks every field it reads from a
-  dummy slot, because the leaf's sentinel did not cover the exit accounts. The
-  recommended Qnero shape is a fixed dummy header preimage whose `block_hash`
-  is a known constant: it is derived in circuit from public inputs the wrapper
-  already reads, it cannot be claimed by a leaf that also binds to a real
-  block, and the wrapper must still mask the commitments, nullifiers and fee of
-  a dummy slot, trusting no invariant that crosses a circuit boundary.
-  Constraint 9 has to be gated on that same sentinel: a padding leaf has no
-  real input, so it must stay provable, while every leaf whose `block_hash`
-  binds a real block must spend something.
+Two recursive layers sit above the leaf, both in `qnero-aggregator`:
+
+```text
+leaf proof        one shielded transfer, 26 public inputs, non-ZK
+  |  N of them
+private batch     zero knowledge, 5 + 21*N public inputs, the transaction a
+  |               wallet submits
+  |  n of them
+public batch      an aggregator's bundle, 4 + n*(5 + 21*N) public inputs, non-ZK
+```
+
+Both verify their inner proofs against a verifier key baked in as circuit
+**constants**. A witnessed verifier key would let a prover substitute a circuit
+of their own with no constraints at all and have the wrapper accept its proof.
+
+Chain defaults: `N = 7` leaves per private batch, `n = 53` private batches per
+public batch, both overridable at artifact-build time. Seven is a wallet-side
+memory decision, fifty-three an aggregator-side cost one.
+
+### 8.1 Private batch public inputs
+
+`5 + 21 * N` field elements. The indices are constants in
+`qnero_circuit::batch_layout`, which has no dependencies, so a verifier and the
+chain read a batch proof without the prover stack.
+
+| index | felts | name | meaning |
+|---|---|---|---|
+| 0..4 | 4 | `block_hash` | the block every non-padding slot is anchored at |
+| 4 | 1 | `block_number` | height of that block |
+
+then, for each slot `i` in `0..N`, at `5 + 21*i`:
+
+| offset | felts | name |
+|---|---|---|
+| +0..4 | 4 | `nf_1` |
+| +4..8 | 4 | `nf_2` |
+| +8..12 | 4 | `cm_1` |
+| +12..16 | 4 | `cm_2` |
+| +16 | 1 | `fee` |
+| +17..21 | 4 | `ct_digest` |
+
+There is no trailing padding: the length is a function of `N` alone. Upstream
+pads its aggregated output to a legacy size; Qnero has no legacy to preserve.
+
+At `N = 7` that is 152 felts.
+
+**Fees are not summed in circuit.** A leaf's fee is a 62-bit field element, so
+seven of them can exceed the Goldilocks modulus and the sum would wrap. Each
+fee is forwarded and `pallet-shielded` sums them in native arithmetic, where
+the total is a `u128`. This is the one place the Qnero wrapper does less than
+upstream's, which enforces a volume fee over 32-bit amounts in circuit with a
+52-bit range check that assumes 64 leaves of `u32`.
+
+**Slot order carries no meaning.** The prover shuffles the leaf proofs
+uniformly, and the circuit picks the batch's block reference by a prefix scan
+over the first non-padding slot rather than from slot 0, so every position is
+equivalent. That shuffle is also what hides where the padding sits. Upstream
+additionally permutes its emitted nullifier region through a switch network,
+because its exit-slot region is grouped and stays correlated with slot order;
+Qnero forwards each slot's six values as one unit, so the proof shuffle already
+randomizes every emitted position and a second network would add nothing.
+
+### 8.2 Public batch public inputs
+
+`4 + n * (5 + 21 * N)` field elements: `aggregator_address(4)`, then each inner
+private batch's public inputs forwarded **verbatim** as one contiguous segment,
+in slot order. Nothing is shuffled, grouped or summed, so the chain can
+attribute a settlement failure to one inner proof.
+
+Every non-padding inner must agree on block hash and block number, which is
+what lets the chain resolve one block per settlement. An aggregator therefore
+buckets the proofs it pools by block.
+
+The aggregator address is four felts of pure witness, registered as the first
+four public inputs and constrained by nothing in circuit. It names who may
+claim the batch's fees. Whoever holds the inner proofs can re-prove the same
+batch under another address, so an aggregator that accepts a finished proof
+from elsewhere must compare the exposed address against its own **off circuit**
+or it will settle batches whose fees are payable to someone else;
+`QneroPublicBatchProver::verify` is that check.
+
+### 8.3 The forwarding contract
+
+**Every non-padding slot's two nullifiers, two output commitments, fee and
+`ct_digest` reach the aggregated public inputs unchanged, and all `2N` real
+nullifiers are constrained pairwise distinct.**
+
+This is the one place a mechanical port of upstream's private batch goes wrong
+quietly. Upstream's leaf has a single nullifier, so its wrapper carries
+`nullifiers_count(N) = N` and an aggregated layout of one nullifier per leaf.
+The visibly required edits when porting are the leaf-side constants; making
+only those drops every leaf's `nf_2` at the batch boundary, and a note spent
+from input slot 1 would never be marked used and could be spent again without
+limit. Upstream also constrains only `N` nullifiers pairwise distinct; at two
+per leaf that has to become `2N`, or one leaf proof replayed across slots
+aggregates twice against a single settled nullifier.
+
+The prover mirrors both rules off circuit so an impossible batch is refused in
+milliseconds instead of after the recursive proving run, and the two must be
+kept in lockstep. The circuit remains the enforcer, and `qnero-aggregator`'s
+own tests fill the witness directly, past the prover's checks, to prove it.
+
+### 8.4 The padding rule
+
+A batch has a fixed number of slots, so a wallet with fewer transfers than
+slots fills the rest, and the filler must be a genuine proof of the leaf
+circuit because the leaf verifier key is baked into the wrapper.
+
+**A padding leaf is a leaf whose `block_hash` is `PADDING_BLOCK_HASH`, the
+Poseidon2 hash of one fixed, publicly known header preimage.** That preimage
+has a domain-separated `parent_hash`, `H_bytes("qnero/padding-header")`, which
+is not a block hash any chain can produce, the empty commitment-tree root, and
+zero everywhere else. The constant is pinned as limbs in
+`qnero_circuit::padding`, in a module that compiles without the circuit
+feature, and a test recomputes it from the preimage.
+
+This was chosen over Wormhole's all-zero-`block_hash` sentinel, which is the
+other candidate recorded at M2, for three reasons.
+
+- **The header binding stays unconditional.** A padding leaf hashes a real
+  preimage like every other leaf, so nothing in the circuit is switched off for
+  padding, and no leaf can publish a `block_hash` it did not compute. Upstream
+  has to make its binding conditional, because no preimage hashes to zero, and
+  a conditional binding is a constraint an attacker wants switched on by the
+  same bit that unlocks the padding path.
+- **The sentinel cannot be claimed by a leaf that spends a note.** The padding
+  preimage carries the empty `zk_tree_root`, so a real input inside a padding
+  leaf would have to hash a Merkle path to the all-zero digest, which is a
+  preimage attack on Poseidon2.
+- **One sentinel serves all three layers.** A padding leaf, an all-padding
+  private batch (whose prefix scan finds no non-padding slot and keeps the
+  sentinel as its reference) and a padding inner of a public batch all carry
+  the same block hash, so the chain has one rule to recognise padding by.
+
+In the leaf, the sentinel gates constraint 9 and nothing else. Everything else
+follows: with both inputs dummy their values are zero, so the balance equation
+forces the fee and both output values to zero as well. A padding leaf provably
+moves nothing.
+
+**The wrapper masks every value a padding slot publishes**, trusting no
+invariant that crosses a circuit boundary:
+
+- both nullifiers become `H(NF_BATCH_PADDING, preimage)` over fresh randomness
+  the prover draws per slot per proving run. They are unique and unlinkable, so
+  the chain settles every published nullifier by one rule and never learns
+  which slots were padding, and cloning one padding template into many slots
+  cannot collide. The domain tag is what keeps a prover-chosen value outside
+  the image of both leaf nullifier functions, for the same reason `NF_DUMMY`
+  exists (section 3);
+- both commitments become zero, which is the absence sentinel the commitment
+  tree already refuses to store, so the chain appends nothing for that slot;
+- the fee and `ct_digest` become zero.
+
+At the public batch, a padding inner keeps its sentinel header, so the chain
+recognises the segment, and its whole slot region is zeroed. The zeroing is
+load bearing there: that template is a published artifact cloned into every
+empty slot, so its nullifiers would otherwise repeat across slots and batches.
+
+### 8.5 Artifacts
+
+`qnero-circuit-builder` writes the set a pallet embeds and a wallet loads:
+
+```text
+leaf_verifier.bin                 verifier data for the spend leaf
+padding_leaf_proof.bin            the canonical padding leaf proof
+private_batch_verifier.bin        verifier data for the private batch
+padding_private_batch_proof.bin   an all-padding private batch (optional)
+public_batch_verifier.bin         verifier data for the public batch
+config.json                       the dimensions the set was built for
+qnero_circuit_config.rs           those dimensions as Rust constants
+```
+
+**No prover artifact, at any layer.** Prover data carries the target list that
+decides which witness values become public inputs, so a poisoned one could make
+a wallet publish its own spend credential, or the preimages that say which
+slots were padding. Every prover rebuilds its circuit from source, which it has
+to do anyway. The set is staged in a hidden sibling directory and swapped in by
+rename once the last stage succeeds, so a failed run cannot leave a mixed
+generation behind, and `config.json` is written last.
+
+A verifier file is one whole `VerifierCircuitData`. A batch artifact cannot be
+pinned by hash, because its bytes are a function of the dimensions, so
+`qnero-verifier` holds it to a profile instead: the exact public-input count
+for those dimensions, the exact `CircuitConfig`, the whole `FriParams`
+recomputed from that config at the degree the artifact claims, a ceiling on
+that degree, and the artifact's index structure against its own gate list.
+
+The last one is not paranoia. A gate's filter is a product over its selector
+group, so a group of `0..2^40` is a verifier that never returns, and one
+flipped bit in a length byte of a published artifact produces exactly that.
+Nothing else catches it: the circuit digest does not cover the selector layout,
+and a parameter floor never looks at it. Recomputing `FriParams` is likewise
+what pins `reduction_arity_bits` and `leaf_hiding`, which live only in that
+second copy. The leaf's own floor pins those two the same way, which closes
+what M2 left open there; both remain unreachable from a comparison of the
+first copy alone.
+
+The wallet-side pinning is stricter, because a wallet can rebuild: the
+aggregator compares an artifact's raw bytes against a canonical rebuild and
+never deserializes the untrusted side, since `CommonCircuitData::from_bytes`
+reserves vector capacity from length fields before they are proven consistent.
+The keccak pin on a tagged release is still the thing neither has, and it still
+needs a tagged circuit to pin.
+
+### 8.6 What M4 still has to decide
+
 - **Minimum fee per non-padding leaf.** This is the anti-spam mechanism, and
   after the correction to constraint 9 it is the only one. A leaf consumes at
   most two notes and always mints two, so requiring a real input does not bound
@@ -481,31 +679,15 @@ with a clear error unless `qnero-circuit`'s `zk` feature is on.
   whose per-leaf fee is below a floor and charges the submitter for the
   commitment slots consumed. Until one of the two lands, constraint 9 only
   stops a prover who holds no notes at all.
-- **Verifier artifact pinning.** `qnero-verifier` loads verifier data from
-  bytes behind a size cap and a parameter floor: public-input count,
-  `security_bits`, `num_challenges`, FRI query rounds, grinding bits, rate,
-  cap height and the leaf's degree, all pinned to `qnero_circuit::params`,
-  which the circuit crate tests against the config the prover builds with. That
-  floor is what stops an artifact built over this same layout with one query
-  round from verifying forged proofs; plonky2's own check on deserialized
-  config rejects only a zero challenge count, a zero constant count and fewer
-  than three routed wires. The floor also requires the artifact's two copies of
-  the FRI configuration to agree. One lives in `common.config.fri_config` and a
-  second in `common.fri_params.config`, deserialized independently from the
-  same bytes, and verification reads the second: the grinding bits it checks
-  the proof-of-work response against, the query count it compares the round
-  proofs against, and the rate that sizes the LDE domain all come from
-  `fri_params.config`. Plonky2 never compares the two, so a floor over
-  `config.fri_config` alone would accept an artifact whose
-  `fri_params.config.proof_of_work_bits` is zero and verify proofs under it
-  with no grinding at all, while the canonical 16 stayed on display in the copy
-  that was checked. Provenance is a separate question. The keccak pin on
-  the artifact bytes still needs a tagged circuit release to pin, and every
-  circuit change after that invalidates it.
+- **Settle both nullifiers of every slot, and skip a zero commitment.** A
+  padding slot publishes two nullifiers that look like any other, by design, so
+  the chain must settle every published nullifier without trying to tell them
+  apart. It must append only nonzero commitments: a zero commitment is the
+  absence sentinel, and it is how a padding slot says it created no note.
 - **Pallet-side `ct_digest` recomputation.** The rule is fixed (section 1) and
   implemented once in `qnero_notes::ct_digest`. What M4 owes is the call:
   recompute the digest over the ciphertexts in the settlement extrinsic, in
-  output order, and reject the leaf when it differs from the public input.
+  output order, and reject the leaf when it differs from the forwarded value.
   Without that call the ciphertexts are attached to a proof that says nothing
   about them.
 - **Coinbase and deposit range checks.** Every value that enters the pool
@@ -513,15 +695,12 @@ with a clear error unless `qnero-circuit`'s `zk` feature is on.
   balance argument in constraint 8 does not hold for notes created that way.
 - **Nullifier seed uniqueness outside a spend.** Inside a spend this is
   settled: `rho_out_j = H(RHO, nf_1, nf_2, j)` is derived in circuit, so a
-  sender has no choice to abuse (section 3). Every other path that creates a note still
-  has to pick one. A deposit or a coinbase note has no spent nullifier to
-  derive from, so M4 must give those a rule of their own, for example a
-  per-block counter or the deposit's own unique identifier, and must reject a
-  repeat. The recipient is the last line: a wallet should refuse a received
-  note whose nullifier duplicates one it already holds or one already settled.
-- **Witness zeroization.** `ask` and `nk` live in plain `Digest` values inside
-  `InputNote`, protected only by redacting `Debug`, and `DerivedKeys` is
-  `Copy`. Upstream wraps the equivalent material in a zeroize-on-drop
-  container. Worth doing before a wallet holds real keys. `nk` is a viewing-tier
-  secret: with `r` in the nullifier preimage it confers spend detection for
-  notes the holder can already see, and nothing beyond that (section 3).
+  sender has no choice to abuse (section 3). A deposit or a coinbase note has
+  no spent nullifier to derive from, so M4 must give those a rule of their own,
+  for example a per-block counter or the deposit's own unique identifier, and
+  must reject a repeat. The recipient is the last line: a wallet should refuse
+  a received note whose nullifier duplicates one it already holds or one
+  already settled.
+- **A keccak pin on a tagged release.** Both the leaf floor and the batch
+  profile stand in for provenance, which they are not. The pin lands with the
+  first tagged circuit, and every circuit change after that invalidates it.
