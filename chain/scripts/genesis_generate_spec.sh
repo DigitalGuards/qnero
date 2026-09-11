@@ -1,0 +1,136 @@
+#!/bin/bash
+
+# This script generates chain specifications from a specific git release tag.
+# This ensures that the genesis state is transparently and reproducibly built from a known version of the runtime code.
+# The script downloads the WASM runtime from GitHub releases and directly replaces the runtime code in the generated chain spec.
+
+set -e
+
+# Check if both parameters are provided
+if [ -z "$1" ] || [ -z "$2" ]; then
+  echo "❌ Error: Missing parameters."
+  echo "Usage: $0 <release_tag> <profile>"
+  echo "Example: $0 v0.1.1-nibbler-snack heisenberg"
+  echo "Example: $0 v0.1.1-nibbler-snack planck"
+  echo "Example: $0 v0.1.1-nibbler-snack mainnet"
+  echo ""
+  echo "Available profiles:"
+  echo "  - heisenberg: Heisenberg testnet"
+  echo "  - planck: Planck network"
+  echo "  - mainnet: Production genesis (requires mainnet_vesting::FINALIZED)"
+  echo ""
+  echo "Naming convention:"
+  echo "  profile -> profile_live_spec (for execution)"
+  echo "  profile -> profile (with _ replaced by - for output file)"
+  echo "  profile -> profile (as CHAIN_ID)"
+  exit 1
+fi
+
+RELEASE_TAG=$1
+PROFILE=$2
+
+# Dynamic generation based on naming convention
+PROFILE_SPEC="${PROFILE}_live_spec"                                    # planck -> planck_live_spec
+OUTPUT_FILE="node/src/chain-specs/${PROFILE//_/-}.json"               # planck -> planck.json
+CHAIN_ID="$PROFILE"                                                    # planck -> planck
+
+echo "🔧 Generating initial chain spec from '$PROFILE'..."
+echo "📁 Output file: $OUTPUT_FILE"
+echo "🆔 Chain ID: $CHAIN_ID"
+echo "🏷️  Release tag: $RELEASE_TAG"
+echo "⚙️  Execution profile: $PROFILE_SPEC"
+echo ""
+
+QUANTUS_NODE_BIN="./target/release/quantus-node"
+GITHUB_REPO="${GITHUB_REPO:-Quantus-Network/chain}"
+
+echo "🔄 Checking current git status..."
+if ! git diff-index --quiet HEAD --; then
+    echo "❌ Error: Your working directory is not clean. Please commit or stash your changes before running this script."
+    exit 1
+fi
+
+echo "⬇️ Fetching latest tags from origin..."
+git fetch --all --tags
+
+BRANCH_NAME="genesis/$PROFILE/$RELEASE_TAG"
+echo "✨ Creating and switching to new branch '$BRANCH_NAME'..."
+git checkout -b "$BRANCH_NAME" "tags/$RELEASE_TAG"
+
+echo "🌐 Fetching runtime spec_version from GitHub release ($GITHUB_REPO)..."
+# gh (not curl) so private repositories work through the caller's gh auth
+ASSETS_JSON=$(gh release view "$RELEASE_TAG" -R "$GITHUB_REPO" --json assets --jq '[.assets[].name | select(contains("quantus-runtime-v"))] | first // empty')
+if [ -z "$ASSETS_JSON" ]; then
+    echo "❌ Error: Could not find runtime assets in release $RELEASE_TAG of $GITHUB_REPO."
+    exit 1
+fi
+
+SPEC_VERSION=$(echo "$ASSETS_JSON" | grep -o 'v[0-9]\+' | sed 's/v//')
+
+if [ -z "$SPEC_VERSION" ] || [ "$SPEC_VERSION" = "null" ]; then
+    echo "❌ Error: Could not determine spec_version from release."
+    exit 1
+fi
+
+echo "📋 Using spec_version: $SPEC_VERSION"
+echo "🎯 Generating chain spec for profile: $PROFILE"
+
+echo "🚀 Building node to generate initial chain spec..."
+cargo build --release --package quantus-node
+
+if [ ! -f "$QUANTUS_NODE_BIN" ]; then
+    echo "❌ Build failed. Quantus node binary not found."
+    exit 1
+fi
+
+echo "🔧 Generating initial chain spec from '$CHAIN_ID'..."
+# --disable-default-bootnode: without it, a spec with no declared bootnodes gets a
+# throwaway /ip4/127.0.0.1 bootnode injected (matters for mainnet, whose
+# bootnodes are added post-launch).
+$QUANTUS_NODE_BIN build-spec --chain "$PROFILE_SPEC" --raw --disable-default-bootnode > "$OUTPUT_FILE"
+
+if [ ! -s "$OUTPUT_FILE" ]; then
+  echo "❌ Failed to generate chain spec. The output file is empty."
+  exit 1
+fi
+
+echo "⬇️ Downloading runtime WASM from GitHub release..."
+
+# Download the compressed WASM (this is what should be in the runtime code storage)
+TEMP_WASM=$(mktemp)
+COMPACT_WASM_NAME="quantus-runtime-v${SPEC_VERSION}.compact.compressed.wasm"
+echo "Downloading: $GITHUB_REPO $RELEASE_TAG $COMPACT_WASM_NAME"
+if ! gh release download "$RELEASE_TAG" -R "$GITHUB_REPO" -p "$COMPACT_WASM_NAME" -O "$TEMP_WASM" --clobber; then
+    echo "❌ Error: Failed to download compressed WASM runtime."
+    exit 1
+fi
+
+echo "📝 Converting WASM to hex and replacing runtime code in chain spec..."
+
+# Convert WASM to hex without 0x prefix
+WASM_HEX=$(xxd -p "$TEMP_WASM" | tr -d '\n')
+
+# Replace the runtime code in the JSON (0x3a636f6465 is the :code storage key)
+# Create a temporary file for the modified JSON
+TEMP_JSON=$(mktemp)
+TEMP_HEX_FILE=$(mktemp)
+
+# Write the hex string to a temporary file (with 0x prefix)
+echo "0x$WASM_HEX" > "$TEMP_HEX_FILE"
+
+# Use jq to replace the runtime code, reading the hex from file
+jq --rawfile wasm_hex "$TEMP_HEX_FILE" '.genesis.raw.top."0x3a636f6465" = ($wasm_hex | rtrimstr("\n"))' "$OUTPUT_FILE" > "$TEMP_JSON"
+
+# Replace the original file
+mv "$TEMP_JSON" "$OUTPUT_FILE"
+
+# Clean up temp files
+rm -f "$TEMP_WASM" "$TEMP_HEX_FILE"
+
+echo "✅ Runtime code replaced successfully in chain spec."
+echo "📄 The chain spec at '$OUTPUT_FILE' has been updated with runtime from $RELEASE_TAG."
+echo "🎉 Genesis generation complete for profile: $PROFILE"
+echo ""
+echo "ℹ️ You are now on a new branch named '$BRANCH_NAME'."
+echo "   Please review and commit the changes to '$OUTPUT_FILE'."
+echo "   Example: git add $OUTPUT_FILE && git commit -m \"feat: generate $PROFILE genesis spec from $RELEASE_TAG\""

@@ -1,0 +1,21 @@
+[package]
+description = "Local stub – skips substrate-wasm-builder to avoid metadata panic with optional frame-benchmarking-cli"
+edition = "2021"
+name = "frame-storage-access-test-runtime"
+version = "0.6.0"
+
+[features]
+default = ["std"]
+no_std = []
+runtime-benchmarks = []
+std = []
+
+[dependencies]
+# Use actual crate name so derive macros can find it
+parity-scale-codec = { version = "3.6.12", default-features = false, features = ["derive"] }
+sp-core = { workspace = true }
+sp-runtime = { workspace = true }
+sp-trie = { workspace = true }
+
+[lints]
+workspace = true

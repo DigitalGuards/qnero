@@ -1,0 +1,70 @@
+[package]
+authors.workspace = true
+description = "FRAME system module (vendored from polkadot-sdk)"
+edition.workspace = true
+homepage.workspace = true
+license = "Apache-2.0"
+name = "frame-system"
+readme = "README.md"
+repository.workspace = true
+version = "45.0.0"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[lib]
+name = "frame_system"
+path = "src/lib.rs"
+
+[[bench]]
+harness = false
+name = "bench"
+path = "benches/bench.rs"
+
+[dependencies]
+cfg-if = { workspace = true }
+codec = { workspace = true, default-features = false, features = ["derive"] }
+docify = { workspace = true }
+frame-support = { workspace = true }
+log = { workspace = true, default-features = false }
+qp-header = { path = "../../primitives/header", default-features = false, features = ["serde"] }
+scale-info = { workspace = true, features = ["derive", "serde"] }
+serde = { workspace = true, default-features = false, features = ["alloc", "derive"] }
+sp-core = { workspace = true, default-features = false, features = ["serde"] }
+sp-io = { workspace = true, default-features = false }
+sp-runtime = { workspace = true, default-features = false, features = ["serde"] }
+sp-version = { workspace = true, features = ["serde"] }
+sp-weights = { workspace = true, default-features = false, features = ["serde"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+env_logger = { workspace = true }
+sp-externalities = { workspace = true }
+
+[features]
+default = ["std"]
+experimental = ["frame-support/experimental"]
+runtime-benchmarks = [
+	"frame-support/runtime-benchmarks",
+	"sp-runtime/runtime-benchmarks",
+]
+std = [
+	"codec/std",
+	"frame-support/std",
+	"log/std",
+	"qp-header/std",
+	"scale-info/std",
+	"serde/std",
+	"sp-core/std",
+	"sp-io/std",
+	"sp-runtime/std",
+	"sp-version/std",
+	"sp-weights/std",
+]
+try-runtime = [
+	"frame-support/try-runtime",
+	"sp-runtime/try-runtime",
+]
+
+[lints]
+workspace = true

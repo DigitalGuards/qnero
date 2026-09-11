@@ -1,0 +1,34 @@
+[package]
+authors = [
+	"Parity Technologies <admin@parity.io>",
+	"Quantus Network Developers <hello@quantus.com>",
+]
+description = "Substrate network types with Dilithium support"
+documentation = "https://docs.rs/sc-network-types"
+edition = "2021"
+homepage = "https://quantus.com/"
+license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
+name = "sc-network-types"
+repository = "https://github.com/quantus-network/chain"
+version = "0.20.3"
+
+[lib]
+name = "sc_network_types"
+path = "src/lib.rs"
+
+[dependencies]
+bs58 = { workspace = true }
+bytes = { workspace = true }
+litep2p = { workspace = true }
+log = { workspace = true }
+multiaddr = { workspace = true }
+multihash = { workspace = true }
+rand = { workspace = true }
+serde_with = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+quickcheck = { workspace = true }
+
+[lints]
+workspace = true

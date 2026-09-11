@@ -1,0 +1,189 @@
+[package]
+authors.workspace = true
+description = "Quantus Runtime - Proof of Vibes"
+edition.workspace = true
+homepage.workspace = true
+license = "Apache-2.0"
+name = "quantus-runtime"
+publish = false
+repository.workspace = true
+version = "1.0.0-gm"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+codec = { features = ["derive"], workspace = true }
+frame-benchmarking.workspace = true
+frame-executive.workspace = true
+frame-metadata-hash-extension.workspace = true
+frame-support = { features = ["experimental"], workspace = true }
+frame-system.workspace = true
+frame-system-benchmarking = { optional = true, workspace = true }
+frame-system-rpc-runtime-api.workspace = true
+frame-try-runtime = { optional = true, workspace = true }
+lazy_static.workspace = true
+log.workspace = true
+pallet-balances.workspace = true
+pallet-mining-rewards.workspace = true
+pallet-multisig.workspace = true
+pallet-preimage.workspace = true
+pallet-qpow.workspace = true
+pallet-ranked-collective.workspace = true
+pallet-referenda.workspace = true
+pallet-reversible-transfers.workspace = true
+pallet-scheduler.workspace = true
+pallet-timestamp.workspace = true
+pallet-transaction-payment.workspace = true
+pallet-transaction-payment-rpc-runtime-api.workspace = true
+pallet-treasury.workspace = true
+pallet-utility.workspace = true
+pallet-vesting.workspace = true
+pallet-wormhole.workspace = true
+pallet-zk-tree.workspace = true
+primitive-types.workspace = true
+qp-dilithium-crypto.workspace = true
+qp-header = { workspace = true, features = ["serde"] }
+qp-high-security.workspace = true
+qp-scheduler.workspace = true
+qp-wormhole.workspace = true
+scale-info = { features = ["derive", "serde"], workspace = true }
+serde_json = { workspace = true, default-features = false, features = [
+	"alloc",
+] }
+smallvec.workspace = true
+sp-api.workspace = true
+sp-block-builder.workspace = true
+sp-consensus-qpow.workspace = true
+sp-core = { features = ["serde"], workspace = true }
+sp-genesis-builder.workspace = true
+sp-inherents.workspace = true
+sp-offchain.workspace = true
+sp-runtime = { features = ["serde"], workspace = true }
+sp-session.workspace = true
+sp-storage.workspace = true
+sp-transaction-pool.workspace = true
+sp-version = { features = ["serde"], workspace = true }
+
+[build-dependencies]
+substrate-wasm-builder = { optional = true, workspace = true, default-features = true }
+
+[dev-dependencies]
+env_logger.workspace = true
+qp-dilithium-crypto.workspace = true
+qp-poseidon-core.workspace = true
+sp-io.workspace = true
+
+[features]
+default = ["std"]
+std = [
+	"codec/std",
+	"frame-benchmarking/std",
+	"frame-executive/std",
+	"frame-metadata-hash-extension/std",
+	"frame-support/std",
+	"frame-system-benchmarking?/std",
+	"frame-system-rpc-runtime-api/std",
+	"frame-system/std",
+	"frame-try-runtime?/std",
+	"log/std",
+	"pallet-balances/std",
+	"pallet-mining-rewards/std",
+	"pallet-multisig/std",
+	"pallet-preimage/std",
+	"pallet-qpow/std",
+	"pallet-ranked-collective/std",
+	"pallet-referenda/std",
+	"pallet-reversible-transfers/std",
+	"pallet-scheduler/std",
+	"pallet-timestamp/std",
+	"pallet-transaction-payment-rpc-runtime-api/std",
+	"pallet-transaction-payment/std",
+	"pallet-treasury/std",
+	"pallet-utility/std",
+	"pallet-vesting/std",
+	"pallet-wormhole/std",
+	"pallet-zk-tree/std",
+	"primitive-types/std",
+	"qp-dilithium-crypto/full_crypto",
+	"qp-dilithium-crypto/std",
+	"qp-header/std",
+	"qp-high-security/std",
+	"qp-scheduler/std",
+	"scale-info/std",
+	"serde_json/std",
+	"sp-api/std",
+	"sp-block-builder/std",
+	"sp-consensus-qpow/std",
+	"sp-core/std",
+	"sp-genesis-builder/std",
+	"sp-inherents/std",
+	"sp-io/std",
+	"sp-offchain/std",
+	"sp-runtime/std",
+	"sp-session/std",
+	"sp-storage/std",
+	"sp-transaction-pool/std",
+	"sp-version/std",
+	"substrate-wasm-builder",
+]
+
+runtime-benchmarks = [
+	"frame-benchmarking/runtime-benchmarks",
+	"frame-support/runtime-benchmarks",
+	"frame-system-benchmarking/runtime-benchmarks",
+	"frame-system/runtime-benchmarks",
+	"pallet-balances/runtime-benchmarks",
+	"pallet-mining-rewards/runtime-benchmarks",
+	"pallet-multisig/runtime-benchmarks",
+	"pallet-preimage/runtime-benchmarks",
+	"pallet-qpow/runtime-benchmarks",
+	"pallet-ranked-collective/runtime-benchmarks",
+	"pallet-referenda/runtime-benchmarks",
+	"pallet-reversible-transfers/runtime-benchmarks",
+	"pallet-scheduler/runtime-benchmarks",
+	"pallet-timestamp/runtime-benchmarks",
+	"pallet-transaction-payment/runtime-benchmarks",
+	"pallet-treasury/runtime-benchmarks",
+	"pallet-utility/runtime-benchmarks",
+	"pallet-vesting/runtime-benchmarks",
+	"pallet-wormhole/runtime-benchmarks",
+	"sp-runtime/runtime-benchmarks",
+]
+
+try-runtime = [
+	"frame-executive/try-runtime",
+	"frame-support/try-runtime",
+	"frame-system/try-runtime",
+	"frame-try-runtime/try-runtime",
+	"pallet-balances/try-runtime",
+	"pallet-mining-rewards/try-runtime",
+	"pallet-multisig/try-runtime",
+	"pallet-qpow/try-runtime",
+	"pallet-ranked-collective/try-runtime",
+	"pallet-timestamp/try-runtime",
+	"pallet-transaction-payment/try-runtime",
+	"pallet-treasury/try-runtime",
+	"pallet-vesting/try-runtime",
+	"pallet-wormhole/try-runtime",
+	"sp-runtime/try-runtime",
+]
+
+# Enable the metadata hash generation.
+#
+# This is hidden behind a feature because it increases the compile time.
+# The wasm binary needs to be compiled twice, once to fetch the metadata,
+# generate the metadata hash and then a second time with the
+# `RUNTIME_METADATA_HASH` environment variable set for the `CheckMetadataHash`
+# extension.
+metadata-hash = ["substrate-wasm-builder/metadata-hash"]
+
+
+# Collapses every referenda track timing window to 2 blocks at compile time.
+# Enabled by CI for fast integration tests. Production builds must NEVER enable
+# this — the feature being off is what guarantees mainnet timing.
+fast-governance = []
+
+# A convenience feature for enabling things when doing a build
+# for an on-chain release.
+on-chain-release-build = ["metadata-hash", "sp-api/disable-logging"]

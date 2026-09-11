@@ -1,0 +1,348 @@
+// This is free and unencumbered software released into the public domain.
+//
+// Anyone is free to copy, modify, publish, use, compile, sell, or
+// distribute this software, either in source code form or as a compiled
+// binary, for any purpose, commercial or non-commercial, and by any
+// means.
+//
+// In jurisdictions that recognize copyright laws, the author or authors
+// of this software dedicate any and all copyright interest in the
+// software to the public domain. We make this dedication for the benefit
+// of the public at large and to the detriment of our heirs and
+// successors. We intend this dedication to be an overt act of
+// relinquishment in perpetuity of all present and future rights to this
+// software under copyright law.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+// OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+// ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+// OTHER DEALINGS IN THE SOFTWARE.
+//
+// For more information, please refer to <http://unlicense.org>
+
+// External crates imports
+use alloc::vec::Vec;
+use frame_support::{
+	genesis_builder_helper::{build_state, get_preset},
+	weights::Weight,
+};
+use primitive_types::U512;
+use sp_api::impl_runtime_apis;
+use sp_core::OpaqueMetadata;
+#[cfg(feature = "try-runtime")]
+use sp_runtime::generic::LazyBlock;
+use sp_runtime::{
+	traits::Block as BlockT,
+	transaction_validity::{TransactionSource, TransactionValidity},
+	ApplyExtrinsicResult,
+};
+use sp_version::RuntimeVersion;
+// Local module imports
+use super::{
+	AccountId, Balance, Block, Executive, InherentDataExt, Nonce, Runtime, RuntimeCall,
+	RuntimeGenesisConfig, System, TransactionPayment, ZkTree, VERSION,
+};
+#[cfg(feature = "try-runtime")]
+use super::{Header, UncheckedExtrinsic};
+
+impl_runtime_apis! {
+
+	impl sp_api::Core<Block> for Runtime {
+		fn version() -> RuntimeVersion {
+			VERSION
+		}
+
+		fn execute_block(block: <Block as BlockT>::LazyBlock) {
+			Executive::execute_block(block);
+		}
+
+		fn initialize_block(header: &<Block as BlockT>::Header) -> sp_runtime::ExtrinsicInclusionMode {
+			Executive::initialize_block(header)
+		}
+	}
+
+	impl sp_api::Metadata<Block> for Runtime {
+		fn metadata() -> OpaqueMetadata {
+			OpaqueMetadata::new(Runtime::metadata().into())
+		}
+
+		fn metadata_at_version(version: u32) -> Option<OpaqueMetadata> {
+			Runtime::metadata_at_version(version)
+		}
+
+		fn metadata_versions() -> Vec<u32> {
+			Runtime::metadata_versions()
+		}
+	}
+
+	impl sp_block_builder::BlockBuilder<Block> for Runtime {
+		fn apply_extrinsic(extrinsic: <Block as BlockT>::Extrinsic) -> ApplyExtrinsicResult {
+
+			Executive::apply_extrinsic(extrinsic)
+		}
+
+		fn finalize_block() -> <Block as BlockT>::Header {
+			Executive::finalize_block()
+		}
+
+		fn inherent_extrinsics(data: sp_inherents::InherentData) -> Vec<<Block as BlockT>::Extrinsic> {
+			data.create_extrinsics()
+		}
+
+		fn check_inherents(
+			block: <Block as BlockT>::LazyBlock,
+			data: sp_inherents::InherentData,
+		) -> sp_inherents::CheckInherentsResult {
+			data.check_extrinsics(&block)
+		}
+	}
+
+	impl sp_transaction_pool::runtime_api::TaggedTransactionQueue<Block> for Runtime {
+		fn validate_transaction(
+			source: TransactionSource,
+			tx: <Block as BlockT>::Extrinsic,
+			block_hash: <Block as BlockT>::Hash,
+		) -> TransactionValidity {
+			Executive::validate_transaction(source, tx, block_hash)
+		}
+	}
+
+	impl sp_offchain::OffchainWorkerApi<Block> for Runtime {
+		fn offchain_worker(header: &<Block as BlockT>::Header) {
+			Executive::offchain_worker(header)
+		}
+	}
+
+	impl sp_session::SessionKeys<Block> for Runtime {
+		fn generate_session_keys(_seed: Option<Vec<u8>>) -> Vec<u8> {
+			Vec::new()
+		}
+
+		//TODO - we don't have session keys now, but it looks like we would have to redefine Session trait to have them.
+		fn decode_session_keys(
+			_encoded: Vec<u8>,
+		) -> Option<Vec<(Vec<u8>, sp_core::crypto::KeyTypeId)>> {
+			None
+		}
+	}
+
+	impl sp_consensus_qpow::QPoWApi<Block> for Runtime {
+		fn verify_nonce_on_import_block(block_hash: [u8; 32], nonce: [u8; 64]) -> bool {
+			pallet_qpow::Pallet::<Self>::verify_nonce_on_import_block(block_hash, nonce)
+		}
+
+		fn verify_nonce_local_mining(block_hash: [u8; 32], nonce: [u8; 64]) -> bool {
+			pallet_qpow::Pallet::<Self>::verify_nonce_local_mining(block_hash, nonce)
+		}
+
+		fn get_max_reorg_depth() -> u32 {
+			pallet_qpow::Pallet::<Self>::get_max_reorg_depth()
+		}
+
+		fn get_difficulty() -> U512 {
+			pallet_qpow::Pallet::<Self>::get_difficulty()
+		}
+
+		fn get_last_block_time() -> u64 {
+			pallet_qpow::Pallet::<Self>::get_last_block_time()
+		}
+
+		fn get_last_block_duration() -> u64 {
+			pallet_qpow::Pallet::<Self>::get_last_block_duration()
+		}
+
+		fn get_chain_height() -> u32 {
+			frame_system::pallet::Pallet::<Self>::block_number()
+		}
+
+
+		fn get_max_difficulty() -> U512 {
+			pallet_qpow::Pallet::<Self>::get_max_difficulty()
+		}
+
+		fn verify_and_get_achieved_difficulty(block_hash: [u8; 32], nonce: [u8; 64]) -> (bool, U512) {
+			pallet_qpow::Pallet::<Self>::verify_and_get_achieved_difficulty(block_hash, nonce)
+		}
+	}
+
+	impl pallet_zk_tree::ZkTreeApi<Block> for Runtime {
+		fn get_root() -> pallet_zk_tree::Hash256 {
+			ZkTree::root()
+		}
+
+		fn get_leaf_count() -> u64 {
+			ZkTree::leaf_count()
+		}
+
+		fn get_depth() -> u8 {
+			ZkTree::depth()
+		}
+
+		fn get_merkle_proof(leaf_index: u64) -> Option<pallet_zk_tree::ZkMerkleProofRpc> {
+			use codec::Encode;
+
+			// Window/canonicality cannot be enforced here: the execution block is
+			// `state_call`'s third argument, not a parameter, and this historical
+			// state cannot see the live tip. The node applies the same
+			// `resolve_proof_block` guard to `state_call` before the executor
+			// loads state (`node/src/zktree_rpc.rs`).
+
+			// Get the leaf
+			let leaf = ZkTree::leaf(leaf_index)?;
+
+			// Generate the proof
+			let proof = ZkTree::get_merkle_proof(leaf_index).ok()?;
+
+			// Compute leaf hash
+			let leaf_hash = pallet_zk_tree::tree::hash_leaf::<Runtime>(&leaf);
+
+			Some(pallet_zk_tree::ZkMerkleProofRpc {
+				leaf_index,
+				leaf_data: leaf.encode(),
+				leaf_hash,
+				siblings: proof.siblings,
+				root: ZkTree::root(),
+				depth: ZkTree::depth(),
+			})
+		}
+	}
+
+	impl frame_system_rpc_runtime_api::AccountNonceApi<Block, AccountId, Nonce> for Runtime {
+		fn account_nonce(account: AccountId) -> Nonce {
+			System::account_nonce(account)
+		}
+	}
+
+	impl pallet_transaction_payment_rpc_runtime_api::TransactionPaymentApi<Block, Balance> for Runtime {
+		fn query_info(
+			uxt: <Block as BlockT>::Extrinsic,
+			len: u32,
+		) -> pallet_transaction_payment_rpc_runtime_api::RuntimeDispatchInfo<Balance> {
+			TransactionPayment::query_info(uxt, len)
+		}
+		fn query_fee_details(
+			uxt: <Block as BlockT>::Extrinsic,
+			len: u32,
+		) -> pallet_transaction_payment::FeeDetails<Balance> {
+			TransactionPayment::query_fee_details(uxt, len)
+		}
+		fn query_weight_to_fee(weight: Weight) -> Balance {
+			TransactionPayment::weight_to_fee(weight)
+		}
+		fn query_length_to_fee(length: u32) -> Balance {
+			TransactionPayment::length_to_fee(length)
+		}
+	}
+
+	impl pallet_transaction_payment_rpc_runtime_api::TransactionPaymentCallApi<Block, Balance, RuntimeCall>
+		for Runtime
+	{
+		fn query_call_info(
+			call: RuntimeCall,
+			len: u32,
+		) -> pallet_transaction_payment::RuntimeDispatchInfo<Balance> {
+			TransactionPayment::query_call_info(call, len)
+		}
+		fn query_call_fee_details(
+			call: RuntimeCall,
+			len: u32,
+		) -> pallet_transaction_payment::FeeDetails<Balance> {
+			TransactionPayment::query_call_fee_details(call, len)
+		}
+		fn query_weight_to_fee(weight: Weight) -> Balance {
+			TransactionPayment::weight_to_fee(weight)
+		}
+		fn query_length_to_fee(length: u32) -> Balance {
+			TransactionPayment::length_to_fee(length)
+		}
+	}
+
+	#[cfg(feature = "runtime-benchmarks")]
+	impl frame_benchmarking::Benchmark<Block> for Runtime {
+		fn benchmark_metadata(extra: bool) -> (
+			Vec<frame_benchmarking::BenchmarkList>,
+			Vec<frame_support::traits::StorageInfo>,
+		) {
+			use frame_benchmarking::{baseline, BenchmarkList};
+			use frame_support::traits::StorageInfoTrait;
+			use frame_system_benchmarking::Pallet as SystemBench;
+			use baseline::Pallet as BaselineBench;
+			use super::*;
+
+			let mut list = Vec::<BenchmarkList>::new();
+			list_benchmarks!(list, extra);
+
+			let storage_info = AllPalletsWithSystem::storage_info();
+
+			(list, storage_info)
+		}
+
+		#[allow(non_local_definitions)]
+		fn dispatch_benchmark(
+			config: frame_benchmarking::BenchmarkConfig
+		) -> Result<Vec<frame_benchmarking::BenchmarkBatch>, alloc::string::String> {
+			use frame_benchmarking::{baseline, BenchmarkBatch};
+			use sp_storage::TrackedStorageKey;
+			use frame_system_benchmarking::Pallet as SystemBench;
+			use baseline::Pallet as BaselineBench;
+			use super::*;
+
+			impl frame_system_benchmarking::Config for Runtime {}
+			impl baseline::Config for Runtime {}
+
+			use frame_support::traits::WhitelistedStorageKeys;
+			let whitelist: Vec<TrackedStorageKey> = AllPalletsWithSystem::whitelisted_storage_keys();
+
+			let mut batches = Vec::<BenchmarkBatch>::new();
+			let params = (&config, &whitelist);
+			add_benchmarks!(params, batches);
+
+			Ok(batches)
+		}
+	}
+
+	#[cfg(feature = "try-runtime")]
+	impl frame_try_runtime::TryRuntime<Block> for Runtime {
+		fn on_runtime_upgrade(checks: frame_try_runtime::UpgradeCheckSelect) -> (Weight, Weight) {
+			// NOTE: intentional unwrap: we don't want to propagate the error backwards, and want to
+			// have a backtrace here. If any of the pre/post migration checks fail, we shall stop
+			// right here and right now.
+			let weight = Executive::try_runtime_upgrade(checks).unwrap();
+			(weight, super::configs::RuntimeBlockWeights::get().max_block)
+		}
+
+		fn execute_block(
+			block: LazyBlock<Header, UncheckedExtrinsic>,
+			state_root_check: bool,
+			signature_check: bool,
+			select: frame_try_runtime::TryStateSelect
+		) -> Weight {
+			// NOTE: intentional unwrap: we don't want to propagate the error backwards, and want to
+			// have a backtrace here.
+			Executive::try_execute_block(block, state_root_check, signature_check, select).expect("execute-block failed")
+		}
+	}
+
+	impl sp_genesis_builder::GenesisBuilder<Block> for Runtime {
+		fn build_state(config: Vec<u8>) -> sp_genesis_builder::Result {
+			let (config, tech_collective_members) =
+				crate::genesis_config_presets::prepare_genesis_build_input(config)?;
+			build_state::<RuntimeGenesisConfig>(config)?;
+			if let Some(members) = tech_collective_members {
+				crate::genesis_config_presets::seed_tech_collective(&members)?;
+			}
+			Ok(())
+		}
+
+		fn get_preset(id: &Option<sp_genesis_builder::PresetId>) -> Option<Vec<u8>> {
+			get_preset::<RuntimeGenesisConfig>(id, crate::genesis_config_presets::get_preset)
+		}
+
+		fn preset_names() -> Vec<sp_genesis_builder::PresetId> {
+			crate::genesis_config_presets::preset_names()
+		}
+	}
+}

@@ -1,0 +1,1015 @@
+//! Service and ServiceFactory implementation. Specialized wrapper over substrate service.
+//!
+//! This module provides the main service setup for a Quantus node, including:
+//! - Network configuration and setup
+//! - Transaction pool management
+//! - Mining infrastructure (local and external miner support)
+//! - RPC endpoint configuration
+
+use futures::FutureExt;
+#[cfg(feature = "tx-logging")]
+use futures::StreamExt;
+use quantus_runtime::{self, apis::RuntimeApi, opaque::Block};
+use sc_client_api::Backend;
+use sc_consensus_qpow::MiningHandle;
+use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
+use sc_telemetry::{Telemetry, TelemetryWorker};
+#[cfg(feature = "tx-logging")]
+use sc_transaction_pool_api::InPoolTransaction;
+use sc_transaction_pool_api::{OffchainTransactionPoolFactory, TransactionPool};
+use sp_inherents::CreateInherentDataProviders;
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+	miner_server::{MinerServer, MinerServerConfig, DEFAULT_MINER_AUTH_TOKEN_FILENAME},
+	prometheus::BusinessMetrics,
+};
+use codec::Encode;
+use jsonrpsee::tokio;
+use quantus_miner_api::{ApiResponseStatus, MiningRequest, MiningResult};
+use sc_basic_authorship::ProposerFactory;
+use sp_api::ProvideRuntimeApi;
+use sp_blockchain::HeaderBackend;
+use sp_consensus::SyncOracle;
+use sp_consensus_qpow::QPoWApi;
+use sp_core::{crypto::AccountId32, U512};
+use std::{path::PathBuf, sync::Arc, time::Duration};
+
+/// Frequency of block import logging. Every 1000 blocks.
+const LOG_FREQUENCY: u64 = 1000;
+
+/// Default tip-age limit for the initial-sync authoring guard: 24 hours,
+/// matching Bitcoin's `DEFAULT_MAX_TIP_AGE`. Deliberately wall-clock scale
+/// rather than a small multiple of the block interval: the guard only needs to
+/// distinguish "way behind, still syncing" from "roughly current", and a tight
+/// window would let a chain stall outlast it, deadlocking recovery if all
+/// miners restart during the stall (nobody authors the block that would
+/// freshen the tip). Tunable via `--max-tip-age`.
+pub const DEFAULT_MAX_TIP_AGE_SECS: u64 = 24 * 60 * 60;
+
+fn tip_is_stale(now_ms: u64, tip_timestamp_ms: u64, max_tip_age_ms: u64) -> bool {
+	now_ms.saturating_sub(tip_timestamp_ms) > max_tip_age_ms
+}
+
+/// Whether the stale-tip freshness gate applies before authoring.
+fn freshness_gate_applies(allow_mining_without_peers: bool, tip_has_been_fresh: bool) -> bool {
+	!allow_mining_without_peers && !tip_has_been_fresh
+}
+
+// ============================================================================
+// External Mining Helper Functions
+// ============================================================================
+
+/// Parse a mining result and extract the seal if valid.
+fn parse_mining_result(result: &MiningResult, expected_job_id: &str) -> Option<Vec<u8>> {
+	let miner_id = result.miner_id.unwrap_or(0);
+
+	// Check job ID matches
+	if result.job_id != expected_job_id {
+		log::debug!(target: "miner", "Received stale result from miner {} for job {}, ignoring", miner_id, result.job_id);
+		return None;
+	}
+
+	// Check status
+	if result.status != ApiResponseStatus::Completed {
+		match result.status {
+			ApiResponseStatus::Failed => log::warn!("⛏️ Mining job failed (miner {})", miner_id),
+			ApiResponseStatus::Cancelled => {
+				log::debug!(target: "miner", "Mining job was cancelled (miner {})", miner_id)
+			},
+			_ => {
+				log::debug!(target: "miner", "Unexpected result status from miner {}: {:?}", miner_id, result.status)
+			},
+		}
+		return None;
+	}
+
+	// Extract and decode work
+	let work_hex = result.work.as_ref()?;
+	match hex::decode(work_hex) {
+		Ok(seal) if seal.len() == 64 => Some(seal),
+		Ok(seal) => {
+			log::error!(
+				"🚨🚨🚨 INVALID SEAL LENGTH FROM MINER {}! Expected 64 bytes, got {} bytes",
+				miner_id,
+				seal.len()
+			);
+			None
+		},
+		Err(e) => {
+			log::error!("🚨🚨🚨 FAILED TO DECODE SEAL HEX FROM MINER {}: {}", miner_id, e);
+			None
+		},
+	}
+}
+
+/// Wait for a mining result from the miner server.
+///
+/// Returns `Some((miner_id, seal))` if a valid 64-byte seal is received, `None` otherwise
+/// (interrupted, failed, invalid, or stale).
+///
+/// The `should_stop` closure should return `true` if we should stop waiting
+/// (e.g., new block arrived or shutdown requested).
+///
+/// This function will keep waiting even if all miners disconnect, since newly
+/// connecting miners automatically receive the current job and can submit results.
+async fn wait_for_mining_result<F>(
+	server: &Arc<MinerServer>,
+	job_id: &str,
+	should_stop: F,
+) -> Option<(u64, Vec<u8>)>
+where
+	F: Fn() -> bool,
+{
+	loop {
+		if should_stop() {
+			return None;
+		}
+
+		match server.recv_result_timeout(Duration::from_millis(500)).await {
+			Some(result) => {
+				let miner_id = result.miner_id.unwrap_or(0);
+				if let Some(seal) = parse_mining_result(&result, job_id) {
+					// The template can rebuild while we were blocked on recv. Re-check
+					// before returning a seal so we never submit work for a superseded
+					// pre_hash (stress tests hit this: job N completes after rebuild).
+					if should_stop() {
+						return None;
+					}
+					return Some((miner_id, seal));
+				}
+				// Keep waiting for other miners (stale, failed, or invalid parse)
+			},
+			None => {
+				// Timeout, continue waiting
+			},
+		}
+	}
+}
+
+// ============================================================================
+// Mining Loop Helpers
+// ============================================================================
+
+/// Result of attempting to mine with an external miner.
+enum ExternalMiningOutcome {
+	/// Successfully found and imported a seal.
+	Success,
+	/// Mining was interrupted (new block, cancellation, or failure).
+	Interrupted,
+}
+
+/// Handle a single round of external mining.
+///
+/// Broadcasts the job to connected miners and waits for results.
+/// If a seal fails validation, continues waiting for more seals.
+/// Only returns when a seal is successfully imported, or when interrupted.
+async fn handle_external_mining(
+	server: &Arc<MinerServer>,
+	client: &Arc<FullClient>,
+	worker_handle: &MiningHandle<
+		Block,
+		FullClient,
+		Arc<sc_network_sync::SyncingService<Block>>,
+		(),
+	>,
+	cancellation_token: &CancellationToken,
+	job_counter: &mut u64,
+	mining_start_time: &mut std::time::Instant,
+) -> ExternalMiningOutcome {
+	// Read the version BEFORE snapshotting metadata (same pattern as
+	// handle_local_mining) so a concurrent rebuild between the two reads is
+	// caught by the version comparisons below.
+	let job_version = worker_handle.version();
+	let metadata = match worker_handle.metadata() {
+		Some(m) => m,
+		None => return ExternalMiningOutcome::Interrupted,
+	};
+
+	// Get difficulty from runtime
+	let difficulty = match client.runtime_api().get_difficulty(metadata.best_hash) {
+		Ok(d) => d,
+		Err(e) => {
+			log::warn!("⛏️ Failed to get difficulty: {:?}", e);
+			return ExternalMiningOutcome::Interrupted;
+		},
+	};
+
+	// Create and broadcast job
+	*job_counter += 1;
+	let job_id = job_counter.to_string();
+	let mining_hash = hex::encode(metadata.pre_hash.as_bytes());
+	log::info!(
+		"⛏️ Broadcasting job {}: pre_hash={}, difficulty={}",
+		job_id,
+		mining_hash,
+		difficulty
+	);
+	let job =
+		MiningRequest { job_id: job_id.clone(), mining_hash, difficulty: difficulty.to_string() };
+
+	server.broadcast_job(job).await;
+
+	// Any rebuild, sync-clear, or consumed build bumps the worker version,
+	// superseding this job. Note submit() re-verifies the seal against the
+	// current build under its own lock, so a stale seal can never be imported;
+	// these checks only avoid wasted verification and misleading logs.
+	let superseded = || cancellation_token.is_cancelled() || worker_handle.version() != job_version;
+	let best_hash = metadata.best_hash;
+	let original_pre_hash = metadata.pre_hash;
+	let log_if_rebuilt = || {
+		if let Some(current) = worker_handle.metadata() {
+			if current.best_hash == best_hash && current.pre_hash != original_pre_hash {
+				log::info!(
+					"⛏️ Block template rebuilt while mining job {}. Old pre_hash: {}, New pre_hash: {}. Rebroadcasting...",
+					job_id,
+					hex::encode(original_pre_hash.as_bytes()),
+					hex::encode(current.pre_hash.as_bytes())
+				);
+			}
+		}
+	};
+
+	// Wait for results from miners, retrying on invalid seals
+	loop {
+		let (miner_id, seal) = match wait_for_mining_result(server, &job_id, superseded).await {
+			Some(result) => result,
+			None => {
+				log_if_rebuilt();
+				return ExternalMiningOutcome::Interrupted;
+			},
+		};
+
+		// Submit the seal (submit verifies atomically before consuming the build)
+		if worker_handle.submit(seal).await {
+			let mining_time = mining_start_time.elapsed().as_secs();
+			log::info!(
+				"🥇 Successfully mined and submitted a new block via external miner {} (mining time: {}s)",
+				miner_id,
+				mining_time
+			);
+			*mining_start_time = std::time::Instant::now();
+			return ExternalMiningOutcome::Success;
+		}
+
+		// If the template moved while we were submitting, the failure is not the
+		// miner's fault — interrupt and rebroadcast instead of blaming the seal.
+		if superseded() {
+			log_if_rebuilt();
+			return ExternalMiningOutcome::Interrupted;
+		}
+
+		// Submit failed (seal invalid or import error)
+		log::warn!(
+			"⛏️ Failed to submit seal from miner {}, continuing to wait (job {})",
+			miner_id,
+			job_id
+		);
+	}
+}
+
+/// Try to find a valid nonce for local mining.
+///
+/// Tries 50k nonces from a random starting point, then yields to check for new blocks.
+/// With Poseidon2 hashing this takes ~50-100ms, keeping the node responsive.
+async fn handle_local_mining(
+	client: &Arc<FullClient>,
+	worker_handle: &MiningHandle<
+		Block,
+		FullClient,
+		Arc<sc_network_sync::SyncingService<Block>>,
+		(),
+	>,
+) -> Option<Vec<u8>> {
+	// Read the version BEFORE snapshotting metadata so any concurrent rebuild
+	// between the two reads is caught by the post-search version check below.
+	let version = worker_handle.version();
+	let metadata = worker_handle.metadata()?;
+	let block_hash = metadata.pre_hash.0;
+	let difficulty = client.runtime_api().get_difficulty(metadata.best_hash).unwrap_or_else(|e| {
+		log::warn!("API error getting difficulty: {:?}", e);
+		U512::zero()
+	});
+
+	if difficulty.is_zero() {
+		return None;
+	}
+
+	let start_nonce = U512::from(rand::random::<u128>());
+	let target = U512::MAX / difficulty;
+
+	let found = tokio::task::spawn_blocking(move || {
+		let mut nonce = start_nonce;
+		for _ in 0..50_000 {
+			let nonce_bytes = nonce.to_big_endian();
+			if qpow_math::get_nonce_hash(block_hash, nonce_bytes) < target {
+				return Some(nonce_bytes);
+			}
+			nonce = nonce.overflowing_add(U512::one()).0;
+		}
+		None
+	})
+	.await
+	.ok()
+	.flatten();
+
+	found.filter(|_| worker_handle.version() == version).map(|nonce| nonce.encode())
+}
+
+/// Submit a mined seal to the worker handle.
+///
+/// Returns `true` if submission was successful, `false` otherwise.
+async fn submit_mined_block(
+	worker_handle: &MiningHandle<
+		Block,
+		FullClient,
+		Arc<sc_network_sync::SyncingService<Block>>,
+		(),
+	>,
+	seal: Vec<u8>,
+	mining_start_time: &mut std::time::Instant,
+	source: &str,
+) -> bool {
+	if worker_handle.submit(seal).await {
+		let mining_time = mining_start_time.elapsed().as_secs();
+		log::info!(
+			"🥇 Successfully mined and submitted a new block{} (mining time: {}s)",
+			source,
+			mining_time
+		);
+		*mining_start_time = std::time::Instant::now();
+		true
+	} else {
+		log::warn!("⛏️ Failed to submit mined block{}", source);
+		false
+	}
+}
+
+/// Pause proposal building and drop the stored external-miner job on the
+/// enabled-to-disabled edge. The protocol has no cancel, so already-connected
+/// miners keep the last job; `clear_current_job` only stops *new* connections
+/// from being handed stale work. Repeated pauses while already disabled are
+/// no-ops so the 5s retry loop does not log a clear every iteration.
+async fn pause_authoring(
+	worker_handle: &MiningHandle<
+		Block,
+		FullClient,
+		Arc<sc_network_sync::SyncingService<Block>>,
+		(),
+	>,
+	miner_server: &Option<Arc<MinerServer>>,
+) {
+	let was_enabled = worker_handle.is_authoring_enabled();
+	worker_handle.set_authoring_enabled(false);
+	if was_enabled {
+		if let Some(server) = miner_server {
+			server.clear_current_job().await;
+		}
+	}
+}
+
+/// The main mining loop that coordinates local and external mining.
+///
+/// This function runs continuously until the cancellation token is triggered.
+/// It handles:
+/// - Waiting for the initial tip to become fresh
+/// - Coordinating with external miners (if server is available)
+/// - Falling back to local mining
+async fn mining_loop(
+	client: Arc<FullClient>,
+	worker_handle: MiningHandle<Block, FullClient, Arc<sc_network_sync::SyncingService<Block>>, ()>,
+	sync_service: Arc<sc_network_sync::SyncingService<Block>>,
+	miner_server: Option<Arc<MinerServer>>,
+	cancellation_token: CancellationToken,
+	allow_mining_without_peers: bool,
+	max_tip_age_ms: u64,
+) {
+	log::info!("⛏️ QPoW Mining task spawned");
+
+	let mut mining_start_time = std::time::Instant::now();
+	let mut job_counter: u64 = 0;
+
+	// Track when we first detected offline status for grace period
+	let mut offline_since: Option<std::time::Instant> = None;
+	const OFFLINE_GRACE_PERIOD: Duration = Duration::from_secs(30);
+	let mut tip_has_been_fresh = false;
+	let mut logged_stale_tip = false;
+	let mut logged_tip_error = false;
+
+	loop {
+		if cancellation_token.is_cancelled() {
+			pause_authoring(&worker_handle, &miner_server).await;
+			log::info!("⛏️ QPoW Mining task shutting down gracefully");
+			break;
+		}
+
+		// Bitcoin-style IBD gate: authoring never depends on network sync state
+		// (which peers could influence). Until the tip has been observed fresh
+		// once, refuse to mine on a stale tip; after that, briefly falling
+		// behind is tolerated because a stale candidate simply loses the
+		// fork-choice race.
+		let chain_info = client.info();
+		if freshness_gate_applies(allow_mining_without_peers, tip_has_been_fresh) {
+			let best_hash = chain_info.best_hash;
+			// The freshness comparison needs the wall clock; if it is
+			// unreadable, fail closed like the runtime-API error below
+			// rather than treating the tip as fresh.
+			let now_ms = std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.ok()
+				.and_then(|duration| u64::try_from(duration.as_millis()).ok());
+			match now_ms.ok_or_else(|| "system wall clock is unreadable".to_string()).and_then(
+				|now_ms| {
+					client
+						.runtime_api()
+						.get_last_block_time(best_hash)
+						.map(|tip_timestamp_ms| (now_ms, tip_timestamp_ms))
+						.map_err(|error| error.to_string())
+				},
+			) {
+				Ok((now_ms, tip_timestamp_ms)) => {
+					logged_tip_error = false;
+					if tip_is_stale(now_ms, tip_timestamp_ms, max_tip_age_ms) {
+						pause_authoring(&worker_handle, &miner_server).await;
+						if !logged_stale_tip {
+							log::info!(
+								"⛏️ Mining paused: best block timestamp is {}s old (limit {}s); waiting to catch up with the network",
+								now_ms.saturating_sub(tip_timestamp_ms) / 1000,
+								max_tip_age_ms / 1000,
+							);
+							logged_stale_tip = true;
+						} else {
+							log::debug!(target: "pow", "Mining paused: tip is stale");
+						}
+						tokio::select! {
+							_ = tokio::time::sleep(Duration::from_secs(5)) => {}
+							_ = cancellation_token.cancelled() => continue
+						}
+						continue;
+					}
+					if logged_stale_tip {
+						log::info!("⛏️ Tip is fresh again, resuming mining");
+					}
+					tip_has_been_fresh = true;
+				},
+				Err(error) => {
+					pause_authoring(&worker_handle, &miner_server).await;
+					// Fail closed: this is the only freshness gate for
+					// authoring, so an unreadable clock or tip timestamp
+					// pauses mining just like a stale one
+					// (--force-authoring bypasses).
+					if !logged_tip_error {
+						log::warn!("⛏️ Mining paused: could not check tip freshness: {error}");
+						logged_tip_error = true;
+					}
+					tokio::select! {
+						_ = tokio::time::sleep(Duration::from_secs(5)) => {}
+						_ = cancellation_token.cancelled() => continue
+					}
+					continue;
+				},
+			}
+		}
+
+		// Don't mine if we have no peers (unless --dev or --force-authoring)
+		// Use a grace period to handle brief network hiccups
+		if !allow_mining_without_peers && sync_service.is_offline() {
+			let now = std::time::Instant::now();
+			match offline_since {
+				None => {
+					// First time detecting offline, start grace period
+					offline_since = Some(now);
+					log::debug!(target: "pow", "No peers detected, starting {}s grace period before pausing mining", OFFLINE_GRACE_PERIOD.as_secs());
+				},
+				Some(since) if now.duration_since(since) >= OFFLINE_GRACE_PERIOD => {
+					// Grace period exceeded, pause mining
+					pause_authoring(&worker_handle, &miner_server).await;
+					log::warn!(target: "pow", "Mining paused: no connected peers for {}s (node is offline)", OFFLINE_GRACE_PERIOD.as_secs());
+					tokio::select! {
+						_ = tokio::time::sleep(Duration::from_secs(5)) => {}
+						_ = cancellation_token.cancelled() => continue
+					}
+					continue;
+				},
+				Some(_) => {
+					// Still within grace period, continue mining but log
+					log::debug!(target: "pow", "No peers but still within grace period, continuing mining");
+				},
+			}
+		} else {
+			// We have peers (or are in dev mode), reset offline tracking
+			if offline_since.is_some() {
+				log::info!(target: "pow", "Peers reconnected, resuming normal mining");
+			}
+			offline_since = None;
+		}
+
+		worker_handle.set_authoring_enabled(true);
+
+		// Wait for mining metadata to be available. If there is no candidate
+		// (e.g. it was cleared during an import burst, or a submitted block
+		// failed to import) request a rebuild so mining resumes without
+		// waiting for an external block/tx trigger.
+		if worker_handle.metadata().is_none() {
+			log::debug!(target: "pow", "No mining metadata available, requesting rebuild");
+			worker_handle.request_rebuild();
+			tokio::select! {
+				_ = tokio::time::sleep(Duration::from_millis(250)) => {}
+				_ = cancellation_token.cancelled() => continue
+			}
+			continue;
+		}
+
+		if let Some(ref server) = miner_server {
+			// External mining path
+			handle_external_mining(
+				server,
+				&client,
+				&worker_handle,
+				&cancellation_token,
+				&mut job_counter,
+				&mut mining_start_time,
+			)
+			.await;
+		} else if let Some(seal) = handle_local_mining(&client, &worker_handle).await {
+			// Local mining path
+			submit_mined_block(&worker_handle, seal, &mut mining_start_time, "").await;
+		}
+
+		// Yield to let other async tasks run
+		tokio::task::yield_now().await;
+	}
+
+	log::info!("⛏️ QPoW Mining task terminated");
+}
+
+/// Spawn the transaction logger task.
+///
+/// This task logs transactions as they are added to the pool.
+/// Only available when the `tx-logging` feature is enabled.
+#[cfg(feature = "tx-logging")]
+fn spawn_transaction_logger(
+	task_manager: &TaskManager,
+	transaction_pool: Arc<sc_transaction_pool::TransactionPoolHandle<Block, FullClient>>,
+	tx_stream: impl futures::Stream<Item = sp_core::H256> + Send + 'static,
+) {
+	task_manager.spawn_handle().spawn("tx-logger", None, async move {
+		let tx_stream = tx_stream;
+		futures::pin_mut!(tx_stream);
+		while let Some(tx_hash) = tx_stream.next().await {
+			if let Some(tx) = transaction_pool.ready_transaction(&tx_hash) {
+				log::trace!(target: "miner", "New transaction: Hash = {:?}", tx_hash);
+				let extrinsic = tx.data();
+				log::trace!(target: "miner", "Payload: {:?}", extrinsic);
+			} else {
+				log::warn!("⛏️ Transaction {:?} not found in pool", tx_hash);
+			}
+		}
+	});
+}
+
+/// Spawn all authority-related tasks (mining, metrics, transaction logging).
+///
+/// This is only called when the node is running as an authority (block producer).
+#[allow(clippy::too_many_arguments)]
+fn spawn_authority_tasks(
+	task_manager: &mut TaskManager,
+	client: Arc<FullClient>,
+	transaction_pool: Arc<sc_transaction_pool::TransactionPoolHandle<Block, FullClient>>,
+	pow_block_import: PowBlockImport,
+	sync_service: Arc<sc_network_sync::SyncingService<Block>>,
+	prometheus_registry: Option<prometheus::Registry>,
+	rewards_address: AccountId32,
+	miner_config: Option<MinerServerConfig>,
+	tx_stream_for_worker: impl futures::Stream<Item = sp_core::H256> + Send + Unpin + 'static,
+	#[cfg(feature = "tx-logging")] tx_stream_for_logger: impl futures::Stream<Item = sp_core::H256>
+		+ Send
+		+ 'static,
+	allow_mining_without_peers: bool,
+	max_tip_age_ms: u64,
+) {
+	// Create block proposer factory
+	let proposer = ProposerFactory::new(
+		task_manager.spawn_handle(),
+		client.clone(),
+		transaction_pool.clone(),
+		prometheus_registry.as_ref(),
+		None,
+	);
+
+	// Create inherent data providers
+	let inherent_data_providers = Box::new(move |_, _| async move {
+		let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
+		Ok(timestamp)
+	})
+		as Box<
+			dyn CreateInherentDataProviders<
+				Block,
+				(),
+				InherentDataProviders = sp_timestamp::InherentDataProvider,
+			>,
+		>;
+
+	// Start the mining worker (block building task)
+	// Convert AccountId32 to [u8; 32] for the mining worker (rewards preimage)
+	let rewards_preimage: [u8; 32] = rewards_address.into();
+	let (worker_handle, worker_task) = sc_consensus_qpow::start_mining_worker(
+		Box::new(pow_block_import),
+		client.clone(),
+		proposer,
+		sync_service.clone(),
+		rewards_preimage,
+		inherent_data_providers,
+		tx_stream_for_worker,
+		Duration::from_secs(10),
+	);
+
+	task_manager
+		.spawn_essential_handle()
+		.spawn_blocking("block-producer", None, worker_task);
+
+	// Start Prometheus business metrics monitoring
+	BusinessMetrics::start_monitoring_task(client.clone(), prometheus_registry, task_manager);
+
+	// Setup graceful shutdown for mining
+	let mining_cancellation_token = CancellationToken::new();
+	let mining_token_clone = mining_cancellation_token.clone();
+
+	task_manager.spawn_handle().spawn("mining-shutdown-listener", None, async move {
+		tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+		log::info!("🛑 Received Ctrl+C signal, shutting down qpow-mining worker");
+		mining_token_clone.cancel();
+	});
+
+	// Spawn the main mining loop
+	task_manager.spawn_essential_handle().spawn("qpow-mining", None, async move {
+		// Start miner server if port is specified. Failure must abort this essential
+		// task (and thus the node) instead of falling back to local mining — the
+		// operator explicitly opted into external mining with --miner-listen-port.
+		let miner_server: Option<Arc<MinerServer>> = if let Some(cfg) = miner_config {
+			let port = cfg.port;
+			match MinerServer::start(cfg) {
+				Ok(server) => Some(server),
+				Err(e) => {
+					log::error!(
+						"⛏️ Failed to start miner server on port {}: {}. \
+						 Refusing to fall back to local mining.",
+						port,
+						e
+					);
+					return;
+				},
+			}
+		} else {
+			log::warn!("⚠️  No --miner-listen-port specified. Using LOCAL mining only.");
+			None
+		};
+
+		mining_loop(
+			client,
+			worker_handle,
+			sync_service,
+			miner_server,
+			mining_cancellation_token,
+			allow_mining_without_peers,
+			max_tip_age_ms,
+		)
+		.await;
+	});
+
+	// Spawn transaction logger (only when tx-logging feature is enabled)
+	#[cfg(feature = "tx-logging")]
+	spawn_transaction_logger(task_manager, transaction_pool, tx_stream_for_logger);
+
+	log::info!(target: "miner", "⛏️  Pow miner spawned");
+}
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+/// WASM host functions. The `runtime-benchmarks` build adds `ext_benchmarking_*`.
+#[cfg(not(feature = "runtime-benchmarks"))]
+pub type HostFunctions = sp_io::SubstrateHostFunctions;
+
+#[cfg(feature = "runtime-benchmarks")]
+pub type HostFunctions =
+	(sp_io::SubstrateHostFunctions, frame_benchmarking::benchmarking::HostFunctions);
+
+pub(crate) type FullClient =
+	sc_service::TFullClient<Block, RuntimeApi, sc_executor::WasmExecutor<HostFunctions>>;
+type FullBackend = sc_service::TFullBackend<Block>;
+pub type PowBlockImport = sc_consensus_qpow::PowBlockImport<
+	Block,
+	Arc<FullClient>,
+	FullClient,
+	Box<
+		dyn sp_inherents::CreateInherentDataProviders<
+			Block,
+			(),
+			InherentDataProviders = sp_timestamp::InherentDataProvider,
+		>,
+	>,
+	FullBackend,
+	LOG_FREQUENCY,
+>;
+
+pub type Service = sc_service::PartialComponents<
+	FullClient,
+	FullBackend,
+	(),
+	sc_consensus::DefaultImportQueue<Block>,
+	sc_transaction_pool::TransactionPoolHandle<Block, FullClient>,
+	(PowBlockImport, Option<Telemetry>),
+>;
+
+#[allow(clippy::result_large_err)]
+pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
+	let telemetry = config
+		.telemetry_endpoints
+		.clone()
+		.filter(|x| !x.is_empty())
+		.map(|endpoints| -> Result<_, sc_telemetry::Error> {
+			let worker = TelemetryWorker::new(16)?;
+			let telemetry = worker.handle().new_telemetry(endpoints);
+			Ok((worker, telemetry))
+		})
+		.transpose()?;
+
+	let executor = sc_service::new_wasm_executor::<HostFunctions>(&config.executor);
+	let (client, backend, keystore_container, task_manager) =
+		sc_service::new_full_parts::<Block, RuntimeApi, _>(
+			config,
+			telemetry.as_ref().map(|(_, telemetry)| telemetry.handle()),
+			executor,
+		)?;
+	let client = Arc::new(client);
+
+	// Initialize genesis block's achieved work if not already set.
+	// Genesis has achieved work = 1 (represents the start of the chain).
+	if let Err(e) = sc_consensus_qpow::initialize_genesis_achieved_work::<Block, _>(&*client) {
+		log::warn!(target: "qpow", "Failed to initialize genesis achieved work: {:?}", e);
+	}
+
+	let telemetry = telemetry.map(|(worker, telemetry)| {
+		task_manager.spawn_handle().spawn("telemetry", None, worker.run());
+		telemetry
+	});
+
+	// Pool type/limits come from CLI (`--pool-type`, `--pool-limit`, `--pool-kbytes`, …)
+	// via `Configuration::transaction_pool`. Builder logs the selected type at create time.
+	let transaction_pool = Arc::from(
+		sc_transaction_pool::Builder::new(
+			task_manager.spawn_essential_handle(),
+			client.clone(),
+			config.role.is_authority().into(),
+		)
+		.with_options(config.transaction_pool.clone())
+		.with_prometheus(config.prometheus_registry())
+		.build(),
+	);
+
+	let inherent_data_providers = Box::new(move |_, _| async move {
+		let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
+		Ok(timestamp)
+	})
+		as Box<
+			dyn CreateInherentDataProviders<
+				Block,
+				(),
+				InherentDataProviders = sp_timestamp::InherentDataProvider,
+			>,
+		>;
+
+	let pow_block_import = sc_consensus_qpow::PowBlockImport::new(
+		Arc::clone(&client),
+		Arc::clone(&client),
+		0, // check inherents starting at block 0
+		inherent_data_providers,
+	);
+
+	let import_queue = sc_consensus_qpow::import_queue::<Block, FullClient>(
+		Box::new(pow_block_import.clone()),
+		None,
+		Arc::clone(&client),
+		&task_manager.spawn_essential_handle(),
+		config.prometheus_registry(),
+	)?;
+
+	Ok(sc_service::PartialComponents {
+		client,
+		backend,
+		task_manager,
+		import_queue,
+		keystore_container,
+		select_chain: (),
+		transaction_pool,
+		other: (pow_block_import, telemetry),
+	})
+}
+
+/// Builds a new service for a full client.
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
+pub fn new_full<
+	N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>,
+>(
+	config: Configuration,
+	rewards_address: AccountId32,
+	miner_listen_port: Option<u16>,
+	miner_auth_token_file: Option<PathBuf>,
+	enable_peer_sharing: bool,
+	sync_max_timeouts_before_drop: u32,
+	sync_disable_major_sync_gating: bool,
+	sync_block_request_timeout: u64,
+	allow_mining_without_peers: bool,
+	max_tip_age_secs: u64,
+) -> Result<TaskManager, ServiceError> {
+	let sc_service::PartialComponents {
+		client,
+		backend,
+		mut task_manager,
+		import_queue,
+		keystore_container,
+		select_chain: _,
+		transaction_pool,
+		other: (pow_block_import, mut telemetry),
+	} = new_partial(&config)?;
+
+	let tx_stream_for_worker = transaction_pool.clone().import_notification_stream();
+	#[cfg(feature = "tx-logging")]
+	let tx_stream_for_logger = transaction_pool.clone().import_notification_stream();
+
+	let timeout = std::time::Duration::from_secs(sync_block_request_timeout);
+	sc_network_sync::set_block_request_timeout(timeout);
+	sc_network::set_transport_timeout(timeout);
+
+	let net_config = sc_network::config::FullNetworkConfiguration::<
+		Block,
+		<Block as sp_runtime::traits::Block>::Hash,
+		N,
+	>::new(&config.network, config.prometheus_registry().cloned());
+	let metrics = N::register_notification_metrics(config.prometheus_registry());
+
+	let (network, system_rpc_tx, tx_handler_controller, sync_service) =
+		sc_service::build_network(sc_service::BuildNetworkParams {
+			config: &config,
+			net_config,
+			client: client.clone(),
+			transaction_pool: transaction_pool.clone(),
+			spawn_handle: task_manager.spawn_handle(),
+			import_queue,
+			block_announce_validator_builder: None,
+			warp_sync_config: None,
+			block_relay: None,
+			metrics,
+		})?;
+
+	sync_service.set_max_timeouts_before_drop(sync_max_timeouts_before_drop);
+	sync_service.set_disable_major_sync_gating(sync_disable_major_sync_gating);
+	log::debug!(
+		"Applied CLI sync flags: max_timeouts_before_drop={}, disable_major_sync_gating={}",
+		sync_max_timeouts_before_drop,
+		sync_disable_major_sync_gating
+	);
+
+	if config.offchain_worker.enabled {
+		let offchain_workers =
+			sc_offchain::OffchainWorkers::new(sc_offchain::OffchainWorkerOptions {
+				runtime_api_provider: client.clone(),
+				is_validator: config.role.is_authority(),
+				keystore: Some(keystore_container.keystore()),
+				offchain_db: backend.offchain_storage(),
+				transaction_pool: Some(OffchainTransactionPoolFactory::new(
+					transaction_pool.clone(),
+				)),
+				network_provider: Arc::new(network.clone()),
+				enable_http_requests: true,
+				custom_extensions: |_| vec![],
+			})?;
+		task_manager.spawn_handle().spawn(
+			"offchain-workers-runner",
+			"offchain-worker",
+			offchain_workers.run(client.clone(), task_manager.spawn_handle()).boxed(),
+		);
+	}
+
+	let role = config.role;
+	let prometheus_registry = config.prometheus_registry().cloned();
+	let miner_config = miner_listen_port.map(|port| MinerServerConfig {
+		port,
+		auth_token_path: miner_auth_token_file
+			.unwrap_or_else(|| config.data_path.join(DEFAULT_MINER_AUTH_TOKEN_FILENAME)),
+		tls_dir: config.data_path.clone(),
+	});
+
+	let rpc_extensions_builder = {
+		let client = client.clone();
+		let pool = transaction_pool.clone();
+		let network_for_rpc = if enable_peer_sharing { Some(network.clone()) } else { None };
+
+		Box::new(move |_| {
+			let deps = crate::rpc::FullDeps {
+				client: client.clone(),
+				pool: pool.clone(),
+				network: network_for_rpc.clone(),
+			};
+			crate::rpc::create_full(deps).map_err(Into::into)
+		})
+	};
+
+	log::info!("🧹 Blocks pruning mode: {:?}", config.blocks_pruning);
+	log::info!("📦 State pruning mode: {:?}", config.state_pruning);
+
+	let _rpc_handlers = sc_service::spawn_tasks(sc_service::SpawnTasksParams {
+		network: network.clone(),
+		client: client.clone(),
+		keystore: keystore_container.keystore(),
+		task_manager: &mut task_manager,
+		transaction_pool: transaction_pool.clone(),
+		rpc_builder: rpc_extensions_builder,
+		backend,
+		system_rpc_tx,
+		tx_handler_controller,
+		sync_service: sync_service.clone(),
+		config,
+		telemetry: telemetry.as_mut(),
+		tracing_execute_block: None,
+	})?;
+
+	if role.is_authority() {
+		#[cfg(feature = "tx-logging")]
+		spawn_authority_tasks(
+			&mut task_manager,
+			client,
+			transaction_pool,
+			pow_block_import,
+			sync_service,
+			prometheus_registry,
+			rewards_address,
+			miner_config,
+			tx_stream_for_worker,
+			tx_stream_for_logger,
+			allow_mining_without_peers,
+			max_tip_age_secs.saturating_mul(1000),
+		);
+		#[cfg(not(feature = "tx-logging"))]
+		spawn_authority_tasks(
+			&mut task_manager,
+			client,
+			transaction_pool,
+			pow_block_import,
+			sync_service,
+			prometheus_registry,
+			rewards_address,
+			miner_config,
+			tx_stream_for_worker,
+			allow_mining_without_peers,
+			max_tip_age_secs.saturating_mul(1000),
+		);
+	}
+
+	// Note: Finalization is now handled synchronously in import_block,
+	// so we don't need a separate finalization task.
+
+	Ok(task_manager)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{freshness_gate_applies, tip_is_stale, DEFAULT_MAX_TIP_AGE_SECS};
+
+	const NOW_MS: u64 = 1_755_000_000_000;
+	const MAX_TIP_AGE_MS: u64 = DEFAULT_MAX_TIP_AGE_SECS * 1000;
+
+	#[test]
+	fn fresh_tip_is_not_stale() {
+		assert!(!tip_is_stale(NOW_MS, NOW_MS, MAX_TIP_AGE_MS));
+		assert!(!tip_is_stale(NOW_MS, NOW_MS - MAX_TIP_AGE_MS, MAX_TIP_AGE_MS));
+	}
+
+	#[test]
+	fn old_tip_is_stale() {
+		assert!(tip_is_stale(NOW_MS, NOW_MS - MAX_TIP_AGE_MS - 1, MAX_TIP_AGE_MS));
+	}
+
+	#[test]
+	fn genesis_tip_is_stale() {
+		assert!(tip_is_stale(NOW_MS, 0, MAX_TIP_AGE_MS));
+	}
+
+	#[test]
+	fn future_tip_is_not_stale() {
+		assert!(!tip_is_stale(NOW_MS, NOW_MS + MAX_TIP_AGE_MS, MAX_TIP_AGE_MS));
+	}
+
+	#[test]
+	fn gate_applies_until_tip_has_been_fresh() {
+		assert!(freshness_gate_applies(false, false));
+		assert!(!freshness_gate_applies(false, true));
+	}
+
+	#[test]
+	fn force_authoring_bypasses_gate() {
+		assert!(!freshness_gate_applies(true, false));
+	}
+}

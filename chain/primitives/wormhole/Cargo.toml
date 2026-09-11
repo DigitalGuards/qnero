@@ -1,0 +1,27 @@
+[package]
+authors.workspace = true
+description = "Common primitives for the wormhole pallet and its dependencies"
+edition.workspace = true
+homepage.workspace = true
+license = "Apache-2.0"
+name = "qp-wormhole"
+publish = false
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+codec = { workspace = true, default-features = false }
+qp-poseidon-core.workspace = true
+sp-consensus-qpow.workspace = true
+sp-core = { workspace = true, optional = true }
+sp-runtime.workspace = true
+
+[features]
+default = ["std"]
+std = [
+	"codec/std",
+	"qp-poseidon-core/std",
+	"sp-consensus-qpow/std",
+	"sp-core",
+	"sp-runtime/std",
+]

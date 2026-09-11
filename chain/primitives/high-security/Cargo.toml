@@ -1,0 +1,18 @@
+[package]
+authors.workspace = true
+description = "High-Security account primitives for Quantus blockchain"
+edition.workspace = true
+homepage.workspace = true
+license = "Apache-2.0"
+name = "qp-high-security"
+publish = false
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+codec = { workspace = true, default-features = false, optional = true }
+
+[features]
+default = ["std"]
+# `codec` is only needed by the `std`-only `testing` inspector.
+std = ["codec/std", "dep:codec"]

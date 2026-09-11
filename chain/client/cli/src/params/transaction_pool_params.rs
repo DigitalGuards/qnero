@@ -1,0 +1,109 @@
+// This file is part of Substrate.
+
+// Copyright (C) Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+use clap::{Args, ValueEnum};
+use sc_transaction_pool::{
+	TransactionPoolOptions, DEFAULT_READY_POOL_KBYTES, DEFAULT_READY_POOL_LIMIT,
+};
+
+/// Type of transaction pool to be used
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum TransactionPoolType {
+	/// Uses a legacy, single-state transaction pool.
+	SingleState,
+	/// Uses a fork-aware transaction pool.
+	ForkAware,
+}
+
+impl Into<sc_transaction_pool::TransactionPoolType> for TransactionPoolType {
+	fn into(self) -> sc_transaction_pool::TransactionPoolType {
+		match self {
+			TransactionPoolType::SingleState =>
+				sc_transaction_pool::TransactionPoolType::SingleState,
+			TransactionPoolType::ForkAware => sc_transaction_pool::TransactionPoolType::ForkAware,
+		}
+	}
+}
+
+/// Parameters used to create the pool configuration.
+#[derive(Debug, Clone, Args)]
+pub struct TransactionPoolParams {
+	/// Maximum number of transactions in the transaction pool.
+	///
+	/// Default sized for Quantus PQ signatures (~7300 bytes/tx) within ~256 MiB.
+	/// Kept in lockstep with transaction gossip via `DEFAULT_READY_POOL_LIMIT`.
+	#[arg(long, value_name = "COUNT", default_value_t = DEFAULT_READY_POOL_LIMIT)]
+	pub pool_limit: usize,
+
+	/// Maximum number of kilobytes of all transactions stored in the pool.
+	///
+	/// Default is 262144 KiB (256 MiB), matching the previous hardcoded node sizing.
+	#[arg(long, value_name = "COUNT", default_value_t = DEFAULT_READY_POOL_KBYTES)]
+	pub pool_kbytes: usize,
+
+	/// How long a transaction is banned for.
+	///
+	/// If it is considered invalid. Defaults to 1800s.
+	#[arg(long, value_name = "SECONDS")]
+	pub tx_ban_seconds: Option<u64>,
+
+	/// The type of transaction pool to be instantiated.
+	///
+	/// Defaults to `single-state` to preserve prior Quantus node behavior; pass
+	/// `--pool-type fork-aware` to exercise the fork-aware pool.
+	#[arg(long, value_enum, default_value_t = TransactionPoolType::SingleState)]
+	pub pool_type: TransactionPoolType,
+}
+
+impl TransactionPoolParams {
+	/// Fill the given `PoolConfiguration` by looking at the cli parameters.
+	pub fn transaction_pool(&self, is_dev: bool) -> TransactionPoolOptions {
+		TransactionPoolOptions::new_with_params(
+			self.pool_limit,
+			self.pool_kbytes * 1024,
+			self.tx_ban_seconds,
+			self.pool_type.into(),
+			is_dev,
+		)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use clap::Parser;
+
+	#[derive(Parser)]
+	struct Cli {
+		#[clap(flatten)]
+		pool: TransactionPoolParams,
+	}
+
+	#[test]
+	fn default_pool_limit_is_shared_ready_limit() {
+		let cli = Cli::try_parse_from([""]).expect("parses pool defaults");
+		assert_eq!(cli.pool.pool_limit, DEFAULT_READY_POOL_LIMIT);
+		assert_eq!(cli.pool.pool_kbytes, DEFAULT_READY_POOL_KBYTES);
+		assert_eq!(cli.pool.transaction_pool(false).ready_count(), DEFAULT_READY_POOL_LIMIT);
+		assert_eq!(
+			usize::from(cli.pool.transaction_pool(false).known_transaction_cache_limit()),
+			DEFAULT_READY_POOL_LIMIT
+		);
+	}
+}

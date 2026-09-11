@@ -1,0 +1,20 @@
+[package]
+authors.workspace = true
+categories = ["api-bindings", "data-structures"]
+description = "API definitions for communication between Quantus node and external miners"
+edition.workspace = true
+homepage.workspace = true
+keywords = [
+	"api",
+	"quantus-network",
+	"substrate",
+]
+license.workspace = true
+name = "quantus-miner-api"
+repository.workspace = true
+version = "0.3.0"
+
+[dependencies]
+serde = { workspace = true, features = ["alloc", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["io-util"] }

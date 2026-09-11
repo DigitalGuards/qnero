@@ -1,0 +1,22 @@
+[package]
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license = "Apache-2.0"
+name = "sp-consensus-qpow"
+publish = false
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+primitive-types = { default-features = false, workspace = true }
+sp-api = { default-features = false, workspace = true }
+sp-runtime = { default-features = false, workspace = true }
+
+[features]
+default = ["std"]
+std = [
+	"primitive-types/std",
+	"sp-api/std",
+	"sp-runtime/std",
+]

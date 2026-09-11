@@ -1,0 +1,1136 @@
+//! # Reversibility Core Pallet
+//!
+//! Provides the core logic for scheduling and cancelling reversible transactions.
+//! It manages the state of accounts opting into reversibility and the pending
+//! transactions associated with them. Transaction interception is handled
+//! separately via a `SignedExtension`.
+//!
+//! ## Volume Fee for High-Security Accounts
+//!
+//! When high-security accounts reverse transactions, a configurable volume fee
+//! (expressed as a Permill) is deducted from the transaction amount and burned.
+//! Regular accounts do not incur any fees when reversing transactions.
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+pub use pallet::*;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
+pub mod weights;
+pub use weights::WeightInfo;
+
+use alloc::vec::Vec;
+use frame_support::{
+	pallet_prelude::*,
+	traits::tokens::{Fortitude, Restriction},
+};
+use frame_system::pallet_prelude::*;
+use qp_scheduler::{BlockNumberOrTimestamp, DispatchTime, ScheduleNamed};
+use qp_wormhole::TransferProofRecorder;
+use sp_arithmetic::Permill;
+use sp_runtime::traits::{BlockNumberProvider, Saturating, StaticLookup};
+
+// Partial implementation for Pallet - runtime will complete it
+impl<T: Config> Pallet<T> {
+	/// Check if account is registered as high-security
+	/// This is used by runtime's HighSecurityInspector implementation
+	pub fn is_high_security_account(who: &T::AccountId) -> bool {
+		HighSecurityAccounts::<T>::contains_key(who)
+	}
+
+	/// Get guardian for high-security account.
+	/// This is used by runtime's HighSecurityInspector implementation.
+	pub fn get_guardian(who: &T::AccountId) -> Option<T::AccountId> {
+		HighSecurityAccounts::<T>::get(who).map(|data| data.guardian)
+	}
+
+	/// Whether `who` may include another signed extrinsic in the current
+	/// rolling window. Non-high-security accounts are unlimited.
+	pub fn high_security_tx_quota_allows(who: &T::AccountId) -> bool {
+		if !HighSecurityAccounts::<T>::contains_key(who) {
+			return true;
+		}
+		Self::hs_quota_has_room(who)
+	}
+
+	/// Whether `who`'s quota ring has room. Does not re-read
+	/// `HighSecurityAccounts`; the caller must already know `who` is
+	/// high-security (one `HighSecurityTxQuota` read).
+	pub fn hs_quota_has_room(who: &T::AccountId) -> bool {
+		let now = T::BlockNumberProvider::current_block_number();
+		Self::hs_ring_has_room(&HighSecurityTxQuota::<T>::get(who), now)
+	}
+
+	/// Record an included signed extrinsic against `who`'s rolling quota.
+	///
+	/// No-op for non-high-security accounts. Errors if the ring is full and
+	/// the oldest entry is still inside the window. O(1): one compare, at
+	/// most one head eviction and one push.
+	pub fn record_high_security_tx(who: &T::AccountId) -> DispatchResult {
+		if !HighSecurityAccounts::<T>::contains_key(who) {
+			return Ok(());
+		}
+		Self::record_hs_quota(who)
+	}
+
+	/// Record against `who`'s quota ring. Does not re-read
+	/// `HighSecurityAccounts`; the caller must already know `who` is
+	/// high-security (one `HighSecurityTxQuota` read + write).
+	pub fn record_hs_quota(who: &T::AccountId) -> DispatchResult {
+		let now = T::BlockNumberProvider::current_block_number();
+		HighSecurityTxQuota::<T>::try_mutate(who, |recent| Self::hs_ring_record(recent, now))
+	}
+
+	/// The single admission predicate for the quota ring, shared by the mempool
+	/// check ([`Self::high_security_tx_quota_allows`]) and inclusion-time
+	/// recording ([`Self::hs_ring_record`]) so pool validation and block
+	/// inclusion can never disagree on a window boundary.
+	///
+	/// Generic over the capacity bound so the zero-capacity edge is unit-testable.
+	fn hs_ring_has_room<S: Get<u32>>(
+		recent: &BoundedVec<BlockNumberFor<T>, S>,
+		now: BlockNumberFor<T>,
+	) -> bool {
+		if (recent.len() as u32) < S::get() {
+			return true;
+		}
+		// At capacity: room only if the oldest entry has aged out of the window.
+		// A zero-capacity ring is at capacity *and* empty — there is no head to
+		// evict, so it never has room. (Claiming room here would panic the
+		// eviction in `hs_ring_record` inside block execution.)
+		match recent.first() {
+			Some(oldest) => now.saturating_sub(*oldest) >= T::HighSecurityTxWindowBlocks::get(),
+			None => false,
+		}
+	}
+
+	/// Push `now` into the ring, evicting the expired head if at capacity.
+	fn hs_ring_record<S: Get<u32>>(
+		recent: &mut BoundedVec<BlockNumberFor<T>, S>,
+		now: BlockNumberFor<T>,
+	) -> DispatchResult {
+		if !Self::hs_ring_has_room(recent, now) {
+			return Err(Error::<T>::HighSecurityTxQuotaExceeded.into());
+		}
+		if (recent.len() as u32) >= S::get() {
+			// At capacity with an expired head (per `hs_ring_has_room`).
+			let _ = recent.remove(0);
+		}
+		recent.try_push(now).map_err(|_| Error::<T>::HighSecurityTxQuotaExceeded.into())
+	}
+}
+
+/// Type alias for this config's `BlockNumberOrTimestamp`.
+pub type BlockNumberOrTimestampOf<T> =
+	BlockNumberOrTimestamp<BlockNumberFor<T>, <T as Config>::Moment>;
+
+/// High security account details
+#[derive(Encode, Decode, MaxEncodedLen, Clone, Default, TypeInfo, Debug, PartialEq, Eq)]
+pub struct HighSecurityAccountData<AccountId, Delay> {
+	/// The guardian account that can cancel transfers and recover funds
+	pub guardian: AccountId,
+	/// The delay period for the account
+	pub delay: Delay,
+}
+
+/// Pending transfer details.
+///
+/// Stores all information needed to execute or cancel a scheduled transfer.
+/// The asset_id field determines the transfer type:
+/// - `None`: Native balance transfer via `pallet_balances`
+/// - `Some(id)`: Reserved for unsupported asset transfers
+#[derive(Encode, Decode, MaxEncodedLen, Clone, Default, TypeInfo, Debug, PartialEq, Eq)]
+pub struct PendingTransfer<AccountId, Balance, AssetId> {
+	/// The account that scheduled the transaction
+	pub from: AccountId,
+	/// The account that the transfer is to
+	pub to: AccountId,
+	/// The guardian who can cancel this transfer
+	pub guardian: AccountId,
+	/// The asset being transferred. `None` for native balance; `Some(id)` is unsupported.
+	pub asset_id: Option<AssetId>,
+	/// Amount frozen for the transaction
+	pub amount: Balance,
+}
+
+/// Balance type
+type BalanceOf<T> = <T as pallet_balances::Config>::Balance;
+
+/// AssetId type
+type AssetIdOf<T> = <T as Config>::AssetId;
+
+/// Canonical RuntimeCall for this pallet (disambiguates multiple `RuntimeCall` providers)
+type RuntimeCallOf<T> = <T as frame_system::Config>::RuntimeCall;
+
+type PendingTransferOf<T> =
+	PendingTransfer<<T as frame_system::Config>::AccountId, BalanceOf<T>, AssetIdOf<T>>;
+
+#[frame_support::pallet]
+pub mod pallet {
+	use super::*;
+	use crate::BlockNumberOrTimestampOf;
+	use frame_support::{
+		dispatch::PostDispatchInfo,
+		traits::{
+			fungible::MutateHold, schedule::v3::TaskName, tokens::Precision, CallerTrait,
+			StorePreimage, Time,
+		},
+		PalletId,
+	};
+	use sp_runtime::{
+		traits::{
+			AccountIdConversion, AtLeast32Bit, BlockNumberProvider, Dispatchable, Hash, Scale, Zero,
+		},
+		Saturating,
+	};
+
+	/// The in-code storage version.
+	///
+	/// This establishes an explicit baseline for future storage migrations.
+	/// Increment this and add a migration hook when storage layout changes.
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
+	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
+	pub struct Pallet<T>(_);
+
+	#[pallet::config]
+	pub trait Config:
+		frame_system::Config<
+			RuntimeCall: From<pallet_balances::Call<Self>>
+			                 + From<Call<Self>>
+			                 + Dispatchable<PostInfo = PostDispatchInfo>
+			                 + TryInto<pallet_balances::Call<Self>>,
+		> + pallet_balances::Config<RuntimeHoldReason = <Self as Config>::RuntimeHoldReason>
+	{
+		/// Identifier used to retain the wire format of unsupported asset transfer calls.
+		type AssetId: Parameter + Member + MaxEncodedLen + Clone + PartialEq + Eq + Default;
+
+		/// Scheduler for the runtime. We use the Named scheduler for cancellability.
+		type Scheduler: ScheduleNamed<
+			BlockNumberFor<Self>,
+			Self::Moment,
+			<Self as frame_system::Config>::RuntimeCall,
+			Self::SchedulerOrigin,
+			Hasher = Self::Hashing,
+		>;
+
+		/// Scheduler origin
+		type SchedulerOrigin: From<frame_system::RawOrigin<Self::AccountId>>
+			+ CallerTrait<Self::AccountId>
+			+ MaxEncodedLen;
+
+		/// Block number provider for scheduling.
+		type BlockNumberProvider: BlockNumberProvider<BlockNumber = BlockNumberFor<Self>>;
+
+		/// Maximum pending reversible transactions allowed per account.
+		#[pallet::constant]
+		type MaxPendingPerAccount: Get<u32>;
+
+		/// Maximum signed extrinsics a high-security account may include in one
+		/// rolling window. Update of the quota ring is O(1).
+		#[pallet::constant]
+		type MaxHighSecurityTxsPerWindow: Get<u32>;
+
+		/// Length of the high-security extrinsic quota window, in blocks.
+		/// At the runtime's 12s target this is one day (`DAYS`).
+		#[pallet::constant]
+		type HighSecurityTxWindowBlocks: Get<BlockNumberFor<Self>>;
+
+		/// The default delay period for reversible transactions if none is specified.
+		///
+		/// NOTE: default delay is always in blocks.
+		#[pallet::constant]
+		type DefaultDelay: Get<BlockNumberOrTimestampOf<Self>>;
+
+		/// The minimum delay period allowed for reversible transactions, in blocks.
+		#[pallet::constant]
+		type MinDelayPeriodBlocks: Get<BlockNumberFor<Self>>;
+
+		/// The minimum delay period allowed for reversible transactions, in milliseconds.
+		#[pallet::constant]
+		type MinDelayPeriodMoment: Get<Self::Moment>;
+
+		/// Pallet Id
+		type PalletId: Get<PalletId>;
+
+		/// The preimage provider used to store scheduled call data.
+		/// Only `StorePreimage::bound()` is used to create bounded calls for scheduling.
+		type Preimages: StorePreimage<H = Self::Hashing>;
+
+		/// A type representing the weights required by the dispatchables of this pallet.
+		type WeightInfo: WeightInfo;
+
+		/// Hold reason for the reversible transactions.
+		type RuntimeHoldReason: From<HoldReason>;
+
+		/// Moment type for scheduling.
+		type Moment: Saturating
+			+ Copy
+			+ Parameter
+			+ AtLeast32Bit
+			+ Scale<BlockNumberFor<Self>, Output = Self::Moment>
+			+ MaxEncodedLen;
+
+		/// Time provider for scheduling.
+		type TimeProvider: Time<Moment = Self::Moment>;
+
+		/// Volume fee taken from reversed transactions for high-security accounts only,
+		/// expressed as a Permill (e.g., Permill::from_percent(1) = 1%). Regular accounts incur no
+		/// fees. The fee is burned (removed from total issuance).
+		#[pallet::constant]
+		type VolumeFee: Get<Permill>;
+
+		/// Proof recorder for storing wormhole transfer proofs.
+		/// This records transfer proofs when reversible transfers are executed.
+		type ProofRecorder: TransferProofRecorder<Self::AccountId, AssetIdOf<Self>, BalanceOf<Self>>;
+	}
+
+	/// Maps accounts to their chosen reversibility delay period (in milliseconds).
+	/// Accounts present in this map have reversibility enabled.
+	#[pallet::storage]
+	#[pallet::getter(fn high_security_accounts)]
+	pub type HighSecurityAccounts<T: Config> = StorageMap<
+		_,
+		Blake2_128Concat,
+		T::AccountId,
+		HighSecurityAccountData<T::AccountId, BlockNumberOrTimestampOf<T>>,
+		OptionQuery,
+	>;
+
+	/// Rolling window of included signed extrinsics for each high-security account.
+	///
+	/// Oldest block number is at index 0. Recording a tx is O(1): compare
+	/// `now - oldest` to [`Config::HighSecurityTxWindowBlocks`], maybe evict
+	/// that one head, then push. Normal accounts are not stored here.
+	#[pallet::storage]
+	#[pallet::getter(fn high_security_tx_quota)]
+	pub type HighSecurityTxQuota<T: Config> = StorageMap<
+		_,
+		Blake2_128Concat,
+		T::AccountId,
+		BoundedVec<BlockNumberFor<T>, T::MaxHighSecurityTxsPerWindow>,
+		ValueQuery,
+	>;
+
+	/// Stores the details of pending transactions scheduled for delayed execution.
+	/// Keyed by the unique transaction ID.
+	#[pallet::storage]
+	#[pallet::getter(fn pending_dispatches)]
+	pub type PendingTransfers<T: Config> =
+		StorageMap<_, Blake2_128Concat, T::Hash, PendingTransferOf<T>, OptionQuery>;
+
+	/// Maps sender accounts to their list of pending transaction IDs.
+	#[pallet::storage]
+	#[pallet::getter(fn pending_transfers_by_sender)]
+	pub type PendingTransfersBySender<T: Config> = StorageMap<
+		_,
+		Blake2_128Concat,
+		T::AccountId,
+		BoundedVec<T::Hash, T::MaxPendingPerAccount>,
+		ValueQuery,
+	>;
+
+	// NOTE: there is deliberately no on-chain guardian → protected-accounts
+	// index. Guardianship is authoritative in `HighSecurityAccounts`, and
+	// `HighSecuritySet` events let an offchain indexer (Subsquid) answer
+	// "which accounts do I guard?". A bounded on-chain index would let a
+	// stranger fill a popular guardian's slots with unwanted enrollments.
+
+	/// Monotonically increasing counter used to generate unique transaction IDs.
+	/// Each scheduled transfer increments this value to ensure no two transfers
+	/// produce the same `tx_id`, even if they have identical parameters.
+	#[pallet::storage]
+	#[pallet::getter(fn next_transaction_id)]
+	pub type NextTransactionId<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+	#[pallet::event]
+	#[pallet::generate_deposit(pub(super) fn deposit_event)]
+	pub enum Event<T: Config> {
+		/// A user has enabled their high-security settings.
+		HighSecuritySet {
+			who: T::AccountId,
+			/// The guardian who can cancel transfers and recover funds.
+			guardian: T::AccountId,
+			delay: BlockNumberOrTimestampOf<T>,
+		},
+		/// A transaction has been scheduled for delayed execution.
+		TransactionScheduled {
+			from: T::AccountId,
+			to: T::AccountId,
+			/// The guardian who can cancel this transfer.
+			guardian: T::AccountId,
+			asset_id: Option<AssetIdOf<T>>,
+			amount: BalanceOf<T>,
+			tx_id: T::Hash,
+			execute_at: DispatchTime<BlockNumberFor<T>, T::Moment>,
+		},
+		/// A scheduled transaction has been successfully cancelled.
+		TransactionCancelled { who: T::AccountId, tx_id: T::Hash },
+		/// A scheduled transaction was executed by the scheduler.
+		TransactionExecuted { tx_id: T::Hash, result: DispatchResultWithPostInfo },
+		/// All funds were recovered from a high-security account by its guardian.
+		FundsRecovered { account: T::AccountId, guardian: T::AccountId },
+		/// Failed to release held funds during recovery. The transfer metadata is preserved
+		/// for manual retry via `cancel`.
+		TransferRecoveryFailed { tx_id: T::Hash },
+		/// The final free-balance sweep of `recover_funds` failed. All pending-transfer
+		/// cancellations performed by the same call remain in effect; the guardian can
+		/// retry `recover_funds` to sweep the free balance once the cause is resolved.
+		RecoverySweepFailed { account: T::AccountId, guardian: T::AccountId },
+	}
+
+	#[pallet::error]
+	pub enum Error<T> {
+		/// The account attempting to enable reversibility is already marked as reversible.
+		AccountAlreadyHighSecurity,
+		/// The account attempting the action is not marked as high security.
+		AccountNotHighSecurity,
+		/// Guardian cannot be the account itself, because it is redundant.
+		GuardianCannotBeSelf,
+		/// The specified pending transaction ID was not found.
+		PendingTxNotFound,
+		/// The caller is not the original submitter of the transaction they are trying to cancel.
+		NotOwner,
+		/// The account has reached the maximum number of pending reversible transactions.
+		TooManyPendingTransactions,
+		/// The specified delay period is below the configured minimum.
+		DelayTooShort,
+		/// Failed to schedule the transaction execution with the scheduler pallet.
+		SchedulingFailed,
+		/// Failed to cancel the scheduled task with the scheduler pallet.
+		CancellationFailed,
+		/// Call is invalid.
+		InvalidCall,
+		/// Invalid scheduler origin
+		InvalidSchedulerOrigin,
+		/// Reverser is invalid
+		InvalidReverser,
+		/// Cannot schedule one time reversible transaction when account is reversible (theft
+		/// deterrence)
+		AccountAlreadyReversibleCannotScheduleOneTime,
+		/// Asset transfers are not supported.
+		AssetsNotSupported,
+		/// Zero-amount transfers cannot be scheduled: there is nothing to hold,
+		/// execute, or reverse.
+		ZeroAmount,
+		/// The high-security account already used its transaction quota for the current window.
+		HighSecurityTxQuotaExceeded,
+	}
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {
+		/// Enable high-security for the calling account with a specified
+		/// reversibility delay.
+		///
+		/// Once an account is set as high security it can only make reversible
+		/// transfers. It is not allowed any other calls.
+		///
+		/// # Warning: Permanent and Irreversible
+		///
+		/// **Enabling high security mode is a one-way operation that cannot be undone.**
+		///
+		/// Once this function is called successfully, the account is permanently restricted
+		/// to only the following operations:
+		/// - [`schedule_transfer`](Self::schedule_transfer) - Schedule delayed native token
+		///   transfers
+		/// - [`cancel`](Self::cancel) - Cancel pending transfers
+		/// - [`recover_funds`](Self::recover_funds) - Guardian-initiated emergency fund recovery
+		///
+		/// There is no mechanism to disable high security mode or restore normal account
+		/// functionality. This design is intentional to provide maximum security guarantees:
+		/// an attacker who gains access to the account cannot simply disable the protections.
+		///
+		/// This permanence also ensures that any funds subsequently sent to a compromised
+		/// account (e.g., from pending payments, contracts, or accidental deposits) remain
+		/// protected and can be recovered by the guardian via
+		/// [`recover_funds`](Self::recover_funds). The guardian can call `recover_funds`
+		/// repeatedly as needed.
+		///
+		/// Users who no longer wish to use high-security features can simply transfer their
+		/// funds to a different account using [`schedule_transfer`](Self::schedule_transfer).
+		///
+		/// # Parameters
+		///
+		/// - `delay`: The reversibility time for any transfer made by the high-security account.
+		/// - `guardian`: The guardian account that can cancel pending transfers and recover funds
+		///   from this high-security account.
+		///
+		/// # Choose the guardian carefully
+		///
+		/// The guardian holds instant, total seizure power: `recover_funds`
+		/// sweeps every hold plus the entire free balance to the guardian,
+		/// with no delay, no second approver, and no way to change the
+		/// relationship afterwards. A single-key guardian is therefore a
+		/// single point of failure for the whole scheme. **Use a multisig
+		/// address as the guardian**: `pallet_multisig` dispatches calls as
+		/// its derived address, so a multisig can cancel and recover exactly
+		/// like a plain account.
+		///
+		/// Guardianship is discoverable offchain (e.g. Subsquid) via the
+		/// `HighSecuritySet` event; there is deliberately no on-chain
+		/// guardian index to fill up or grief.
+		#[pallet::call_index(0)]
+		#[pallet::weight(<T as Config>::WeightInfo::set_high_security())]
+		pub fn set_high_security(
+			origin: OriginFor<T>,
+			delay: BlockNumberOrTimestampOf<T>,
+			guardian: T::AccountId,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(guardian != who.clone(), Error::<T>::GuardianCannotBeSelf);
+			ensure!(
+				!HighSecurityAccounts::<T>::contains_key(&who),
+				Error::<T>::AccountAlreadyHighSecurity
+			);
+
+			Self::validate_delay(&delay)?;
+
+			HighSecurityAccounts::<T>::insert(
+				who.clone(),
+				HighSecurityAccountData { guardian: guardian.clone(), delay },
+			);
+			Self::deposit_event(Event::HighSecuritySet { who, guardian, delay });
+
+			Ok(())
+		}
+
+		/// Cancel a pending reversible transaction scheduled by the caller.
+		///
+		/// - `tx_id`: The unique identifier of the transaction to cancel.
+		#[pallet::call_index(1)]
+		#[pallet::weight(<T as Config>::WeightInfo::cancel())]
+		pub fn cancel(origin: OriginFor<T>, tx_id: T::Hash) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			Self::cancel_transfer(&who, tx_id)
+		}
+
+		/// Executes a previously scheduled transfer after the delay period has elapsed.
+		///
+		/// This extrinsic is called automatically by the Scheduler pallet when the
+		/// delay period expires. It must be signed by this pallet's account (not a user).
+		/// The pallet account is set as the origin when scheduling via
+		/// `do_schedule_transfer_inner`.
+		///
+		/// # Parameters
+		///
+		/// - `tx_id`: The unique identifier of the pending transfer to execute.
+		///
+		/// Execution uses `transfer_allow_death` so a sender who spent their leftover
+		/// free balance during the delay still completes. A failed inner transfer (e.g.
+		/// dest overflow, or `amount < ED` to a new account) does not fail this
+		/// extrinsic: the hold is already released and the pending transfer is already
+		/// removed. Propagating that error would roll back those writes (FRAME
+		/// dispatchables are transactional) while Scheduler terminally drops the named
+		/// task, freezing the funds with no retry. The inner result is still recorded on
+		/// [`Event::TransactionExecuted`].
+		///
+		/// # Errors
+		///
+		/// - [`InvalidSchedulerOrigin`](Error::InvalidSchedulerOrigin): Called by an account other
+		///   than this pallet's account.
+		/// - [`PendingTxNotFound`](Error::PendingTxNotFound): No pending transfer with this ID.
+		#[pallet::call_index(2)]
+		#[pallet::weight(<T as Config>::WeightInfo::execute_transfer())]
+		#[allow(clippy::useless_conversion)]
+		pub fn execute_transfer(
+			origin: OriginFor<T>,
+			tx_id: T::Hash,
+		) -> DispatchResultWithPostInfo {
+			let who = ensure_signed(origin)?;
+
+			ensure!(who == Self::account_id(), Error::<T>::InvalidSchedulerOrigin);
+
+			Self::do_execute_transfer(&tx_id)
+		}
+
+		/// Schedule a transaction for delayed execution.
+		#[pallet::call_index(3)]
+		#[pallet::weight(<T as Config>::WeightInfo::schedule_transfer())]
+		pub fn schedule_transfer(
+			origin: OriginFor<T>,
+			dest: <<T as frame_system::Config>::Lookup as StaticLookup>::Source,
+			amount: BalanceOf<T>,
+		) -> DispatchResult {
+			Self::do_schedule_transfer(origin, dest, amount)
+		}
+
+		/// Schedule a transaction for delayed execution with a custom, one-time delay.
+		///
+		/// This can only be used by accounts that have *not* set up a persistent
+		/// reversibility configuration with `set_high_security`.
+		///
+		/// - `delay`: The time (in blocks or milliseconds) before the transaction executes.
+		#[pallet::call_index(4)]
+		#[pallet::weight(<T as Config>::WeightInfo::schedule_transfer())]
+		pub fn schedule_transfer_with_delay(
+			origin: OriginFor<T>,
+			dest: <<T as frame_system::Config>::Lookup as StaticLookup>::Source,
+			amount: BalanceOf<T>,
+			delay: BlockNumberOrTimestampOf<T>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			log::debug!(target: "reversible-transfers", "schedule_transfer_with_delay with delay: {delay:?}");
+
+			// Accounts with pre-configured reversibility cannot use this extrinsic.
+			ensure!(
+				!HighSecurityAccounts::<T>::contains_key(&who),
+				Error::<T>::AccountAlreadyReversibleCannotScheduleOneTime
+			);
+
+			// Validate the provided delay.
+			Self::validate_delay(&delay)?;
+
+			Self::do_schedule_transfer_inner(who.clone(), dest, who, amount, delay, None)
+		}
+
+		// Call indices 5 and 6 were `schedule_asset_transfer` /
+		// `schedule_asset_transfer_with_delay` (removed with assets support). Kept vacant so
+		// `recover_funds` stays at index 7.
+
+		/// Allows the guardian to recover all funds from a high-security account
+		/// by transferring the entire balance to themselves.
+		///
+		/// This is an emergency function for when the high-security account may be compromised.
+		/// It cancels all pending transfers first (applying volume fees), then transfers
+		/// the remaining free balance to the guardian.
+		///
+		/// # Cancel vs recovery authority
+		///
+		/// Per-transfer `cancel` freezes authority in `pending.guardian` at schedule time
+		/// (so a later `set_high_security` cannot rewrite cancel rights on pre-enrollment
+		/// one-time transfers). `recover_funds` does **not** use that freeze: it authorizes
+		/// against the *live* high-security guardian and seizes every pending hold on the
+		/// account (volume fee applied). That asymmetry is intentional — recovery is
+		/// seize-the-account, not a batch of frozen cancel policies.
+		///
+		/// # Repeated Recovery
+		///
+		/// This function can be called multiple times on the same account. The high-security
+		/// status and guardian relationship are intentionally preserved after recovery, ensuring
+		/// that any funds subsequently deposited to the account (e.g., from pending payments,
+		/// contracts, or accidental deposits) remain protected and recoverable.
+		///
+		/// # Error Handling
+		///
+		/// If releasing held funds fails for any transfer, that transfer is skipped (metadata
+		/// preserved for manual retry via `cancel`) and a `TransferRecoveryFailed` event is
+		/// emitted. Other transfers continue to be processed.
+		///
+		/// The closing free-balance sweep to the guardian is likewise best-effort: if it
+		/// fails (e.g. the guardian cannot receive the funds), the call still succeeds and
+		/// all cancellations performed above remain in effect — they must not be rolled
+		/// back, or the pending transfers would be re-armed and execute at their scheduled
+		/// time. A `RecoverySweepFailed` event is emitted instead of `FundsRecovered`, and
+		/// the guardian can call `recover_funds` again to retry the sweep.
+		#[pallet::call_index(7)]
+		#[pallet::weight(<T as Config>::WeightInfo::recover_funds(T::MaxPendingPerAccount::get()))]
+		#[allow(clippy::useless_conversion)]
+		pub fn recover_funds(
+			origin: OriginFor<T>,
+			account: T::AccountId,
+		) -> DispatchResultWithPostInfo {
+			let who = ensure_signed(origin)?;
+
+			let high_security_account_data = HighSecurityAccounts::<T>::get(&account)
+				.ok_or(Error::<T>::AccountNotHighSecurity)?;
+
+			ensure!(who == high_security_account_data.guardian, Error::<T>::InvalidReverser);
+
+			// Get pending tx_ids without removing - only remove on successful release
+			let pending_tx_ids: Vec<_> =
+				PendingTransfersBySender::<T>::get(&account).into_iter().collect();
+
+			// Weight is keyed to the number of transfers processed (one storage read
+			// plus one release attempt each), NOT to the number of successful
+			// cancellations. Every iteration performs per-transfer work regardless of
+			// whether the release succeeds, and a successful cancellation is strictly
+			// more expensive than a failed one (it additionally removes metadata and
+			// cancels the scheduled task), so charging every processed transfer at the
+			// benchmarked success rate is a safe upper bound. Bounded by
+			// `MaxPendingPerAccount`, matching the pre-dispatch weight declaration.
+			let num_processed = pending_tx_ids.len() as u32;
+
+			for tx_id in pending_tx_ids.iter() {
+				// PendingTransfersBySender and PendingTransfers should always be in sync.
+				// If not, this is an invariant violation - log defensively and skip.
+				let Some(pending) = PendingTransfers::<T>::get(tx_id) else {
+					defensive!(
+						"PendingTransfersBySender/PendingTransfers inconsistency: \
+						tx {:?} in sender index but not in PendingTransfers",
+						tx_id
+					);
+					continue;
+				};
+
+				// Try to release held funds first
+				if let Err(e) = Self::release_held_funds_with_fee(&pending, &who, true) {
+					log::warn!(
+						"Failed to release held funds for tx {:?} during recovery: {:?}",
+						tx_id,
+						e
+					);
+					// Skip - leave metadata intact for manual recovery via cancel
+					Self::deposit_event(Event::TransferRecoveryFailed { tx_id: *tx_id });
+					continue;
+				}
+
+				// Release succeeded - now remove metadata and cancel scheduler
+				PendingTransfers::<T>::remove(tx_id);
+
+				if let Ok(id) = Self::make_schedule_id(tx_id) {
+					if let Err(e) = T::Scheduler::cancel_named(id) {
+						log::warn!(
+							"Failed to cancel scheduled task for tx {:?}: {:?} (funds already released)",
+							tx_id,
+							e
+						);
+					}
+				}
+
+				Self::deposit_event(Event::TransactionCancelled {
+					who: who.clone(),
+					tx_id: *tx_id,
+				});
+			}
+
+			// Update sender index to only contain transfers that weren't cancelled
+			PendingTransfersBySender::<T>::mutate(&account, |list| {
+				list.retain(|tx_id| PendingTransfers::<T>::contains_key(tx_id));
+			});
+
+			// Remove empty entry
+			if PendingTransfersBySender::<T>::get(&account).is_empty() {
+				PendingTransfersBySender::<T>::remove(&account);
+			}
+
+			let call: RuntimeCallOf<T> = pallet_balances::Call::<T>::transfer_all {
+				dest: T::Lookup::unlookup(who.clone()),
+				keep_alive: false,
+			}
+			.into();
+
+			// The sweep is best-effort: propagating its error would roll back the whole
+			// (transactional) extrinsic, reverting every hold release and scheduler
+			// cancellation above and re-arming the pending transfers a compromised
+			// account's guardian is trying to stop. Keep that work, report the failed
+			// sweep, and let the guardian retry once the cause is resolved.
+			match call.dispatch(frame_system::RawOrigin::Signed(account.clone()).into()) {
+				Ok(_) => {
+					Self::deposit_event(Event::FundsRecovered { account, guardian: who });
+				},
+				Err(e) => {
+					log::warn!(
+						"recover_funds: final transfer_all sweep from {:?} failed: {:?}",
+						account,
+						e.error
+					);
+					Self::deposit_event(Event::RecoverySweepFailed { account, guardian: who });
+				},
+			}
+
+			Ok(Some(<T as Config>::WeightInfo::recover_funds(num_processed)).into())
+		}
+	}
+
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+		fn integrity_test() {
+			assert!(
+				!T::MinDelayPeriodBlocks::get().is_zero() &&
+					!T::MinDelayPeriodMoment::get().is_zero(),
+				"Minimum delay periods must be greater than 0"
+			);
+
+			// NOTE: default delay is always in blocks
+			assert!(
+				BlockNumberOrTimestampOf::<T>::BlockNumber(T::MinDelayPeriodBlocks::get()) <=
+					T::DefaultDelay::get(),
+				"Minimum delay periods must be less or equal to `T::DefaultDelay`"
+			);
+		}
+	}
+
+	/// A reason for holding funds.
+	#[pallet::composite_enum]
+	pub enum HoldReason {
+		/// Scheduled transfer amount.
+		#[codec(index = 0)]
+		ScheduledTransfer,
+	}
+
+	impl<T: Config> Pallet<T> {
+		/// Check if an account has reversibility enabled and return its delay.
+		pub fn is_high_security(
+			who: &T::AccountId,
+		) -> Option<HighSecurityAccountData<T::AccountId, BlockNumberOrTimestampOf<T>>> {
+			HighSecurityAccounts::<T>::get(who)
+		}
+
+		/// Get full details of a pending transfer by its ID
+		pub fn get_pending_transfer_details(tx_id: &T::Hash) -> Option<PendingTransferOf<T>> {
+			PendingTransfers::<T>::get(tx_id)
+		}
+
+		// Pallet account as origin
+		pub fn account_id() -> T::AccountId {
+			T::PalletId::get().into_account_truncating()
+		}
+
+		fn validate_delay(delay: &BlockNumberOrTimestampOf<T>) -> DispatchResult {
+			match delay {
+				BlockNumberOrTimestamp::BlockNumber(x) => {
+					ensure!(*x >= T::MinDelayPeriodBlocks::get(), Error::<T>::DelayTooShort)
+				},
+				BlockNumberOrTimestamp::Timestamp(t) => {
+					ensure!(*t >= T::MinDelayPeriodMoment::get(), Error::<T>::DelayTooShort)
+				},
+			}
+			Ok(())
+		}
+
+		fn do_execute_transfer(tx_id: &T::Hash) -> DispatchResultWithPostInfo {
+			let pending = PendingTransfers::<T>::get(tx_id).ok_or(Error::<T>::PendingTxNotFound)?;
+			ensure!(pending.asset_id.is_none(), Error::<T>::AssetsNotSupported);
+
+			// Build the transfer call from stored data
+			let to_lookup = T::Lookup::unlookup(pending.to.clone());
+			let call: RuntimeCallOf<T> = pallet_balances::Call::<T>::transfer_allow_death {
+				dest: to_lookup,
+				value: pending.amount,
+			}
+			.into();
+
+			// Release held funds
+			pallet_balances::Pallet::<T>::release(
+				&HoldReason::ScheduledTransfer.into(),
+				&pending.from,
+				pending.amount,
+				Precision::Exact,
+			)?;
+
+			// Remove transfer from storage
+			PendingTransfers::<T>::remove(tx_id);
+
+			// Remove from sender's pending list
+			PendingTransfersBySender::<T>::mutate(&pending.from, |list| {
+				list.retain(|id| id != tx_id);
+			});
+
+			let post_info =
+				call.dispatch(frame_system::RawOrigin::Signed(pending.from.clone()).into());
+
+			// Record only when value actually moved. `transfer_allow_death` treats
+			// `source == dest` as a no-op that still returns `Ok`, and this path runs
+			// in scheduler hook context so the event scanner never sees it.
+			if post_info.is_ok() && pending.from != pending.to {
+				T::ProofRecorder::record_transfer_proof(
+					pending.asset_id.clone(),
+					pending.from.clone(),
+					pending.to.clone(),
+					pending.amount,
+				);
+			}
+
+			Self::deposit_event(Event::TransactionExecuted { tx_id: *tx_id, result: post_info });
+
+			// Best-effort: do not propagate the inner transfer error. FRAME wraps every
+			// dispatchable in `with_storage_layer`, so returning `Err` rolls back the hold
+			// release and pending-transfer removal above. Scheduler then terminally drops
+			// the named task (no retry is configured), leaving funds held with no
+			// scheduled execution — the same freeze `cancel_transfer` and `recover_funds`
+			// already guard against.
+			match post_info {
+				Ok(info) => Ok(info),
+				Err(e) => {
+					log::warn!(
+						"do_execute_transfer: inner transfer for tx {:?} failed: {:?}",
+						tx_id,
+						e.error
+					);
+					Ok(e.post_info)
+				},
+			}
+		}
+
+		/// Simply converts hash output value to a `TaskName`
+		pub fn make_schedule_id(tx_id: &T::Hash) -> Result<TaskName, DispatchError> {
+			let task_name =
+				tx_id.clone().as_ref().try_into().map_err(|_| Error::<T>::InvalidCall)?;
+
+			Ok(task_name)
+		}
+
+		/// Internal logic to schedule a transfer with a given delay.
+		fn do_schedule_transfer_inner(
+			from: T::AccountId,
+			to: <<T as frame_system::Config>::Lookup as StaticLookup>::Source,
+			guardian: T::AccountId,
+			amount: BalanceOf<T>,
+			delay: BlockNumberOrTimestampOf<T>,
+			asset_id: Option<AssetIdOf<T>>,
+		) -> DispatchResult {
+			let recipient = T::Lookup::lookup(to.clone())?;
+			ensure!(asset_id.is_none(), Error::<T>::AssetsNotSupported);
+			// A zero-amount schedule is a pure no-op with side effects: it consumes a
+			// pending-transfer slot and scheduler agenda space, and its execution would
+			// dispatch a zero-value transfer. Reject it outright.
+			ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
+
+			// Build the transfer call for tx_id computation (not stored)
+			let transfer_call: RuntimeCallOf<T> =
+				pallet_balances::Call::<T>::transfer_keep_alive { dest: to.clone(), value: amount }
+					.into();
+
+			let tx_id = T::Hashing::hash_of(
+				&(from.clone(), transfer_call.clone(), NextTransactionId::<T>::get()).encode(),
+			);
+
+			log::debug!(target: "reversible-transfers", "Reversible transfer scheduled with delay: {delay:?}");
+			log::debug!(target: "reversible-transfers", "Reversible transfer tx_id: {tx_id:?}");
+
+			let dispatch_time = match delay {
+				BlockNumberOrTimestamp::BlockNumber(blocks) => DispatchTime::At(
+					<T as pallet::Config>::BlockNumberProvider::current_block_number()
+						.saturating_add(blocks),
+				),
+				BlockNumberOrTimestamp::Timestamp(millis) =>
+					DispatchTime::After(BlockNumberOrTimestamp::Timestamp(
+						T::TimeProvider::now().saturating_add(millis),
+					)),
+			};
+			log::debug!(target: "reversible-transfers", "Now time: {:?}", T::TimeProvider::now());
+			log::debug!(target: "reversible-transfers", "dispatch_time: {dispatch_time:?}");
+
+			let new_pending = PendingTransfer {
+				from: from.clone(),
+				to: recipient.clone(),
+				guardian: guardian.clone(),
+				asset_id: asset_id.clone(),
+				amount,
+			};
+
+			let schedule_id = Self::make_schedule_id(&tx_id)?;
+
+			// Store the pending transfer
+			PendingTransfers::<T>::insert(tx_id, new_pending);
+
+			// Add to sender's pending list
+			PendingTransfersBySender::<T>::try_mutate(&from, |list| {
+				list.try_push(tx_id).map_err(|_| Error::<T>::TooManyPendingTransactions)
+			})?;
+
+			let bounded_call = T::Preimages::bound(Call::<T>::execute_transfer { tx_id }.into())?;
+
+			// Schedule the `do_execute` call. Reversible transfers are a permissionless
+			// scheduling surface (any signed account can target an arbitrary future
+			// block), so they run at `LOWEST_PRIORITY`: the scheduler reserves agenda
+			// headroom above that priority, preventing user transfers from filling a
+			// block's agenda and censoring e.g. governance enactment scheduled at a
+			// deterministic block.
+			T::Scheduler::schedule_named(
+				schedule_id,
+				dispatch_time,
+				frame_support::traits::schedule::LOWEST_PRIORITY,
+				frame_support::dispatch::RawOrigin::Signed(Self::account_id()).into(),
+				bounded_call,
+			)
+			.map_err(|e| {
+				log::error!("Failed to schedule transaction: {e:?}");
+				Error::<T>::SchedulingFailed
+			})?;
+
+			pallet_balances::Pallet::<T>::hold(
+				&HoldReason::ScheduledTransfer.into(),
+				&from,
+				amount,
+			)?;
+
+			NextTransactionId::<T>::mutate(|id| id.saturating_inc());
+
+			Self::deposit_event(Event::TransactionScheduled {
+				from,
+				to: recipient,
+				guardian,
+				asset_id,
+				tx_id,
+				execute_at: dispatch_time,
+				amount,
+			});
+
+			Ok(())
+		}
+
+		/// Internal helper called by [`schedule_transfer`](Self::schedule_transfer) extrinsic.
+		///
+		/// Schedules a native balance transfer for delayed execution using the caller's
+		/// pre-configured delay period.
+		pub fn do_schedule_transfer(
+			origin: T::RuntimeOrigin,
+			dest: <<T as frame_system::Config>::Lookup as StaticLookup>::Source,
+			amount: BalanceOf<T>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let HighSecurityAccountData { delay, guardian, .. } =
+				Self::high_security_accounts(&who).ok_or(Error::<T>::AccountNotHighSecurity)?;
+
+			Self::do_schedule_transfer_inner(who, dest, guardian, amount, delay, None)
+		}
+
+		/// Cancels a previously scheduled transaction. Internal logic used by `cancel` extrinsic.
+		fn cancel_transfer(who: &T::AccountId, tx_id: T::Hash) -> DispatchResult {
+			let pending = PendingTransfers::<T>::get(tx_id).ok_or(Error::<T>::PendingTxNotFound)?;
+
+			// Authority, recipient, and fee policy are frozen at schedule time in
+			// `pending.guardian` (high-security schedules store the configured guardian;
+			// one-time schedules store the sender). Do not re-read live
+			// `HighSecurityAccounts` here — a later `set_high_security` would otherwise
+			// retroactively rewrite cancel rights and burn a volume fee for transfers
+			// the owner scheduled while still a regular account.
+			let apply_fee = pending.guardian != pending.from;
+			let (recipient, apply_fee) = if apply_fee {
+				ensure!(who == &pending.guardian, Error::<T>::InvalidReverser);
+				(pending.guardian.clone(), true)
+			} else {
+				ensure!(who == &pending.from, Error::<T>::NotOwner);
+				(pending.from.clone(), false)
+			};
+
+			// Release funds before mutating metadata so a failure leaves the pending transfer
+			// intact and retryable.
+			Self::release_held_funds_with_fee(&pending, &recipient, apply_fee)?;
+
+			// Remove from storage
+			PendingTransfers::<T>::remove(tx_id);
+			PendingTransfersBySender::<T>::mutate(&pending.from, |list| {
+				list.retain(|id| *id != tx_id);
+			});
+
+			// Cancel scheduler best-effort: the funds have already been released above, so a
+			// failure here must NOT propagate — propagating rolls back the whole transactional
+			// extrinsic, re-arming the pending transfer and permanently freezing the held funds
+			// (the scheduler terminally removes a named task on a failed dispatch). Mirrors the
+			// best-effort cancel in `recover_funds`.
+			let schedule_id = Self::make_schedule_id(&tx_id)?;
+			if let Err(e) = T::Scheduler::cancel_named(schedule_id) {
+				log::warn!(
+					"Failed to cancel scheduled task for tx {:?}: {:?} (funds already released)",
+					tx_id,
+					e
+				);
+			}
+
+			Self::deposit_event(Event::TransactionCancelled { who: who.clone(), tx_id });
+			Ok(())
+		}
+
+		/// Releases held funds from a pending transfer, optionally applying volume fee.
+		/// Burns the fee portion and transfers the remainder to the recipient.
+		///
+		/// Wrapped in a storage layer so a partial failure (e.g. the recipient cannot receive
+		/// the funds) rolls back any fee burn, leaving the original hold intact and the pending
+		/// transfer retryable.
+		#[frame_support::transactional]
+		fn release_held_funds_with_fee(
+			pending: &PendingTransferOf<T>,
+			recipient: &T::AccountId,
+			apply_fee: bool,
+		) -> DispatchResult {
+			ensure!(pending.asset_id.is_none(), Error::<T>::AssetsNotSupported);
+
+			let (fee_amount, remaining_amount) = if apply_fee {
+				let volume_fee = T::VolumeFee::get();
+				let fee = volume_fee * pending.amount;
+				(fee, pending.amount.saturating_sub(fee))
+			} else {
+				(Zero::zero(), pending.amount)
+			};
+
+			// Burn fee amount
+			pallet_balances::Pallet::<T>::burn_held(
+				&HoldReason::ScheduledTransfer.into(),
+				&pending.from,
+				fee_amount,
+				Precision::Exact,
+				Fortitude::Polite,
+			)?;
+
+			// Transfer remaining amount to recipient. A self-directed release (owner
+			// cancel of a one-time schedule) is hold → free on the same account: use
+			// `release` so we do not emit `TransferOnHold { source: A, dest: A }`, which
+			// is not a credit. Cross-account seizures still use `transfer_on_hold`
+			// (`Restriction::Free`) so the destination receives free balance and the
+			// runtime event scanner records a leaf.
+			if recipient == &pending.from {
+				pallet_balances::Pallet::<T>::release(
+					&HoldReason::ScheduledTransfer.into(),
+					&pending.from,
+					remaining_amount,
+					Precision::Exact,
+				)?;
+			} else {
+				pallet_balances::Pallet::<T>::transfer_on_hold(
+					&HoldReason::ScheduledTransfer.into(),
+					&pending.from,
+					recipient,
+					remaining_amount,
+					Precision::Exact,
+					Restriction::Free,
+					Fortitude::Polite,
+				)?;
+			}
+
+			Ok(())
+		}
+	}
+
+	#[pallet::genesis_config]
+	#[derive(frame_support::DefaultNoBound)]
+	pub struct GenesisConfig<T: Config> {
+		/// Configure initial reversible accounts. [AccountId, Guardian, Delay]
+		/// NOTE: using `(bool, BlockNumberFor<T>)` where `bool` indicates if the delay is in block
+		/// numbers
+		pub initial_high_security_accounts: Vec<(T::AccountId, T::AccountId, BlockNumberFor<T>)>,
+	}
+
+	#[pallet::genesis_build]
+	impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
+		fn build(&self) {
+			for (who, guardian, delay) in &self.initial_high_security_accounts {
+				// A self-guardian silently voids all guardian protection. Enforce the same
+				// invariant as the signed `set_high_security` path (GuardianCannotBeSelf),
+				// failing genesis construction rather than admitting an unprotected account.
+				assert!(
+					guardian != who,
+					"Genesis high-security account {:?} cannot be its own guardian",
+					who
+				);
+
+				// Basic validation, ensure delay is reasonable if needed
+				let wrapped_delay = BlockNumberOrTimestampOf::<T>::BlockNumber(*delay);
+
+				if *delay >= T::MinDelayPeriodBlocks::get() {
+					HighSecurityAccounts::<T>::insert(
+						who,
+						HighSecurityAccountData {
+							guardian: guardian.clone(),
+							delay: wrapped_delay,
+						},
+					);
+				} else {
+					// Optionally log a warning during genesis build
+					log::warn!(
+                        "Genesis config for account {:?} has delay {:?} below MinDelayPeriodBlocks {:?}, skipping.",
+                        who, wrapped_delay, T::MinDelayPeriodBlocks::get()
+                     );
+				}
+			}
+		}
+	}
+}
