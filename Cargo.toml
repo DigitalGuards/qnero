@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/qnero-pqcrypto", "crates/qnero-notes"]
+members = [
+    "crates/qnero-pqcrypto",
+    "crates/qnero-notes",
+    "crates/qnero-circuit",
+    "crates/qnero-prover",
+    "crates/qnero-verifier",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,7 +16,14 @@ repository = "https://github.com/DigitalGuards/qnero"
 
 [workspace.dependencies]
 qnero-pqcrypto = { path = "crates/qnero-pqcrypto" }
+qnero-notes = { path = "crates/qnero-notes" }
+qnero-circuit = { path = "crates/qnero-circuit" }
+qnero-prover = { path = "crates/qnero-prover" }
+qnero-verifier = { path = "crates/qnero-verifier" }
 qp-poseidon-core = { version = "3.1.0", default-features = false, features = ["std"] }
+qp-plonky2 = { version = "=1.5.5", default-features = false, features = ["std"] }
+qp-plonky2-verifier = { version = "=1.5.5", default-features = false, features = ["std"] }
+anyhow = "1.0"
 bech32 = "0.9"
 zeroize = { version = "1.8", features = ["derive"] }
 rand = "0.9"

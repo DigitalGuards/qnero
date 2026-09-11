@@ -50,7 +50,7 @@ Verified on this machine 2026-09-11: `cargo test -p qp-wormhole-circuit
 | `PrivateBatchAggregator` (7 leaves, ZK, client side) | fork | New public-input layout |
 | `PublicBatchAggregator` (53 batches, delegatable) | fork | Forward-only, minimal change |
 | `pallet-wormhole` verify flow: PI parse, block hash check, nullifier dedupe, plonky2 verify, tx-pool tags | fork as `pallet-shielded` | Exit-account minting becomes commitment append + ciphertext event |
-| `pallet-zk-tree` 4-ary Poseidon tree | as is | Leaf becomes the note commitment |
+| `pallet-zk-tree` 4-ary Poseidon tree | small fork | Node hashing unchanged; `Leaves` holds a raw `Hash256`, the note commitment, see `docs/CIRCUIT.md` section 4 |
 | `UsedNullifiers` storage | as is | |
 | ML-DSA-87 accounts, hdwallet | as is | Transparent layer, needed for miners and fees in v0 |
 | Audits | as is | Eiger Wormhole audit 2026-03-20, Substrate audit 2026-05-13, PoW + Poseidon review |
@@ -97,6 +97,10 @@ the same linear scan Monero wallets do.
 
 ## 6. v0 spend circuit (leaf)
 
+Built at M2. `docs/CIRCUIT.md` is the implemented specification, including the
+tree leaf rule M3 and M4 depend on; this section is the design intent it was
+built from, and the two agree.
+
 One leaf = one shielded transfer: up to 2 inputs, exactly 2 outputs.
 
 Private inputs: for each input, the note `(pk, v, rho, r)`, `ask`, `nk`,
@@ -140,7 +144,7 @@ batch is the on-chain transaction unit. Public batch: unchanged in shape.
 | # | Deliverable | Estimate |
 |---|---|---|
 | M1 | `qnero-notes` crate: keys, addresses, note commitment, ML-KEM note encryption, scan; KATs pinned | DONE 2026-09-11 |
-| M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | 2 to 3 weeks |
+| M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (316 gates, degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
 | M3 | Private and public batch aggregators on the new PI layout | 1 week |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | 2 weeks |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | 2 weeks |

@@ -1,0 +1,13 @@
+[package]
+name = "qnero-verifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Verifier for the Qnero v0 shielded spend leaf circuit"
+
+[dependencies]
+# Layout constants only: the circuit feature stays off so this crate does not
+# pull in plonky2 or the note primitives.
+qnero-circuit = { path = "../qnero-circuit", version = "0.1.0", default-features = false }
+qp-plonky2-verifier = { workspace = true }
+anyhow = { workspace = true }

@@ -437,7 +437,7 @@ mod tests {
         .unwrap();
 
         let decrypted = ciphertext
-            .decrypt(&sk_enc, pk_recipient, diversifier_index)
+            .decrypt(sk_enc, pk_recipient, diversifier_index)
             .unwrap();
 
         assert_eq!(decrypted.value, note.value);
@@ -493,7 +493,7 @@ mod tests {
         let mut tampered = ciphertext.clone();
         tampered.crypto_suite = ciphertext.crypto_suite.wrapping_add(1);
 
-        let result = tampered.decrypt(&sk_enc, [1u8; 32], 0);
+        let result = tampered.decrypt(sk_enc, [1u8; 32], 0);
         assert!(result.is_err(), "tampered crypto_suite must fail");
     }
 
@@ -510,7 +510,7 @@ mod tests {
         let mut tampered = ciphertext.clone();
         tampered.diversifier_index = tampered.diversifier_index.wrapping_add(1);
 
-        let result = tampered.decrypt(&sk_enc, [2u8; 32], 7);
+        let result = tampered.decrypt(sk_enc, [2u8; 32], 7);
         assert!(result.is_err(), "tampered diversifier_index must fail");
     }
 

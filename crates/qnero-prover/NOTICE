@@ -1,0 +1,4 @@
+The shape of this crate (a one-shot build, commit, prove wrapper that never
+loads or emits a prover artifact) follows Quantus-Network/qp-zk-circuits
+`wormhole/prover` (MIT), read at version 4.4.0 on 2026-09-11. No code is copied
+verbatim; see CHANGES.md.

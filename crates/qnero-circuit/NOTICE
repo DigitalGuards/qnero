@@ -1,0 +1,16 @@
+Parts of qnero-circuit are derived from Quantus-Network/qp-zk-circuits
+(https://github.com/Quantus-Network/qp-zk-circuits, MIT License), read at
+version 4.4.0 on 2026-09-11. The derived parts are:
+
+- src/gadgets.rs      from common/src/gadgets.rs
+- src/merkle.rs       from common/src/zk_merkle.rs and
+                      wormhole/circuit/src/zk_merkle_proof.rs
+- src/header.rs       from wormhole/circuit/src/block_header/{mod.rs,header.rs}
+- src/config.rs       from common/src/circuit.rs
+- src/circuit.rs      structure only, from wormhole/circuit/src/circuit.rs
+
+The Merkle node hashing rule is the one implemented by
+Quantus-Network/quantus-chain `pallets/zk-tree` (MIT), so proofs produced here
+verify against that pallet's tree.
+
+Local changes are listed in CHANGES.md.

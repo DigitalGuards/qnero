@@ -1,0 +1,16 @@
+[package]
+name = "qnero-prover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Prover for the Qnero v0 shielded spend leaf circuit"
+
+[dependencies]
+qnero-circuit = { workspace = true }
+qnero-notes = { workspace = true }
+qp-plonky2 = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+qnero-verifier = { workspace = true }
+rand = { workspace = true }

@@ -1,0 +1,25 @@
+[package]
+name = "qnero-circuit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qnero v0 shielded spend circuit (leaf): 2-in / 2-out note spend over Poseidon2 and Plonky2"
+
+[dependencies]
+qnero-notes = { workspace = true, optional = true }
+qp-plonky2 = { workspace = true, optional = true }
+qp-poseidon-core = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+
+[features]
+default = ["circuit"]
+# The circuit itself. Without it only `layout` compiles, which is all a
+# verifier needs to read a proof's public inputs.
+circuit = ["dep:qnero-notes", "dep:qp-plonky2", "dep:qp-poseidon-core", "dep:anyhow"]
+# Zero-knowledge proving. Plonky2 panics on a `zero_knowledge` config unless
+# its randomness is compiled in, so ZK configs are gated behind this flag and
+# rejected with a clear error when it is off.
+zk = ["circuit", "qp-plonky2/rand", "qp-plonky2/thread_rng"]

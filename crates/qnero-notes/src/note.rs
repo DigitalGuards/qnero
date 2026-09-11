@@ -45,10 +45,7 @@ impl Note {
 
     /// `inner = H(NOTE, pk, rho, r)`. Hides everything except the value.
     pub fn inner(&self) -> Digest {
-        Digest::hash_felts(
-            domain::NOTE,
-            &[self.pk.felts(), self.rho.felts(), self.r.felts()],
-        )
+        note_inner(&self.pk, &self.rho, &self.r)
     }
 
     /// `cm = H(CM, inner, value)`. The leaf stored in the commitment tree.
@@ -58,8 +55,23 @@ impl Note {
 
     /// `nf = H(NF, nk, rho)`. Published when the note is spent.
     pub fn nullifier(&self, nk: &Digest) -> Digest {
-        Digest::hash_felts(domain::NF, &[nk.felts(), self.rho.felts()])
+        nullifier(nk, &self.rho)
     }
+}
+
+/// `inner = H(NOTE, pk, rho, r)`, on loose fields.
+///
+/// The free functions exist because the spend circuit's witness carries note
+/// fields that have not been through [`Note::new`], including deliberately
+/// out-of-range values a negative test feeds to the circuit's range checks.
+/// [`Note`] is the checked constructor; these are the hash rules themselves.
+pub fn note_inner(pk: &Digest, rho: &Digest, r: &Digest) -> Digest {
+    Digest::hash_felts(domain::NOTE, &[pk.felts(), rho.felts(), r.felts()])
+}
+
+/// `nf = H(NF, nk, rho)`, on loose fields.
+pub fn nullifier(nk: &Digest, rho: &Digest) -> Digest {
+    Digest::hash_felts(domain::NF, &[nk.felts(), rho.felts()])
 }
 
 /// Recompute a commitment from its public opening. Used by the chain for

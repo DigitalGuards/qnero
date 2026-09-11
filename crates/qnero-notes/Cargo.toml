@@ -19,4 +19,4 @@ hex = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-qp-plonky2 = { version = "=1.5.5", default-features = false, features = ["std"] }
+qp-plonky2 = { workspace = true }

@@ -1,0 +1,4 @@
+The shape of this crate (a verify-only crate depending on the plonky2 verifier
+alone) follows Quantus-Network/qp-zk-circuits
+`wormhole/verifier` (MIT), read at version 4.4.0 on 2026-09-11. No code is
+copied verbatim; see CHANGES.md.

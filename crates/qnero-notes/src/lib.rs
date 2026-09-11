@@ -37,5 +37,7 @@ pub use address::{Address, ADDRESS_HRP, ADDRESS_VERSION};
 pub use digest::{Digest, Felt};
 pub use encrypt::{decrypt_note, encrypt_note, try_receive, NoteCiphertext, ReceivedNote};
 pub use error::NotesError;
-pub use keys::{FullViewingKey, IncomingViewingKey, SpendingKey};
-pub use note::{Note, MAX_VALUE, VALUE_BITS};
+pub use keys::{
+    derive_ak, derive_pk, DerivedKeys, FullViewingKey, IncomingViewingKey, SpendingKey,
+};
+pub use note::{commitment_from_inner, note_inner, nullifier, Note, MAX_VALUE, VALUE_BITS};
