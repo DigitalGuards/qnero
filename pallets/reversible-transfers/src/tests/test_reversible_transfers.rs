@@ -1,0 +1,1975 @@
+use crate::tests::mock::*; // Import mock runtime and types
+use crate::*; // Import items from parent module (lib.rs)
+use frame_support::{
+	assert_err, assert_ok,
+	traits::{fungible::InspectHold, Time},
+};
+use pallet_scheduler::Agenda;
+use qp_scheduler::{BlockNumberOrTimestamp, ScheduleNamed};
+use sp_core::H256;
+use sp_runtime::traits::{BadOrigin, BlakeTwo256, Hash};
+
+// Helper function to create a transfer call
+pub(crate) fn transfer_call(dest: AccountId, amount: Balance) -> RuntimeCall {
+	RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive { dest, value: amount })
+}
+
+// Helper: approximate equality for balances to tolerate fee deductions
+fn approx_eq_balance(a: Balance, b: Balance, epsilon: Balance) -> bool {
+	if a >= b {
+		a - b <= epsilon
+	} else {
+		b - a <= epsilon
+	}
+}
+
+// Helper function to calculate TxId (matching the logic in schedule_transfer)
+pub(crate) fn calculate_tx_id<T: Config>(who: AccountId, call: &RuntimeCall) -> H256 {
+	let current_tx_id = NextTransactionId::<T>::get();
+	BlakeTwo256::hash_of(&(who, call, current_tx_id).encode())
+}
+
+// Helper to run to the next block
+fn run_to_block(n: u64) {
+	while System::block_number() < n {
+		// Finalize previous block
+		Scheduler::on_finalize(System::block_number());
+		System::finalize();
+		// Set next block number
+		System::set_block_number(System::block_number() + 1);
+		// Initialize next block
+		System::on_initialize(System::block_number());
+		Scheduler::on_initialize(System::block_number());
+	}
+}
+
+#[test]
+fn set_high_security_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let genesis_user = alice();
+
+		// Check initial state
+		assert_eq!(
+			ReversibleTransfers::is_high_security(&genesis_user),
+			Some(HighSecurityAccountData {
+				delay: BlockNumberOrTimestampOf::<Test>::BlockNumber(10),
+				guardian: bob(),
+			})
+		);
+
+		// Set the delay
+		let another_user = account_id(4);
+		let guardian = account_id(5);
+		let delay = BlockNumberOrTimestampOf::<Test>::BlockNumber(5);
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(another_user.clone()),
+			delay,
+			guardian.clone(),
+		));
+		assert_eq!(
+			ReversibleTransfers::is_high_security(&another_user),
+			Some(HighSecurityAccountData { delay, guardian: guardian.clone() })
+		);
+		System::assert_last_event(
+			Event::HighSecuritySet { who: another_user.clone(), guardian: guardian.clone(), delay }
+				.into(),
+		);
+
+		// Calling this again should err
+		assert_err!(
+			ReversibleTransfers::set_high_security(
+				RuntimeOrigin::signed(another_user.clone()),
+				delay,
+				guardian.clone(),
+			),
+			Error::<Test>::AccountAlreadyHighSecurity
+		);
+
+		// Use default delay
+		let default_user = account_id(7);
+		let default_guardian = account_id(8);
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(default_user.clone()),
+			DefaultDelay::get(),
+			default_guardian.clone(),
+		));
+		assert_eq!(
+			ReversibleTransfers::is_high_security(&default_user),
+			Some(HighSecurityAccountData {
+				delay: DefaultDelay::get(),
+				guardian: default_guardian.clone(),
+			})
+		);
+		System::assert_last_event(
+			Event::HighSecuritySet {
+				who: default_user,
+				guardian: default_guardian.clone(),
+				delay: DefaultDelay::get(),
+			}
+			.into(),
+		);
+
+		// Too short delay
+		let _short_delay: BlockNumberOrTimestampOf<Test> =
+			BlockNumberOrTimestamp::BlockNumber(MinDelayPeriodBlocks::get() - 1);
+
+		let new_user = account_id(10);
+		let new_guardian = account_id(11);
+		let short_delay = BlockNumberOrTimestampOf::<Test>::BlockNumber(1);
+		assert_err!(
+			ReversibleTransfers::set_high_security(
+				RuntimeOrigin::signed(new_user.clone()),
+				short_delay,
+				new_guardian.clone(),
+			),
+			Error::<Test>::DelayTooShort
+		);
+
+		// Explicit reverse can not be self
+		assert_err!(
+			ReversibleTransfers::set_high_security(
+				RuntimeOrigin::signed(new_user.clone()),
+				delay,
+				new_user.clone(),
+			),
+			Error::<Test>::GuardianCannotBeSelf
+		);
+
+		assert_eq!(ReversibleTransfers::is_high_security(&new_user), None);
+
+		// Use explicit reverser
+		let reversible_account = account_id(6);
+		let guardian = account_id(7);
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(reversible_account.clone()),
+			delay,
+			guardian.clone(),
+		));
+		assert_eq!(
+			ReversibleTransfers::is_high_security(&reversible_account),
+			Some(HighSecurityAccountData { delay, guardian })
+		);
+	});
+}
+
+#[test]
+fn set_reversibility_with_timestamp_delay_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1); // Block number still relevant for system events, etc.
+		MockTimestamp::<Test>::set_timestamp(1_000_000); // Initial mock time
+
+		let user = account_id(4);
+		// Assuming MinDelayPeriod allows for timestamp delays of this magnitude.
+		// e.g., MinDelayPeriod is Timestamp(1000) and TimestampBucketSize is 1000.
+		// A delay of 5 * TimestampBucketSize = 5000.
+		let delay = BlockNumberOrTimestamp::Timestamp(5 * TimestampBucketSize::get());
+
+		let guardian = account_id(16);
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(user.clone()),
+			delay,
+			guardian.clone(),
+		));
+
+		assert_eq!(
+			ReversibleTransfers::is_high_security(&user),
+			Some(HighSecurityAccountData { delay, guardian })
+		);
+
+		// Try to set a delay that's too short - timestamp based
+		// Assuming MinDelayPeriodTimestamp is, say, 2 * TimestampBucketSize::get().
+		let short_delay_ts = BlockNumberOrTimestamp::Timestamp(TimestampBucketSize::get());
+		let another_user = account_id(5);
+
+		let another_guardian = account_id(18);
+		assert_err!(
+			ReversibleTransfers::set_high_security(
+				RuntimeOrigin::signed(another_user.clone()),
+				short_delay_ts,
+				another_guardian.clone(),
+			),
+			Error::<Test>::DelayTooShort
+		);
+	});
+}
+
+#[test]
+fn set_reversibility_fails_delay_too_short() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let user = account_id(20);
+		let guardian = account_id(21);
+		let short_delay = BlockNumberOrTimestampOf::<Test>::BlockNumber(1);
+		assert_err!(
+			ReversibleTransfers::set_high_security(
+				RuntimeOrigin::signed(user.clone()),
+				short_delay,
+				guardian.clone(),
+			),
+			Error::<Test>::DelayTooShort
+		);
+		assert_eq!(ReversibleTransfers::is_high_security(&user), None);
+	});
+}
+
+/// A zero-amount schedule is a pure no-op with side effects: it consumes a
+/// pending-transfer slot and scheduler agenda space, and its execution would
+/// dispatch a zero-value transfer. Both signed scheduling entry points must
+/// reject it before any state is written.
+#[test]
+fn schedule_transfer_rejects_zero_amount() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+
+		// High-security entry point (alice is high-security from genesis).
+		assert_err!(
+			ReversibleTransfers::schedule_transfer(RuntimeOrigin::signed(alice()), bob(), 0),
+			Error::<Test>::ZeroAmount
+		);
+
+		// One-time entry point (charlie is a regular account).
+		assert_err!(
+			ReversibleTransfers::schedule_transfer_with_delay(
+				RuntimeOrigin::signed(charlie()),
+				bob(),
+				0,
+				BlockNumberOrTimestamp::BlockNumber(10),
+			),
+			Error::<Test>::ZeroAmount
+		);
+
+		// Nothing was scheduled or stored on either path.
+		assert!(PendingTransfersBySender::<Test>::get(alice()).is_empty());
+		assert!(PendingTransfersBySender::<Test>::get(charlie()).is_empty());
+	});
+}
+
+#[test]
+fn schedule_transfer_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let user = alice(); // Reversible from genesis
+		let dest_user = bob();
+		let amount = 100;
+		let dest_user_balance = Balances::free_balance(&dest_user);
+		let user_balance = Balances::free_balance(&user);
+
+		let call = transfer_call(dest_user.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+		let HighSecurityAccountData { delay: user_delay, .. } =
+			ReversibleTransfers::is_high_security(&user).unwrap();
+		let expected_block = System::block_number() + user_delay.as_block_number().unwrap();
+		let expected_block = BlockNumberOrTimestamp::BlockNumber(expected_block);
+
+		assert!(Agenda::<Test>::get(expected_block).is_empty());
+
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest_user.clone(),
+			amount,
+		));
+
+		// Check storage
+		assert_eq!(
+			PendingTransfers::<Test>::get(tx_id).unwrap(),
+			PendingTransfer {
+				from: user.clone(),
+				to: dest_user.clone(),
+				guardian: bob(), // From genesis config
+				asset_id: None,  // Native balance transfer
+				amount,
+			}
+		);
+
+		// Check scheduler
+		assert!(!Agenda::<Test>::get(expected_block).is_empty());
+
+		// Skip to the delay block
+		run_to_block(expected_block.as_block_number().unwrap());
+
+		// Check that the transfer is executed
+		let eps: Balance = 10; // tolerate tiny fee differences
+		assert!(approx_eq_balance(Balances::free_balance(&user), user_balance - amount, eps));
+		assert_eq!(Balances::free_balance(&dest_user), dest_user_balance + amount);
+
+		// Use explicit reverser
+		let reversible_account = ferdie();
+		let guardian = user.clone();
+
+		// Set reversibility
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(reversible_account.clone()),
+			BlockNumberOrTimestamp::BlockNumber(10),
+			guardian.clone(),
+		));
+
+		let tx_id = calculate_tx_id::<Test>(reversible_account.clone(), &call);
+		// Schedule transfer
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(reversible_account.clone()),
+			dest_user.clone(),
+			amount,
+		));
+
+		// Try reversing with original user
+		assert_err!(
+			ReversibleTransfers::cancel(RuntimeOrigin::signed(reversible_account.clone()), tx_id,),
+			Error::<Test>::InvalidReverser
+		);
+
+		let guardian_balance = Balances::free_balance(&guardian);
+		let reversible_account_balance = Balances::free_balance(&reversible_account);
+		let guardian_hold = Balances::balance_on_hold(
+			&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+			&guardian,
+		);
+		assert_eq!(guardian_hold, 0);
+
+		// Try reversing with explicit reverser
+		assert_ok!(ReversibleTransfers::cancel(RuntimeOrigin::signed(guardian.clone()), tx_id,));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+
+		// Funds should be release as free balance to `guardian`
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&reversible_account
+			),
+			0
+		);
+
+		// With 100 tokens and 100 basis points (1%) fee: 100 * 100 / 10000 = 1 token fee
+		let expected_fee = 1;
+		let expected_amount_to_guardian = amount - expected_fee;
+		assert_eq!(
+			Balances::free_balance(&guardian),
+			guardian_balance + expected_amount_to_guardian
+		);
+
+		// Unchanged balance for `reversible_account`
+		assert_eq!(Balances::free_balance(&reversible_account), reversible_account_balance);
+
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&guardian,
+			),
+			0
+		);
+	});
+}
+
+#[test]
+fn schedule_transfer_with_timestamp_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let user = ferdie();
+		let dest_user = bob();
+		let amount = 100;
+		let dest_user_balance = Balances::free_balance(&dest_user);
+		let user_balance = Balances::free_balance(&user);
+
+		let call = transfer_call(dest_user.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+
+		// Set reversibility
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(user.clone()),
+			BlockNumberOrTimestamp::Timestamp(10_000),
+			guardian_255(), // Guardian for ferdie
+		));
+
+		let timestamp_bucket_size = TimestampBucketSize::get();
+		let current_time = MockTimestamp::<Test>::now();
+		let HighSecurityAccountData { delay: user_delay, .. } =
+			ReversibleTransfers::is_high_security(&user).unwrap();
+		let expected_raw_timestamp = (current_time / timestamp_bucket_size) * timestamp_bucket_size +
+			user_delay.as_timestamp().unwrap();
+
+		// With the scheduler fix, After(Timestamp) tasks go to next bucket after normalization
+		// normalize() adds one bucket, then scheduler adds another for safety
+		let expected_timestamp = BlockNumberOrTimestamp::Timestamp(
+			expected_raw_timestamp + TimestampBucketSize::get() + TimestampBucketSize::get(),
+		);
+
+		assert!(Agenda::<Test>::get(expected_timestamp).is_empty());
+
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest_user.clone(),
+			amount,
+		));
+
+		// Check storage
+		assert_eq!(
+			PendingTransfers::<Test>::get(tx_id).unwrap(),
+			PendingTransfer {
+				from: user.clone(),
+				to: dest_user.clone(),
+				guardian: guardian_255(), /* This should match the actual guardian from
+				                           * the test setup */
+				asset_id: None, // Native balance transfer
+				amount,
+			}
+		);
+
+		// Check scheduler
+		assert!(!Agenda::<Test>::get(expected_timestamp).is_empty());
+
+		// Advance to expected execution time and ensure it executed
+		// With the extra bucket, we need to advance to when the bucket starts processing
+		// (bucket starts at expected_timestamp - bucket_size + 1)
+		MockTimestamp::<Test>::set_timestamp(
+			expected_timestamp.as_timestamp().unwrap() - timestamp_bucket_size + 1,
+		);
+		run_to_block(2);
+		let eps: Balance = 10; // tolerate tiny fee differences
+		assert!(approx_eq_balance(Balances::free_balance(&user), user_balance - amount, eps));
+		assert_eq!(Balances::free_balance(&dest_user), dest_user_balance + amount);
+
+		// Use explicit reverser
+		let reversible_account = account_256();
+		let guardian = alice();
+
+		// Set reversibility
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(reversible_account.clone()),
+			BlockNumberOrTimestamp::BlockNumber(10),
+			guardian.clone(),
+		));
+
+		let call = transfer_call(dest_user.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(reversible_account.clone(), &call);
+		// Schedule transfer
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(reversible_account.clone()),
+			dest_user.clone(),
+			amount,
+		));
+
+		// Try reversing with original user
+		assert_err!(
+			ReversibleTransfers::cancel(RuntimeOrigin::signed(reversible_account.clone()), tx_id,),
+			Error::<Test>::InvalidReverser
+		);
+
+		let guardian_balance = Balances::free_balance(&guardian);
+		let reversible_account_balance = Balances::free_balance(&reversible_account);
+		let guardian_hold = Balances::balance_on_hold(
+			&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+			&guardian,
+		);
+		assert_eq!(guardian_hold, 0);
+
+		// Try reversing with explicit reverser
+		assert_ok!(ReversibleTransfers::cancel(RuntimeOrigin::signed(guardian.clone()), tx_id,));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+
+		// Funds should be release as free balance to `guardian`
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&reversible_account
+			),
+			0
+		);
+
+		// With 100 tokens and 100 basis points (1%) fee: 100 * 100 / 10000 = 1 token fee
+		let expected_fee = 1;
+		let expected_amount_to_guardian = amount - expected_fee;
+		assert_eq!(
+			Balances::free_balance(&guardian),
+			guardian_balance + expected_amount_to_guardian
+		);
+
+		// Unchanged balance for `reversible_account`
+		assert_eq!(Balances::free_balance(&reversible_account), reversible_account_balance);
+
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&guardian,
+			),
+			0
+		);
+	});
+}
+
+#[test]
+fn schedule_transfer_fails_not_reversible() {
+	new_test_ext().execute_with(|| {
+		let user = bob(); // Not reversible
+
+		assert_err!(
+			ReversibleTransfers::schedule_transfer(
+				RuntimeOrigin::signed(user.clone()),
+				charlie(),
+				50
+			),
+			Error::<Test>::AccountNotHighSecurity
+		);
+	});
+}
+
+#[test]
+fn schedule_multiple_transfer_works() {
+	new_test_ext().execute_with(|| {
+		let user = alice(); // User 1 is high-security from genesis with guardian=2
+		let dest_user = bob();
+		let amount = 100;
+
+		let tx_id =
+			calculate_tx_id::<Test>(user.clone(), &transfer_call(dest_user.clone(), amount));
+
+		// Schedule first
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest_user.clone(),
+			amount,
+		));
+
+		// Try to schedule the same call again
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest_user.clone(),
+			amount
+		));
+
+		// Cancel the first pending transaction
+		assert_ok!(ReversibleTransfers::cancel(
+			RuntimeOrigin::signed(bob()), // guardian from genesis config
+			tx_id
+		));
+
+		// Check that the pending transaction is removed when executed
+		let execute_block = System::block_number() + 10;
+		run_to_block(execute_block);
+
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+	});
+}
+
+#[test]
+fn cancel_dispatch_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let user = alice(); // High-security account from genesis
+		let guardian = bob();
+		let amount = 10_000;
+		let call = transfer_call(guardian.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+		let HighSecurityAccountData { delay: user_delay, .. } =
+			ReversibleTransfers::is_high_security(&user).unwrap();
+		let execute_block = BlockNumberOrTimestamp::BlockNumber(
+			System::block_number() + user_delay.as_block_number().unwrap(),
+		);
+
+		// Record initial balances
+		let initial_guardian_balance = Balances::free_balance(&guardian);
+		let initial_total_issuance = pallet_balances::TotalIssuance::<Test>::get();
+
+		assert_eq!(Agenda::<Test>::get(execute_block).len(), 0);
+
+		// Schedule first
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			guardian.clone(),
+			amount,
+		));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_some());
+
+		// Check the expected block agendas count
+		assert_eq!(Agenda::<Test>::get(execute_block).len(), 1);
+
+		// Now cancel (must be called by guardian, which is user 2 from genesis)
+		assert_ok!(ReversibleTransfers::cancel(
+			RuntimeOrigin::signed(guardian.clone()), // guardian from genesis config
+			tx_id
+		));
+
+		// Check state cleared
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+
+		assert_eq!(Agenda::<Test>::get(execute_block).len(), 0);
+
+		// Verify volume fee was applied for high-security account
+		// Expected fee: 10,000 * 1% = 100 tokens
+		let expected_fee = 100;
+		let expected_remaining = amount - expected_fee;
+
+		// Check that guardian received the remaining amount (after fee)
+		// Check final balances after cancellation
+		assert_eq!(
+			Balances::free_balance(&guardian),
+			initial_guardian_balance + expected_remaining,
+			"High-security account should have volume fee deducted"
+		);
+
+		// Check that fee was burned (total issuance decreased)
+		assert_eq!(
+			pallet_balances::TotalIssuance::<Test>::get(),
+			initial_total_issuance - expected_fee,
+			"Volume fee should be burned from total issuance"
+		);
+
+		// Check event
+		System::assert_last_event(Event::TransactionCancelled { who: guardian, tx_id }.into());
+	});
+}
+
+#[test]
+fn no_volume_fee_for_regular_reversible_accounts() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let user = charlie(); // Regular account (not high-security)
+		let recipient = dave();
+		let amount = 10_000;
+
+		// Check initial balances
+		let initial_user_balance = Balances::free_balance(&user);
+		let initial_recipient_balance = Balances::free_balance(&recipient);
+		let initial_total_issuance = pallet_balances::TotalIssuance::<Test>::get();
+
+		let call = transfer_call(recipient.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+
+		// Schedule transfer with delay (regular accounts use schedule_transfer_with_delay)
+		let delay = BlockNumberOrTimestamp::BlockNumber(5);
+		assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+			RuntimeOrigin::signed(user.clone()),
+			recipient.clone(),
+			amount,
+			delay
+		));
+
+		// Cancel the transfer (user can cancel their own for regular accounts)
+		assert_ok!(ReversibleTransfers::cancel(RuntimeOrigin::signed(user.clone()), tx_id));
+
+		// Verify user got full amount back (no volume fee for regular accounts)
+		// For regular accounts, cancellation returns funds to the original sender
+		assert_eq!(
+			Balances::free_balance(&user),
+			initial_user_balance, // Should be back to original balance
+			"Regular accounts should get full refund with no volume fee deducted"
+		);
+
+		// Verify recipient balance unchanged (they never received the funds)
+		assert_eq!(
+			Balances::free_balance(&recipient),
+			initial_recipient_balance,
+			"Recipient should not receive funds when transaction is cancelled"
+		);
+
+		// Verify total issuance unchanged (no fee burned for regular accounts)
+		assert_eq!(
+			pallet_balances::TotalIssuance::<Test>::get(),
+			initial_total_issuance,
+			"Total issuance should not change for regular account cancellation"
+		);
+
+		// Should still have TransactionCancelled event
+		System::assert_has_event(Event::TransactionCancelled { who: user, tx_id }.into());
+	});
+}
+
+/// A failed scheduled execution makes the scheduler terminally drop the named task while the
+/// pending transfer and its hold survive (the failing dispatch is rolled back). Cancelling
+/// afterwards must still release the held funds: the best-effort `cancel_named` must not
+/// propagate its `NotFound` and roll back the release, which would permanently freeze the funds.
+#[test]
+fn cancel_releases_funds_when_scheduled_task_already_gone() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let user = charlie(); // regular one-time-delay account (guardian == user)
+		let recipient = dave();
+		let amount = 10_000u128;
+
+		let initial_user_balance = Balances::free_balance(&user);
+		let call = transfer_call(recipient.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+
+		assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+			RuntimeOrigin::signed(user.clone()),
+			recipient.clone(),
+			amount,
+			BlockNumberOrTimestamp::BlockNumber(5),
+		));
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			amount
+		);
+
+		// Simulate the scheduler terminally removing the named task (as it does on a failed
+		// dispatch): the pending transfer and hold survive, but `cancel_named` now returns
+		// NotFound.
+		let schedule_id = ReversibleTransfers::make_schedule_id(&tx_id).unwrap();
+		assert_ok!(<Scheduler as ScheduleNamed<_, _, _, _>>::cancel_named(schedule_id));
+
+		// Cancelling must still succeed and release the held funds despite the missing task.
+		assert_ok!(ReversibleTransfers::cancel(RuntimeOrigin::signed(user.clone()), tx_id));
+
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			0,
+			"held funds must be released, not frozen, when the scheduled task is already gone"
+		);
+		assert_eq!(Balances::free_balance(&user), initial_user_balance);
+	});
+}
+
+/// Auto-execution uses `transfer_allow_death`, so a sender who spends their leftover
+/// free balance during the delay still completes: the held amount is delivered even
+/// if that reaps the sender. `transfer_keep_alive` would have failed this path.
+#[test]
+fn allow_death_completes_transfer_when_sender_would_go_below_ed() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let sender = charlie();
+		let recipient = dave();
+		let leftover_sink = eve();
+		let amount = 10_000u128;
+		let delay = BlockNumberOrTimestamp::BlockNumber(5);
+
+		let initial_recipient = Balances::free_balance(&recipient);
+		let call = transfer_call(recipient.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(sender.clone(), &call);
+		let execute_block = BlockNumberOrTimestamp::BlockNumber(System::block_number())
+			.saturating_add(&delay)
+			.unwrap();
+
+		assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+			RuntimeOrigin::signed(sender.clone()),
+			recipient.clone(),
+			amount,
+			delay,
+		));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_some());
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&sender
+			),
+			amount
+		);
+		assert!(!Agenda::<Test>::get(execute_block).is_empty());
+
+		// Spend leftover free balance during the delay. `transfer_all` cannot take the
+		// last ED while a hold keeps the account alive; write the last unit directly
+		// so execute would drop the sender below ED.
+		assert_ok!(Balances::transfer_all(
+			RuntimeOrigin::signed(sender.clone()),
+			leftover_sink,
+			false,
+		));
+		frame_system::Account::<Test>::mutate(&sender, |info| {
+			info.data.free = 0;
+		});
+		assert_eq!(Balances::free_balance(&sender), 0);
+
+		run_to_block(execute_block.as_block_number().unwrap());
+
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&sender
+			),
+			0
+		);
+		assert_eq!(Balances::free_balance(&sender), 0);
+		assert_eq!(Balances::free_balance(&recipient), initial_recipient + amount);
+		assert_eq!(Agenda::<Test>::get(execute_block).len(), 0);
+		System::assert_has_event(
+			Event::TransactionExecuted { tx_id, result: Ok(().into()) }.into(),
+		);
+	});
+}
+
+/// Auto-execution must not freeze funds when the inner transfer still fails
+/// (`allow_death` is not infallible: dest overflow, dust to a new account, …).
+///
+/// FRAME wraps every dispatchable in `with_storage_layer`, and Scheduler treats any
+/// outcome as terminal when no retry is configured. If `do_execute_transfer` returns
+/// the inner `Err`, the hold release and pending-transfer removal roll back while
+/// the named task is permanently dropped — leaving funds held with no scheduled
+/// execution. The hold and bookkeeping must commit independently of the inner
+/// transfer, and the failure must stay visible as `TransactionExecuted { Err }`.
+#[test]
+fn failed_inner_transfer_does_not_leave_funds_held_after_scheduler_drops_task() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let sender = charlie();
+		let recipient = dave();
+		let amount = 10_000u128;
+		let delay = BlockNumberOrTimestamp::BlockNumber(5);
+
+		let initial_sender = Balances::free_balance(&sender);
+		let call = transfer_call(recipient.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(sender.clone(), &call);
+		let execute_block = BlockNumberOrTimestamp::BlockNumber(System::block_number())
+			.saturating_add(&delay)
+			.unwrap();
+
+		assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+			RuntimeOrigin::signed(sender.clone()),
+			recipient.clone(),
+			amount,
+			delay,
+		));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_some());
+		assert!(!Agenda::<Test>::get(execute_block).is_empty());
+
+		// Overflow the recipient so `transfer_allow_death` fails after the hold is
+		// released. The mock ED is 1, so the real-runtime "dust to a new account"
+		// trigger is unreachable here.
+		let _ = <Balances as frame_support::traits::Currency<_>>::make_free_balance_be(
+			&recipient,
+			u128::MAX,
+		);
+
+		run_to_block(execute_block.as_block_number().unwrap());
+
+		assert!(
+			ReversibleTransfers::pending_dispatches(tx_id).is_none(),
+			"failed auto-execution must clear the pending transfer, not leave it stuck"
+		);
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&sender
+			),
+			0,
+			"held funds must be released when the inner transfer fails"
+		);
+		assert_eq!(
+			Balances::free_balance(&sender),
+			initial_sender,
+			"released hold must return to the sender when the transfer does not complete"
+		);
+		assert_eq!(Balances::free_balance(&recipient), u128::MAX);
+		assert_eq!(
+			Agenda::<Test>::get(execute_block).len(),
+			0,
+			"scheduler must drop the named task after dispatch (no retry is configured)"
+		);
+
+		let executed_with_error = System::events().iter().any(|rec| {
+			matches!(
+				&rec.event,
+				RuntimeEvent::ReversibleTransfers(Event::TransactionExecuted {
+					tx_id: tid,
+					result: Err(_),
+				}) if *tid == tx_id
+			)
+		});
+		assert!(
+			executed_with_error,
+			"failed auto-execution must emit TransactionExecuted with Err"
+		);
+
+		assert_err!(
+			ReversibleTransfers::cancel(RuntimeOrigin::signed(sender), tx_id),
+			Error::<Test>::PendingTxNotFound
+		);
+	});
+}
+
+/// A one-time schedule freezes *cancel* authority in `pending.guardian` (= sender).
+/// Later `set_high_security` must not rewrite that: the owner keeps full-refund cancel
+/// rights, and the new guardian must not be able to cancel/seize via `cancel`.
+///
+/// This does **not** constrain `recover_funds`: once the account is high-security, the
+/// live guardian may still seize these holds through recovery (account-level seize).
+#[test]
+fn set_high_security_does_not_retroactively_reclassify_pending_one_time_cancel() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let owner = charlie(); // regular account
+		let recipient = dave();
+		let new_guardian = eve();
+		let amount = 10_000u128;
+
+		let initial_owner = Balances::free_balance(&owner);
+		let initial_guardian = Balances::free_balance(&new_guardian);
+		let initial_issuance = pallet_balances::TotalIssuance::<Test>::get();
+
+		let call = transfer_call(recipient.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(owner.clone(), &call);
+
+		assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+			RuntimeOrigin::signed(owner.clone()),
+			recipient,
+			amount,
+			BlockNumberOrTimestamp::BlockNumber(10),
+		));
+
+		// Policy frozen at schedule time: guardian is the owner themselves.
+		let pending = ReversibleTransfers::pending_dispatches(tx_id).expect("pending");
+		assert_eq!(pending.guardian, owner);
+
+		// Owner later enrolls in high security with a different guardian.
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(owner.clone()),
+			BlockNumberOrTimestamp::BlockNumber(10),
+			new_guardian.clone(),
+		));
+
+		// New guardian must not be able to cancel / seize the pre-existing one-time transfer.
+		assert_err!(
+			ReversibleTransfers::cancel(RuntimeOrigin::signed(new_guardian.clone()), tx_id),
+			Error::<Test>::NotOwner
+		);
+
+		// Owner still cancels with a full refund and no volume fee.
+		assert_ok!(ReversibleTransfers::cancel(RuntimeOrigin::signed(owner.clone()), tx_id));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+		assert_eq!(Balances::free_balance(&owner), initial_owner);
+		assert_eq!(Balances::free_balance(&new_guardian), initial_guardian);
+		assert_eq!(pallet_balances::TotalIssuance::<Test>::get(), initial_issuance);
+	});
+}
+
+#[test]
+fn cancel_dispatch_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		let owner = alice();
+		let _attacker = charlie();
+		let call = transfer_call(bob(), 50);
+		let tx_id = calculate_tx_id::<Test>(owner.clone(), &call);
+
+		// Schedule as owner
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(owner.clone()),
+			bob(),
+			50
+		));
+
+		// Attacker tries to cancel
+		assert_err!(
+			ReversibleTransfers::cancel(RuntimeOrigin::signed(charlie()), tx_id),
+			Error::<Test>::InvalidReverser
+		);
+	});
+}
+
+#[test]
+fn cancel_dispatch_fails_not_found() {
+	new_test_ext().execute_with(|| {
+		let user = dave();
+		let non_existent_tx_id = H256::random();
+
+		assert_err!(
+			ReversibleTransfers::cancel(RuntimeOrigin::signed(user.clone()), non_existent_tx_id),
+			Error::<Test>::PendingTxNotFound
+		);
+	});
+}
+
+#[test]
+fn execute_transfer_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let user = alice(); // Reversible, delay 10
+		let dest = bob();
+		let amount = 50;
+		let call = transfer_call(dest.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+
+		let HighSecurityAccountData { delay, .. } =
+			ReversibleTransfers::is_high_security(&user).unwrap();
+		let execute_block = BlockNumberOrTimestampOf::<Test>::BlockNumber(
+			System::block_number() + delay.as_block_number().unwrap(),
+		);
+
+		// Schedule as the same user who wants to be reversible
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest.clone(),
+			amount
+		));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_some());
+
+		run_to_block(execute_block.as_block_number().unwrap() - 1);
+
+		// Execute the dispatch as a normal user. This should fail
+		// because the origin should be `Signed(PalletId::into_account())`
+		assert_err!(
+			ReversibleTransfers::execute_transfer(RuntimeOrigin::signed(user), tx_id),
+			Error::<Test>::InvalidSchedulerOrigin,
+		);
+
+		// Check state cleared
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_some());
+
+		// Even root origin should fail
+		assert_err!(ReversibleTransfers::execute_transfer(RuntimeOrigin::root(), tx_id), BadOrigin);
+	});
+}
+
+#[test]
+fn schedule_transfer_with_timestamp_delay_executes() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let initial_mock_time = MockTimestamp::<Test>::now();
+		MockTimestamp::<Test>::set_timestamp(initial_mock_time);
+
+		let user = account_256();
+		let dest_user = bob();
+		let amount = 100;
+
+		let bucket_size = TimestampBucketSize::get();
+		let user_delay_duration = 5 * bucket_size; // e.g., 5000ms if bucket is 1000ms
+		let user_timestamp_delay = BlockNumberOrTimestamp::Timestamp(user_delay_duration);
+
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(user.clone()),
+			user_timestamp_delay,
+			guardian_1(), // guardian for alice
+		));
+
+		let user_balance_before = Balances::free_balance(&user);
+		let dest_balance_before = Balances::free_balance(&dest_user);
+		let call = transfer_call(dest_user.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+
+		// Schedule a transfer
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest_user.clone(),
+			amount,
+		));
+
+		// The transfer should be scheduled at: current_time + user_delay_duration
+		// With the scheduler fix, After(Timestamp) tasks go to next bucket after normalization
+		let expected_execution_time = BlockNumberOrTimestamp::<u64, u64>::Timestamp(
+			BlockNumberOrTimestamp::<u64, u64>::Timestamp(initial_mock_time + user_delay_duration)
+				.normalize(bucket_size)
+				.as_timestamp()
+				.unwrap() + bucket_size,
+		);
+
+		assert!(
+			!Agenda::<Test>::get(expected_execution_time).is_empty(),
+			"Task not found in agenda for timestamp"
+		);
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			amount
+		);
+
+		// Advance time to just before execution
+		MockTimestamp::<Test>::set_timestamp(
+			expected_execution_time.as_timestamp().unwrap() - bucket_size - 1,
+		);
+		run_to_block(2);
+
+		assert_eq!(Balances::free_balance(&user), user_balance_before - amount);
+		assert_eq!(Balances::free_balance(&dest_user), dest_balance_before);
+
+		// Advance time to the exact execution moment
+		MockTimestamp::<Test>::set_timestamp(expected_execution_time.as_timestamp().unwrap() - 1);
+		run_to_block(3);
+
+		// Check that the transfer is executed
+		assert_eq!(Balances::free_balance(&user), user_balance_before - amount);
+		assert_eq!(Balances::free_balance(&dest_user), dest_balance_before + amount);
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			0
+		);
+		System::assert_has_event(
+			Event::TransactionExecuted { tx_id, result: Ok(().into()) }.into(),
+		);
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+		assert_eq!(Agenda::<Test>::get(expected_execution_time).len(), 0); // Task removed
+	});
+}
+
+#[test]
+fn full_flow_execute_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+
+		let user = alice(); // Reversible, delay 10
+		let dest = bob();
+		let amount = 50;
+		let initial_user_balance = Balances::free_balance(&user);
+		let initial_dest_balance = Balances::free_balance(&dest);
+		let call = transfer_call(dest.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+		let HighSecurityAccountData { delay, .. } =
+			ReversibleTransfers::is_high_security(&user).unwrap();
+		let start_block = BlockNumberOrTimestamp::BlockNumber(System::block_number());
+		let execute_block = start_block.saturating_add(&delay).unwrap();
+
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest.clone(),
+			amount,
+		));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_some());
+		assert!(!Agenda::<Test>::get(execute_block).is_empty());
+		// Not executed yet, but on hold
+		assert_eq!(Balances::free_balance(&user), initial_user_balance - 50);
+
+		run_to_block(execute_block.as_block_number().unwrap());
+
+		// Event should be emitted by execute_transfer called by scheduler
+		let expected_event = Event::TransactionExecuted { tx_id, result: Ok(().into()) };
+		assert!(
+			System::events().iter().any(|rec| rec.event == expected_event.clone().into()),
+			"Execute event not found"
+		);
+
+		assert_eq!(Balances::free_balance(&user), initial_user_balance - amount);
+		assert_eq!(Balances::free_balance(&dest), initial_dest_balance + amount);
+
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+		assert_eq!(Agenda::<Test>::get(execute_block).len(), 0); // Task removed after execution
+	});
+}
+
+#[test]
+fn full_flow_execute_with_timestamp_delay_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let initial_mock_time = 1_000_000;
+		MockTimestamp::<Test>::set_timestamp(initial_mock_time);
+
+		let user = ferdie();
+		let dest = bob();
+		let amount = 50;
+
+		let user_delay_duration = 10 * TimestampBucketSize::get(); // e.g. 10s
+		let user_timestamp_delay = BlockNumberOrTimestamp::Timestamp(user_delay_duration);
+
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(user.clone()),
+			user_timestamp_delay,
+			guardian_255(), // guardian for ferdie
+		));
+
+		let initial_user_balance = Balances::free_balance(&user);
+		let initial_dest_balance = Balances::free_balance(&dest);
+		let call = transfer_call(dest.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest.clone(),
+			amount,
+		));
+
+		// With the scheduler fix, After(Timestamp) tasks go to next bucket after normalization
+		let expected_execution_time = BlockNumberOrTimestamp::<u64, u64>::Timestamp(
+			BlockNumberOrTimestamp::<u64, u64>::Timestamp(initial_mock_time + user_delay_duration)
+				.normalize(TimestampBucketSize::get())
+				.as_timestamp()
+				.unwrap() + TimestampBucketSize::get(),
+		);
+
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_some());
+		assert!(!Agenda::<Test>::get(expected_execution_time).is_empty());
+		assert_eq!(Balances::free_balance(&user), initial_user_balance - amount); // On hold
+
+		// Advance time to execution (bucket starts at expected_execution_time - bucket_size + 1)
+		MockTimestamp::<Test>::set_timestamp(
+			expected_execution_time.as_timestamp().unwrap() - TimestampBucketSize::get(),
+		);
+		run_to_block(2);
+
+		let expected_event = Event::TransactionExecuted { tx_id, result: Ok(().into()) };
+		assert!(
+			System::events().iter().any(|rec| rec.event == expected_event.clone().into()),
+			"Execute event not found"
+		);
+
+		assert_eq!(Balances::free_balance(&user), initial_user_balance - amount);
+		assert_eq!(Balances::free_balance(&dest), initial_dest_balance + amount);
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+		assert_eq!(Agenda::<Test>::get(expected_execution_time).len(), 0);
+	});
+}
+
+#[test]
+fn full_flow_cancel_prevents_execution() {
+	new_test_ext().execute_with(|| {
+		let user = alice();
+		let dest = bob();
+		let amount = 50;
+
+		let initial_user_balance = Balances::free_balance(&user);
+		let initial_dest_balance = Balances::free_balance(&dest);
+		let call = transfer_call(dest.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+		let HighSecurityAccountData { delay, .. } =
+			ReversibleTransfers::is_high_security(&user).unwrap();
+		let start_block = System::block_number();
+		let execute_block = BlockNumberOrTimestampOf::<Test>::BlockNumber(
+			start_block + delay.as_block_number().unwrap(),
+		);
+
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest.clone(),
+			amount,
+		));
+		// Amount is on hold
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			amount
+		);
+
+		assert_ok!(ReversibleTransfers::cancel(
+			RuntimeOrigin::signed(bob()), // guardian from genesis config
+			tx_id
+		));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+
+		// Run past the execution block
+		run_to_block(execute_block.as_block_number().unwrap() + 1);
+
+		// State is unchanged, amount is released
+		// Amount is on hold
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			0
+		);
+		assert_eq!(Balances::free_balance(&user), initial_user_balance - amount);
+		// dest (user 2) is also the guardian, so they receive the cancelled amount
+		assert_eq!(Balances::free_balance(&dest), initial_dest_balance + amount);
+
+		// No events were emitted
+		let expected_event_pattern = |e: &RuntimeEvent| {
+			matches!(e, RuntimeEvent::ReversibleTransfers(Event::TransactionExecuted {
+			tx_id: tid, ..
+		}) if *tid == tx_id)
+		};
+		assert!(
+			!System::events().iter().any(|rec| expected_event_pattern(&rec.event)),
+			"TransactionExecuted event should not exist"
+		);
+	});
+}
+
+#[test]
+fn full_flow_cancel_prevents_execution_with_timestamp_delay() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let initial_mock_time = 1_000_000;
+		MockTimestamp::<Test>::set_timestamp(initial_mock_time);
+
+		let user = ferdie();
+		let dest = account_256();
+		let amount = 50;
+		let user_delay_duration = 10 * TimestampBucketSize::get();
+
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(user.clone()),
+			BlockNumberOrTimestamp::Timestamp(user_delay_duration),
+			guardian_255(),
+		));
+
+		let initial_user_balance = Balances::free_balance(&user);
+		let initial_dest_balance = Balances::free_balance(&dest);
+		let call = transfer_call(dest.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest.clone(),
+			amount,
+		));
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			amount
+		);
+
+		// Cancel before execution time
+		MockTimestamp::<Test>::set_timestamp(initial_mock_time + user_delay_duration / 2);
+		run_to_block(1);
+
+		assert_ok!(ReversibleTransfers::cancel(
+			RuntimeOrigin::signed(guardian_255()), // guardian from test setup
+			tx_id
+		));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			0 // Hold released
+		);
+
+		// Run past the original execution time
+		let original_execution_time = initial_mock_time + user_delay_duration;
+		MockTimestamp::<Test>::set_timestamp(original_execution_time + TimestampBucketSize::get());
+		run_to_block(2);
+
+		assert_eq!(Balances::free_balance(&user), initial_user_balance - amount);
+		assert_eq!(Balances::free_balance(&dest), initial_dest_balance);
+		// Guardian should have received the cancelled amount
+		let guardian_balance = Balances::free_balance(guardian_255());
+		assert_eq!(guardian_balance, amount); // guardian started with 0, now has the cancelled amount
+
+		let expected_event_pattern = |e: &RuntimeEvent| {
+			matches!(e, RuntimeEvent::ReversibleTransfers(Event::TransactionExecuted {
+			tx_id: tid, ..
+		}) if *tid == tx_id)
+		};
+		assert!(
+			!System::events().iter().any(|rec| expected_event_pattern(&rec.event)),
+			"TransactionExecuted event should not exist for timestamp delay"
+		);
+	});
+}
+
+/// The case we want to check:
+///
+/// 1. User 1 schedules a transfer to user 2 with amount 100
+/// 2. User 1 schedules a transfer to user 2 with amount 200, after 2 blocks
+/// 3. User 1 schedules a transfer to user 2 with amount 300, after 3 blocks
+///
+/// When the first transfer is executed, we thaw all frozen amounts, and then freeze the new amount
+/// again.
+#[test]
+fn freeze_amount_is_consistent_with_multiple_transfers() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let user = alice(); // Reversible, delay 10
+		let dest = bob();
+		let user_initial_balance = Balances::free_balance(&user);
+		let dest_initial_balance = Balances::free_balance(&dest);
+
+		let amount1 = 100;
+		let amount2 = 200;
+		let amount3 = 300;
+
+		let HighSecurityAccountData { delay, .. } =
+			ReversibleTransfers::is_high_security(&user).unwrap();
+		let delay_blocks = delay.as_block_number().unwrap();
+		let execute_block1 =
+			BlockNumberOrTimestampOf::<Test>::BlockNumber(System::block_number() + delay_blocks);
+		let execute_block2 = BlockNumberOrTimestampOf::<Test>::BlockNumber(
+			System::block_number() + delay_blocks + 2,
+		);
+		let execute_block3 = BlockNumberOrTimestampOf::<Test>::BlockNumber(
+			System::block_number() + delay_blocks + 3,
+		);
+
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest.clone(),
+			amount1
+		));
+
+		System::set_block_number(3);
+
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest.clone(),
+			amount2
+		));
+
+		System::set_block_number(4);
+
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest.clone(),
+			amount3
+		));
+
+		// Check frozen amounts
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			amount1 + amount2 + amount3
+		);
+		// Check that the first transfer is executed and the frozen amounts are thawed
+		assert_eq!(
+			Balances::free_balance(&user),
+			user_initial_balance - amount1 - amount2 - amount3
+		);
+
+		run_to_block(execute_block1.as_block_number().unwrap());
+
+		// Check that the first transfer is executed and the frozen amounts are thawed
+		assert_eq!(
+			Balances::free_balance(&user),
+			user_initial_balance - amount1 - amount2 - amount3
+		);
+		assert_eq!(Balances::free_balance(&dest), dest_initial_balance + amount1);
+
+		// First amount is released
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			amount2 + amount3
+		);
+
+		run_to_block(execute_block2.as_block_number().unwrap());
+		// Check that the second transfer is executed and the frozen amounts are thawed
+		assert_eq!(
+			Balances::free_balance(&user),
+			user_initial_balance - amount1 - amount2 - amount3
+		);
+
+		assert_eq!(Balances::free_balance(&dest), dest_initial_balance + amount1 + amount2);
+
+		// Second amount is released
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			amount3
+		);
+		run_to_block(execute_block3.as_block_number().unwrap());
+		// Check that the third transfer is executed and the held amounts are released
+		assert_eq!(
+			Balances::free_balance(&user),
+			user_initial_balance - amount1 - amount2 - amount3
+		);
+		assert_eq!(
+			Balances::free_balance(&dest),
+			dest_initial_balance + amount1 + amount2 + amount3
+		);
+		// Third amount is released
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			0
+		);
+
+		// Check that the held amounts are released
+		assert_eq!(
+			Balances::balance_on_hold(
+				&RuntimeHoldReason::ReversibleTransfers(HoldReason::ScheduledTransfer),
+				&user
+			),
+			0
+		);
+	});
+}
+
+#[test]
+fn schedule_transfer_with_delay_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let sender: AccountId = eve(); // An account without a pre-configured policy
+		let recipient: AccountId = ferdie();
+		let amount: Balance = 1000;
+		let custom_delay = BlockNumberOrTimestamp::BlockNumber(10); // A custom delay
+
+		// Ensure the sender is not reversible initially
+		assert_eq!(ReversibleTransfers::is_high_security(&sender), None);
+
+		let call = transfer_call(recipient.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(sender.clone(), &call);
+
+		// --- Test Happy Path ---
+		assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+			RuntimeOrigin::signed(sender.clone()),
+			recipient.clone(),
+			amount,
+			custom_delay,
+		));
+
+		// Check that the transfer is pending
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_some());
+		// Check that funds are held
+		assert_eq!(
+			Balances::balance_on_hold(&HoldReason::ScheduledTransfer.into(), &sender),
+			amount
+		);
+
+		// --- Test Cancellation ---
+		assert_ok!(ReversibleTransfers::cancel(RuntimeOrigin::signed(sender.clone()), tx_id));
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+		assert_eq!(Balances::balance_on_hold(&HoldReason::ScheduledTransfer.into(), &sender), 0);
+
+		// --- Test Error Path ---
+		let configured_sender: AccountId = alice(); // This account has a policy from genesis
+		assert_err!(
+			ReversibleTransfers::schedule_transfer_with_delay(
+				RuntimeOrigin::signed(configured_sender.clone()),
+				recipient.clone(),
+				amount,
+				custom_delay,
+			),
+			Error::<Test>::AccountAlreadyReversibleCannotScheduleOneTime
+		);
+	});
+}
+
+#[test]
+fn schedule_transfer_with_error_short_delay() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let sender: AccountId = charlie();
+		let recipient: AccountId = dave();
+		let amount: Balance = 1000;
+		let custom_delay = BlockNumberOrTimestamp::BlockNumber(1);
+
+		assert_err!(
+			ReversibleTransfers::schedule_transfer_with_delay(
+				RuntimeOrigin::signed(sender.clone()),
+				recipient.clone(),
+				amount,
+				custom_delay,
+			),
+			Error::<Test>::DelayTooShort
+		);
+	});
+}
+
+#[test]
+fn schedule_transfer_with_delay_executes_correctly() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let sender: AccountId = charlie();
+		let recipient: AccountId = dave();
+		let amount: Balance = 1000;
+		let custom_delay_blocks = 10;
+		let custom_delay = BlockNumberOrTimestamp::BlockNumber(custom_delay_blocks);
+
+		let initial_sender_balance = Balances::free_balance(&sender);
+		let initial_recipient_balance = Balances::free_balance(&recipient);
+
+		let call = transfer_call(recipient.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(sender.clone(), &call);
+
+		// Schedule the transfer
+		assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+			RuntimeOrigin::signed(sender.clone()),
+			recipient.clone(),
+			amount,
+			custom_delay,
+		));
+
+		// Check that funds are held
+		assert_eq!(
+			Balances::balance_on_hold(&HoldReason::ScheduledTransfer.into(), &sender),
+			amount
+		);
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_some());
+
+		// Run to the execution block
+		let execute_block = System::block_number() + custom_delay_blocks;
+		run_to_block(execute_block);
+
+		// Check that the transfer was executed
+		assert_eq!(Balances::free_balance(&sender), initial_sender_balance - amount);
+		assert_eq!(Balances::free_balance(&recipient), initial_recipient_balance + amount);
+
+		// Check that the hold is released
+		assert_eq!(Balances::balance_on_hold(&HoldReason::ScheduledTransfer.into(), &sender), 0);
+
+		// Check that the pending dispatch is removed
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+
+		// Check for the execution event
+		System::assert_has_event(
+			Event::TransactionExecuted { tx_id, result: Ok(().into()) }.into(),
+		);
+	});
+}
+
+#[test]
+fn schedule_transfer_with_timestamp_delay_executes_correctly() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		MockTimestamp::<Test>::set_timestamp(1_000_000); // Initial mock time
+
+		let sender: AccountId = charlie();
+		let recipient: AccountId = dave();
+		let amount: Balance = 1000;
+		let one_minute_ms = 1000 * 60;
+		let custom_delay_ms = 10 * one_minute_ms; // 10 minutes
+		let custom_delay = BlockNumberOrTimestamp::Timestamp(custom_delay_ms);
+
+		let initial_sender_balance = Balances::free_balance(&sender);
+		let initial_recipient_balance = Balances::free_balance(&recipient);
+
+		let call = transfer_call(recipient.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(sender.clone(), &call);
+
+		// Schedule the transfer
+		assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+			RuntimeOrigin::signed(sender.clone()),
+			recipient.clone(),
+			amount,
+			custom_delay,
+		));
+
+		// Check that funds are held
+		assert_eq!(
+			Balances::balance_on_hold(&HoldReason::ScheduledTransfer.into(), &sender),
+			amount
+		);
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_some());
+
+		// With the scheduler fix, After(Timestamp) tasks go to next bucket after normalization
+		// Calculate the actual execution bucket
+		let bucket_size = 1000u64; // TimestampBucketSize
+		let normalized = BlockNumberOrTimestamp::<u64, u64>::Timestamp(1_000_000 + custom_delay_ms)
+			.normalize(bucket_size)
+			.as_timestamp()
+			.unwrap();
+		let actual_execution_bucket = normalized + bucket_size;
+
+		// Set time before execution time (before bucket starts)
+		MockTimestamp::<Test>::set_timestamp(actual_execution_bucket - bucket_size - 1);
+		let execute_block = System::block_number() + 3;
+		run_to_block(execute_block);
+
+		// Check that the transfer was not yet executed
+		assert_eq!(Balances::free_balance(&sender), initial_sender_balance - amount);
+
+		// recipient balance not yet changed
+		assert_eq!(Balances::free_balance(&recipient), initial_recipient_balance);
+
+		// Set time past execution time (bucket starts at actual_execution_bucket - bucket_size + 1)
+		MockTimestamp::<Test>::set_timestamp(actual_execution_bucket - bucket_size + 1);
+		let execute_block = System::block_number() + 2;
+		run_to_block(execute_block);
+
+		// Check that the transfer was executed
+		assert_eq!(Balances::free_balance(&sender), initial_sender_balance - amount);
+		assert_eq!(Balances::free_balance(&recipient), initial_recipient_balance + amount);
+
+		// Check that the hold is released
+		assert_eq!(Balances::balance_on_hold(&HoldReason::ScheduledTransfer.into(), &sender), 0);
+
+		// Check that the pending dispatch is removed
+		assert!(ReversibleTransfers::pending_dispatches(tx_id).is_none());
+		assert!(ReversibleTransfers::get_pending_transfer_details(&tx_id).is_none());
+
+		// Check for the execution event
+		System::assert_has_event(
+			Event::TransactionExecuted { tx_id, result: Ok(().into()) }.into(),
+		);
+	});
+}
+
+/// There is deliberately no on-chain guardian index: a guardian can protect
+/// any number of accounts, so a stranger cannot exhaust a popular guardian's
+/// capacity with unwanted enrollments. Discovery of "which accounts do I
+/// guard?" is offchain (Subsquid) via `HighSecuritySet` events.
+#[test]
+fn guardian_capacity_is_unbounded() {
+	new_test_ext().execute_with(|| {
+		let guardian = account_id(99);
+		let delay = BlockNumberOrTimestamp::BlockNumber(10);
+		for i in 100..150 {
+			assert_ok!(ReversibleTransfers::set_high_security(
+				RuntimeOrigin::signed(account_id(i)),
+				delay,
+				guardian.clone(),
+			));
+		}
+	});
+}
+
+#[test]
+fn next_transaction_id_increments_correctly() {
+	new_test_ext().execute_with(|| {
+		let tx_id = ReversibleTransfers::next_transaction_id();
+		assert_eq!(tx_id, 0);
+
+		// Perform a reversible transfer
+		let reversible_account = account_id(100);
+		let receiver = account_id(101);
+		let amount = 100;
+		let delay = BlockNumberOrTimestamp::BlockNumber(10);
+
+		let guardian = account_id(201);
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(reversible_account.clone()),
+			delay,
+			guardian.clone(),
+		));
+
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(reversible_account.clone()),
+			receiver.clone(),
+			amount,
+		));
+
+		let tx_id = ReversibleTransfers::next_transaction_id();
+		assert_eq!(tx_id, 1);
+
+		// batch_all call should have all unique tx ids and increment counter
+		assert_ok!(Utility::batch_all(
+			RuntimeOrigin::signed(reversible_account.clone()),
+			vec![
+				ReversibleTransfersCall::schedule_transfer { dest: receiver.clone(), amount }
+					.into(),
+				ReversibleTransfersCall::schedule_transfer {
+					dest: receiver.clone(),
+					amount: amount + 1
+				}
+				.into(),
+				ReversibleTransfersCall::schedule_transfer {
+					dest: receiver.clone(),
+					amount: amount + 2
+				}
+				.into(),
+			],
+		));
+
+		assert_eq!(ReversibleTransfers::next_transaction_id(), 4);
+	});
+}
+
+#[test]
+fn reversible_transfer_records_transfer_proof_on_execution() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		MockProofRecorder::clear();
+
+		let user = alice(); // Reversible, delay 10
+		let dest = bob();
+		let amount = 50;
+		let call = transfer_call(dest.clone(), amount);
+		let _tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+		let HighSecurityAccountData { delay, .. } =
+			ReversibleTransfers::is_high_security(&user).unwrap();
+		let start_block = BlockNumberOrTimestamp::BlockNumber(System::block_number());
+		let execute_block = start_block.saturating_add(&delay).unwrap();
+
+		// No proofs recorded yet
+		assert!(MockProofRecorder::get_recorded_proofs().is_empty());
+
+		// Schedule the transfer
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			dest.clone(),
+			amount,
+		));
+
+		// Still no proofs (transfer not executed yet)
+		assert!(MockProofRecorder::get_recorded_proofs().is_empty());
+
+		// Run to execution block
+		run_to_block(execute_block.as_block_number().unwrap());
+
+		// Now the transfer proof should be recorded
+		let proofs = MockProofRecorder::get_recorded_proofs();
+		assert_eq!(proofs.len(), 1, "Expected exactly one transfer proof to be recorded");
+
+		let proof = &proofs[0];
+		assert_eq!(proof.asset_id, None, "Native transfer should have None asset_id");
+		assert_eq!(proof.from, user, "Transfer proof 'from' should match sender");
+		assert_eq!(proof.to, dest, "Transfer proof 'to' should match destination");
+		assert_eq!(proof.amount, amount, "Transfer proof amount should match");
+	});
+}
+
+#[test]
+fn self_directed_scheduled_transfer_does_not_record_proof() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		MockProofRecorder::clear();
+
+		let user = charlie();
+		let amount = 50;
+		let delay = BlockNumberOrTimestamp::BlockNumber(10);
+		let start_block = BlockNumberOrTimestamp::BlockNumber(System::block_number());
+		let execute_block = start_block.saturating_add(&delay).unwrap();
+		let free_before = Balances::free_balance(&user);
+
+		assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+			RuntimeOrigin::signed(user.clone()),
+			user.clone(),
+			amount,
+			delay,
+		));
+		assert!(MockProofRecorder::get_recorded_proofs().is_empty());
+
+		run_to_block(execute_block.as_block_number().unwrap());
+
+		assert!(
+			MockProofRecorder::get_recorded_proofs().is_empty(),
+			"a self-directed execution moves no value and must not record a proof"
+		);
+		assert_eq!(
+			Balances::free_balance(&user),
+			free_before,
+			"a self-directed execution must restore the sender's free balance"
+		);
+	});
+}
+
+#[test]
+fn cancelled_reversible_transfer_does_not_record_proof() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		MockProofRecorder::clear();
+
+		let user = alice(); // Reversible, delay 10
+		let guardian = bob(); // guardian from genesis config
+		let amount = 50;
+		let call = transfer_call(guardian.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+
+		// Schedule the transfer
+		assert_ok!(ReversibleTransfers::schedule_transfer(
+			RuntimeOrigin::signed(user.clone()),
+			guardian.clone(),
+			amount,
+		));
+
+		// Cancel it before execution (must be called by guardian)
+		assert_ok!(ReversibleTransfers::cancel(RuntimeOrigin::signed(guardian), tx_id));
+
+		// No proofs should be recorded
+		assert!(
+			MockProofRecorder::get_recorded_proofs().is_empty(),
+			"Cancelled transfer should not record any proof"
+		);
+	});
+}
+
+#[test]
+fn owner_cancel_of_one_time_schedule_does_not_record_proof() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		MockProofRecorder::clear();
+
+		let user = charlie();
+		let dest = dave();
+		let amount = 50;
+		let call = transfer_call(dest.clone(), amount);
+		let tx_id = calculate_tx_id::<Test>(user.clone(), &call);
+
+		assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+			RuntimeOrigin::signed(user.clone()),
+			dest,
+			amount,
+			BlockNumberOrTimestamp::BlockNumber(5),
+		));
+		assert_ok!(ReversibleTransfers::cancel(RuntimeOrigin::signed(user), tx_id));
+
+		assert!(
+			MockProofRecorder::get_recorded_proofs().is_empty(),
+			"owner cancel must not record via ProofRecorder; the runtime scanner is the only recorder, and a self-release is not a credit"
+		);
+	});
+}
+
+#[test]
+fn validate_delay_accepts_delay_equal_to_minimum() {
+	new_test_ext().execute_with(|| {
+		let user = charlie();
+		let guardian = dave();
+		let delay = BlockNumberOrTimestamp::BlockNumber(MinDelayPeriodBlocks::get());
+
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(user),
+			delay,
+			guardian,
+		));
+	});
+}
+
+#[test]
+fn validate_delay_accepts_timestamp_equal_to_minimum() {
+	new_test_ext().execute_with(|| {
+		let user = charlie();
+		let guardian = dave();
+		let delay = BlockNumberOrTimestamp::Timestamp(MinDelayPeriodMoment::get());
+
+		assert_ok!(ReversibleTransfers::set_high_security(
+			RuntimeOrigin::signed(user),
+			delay,
+			guardian,
+		));
+	});
+}
+
+/// Reversible transfers are a permissionless scheduling surface: any signed account
+/// can place a task at an attacker-chosen future block. They must be scheduled at
+/// `LOWEST_PRIORITY` so the scheduler's reserved high-priority headroom (~20% of
+/// `MaxScheduledPerBlock`, at least one slot) prevents them from filling a block's
+/// agenda and censoring governance enactment scheduled at the same (deterministic)
+/// block.
+#[test]
+fn scheduled_transfers_cannot_crowd_out_high_priority_tasks() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let sender: AccountId = eve(); // no pre-configured policy
+		let recipient: AccountId = ferdie();
+		let amount: Balance = 100;
+		let delay_blocks = 5u64;
+		let delay = BlockNumberOrTimestamp::BlockNumber(delay_blocks);
+		let execute_block = BlockNumberOrTimestamp::BlockNumber(1 + delay_blocks);
+
+		let max: u32 =
+			<<Test as pallet_scheduler::Config>::MaxScheduledPerBlock as sp_core::Get<u32>>::get();
+		// Mirror the scheduler: ~20% reserved, at least 1 slot.
+		let reserved: u32 = (max / 5).max(1).min(max.saturating_sub(1));
+		assert!(reserved > 0 && reserved < max, "pre-condition: reservation must be meaningful");
+
+		// The attacker can only fill the unreserved part of the target block's agenda.
+		for _ in 0..max - reserved {
+			assert_ok!(ReversibleTransfers::schedule_transfer_with_delay(
+				RuntimeOrigin::signed(sender.clone()),
+				recipient.clone(),
+				amount,
+				delay,
+			));
+		}
+		assert_eq!(Agenda::<Test>::get(execute_block).len() as u32, max - reserved);
+
+		// Further transfers targeting the same block are rejected.
+		assert_err!(
+			ReversibleTransfers::schedule_transfer_with_delay(
+				RuntimeOrigin::signed(sender.clone()),
+				recipient.clone(),
+				amount,
+				delay,
+			),
+			Error::<Test>::SchedulingFailed
+		);
+
+		// A high-priority task (governance enactment is scheduled at priority 63) still
+		// fits into the reserved headroom of the same block.
+		assert_ok!(Scheduler::schedule(
+			RuntimeOrigin::root(),
+			1 + delay_blocks,
+			63,
+			Box::new(RuntimeCall::System(frame_system::Call::remark { remark: vec![] })),
+		));
+	});
+}

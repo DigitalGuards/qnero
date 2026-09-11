@@ -1,0 +1,146 @@
+use quantus_runtime::{
+	genesis_config_presets::{
+		HEISENBERG_RUNTIME_PRESET, MAINNET_RUNTIME_PRESET, PLANCK_RUNTIME_PRESET,
+	},
+	WASM_BINARY,
+};
+use sc_service::{ChainType, Properties};
+use sc_telemetry::TelemetryEndpoints;
+use serde_json::json;
+
+/// Specialized `ChainSpec`. This is a specialization of the general Substrate ChainSpec type.
+pub type ChainSpec = sc_service::GenericChainSpec;
+
+pub fn development_chain_spec() -> Result<ChainSpec, String> {
+	let mut properties = Properties::new();
+	properties.insert("tokenDecimals".into(), json!(12));
+	properties.insert("tokenSymbol".into(), json!("DEV"));
+	properties.insert("ss58Format".into(), json!(189));
+
+	Ok(ChainSpec::builder(
+		WASM_BINARY.ok_or_else(|| "Quantus DevNet wasm not available".to_string())?,
+		None,
+	)
+	.with_name("Quantus DevNet")
+	.with_id("dev")
+	.with_protocol_id("quantus-devnet")
+	.with_chain_type(ChainType::Development)
+	.with_genesis_config_preset_name(sp_genesis_builder::DEV_RUNTIME_PRESET)
+	.with_properties(properties)
+	.build())
+}
+
+/// Heisenberg — internal integration testnet, **not** mainnet.
+///
+/// Genesis intentionally endows the well-known Dilithium accounts
+/// (`crystal_alice` / `dilithium_bob` / `crystal_charlie`, seeds `[0]/` /
+/// `[1]` / `[2]`) and uses them as treasury signers and tech-collective
+/// members. Those private keys are public by design so integrators and CI can
+/// exercise governance, treasury, and transfer flows without distributing
+/// secrets. Tokens have no monetary value; the network may be reset. Do not
+/// treat Heisenberg key material, balances, or authority as production-grade.
+pub fn heisenberg_chain_spec() -> Result<ChainSpec, String> {
+	let mut properties = Properties::new();
+	properties.insert("tokenDecimals".into(), json!(12));
+	properties.insert("tokenSymbol".into(), json!("HEI"));
+	properties.insert("ss58Format".into(), json!(189));
+
+	let telemetry_endpoints = TelemetryEndpoints::new(vec![(
+		"/dns/shard-telemetry.quantus.cat/tcp/443/x-parity-wss/%2Fsubmit%2F".to_string(),
+		0,
+	)])
+	.expect("Telemetry endpoints config is valid; qed");
+
+	let boot_nodes = vec![
+		"/dns/a1-p2p-heisenberg.quantus.cat/tcp/30333/p2p/Qmdts9fu3NCMFnvLdD1dHAHFer8EPzVDXxVnyPxRKA3Gkt"
+			.parse()
+			.unwrap(),
+		"/dns/a2-p2p-heisenberg.quantus.cat/tcp/30333/p2p/QmcKHndoiNRdiT6iVp6ugj8bNse5Vd5WmCoE9YWn9kNaTM"
+			.parse()
+			.unwrap(),
+	];
+
+	Ok(ChainSpec::builder(
+		WASM_BINARY.ok_or_else(|| "Runtime wasm not available".to_string())?,
+		None,
+	)
+	.with_name("Heisenberg")
+	.with_id("heisenberg")
+	.with_protocol_id("heisenberg")
+	.with_boot_nodes(boot_nodes)
+	.with_telemetry_endpoints(telemetry_endpoints)
+	.with_chain_type(ChainType::Live)
+	.with_genesis_config_preset_name(HEISENBERG_RUNTIME_PRESET)
+	.with_properties(properties)
+	.build())
+}
+
+/// Mainnet. Genesis comes from the `mainnet` runtime preset; the allocation
+/// table is `runtime/src/genesis_config_presets/mainnet_vesting.rs`. Spec
+/// building panics until that table is finalized. Bootnodes are added once
+/// infrastructure exists (`bootNodes` is outside genesis).
+pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
+	let mut properties = Properties::new();
+	properties.insert("tokenDecimals".into(), json!(12));
+	properties.insert("tokenSymbol".into(), json!("QTC"));
+	properties.insert("ss58Format".into(), json!(189));
+
+	let telemetry_endpoints = TelemetryEndpoints::new(vec![(
+		"/dns/shard-telemetry.quantus.cat/tcp/443/x-parity-wss/%2Fsubmit%2F".to_string(),
+		0,
+	)])
+	.expect("Telemetry endpoints config is valid; qed");
+
+	Ok(ChainSpec::builder(
+		WASM_BINARY.ok_or_else(|| "Runtime wasm not available".to_string())?,
+		None,
+	)
+	.with_name("Quantus")
+	.with_id("mainnet")
+	.with_protocol_id("quantus")
+	.with_telemetry_endpoints(telemetry_endpoints)
+	.with_chain_type(ChainType::Live)
+	.with_genesis_config_preset_name(MAINNET_RUNTIME_PRESET)
+	.with_properties(properties)
+	.build())
+}
+
+/// Planck network — live treasury signers + faucet; dev dilithium accounts for testing.
+pub fn planck_chain_spec() -> Result<ChainSpec, String> {
+	let mut properties = Properties::new();
+	properties.insert("tokenDecimals".into(), json!(12));
+	properties.insert("tokenSymbol".into(), json!("PLK"));
+	properties.insert("ss58Format".into(), json!(189));
+
+	let telemetry_endpoints = TelemetryEndpoints::new(vec![(
+		"/dns/shard-telemetry.quantus.cat/tcp/443/x-parity-wss/%2Fsubmit%2F".to_string(),
+		0,
+	)])
+	.expect("Telemetry endpoints config is valid; qed");
+
+	let boot_nodes = vec![
+		"/dns/a1-p2p-planck.quantus.cat/tcp/30333/p2p/QmQ4AywkRZuv2L4XKb71Y3erk2DpQPNUTmMS2LGEEr5q8r"
+			.parse()
+			.unwrap(),
+		"/dns/a2-p2p-planck.quantus.cat/tcp/30333/p2p/QmZT5LVJjBWf3QeJY6JKcFY6bCJoWucji96pKwpgbfTgic"
+			.parse()
+			.unwrap(),
+		"/ip4/72.61.118.55/tcp/30333/p2p/QmbctLKQojifo6bym7a1ypph55n1nSw58YZGDkGtgRNVmF"
+			.parse()
+			.unwrap(),
+	];
+
+	Ok(ChainSpec::builder(
+		WASM_BINARY.ok_or_else(|| "Runtime wasm not available".to_string())?,
+		None,
+	)
+	.with_name("Planck")
+	.with_id("planck")
+	.with_protocol_id("planck")
+	.with_boot_nodes(boot_nodes)
+	.with_telemetry_endpoints(telemetry_endpoints)
+	.with_chain_type(ChainType::Live)
+	.with_genesis_config_preset_name(PLANCK_RUNTIME_PRESET)
+	.with_properties(properties)
+	.build())
+}

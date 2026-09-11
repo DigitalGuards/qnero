@@ -1,0 +1,1684 @@
+//! > Made with *Substrate*, for *Polkadot*.
+//!
+//! [![github]](https://github.com/paritytech/polkadot-sdk/tree/master/substrate/frame/scheduler) -
+//! [![polkadot]](https://polkadot.network)
+//!
+//! [polkadot]: https://img.shields.io/badge/polkadot-E6007A?style=for-the-badge&logo=polkadot&logoColor=white
+//! [github]: https://img.shields.io/badge/github-8da0cb?style=for-the-badge&labelColor=555555&logo=github
+//!
+//! # Scheduler Pallet
+//!
+//! A Pallet for scheduling runtime calls.
+//!
+//! ## Overview
+//!
+//! This Pallet exposes capabilities for scheduling runtime calls to occur at a specified block
+//! number or at a specified period. These scheduled runtime calls may be named or anonymous and may
+//! be canceled.
+//!
+//! __NOTE:__ Instead of using the filter contained in the origin to call `fn schedule`, scheduled
+//! runtime calls will be dispatched with the default filter for the origin: namely
+//! `frame_system::Config::BaseCallFilter` for all origin types (except root which will get no
+//! filter).
+//!
+//! If a call is scheduled using proxy or whatever mechanism which adds filter, then those filter
+//! will not be used when dispatching the schedule runtime call.
+//!
+//! ### Examples
+//!
+//! 1. Scheduling a runtime call at a specific block.
+#![doc = docify::embed!("src/tests.rs", basic_scheduling_works)]
+//!
+//! 2. Scheduling a preimage hash of a runtime call at a specific block
+#![doc = docify::embed!("src/tests.rs", scheduling_with_preimages_works)]
+
+//!
+//! ## Pallet API
+//!
+//! See the [`pallet`] module for more information about the interfaces this pallet exposes,
+//! including its configuration trait, dispatchables, storage items, events and errors.
+//!
+//! ## Warning
+//!
+//! This Pallet executes all scheduled runtime calls in the [`on_initialize`] hook. Do not execute
+//! any runtime calls which should not be considered mandatory.
+//!
+//! Please be aware that any scheduled runtime calls executed in a future block may __fail__ or may
+//! result in __undefined behavior__ since the runtime could have upgraded between the time of
+//! scheduling and execution. For example, the runtime upgrade could have:
+//!
+//! * Modified the implementation of the runtime call (runtime specification upgrade).
+//!     * Could lead to undefined behavior.
+//! * Removed or changed the ordering/index of the runtime call.
+//!     * Could fail due to the runtime call index not being part of the `Call`.
+//!     * Could lead to undefined behavior, such as executing another runtime call with the same
+//!       index.
+//!
+//! [`on_initialize`]: frame_support::traits::Hooks::on_initialize
+
+// Ensure we're `no_std` when compiling for Wasm.
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+#[cfg(test)]
+mod mock;
+#[cfg(test)]
+mod tests;
+pub mod weights;
+
+extern crate alloc;
+
+use alloc::{boxed::Box, vec::Vec};
+use codec::{Decode, Encode, MaxEncodedLen};
+use core::{borrow::Borrow, cmp::Ordering, marker::PhantomData};
+use frame_support::{
+	defensive,
+	dispatch::{DispatchResult, GetDispatchInfo, Parameter, RawOrigin},
+	ensure,
+	traits::{
+		schedule::{self, DispatchTime as DispatchBlock},
+		Bounded, BoundedInline, CallerTrait, DefensiveOption, EnsureOrigin, Get, IsType,
+		OriginTrait, PrivilegeCmp, QueryPreimage, StorageVersion, StorePreimage, Time,
+	},
+	weights::{Weight, WeightMeter},
+};
+use frame_system::{
+	pallet_prelude::BlockNumberFor,
+	{self as system},
+};
+use qp_scheduler::{BlockNumberOrTimestamp, DispatchTime, ScheduleNamed};
+use scale_info::TypeInfo;
+use sp_runtime::{
+	traits::{BadOrigin, Dispatchable, Hash, One, Saturating, Zero},
+	BoundedVec, DispatchError, RuntimeDebug,
+};
+
+pub use pallet::*;
+pub use weights::WeightInfo;
+
+/// Just a simple index for naming period tasks.
+pub type PeriodicIndex = u32;
+/// The location of a scheduled task that can be used to remove it.
+pub type TaskAddress<BlockNumber, Moment> = (BlockNumberOrTimestamp<BlockNumber, Moment>, u32);
+/// Task address of Config.
+pub type TaskAddressOf<T> = TaskAddress<BlockNumberFor<T>, <T as Config>::Moment>;
+
+pub type BoundedCallOf<T> =
+	Bounded<<T as Config>::RuntimeCall, <T as frame_system::Config>::Hashing>;
+
+pub type BlockNumberOrTimestampOf<T> =
+	BlockNumberOrTimestamp<BlockNumberFor<T>, <T as Config>::Moment>;
+
+/// The configuration of the retry mechanism for a given task along with its current state.
+#[derive(Clone, Copy, RuntimeDebug, PartialEq, Eq, Encode, Decode, MaxEncodedLen, TypeInfo)]
+pub struct RetryConfig<Period> {
+	/// Initial amount of retries allowed.
+	total_retries: u8,
+	/// Amount of retries left.
+	remaining: u8,
+	/// Period of time between retry attempts.
+	period: Period,
+}
+
+/// Information regarding an item to be executed in the future.
+#[cfg_attr(any(feature = "std", test), derive(PartialEq, Eq))]
+#[derive(Clone, RuntimeDebug, Encode, Decode, MaxEncodedLen, TypeInfo)]
+pub struct Scheduled<Name, Call, BlockNumber, PalletsOrigin, AccountId, Moment> {
+	/// The unique identity for this task, if there is one.
+	maybe_id: Option<Name>,
+	/// This task's priority.
+	priority: schedule::Priority,
+	/// The call to be dispatched.
+	call: Call,
+	/// The origin with which to dispatch the call.
+	origin: PalletsOrigin,
+	_phantom: PhantomData<(AccountId, BlockNumber, Moment)>,
+}
+
+impl<Name, Call, BlockNumber, PalletsOrigin, AccountId, Moment>
+	Scheduled<Name, Call, BlockNumber, PalletsOrigin, AccountId, Moment>
+where
+	Call: Clone,
+	PalletsOrigin: Clone,
+{
+	/// Create a new task to be used for retry attempts of the original one. The cloned task will
+	/// have the same `priority`, `call` and `origin`, but will always be unnamed.
+	pub fn as_retry(&self) -> Self {
+		Self {
+			maybe_id: None,
+			priority: self.priority,
+			call: self.call.clone(),
+			origin: self.origin.clone(),
+			_phantom: Default::default(),
+		}
+	}
+}
+
+pub type ScheduledOf<T> = Scheduled<
+	TaskName,
+	BoundedCallOf<T>,
+	BlockNumberFor<T>,
+	<T as Config>::PalletsOrigin,
+	<T as frame_system::Config>::AccountId,
+	<T as Config>::Moment,
+>;
+
+pub(crate) trait MarginalWeightInfo: WeightInfo {
+	fn service_task(maybe_lookup_len: Option<usize>, named: bool) -> Weight {
+		let base = Self::service_task_base();
+		let mut total = match maybe_lookup_len {
+			None => base,
+			// V12 audit #181227: `service_task_fetched` omits the unconditional `Retries` take
+			// charged in `service_task_base`; compose base so the lookup branch meters it too.
+			Some(l) => base.saturating_add(Self::service_task_fetched(l as u32)),
+		};
+		if named {
+			total.saturating_accrue(Self::service_task_named().saturating_sub(base));
+		}
+		total
+	}
+}
+impl<T: WeightInfo> MarginalWeightInfo for T {}
+
+#[frame_support::pallet]
+pub mod pallet {
+	use super::*;
+	use frame_support::{dispatch::PostDispatchInfo, pallet_prelude::*};
+	use frame_system::pallet_prelude::*;
+	use sp_runtime::traits::{AtLeast32Bit, Scale};
+
+	/// The in-code storage version.
+	///
+	/// **Fork baseline:** This scheduler is forked from upstream pallet-scheduler at version 4.
+	/// The fork introduced timestamp-aware agenda keys (`BlockNumberOrTimestamp`) and modified
+	/// task addresses, but retained the upstream version number as the established baseline.
+	///
+	/// For future storage layout changes in this fork:
+	/// 1. Increment this version (e.g., to 5)
+	/// 2. Add a migration hook in `Hooks::on_runtime_upgrade`
+	/// 3. Document the migration in release notes
+	///
+	/// Note: There is no migration path FROM upstream v4 TO this fork's v4, as they have
+	/// incompatible storage layouts. This fork's v4 is the genesis baseline for this chain.
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(4);
+
+	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
+	pub struct Pallet<T>(_);
+
+	/// `system::Config` should always be included in our implied traits.
+	#[pallet::config]
+	pub trait Config: frame_system::Config {
+		/// The aggregated origin which the dispatch will take.
+		type RuntimeOrigin: OriginTrait<PalletsOrigin = Self::PalletsOrigin>
+			+ From<Self::PalletsOrigin>
+			+ IsType<<Self as system::Config>::RuntimeOrigin>;
+
+		/// The caller origin, overarching type of all pallets origins.
+		type PalletsOrigin: From<system::RawOrigin<Self::AccountId>>
+			+ CallerTrait<Self::AccountId>
+			+ MaxEncodedLen;
+
+		/// The aggregated call type.
+		type RuntimeCall: Parameter
+			+ Dispatchable<
+				RuntimeOrigin = <Self as Config>::RuntimeOrigin,
+				PostInfo = PostDispatchInfo,
+			> + GetDispatchInfo
+			+ From<system::Call<Self>>;
+
+		/// The maximum weight that may be scheduled per block for any dispatchables.
+		#[pallet::constant]
+		type MaximumWeight: Get<Weight>;
+
+		/// Required origin to schedule or cancel calls.
+		type ScheduleOrigin: EnsureOrigin<<Self as system::Config>::RuntimeOrigin>;
+
+		/// Compare the privileges of origins.
+		///
+		/// This will be used when canceling a task, to ensure that the origin that tries
+		/// to cancel has greater or equal privileges as the origin that created the scheduled task.
+		///
+		/// For simplicity the [`EqualPrivilegeOnly`](frame_support::traits::EqualPrivilegeOnly) can
+		/// be used. This will only check if two given origins are equal.
+		type OriginPrivilegeCmp: PrivilegeCmp<Self::PalletsOrigin>;
+
+		/// The maximum number of scheduled calls in the queue for a single block.
+		///
+		/// NOTE:
+		/// + Dependent pallets' benchmarks might require a higher limit for the setting. Set a
+		/// higher limit under `runtime-benchmarks` feature.
+		#[pallet::constant]
+		type MaxScheduledPerBlock: Get<u32>;
+
+		/// Weight information for extrinsics in this pallet.
+		type WeightInfo: WeightInfo;
+
+		/// The preimage provider with which we look up call hashes to get the call.
+		type Preimages: QueryPreimage<H = Self::Hashing> + StorePreimage;
+
+		/// Moment type
+		type Moment: Saturating
+			+ Copy
+			+ Parameter
+			+ AtLeast32Bit
+			+ Scale<BlockNumberFor<Self>, Output = Self::Moment>
+			+ MaxEncodedLen
+			+ Default
+			+ sp_runtime::traits::Zero;
+
+		/// Time provider, usually timestamp pallet.
+		type TimeProvider: Time<Moment = Self::Moment>;
+
+		/// Precision of the timestamp buckets.
+		///
+		/// Timestamp based dispatches are rounded to the nearest bucket of this precision.
+		#[pallet::constant]
+		type TimestampBucketSize: Get<Self::Moment>;
+	}
+
+	/// Tracks incomplete block-based agendas that need to be processed in a later block.
+	#[pallet::storage]
+	pub type IncompleteBlockSince<T: Config> = StorageValue<_, BlockNumberFor<T>>;
+
+	/// Tracks incomplete timestamp-based agendas that need to be processed in a later block.
+	#[pallet::storage]
+	pub type IncompleteTimestampSince<T: Config> = StorageValue<_, T::Moment>;
+
+	/// Tracks the last timestamp bucket that was fully processed.
+	/// Used to avoid reprocessing all buckets from 0 on every run.
+	#[pallet::storage]
+	pub type LastProcessedTimestamp<T: Config> = StorageValue<_, T::Moment>;
+
+	/// Items to be executed, indexed by the block number that they should be executed on.
+	#[pallet::storage]
+	pub type Agenda<T: Config> = StorageMap<
+		_,
+		Twox64Concat,
+		BlockNumberOrTimestampOf<T>,
+		BoundedVec<Option<ScheduledOf<T>>, T::MaxScheduledPerBlock>,
+		ValueQuery,
+	>;
+
+	/// Retry configurations for items to be executed, indexed by task address.
+	#[pallet::storage]
+	pub type Retries<T: Config> = StorageMap<
+		_,
+		Blake2_128Concat,
+		TaskAddressOf<T>,
+		RetryConfig<BlockNumberOrTimestampOf<T>>,
+		OptionQuery,
+	>;
+
+	/// Lookup from a name to the block number and index of the task.
+	#[pallet::storage]
+	pub(crate) type Lookup<T: Config> = StorageMap<_, Twox64Concat, TaskName, TaskAddressOf<T>>;
+
+	/// Events type.
+	#[pallet::event]
+	#[pallet::generate_deposit(pub(super) fn deposit_event)]
+	pub enum Event<T: Config> {
+		/// Scheduled some task.
+		Scheduled { when: BlockNumberOrTimestampOf<T>, index: u32 },
+		/// Canceled some task.
+		Canceled { when: BlockNumberOrTimestampOf<T>, index: u32 },
+		/// Dispatched some task.
+		Dispatched { task: TaskAddressOf<T>, id: Option<TaskName>, result: DispatchResult },
+		/// Set a retry configuration for some task.
+		RetrySet {
+			task: TaskAddressOf<T>,
+			id: Option<TaskName>,
+			period: BlockNumberOrTimestampOf<T>,
+			retries: u8,
+		},
+		/// Cancel a retry configuration for some task.
+		RetryCancelled { task: TaskAddressOf<T>, id: Option<TaskName> },
+		/// The call for the provided hash was not found so the task has been aborted.
+		CallUnavailable { task: TaskAddressOf<T>, id: Option<TaskName> },
+		/// The given task was unable to be retried since the agenda is full at that block or there
+		/// was not enough weight to reschedule it.
+		RetryFailed { task: TaskAddressOf<T>, id: Option<TaskName> },
+		/// The given task can never be executed since it is overweight.
+		PermanentlyOverweight { task: TaskAddressOf<T>, id: Option<TaskName> },
+	}
+
+	#[pallet::error]
+	pub enum Error<T> {
+		/// Failed to schedule a call
+		FailedToSchedule,
+		/// Cannot find the scheduled call.
+		NotFound,
+		/// Given target block number is in the past.
+		TargetBlockNumberInPast,
+		/// Given target timestamp is in the past.
+		TargetTimestampInPast,
+		/// Reschedule failed because it does not change scheduled time.
+		RescheduleNoChange,
+		/// Attempt to use a non-named function on a named task.
+		Named,
+		/// Periodic scheduling is not supported.
+		PeriodicNotSupported,
+		/// Retry period type does not match task scheduling type.
+		///
+		/// Block-scheduled tasks require a block-number retry period,
+		/// and timestamp-scheduled tasks require a timestamp retry period.
+		RetryPeriodMismatch,
+		/// Retry period value is invalid.
+		///
+		/// A retry period must be non-zero, and a timestamp retry period must additionally
+		/// be a whole multiple of [`Config::TimestampBucketSize`]. A zero period would
+		/// re-target the agenda currently being serviced (losing the retry to the stale
+		/// agenda write-back), and a non-bucket-aligned timestamp period would place the
+		/// retry in an agenda key the servicing loop never visits.
+		InvalidRetryPeriod,
+	}
+
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+		/// Execute the scheduled calls
+		fn on_initialize(now: BlockNumberFor<T>) -> Weight {
+			let mut weight_counter = WeightMeter::with_limit(T::MaximumWeight::get());
+
+			log::debug!(target: "scheduler", "on_initialize: now: {:?}", now);
+
+			// Consume base weight for block-based agenda processing
+			if weight_counter.try_consume(T::WeightInfo::service_agendas_base()).is_err() {
+				return weight_counter.consumed();
+			}
+
+			// Shared executed counter across block and timestamp agendas.
+			// This ensures that if block tasks execute first, a timestamp task that
+			// doesn't fit in the remaining weight is NOT incorrectly marked as
+			// permanently overweight (which only applies to the very first task).
+			let mut executed = 0u32;
+
+			// Process block-based agendas
+			Self::service_block_agendas(&mut weight_counter, &mut executed, now, u32::MAX);
+
+			// Process timestamp-based agendas using current system time
+			// This ensures no buckets are skipped if block times are longer than bucket intervals
+			let current_timestamp = T::TimeProvider::now();
+
+			log::debug!(target: "scheduler", "on_initialize: current_timestamp: {:?}", current_timestamp);
+			if current_timestamp > T::Moment::zero() {
+				// Consume base weight for timestamp-based agenda housekeeping
+				// (IncompleteTimestampSince and LastProcessedTimestamp reads/writes)
+				if weight_counter
+					.try_consume(T::WeightInfo::service_timestamp_agendas_base())
+					.is_err()
+				{
+					return weight_counter.consumed();
+				}
+
+				Self::service_timestamp_agendas(
+					&mut weight_counter,
+					&mut executed,
+					current_timestamp,
+					u32::MAX,
+				);
+			}
+
+			weight_counter.consumed()
+		}
+	}
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {
+		#[pallet::call_index(0)]
+		#[pallet::weight(<T as Config>::WeightInfo::schedule(T::MaxScheduledPerBlock::get()))]
+		pub fn schedule(
+			origin: OriginFor<T>,
+			when: BlockNumberFor<T>,
+			priority: schedule::Priority,
+			call: Box<<T as Config>::RuntimeCall>,
+		) -> DispatchResult {
+			T::ScheduleOrigin::ensure_origin(origin.clone())?;
+			let origin = <T as Config>::RuntimeOrigin::from(origin);
+			// Must be checked before `bound`; see `lookup_already_requested` (V12 audit #162453).
+			let already_requested = Self::lookup_already_requested(&call);
+			Self::do_schedule_inner(
+				DispatchTime::At(when),
+				priority,
+				origin.caller().clone(),
+				T::Preimages::bound(*call)?,
+				already_requested,
+			)?;
+			Ok(())
+		}
+
+		/// Cancel an anonymously scheduled task.
+		#[pallet::call_index(1)]
+		#[pallet::weight(<T as Config>::WeightInfo::cancel(T::MaxScheduledPerBlock::get()))]
+		pub fn cancel(
+			origin: OriginFor<T>,
+			when: BlockNumberOrTimestampOf<T>,
+			index: u32,
+		) -> DispatchResult {
+			T::ScheduleOrigin::ensure_origin(origin.clone())?;
+			let origin = <T as Config>::RuntimeOrigin::from(origin);
+			Self::do_cancel(Some(origin.caller().clone()), (when, index))?;
+			Ok(())
+		}
+
+		#[pallet::call_index(2)]
+		#[pallet::weight(<T as Config>::WeightInfo::schedule_named(T::MaxScheduledPerBlock::get()))]
+		pub fn schedule_named(
+			origin: OriginFor<T>,
+			id: TaskName,
+			when: BlockNumberFor<T>,
+			priority: schedule::Priority,
+			call: Box<<T as Config>::RuntimeCall>,
+		) -> DispatchResult {
+			T::ScheduleOrigin::ensure_origin(origin.clone())?;
+			let origin = <T as Config>::RuntimeOrigin::from(origin);
+			// Must be checked before `bound`; see `lookup_already_requested` (V12 audit #162453).
+			let already_requested = Self::lookup_already_requested(&call);
+			Self::do_schedule_named_inner(
+				id,
+				DispatchTime::At(when),
+				priority,
+				origin.caller().clone(),
+				T::Preimages::bound(*call)?,
+				already_requested,
+			)?;
+			Ok(())
+		}
+
+		/// Cancel a named scheduled task.
+		#[pallet::call_index(3)]
+		#[pallet::weight(<T as Config>::WeightInfo::cancel_named(T::MaxScheduledPerBlock::get()))]
+		pub fn cancel_named(origin: OriginFor<T>, id: TaskName) -> DispatchResult {
+			T::ScheduleOrigin::ensure_origin(origin.clone())?;
+			let origin = <T as Config>::RuntimeOrigin::from(origin);
+			Self::do_cancel_named(Some(origin.caller().clone()), id)?;
+			Ok(())
+		}
+
+		#[pallet::call_index(4)]
+		#[pallet::weight(<T as Config>::WeightInfo::schedule(T::MaxScheduledPerBlock::get()))]
+		pub fn schedule_after(
+			origin: OriginFor<T>,
+			after: BlockNumberOrTimestamp<BlockNumberFor<T>, T::Moment>,
+			priority: schedule::Priority,
+			call: Box<<T as Config>::RuntimeCall>,
+		) -> DispatchResult {
+			T::ScheduleOrigin::ensure_origin(origin.clone())?;
+			let origin = <T as Config>::RuntimeOrigin::from(origin);
+			// Must be checked before `bound`; see `lookup_already_requested` (V12 audit #162453).
+			let already_requested = Self::lookup_already_requested(&call);
+			Self::do_schedule_inner(
+				DispatchTime::After(after),
+				priority,
+				origin.caller().clone(),
+				T::Preimages::bound(*call)?,
+				already_requested,
+			)?;
+			Ok(())
+		}
+
+		#[pallet::call_index(5)]
+		#[pallet::weight(<T as Config>::WeightInfo::schedule_named(T::MaxScheduledPerBlock::get()))]
+		pub fn schedule_named_after(
+			origin: OriginFor<T>,
+			id: TaskName,
+			after: BlockNumberOrTimestamp<BlockNumberFor<T>, T::Moment>,
+			priority: schedule::Priority,
+			call: Box<<T as Config>::RuntimeCall>,
+		) -> DispatchResult {
+			T::ScheduleOrigin::ensure_origin(origin.clone())?;
+			let origin = <T as Config>::RuntimeOrigin::from(origin);
+			// Must be checked before `bound`; see `lookup_already_requested` (V12 audit #162453).
+			let already_requested = Self::lookup_already_requested(&call);
+			Self::do_schedule_named_inner(
+				id,
+				DispatchTime::After(after),
+				priority,
+				origin.caller().clone(),
+				T::Preimages::bound(*call)?,
+				already_requested,
+			)?;
+			Ok(())
+		}
+
+		/// Set a retry configuration for a task so that, in case its scheduled run fails, it will
+		/// be retried after `period` blocks, for a total amount of `retries` retries or until it
+		/// succeeds.
+		///
+		/// Tasks which need to be scheduled for a retry are still subject to weight metering and
+		/// agenda space, same as a regular task.
+		///
+		/// Tasks scheduled as a result of a retry are unnamed
+		/// clones of the original task. Their retry configuration will be derived from the
+		/// original task's configuration, but will have a lower value for `remaining` than the
+		/// original `total_retries`.
+		///
+		/// The `period` type must match the task's scheduling type: block-scheduled tasks
+		/// require a block-number period, and timestamp-scheduled tasks require a timestamp
+		/// period. Mismatched types will return [`Error::RetryPeriodMismatch`].
+		#[pallet::call_index(6)]
+		#[pallet::weight(<T as Config>::WeightInfo::set_retry())]
+		pub fn set_retry(
+			origin: OriginFor<T>,
+			task: TaskAddressOf<T>,
+			retries: u8,
+			period: BlockNumberOrTimestampOf<T>,
+		) -> DispatchResult {
+			T::ScheduleOrigin::ensure_origin(origin.clone())?;
+			let origin = <T as Config>::RuntimeOrigin::from(origin);
+			let (when, index) = task;
+			let agenda = Agenda::<T>::get(when);
+			let scheduled = agenda
+				.get(index as usize)
+				.and_then(Option::as_ref)
+				.ok_or(Error::<T>::NotFound)?;
+			Self::ensure_privilege(origin.caller(), &scheduled.origin)?;
+			// Ensure retry period type matches task scheduling type
+			Self::ensure_period_matches_task_type(&when, &period)?;
+			Retries::<T>::insert(
+				(when, index),
+				RetryConfig { total_retries: retries, remaining: retries, period },
+			);
+			Self::deposit_event(Event::RetrySet { task, id: None, period, retries });
+			Ok(())
+		}
+
+		/// Set a retry configuration for a named task so that, in case its scheduled run fails, it
+		/// will be retried after `period` blocks, for a total amount of `retries` retries or until
+		/// it succeeds.
+		///
+		/// Tasks which need to be scheduled for a retry are still subject to weight metering and
+		/// agenda space, same as a regular task.
+		///
+		/// Tasks scheduled as a result of a retry are unnamed
+		/// clones of the original task. Their retry configuration will be derived from the
+		/// original task's configuration, but will have a lower value for `remaining` than the
+		/// original `total_retries`.
+		///
+		/// The `period` type must match the task's scheduling type: block-scheduled tasks
+		/// require a block-number period, and timestamp-scheduled tasks require a timestamp
+		/// period. Mismatched types will return [`Error::RetryPeriodMismatch`].
+		#[pallet::call_index(7)]
+		#[pallet::weight(<T as Config>::WeightInfo::set_retry_named())]
+		pub fn set_retry_named(
+			origin: OriginFor<T>,
+			id: TaskName,
+			retries: u8,
+			period: BlockNumberOrTimestampOf<T>,
+		) -> DispatchResult {
+			T::ScheduleOrigin::ensure_origin(origin.clone())?;
+			let origin = <T as Config>::RuntimeOrigin::from(origin);
+			let (when, agenda_index) = Lookup::<T>::get(id).ok_or(Error::<T>::NotFound)?;
+			let agenda = Agenda::<T>::get(when);
+			// This defensive check handles the case where Lookup and Agenda have fallen out of
+			// sync, which indicates an internal invariant violation rather than a user-triggerable
+			// error.
+			let scheduled = agenda
+				.get(agenda_index as usize)
+				.and_then(Option::as_ref)
+				.defensive_ok_or(Error::<T>::NotFound)?;
+			Self::ensure_privilege(origin.caller(), &scheduled.origin)?;
+			// Ensure retry period type matches task scheduling type
+			Self::ensure_period_matches_task_type(&when, &period)?;
+			Retries::<T>::insert(
+				(when, agenda_index),
+				RetryConfig { total_retries: retries, remaining: retries, period },
+			);
+			Self::deposit_event(Event::RetrySet {
+				task: (when, agenda_index),
+				id: Some(id),
+				period,
+				retries,
+			});
+			Ok(())
+		}
+
+		/// Removes the retry configuration of a task.
+		#[pallet::call_index(8)]
+		#[pallet::weight(<T as Config>::WeightInfo::cancel_retry())]
+		pub fn cancel_retry(origin: OriginFor<T>, task: TaskAddressOf<T>) -> DispatchResult {
+			T::ScheduleOrigin::ensure_origin(origin.clone())?;
+			let origin = <T as Config>::RuntimeOrigin::from(origin);
+			Self::do_cancel_retry(origin.caller(), task)?;
+			Self::deposit_event(Event::RetryCancelled { task, id: None });
+			Ok(())
+		}
+
+		/// Cancel the retry configuration of a named task.
+		#[pallet::call_index(9)]
+		#[pallet::weight(<T as Config>::WeightInfo::cancel_retry_named())]
+		pub fn cancel_retry_named(origin: OriginFor<T>, id: TaskName) -> DispatchResult {
+			T::ScheduleOrigin::ensure_origin(origin.clone())?;
+			let origin = <T as Config>::RuntimeOrigin::from(origin);
+			let task = Lookup::<T>::get(id).ok_or(Error::<T>::NotFound)?;
+			Self::do_cancel_retry(origin.caller(), task)?;
+			Self::deposit_event(Event::RetryCancelled { task, id: Some(id) });
+			Ok(())
+		}
+	}
+}
+
+impl<T: Config> Pallet<T> {
+	/// Resolve a [`DispatchTime`] into a concrete [`BlockNumberOrTimestamp`] for storage.
+	///
+	/// # Block-based scheduling
+	/// - `At(block)`: Schedule at exact block number
+	/// - `After(BlockNumber(n))`: Schedule at `current_block + n + 1` (relative)
+	///
+	/// # Timestamp-based scheduling
+	/// - `After(Timestamp(target))`: Schedule in a bucket guaranteed to execute after `target`
+	///
+	/// **Important:** Timestamp scheduling uses bucket normalization. The `target` value is
+	/// treated as an absolute timestamp, not a relative delay. The task is placed in the
+	/// bucket following the one containing `target`, ensuring execution occurs strictly
+	/// after the target time (with bucket-sized granularity).
+	///
+	/// For relative delays, callers should compute `now + delay` before calling.
+	/// See [`DispatchTime`] documentation for details and examples.
+	fn resolve_time(
+		when: DispatchTime<BlockNumberFor<T>, T::Moment>,
+	) -> Result<BlockNumberOrTimestampOf<T>, DispatchError> {
+		let current_block = frame_system::Pallet::<T>::block_number();
+		let now = T::TimeProvider::now();
+
+		let when = match when {
+			DispatchTime::At(x) => BlockNumberOrTimestamp::BlockNumber(x),
+			// The current block has already completed its scheduled tasks, so
+			// schedule the task at least one block after this current block.
+			DispatchTime::After(x) => match x {
+				// Block-based: truly relative (current + delay + 1)
+				BlockNumberOrTimestamp::BlockNumber(x) => BlockNumberOrTimestamp::BlockNumber(
+					current_block.saturating_add(x).saturating_add(One::one()),
+				),
+				// Timestamp-based: bucket the target time, then advance one bucket.
+				// This ensures the task executes strictly AFTER the target timestamp.
+				//
+				// Example with bucket_size = 24000ms:
+				// - Target = 35000ms -> normalize() = 48000ms (next bucket boundary)
+				// - Then advance: 48000 + 24000 = 72000ms
+				// - Task executes when timestamp >= 72000ms, guaranteed > 35000ms
+				BlockNumberOrTimestamp::Timestamp(target) => {
+					let bucket = x.normalize(T::TimestampBucketSize::get());
+					let bucket_time = bucket.as_timestamp().unwrap_or(target);
+					BlockNumberOrTimestamp::Timestamp(
+						bucket_time.saturating_add(T::TimestampBucketSize::get()),
+					)
+				},
+			},
+		};
+
+		match when {
+			BlockNumberOrTimestamp::BlockNumber(x) => {
+				ensure!(x > current_block, Error::<T>::TargetBlockNumberInPast);
+			},
+			BlockNumberOrTimestamp::Timestamp(x) => {
+				// Ensure that the timestamp is in the future.
+				ensure!(x > now, Error::<T>::TargetTimestampInPast);
+			},
+		};
+		log::debug!(target: "scheduler", "resolve time: when: {:?}, now: {:?}", when, now);
+
+		Ok(when)
+	}
+
+	fn place_task(
+		when: BlockNumberOrTimestampOf<T>,
+		what: ScheduledOf<T>,
+	) -> Result<TaskAddressOf<T>, (DispatchError, ScheduledOf<T>)> {
+		let maybe_name = what.maybe_id;
+		let index = Self::push_to_agenda(when, what)?;
+		let address = (when, index);
+		if let Some(name) = maybe_name {
+			Lookup::<T>::insert(name, address)
+		}
+		Self::deposit_event(Event::Scheduled { when: address.0, index: address.1 });
+		Ok(address)
+	}
+
+	fn push_to_agenda(
+		when: BlockNumberOrTimestampOf<T>,
+		what: ScheduledOf<T>,
+	) -> Result<u32, (DispatchError, ScheduledOf<T>)> {
+		let mut agenda = Agenda::<T>::get(when);
+		// `LOWEST_PRIORITY` tasks (a best-effort, potentially permissionless surface such
+		// as reversible transfers) may not consume the last ~20% of an agenda, so
+		// higher-priority tasks such as governance enactment always retain headroom and
+		// cannot be censored by pre-filling their target block. Reserve at least one
+		// slot even when `MaxScheduledPerBlock < 5` (where `max / 5` would be 0).
+		if what.priority == schedule::LOWEST_PRIORITY {
+			let occupied = agenda.iter().filter(|slot| slot.is_some()).count() as u32;
+			let max = T::MaxScheduledPerBlock::get();
+			let reserved = (max / 5).max(1).min(max.saturating_sub(1));
+			let cap = max.saturating_sub(reserved);
+			if occupied >= cap {
+				return Err((DispatchError::Exhausted, what));
+			}
+		}
+		let index = if (agenda.len() as u32) < T::MaxScheduledPerBlock::get() {
+			// will always succeed due to the above check.
+			let _ = agenda.try_push(Some(what));
+			agenda.len() as u32 - 1
+		} else if let Some(hole_index) = agenda.iter().position(|i| i.is_none()) {
+			agenda[hole_index] = Some(what);
+			hole_index as u32
+		} else {
+			return Err((DispatchError::Exhausted, what));
+		};
+		Agenda::<T>::insert(when, agenda);
+		Ok(index)
+	}
+
+	/// Remove trailing `None` items of an agenda at `when`. If all items are `None` remove the
+	/// agenda record entirely.
+	fn cleanup_agenda(when: BlockNumberOrTimestampOf<T>) {
+		let mut agenda = Agenda::<T>::get(when);
+		match agenda.iter().rposition(|i| i.is_some()) {
+			Some(i) if agenda.len() > i + 1 => {
+				agenda.truncate(i + 1);
+				Agenda::<T>::insert(when, agenda);
+			},
+			Some(_) => {},
+			None => {
+				Agenda::<T>::remove(when);
+			},
+		}
+	}
+
+	fn do_schedule(
+		when: DispatchTime<BlockNumberFor<T>, T::Moment>,
+		priority: schedule::Priority,
+		origin: T::PalletsOrigin,
+		call: BoundedCallOf<T>,
+	) -> Result<TaskAddressOf<T>, DispatchError> {
+		// V12 audit #162453: callers that hand over an already-`Bounded` call (the v3 trait
+		// shims, benchmarks and tests) cannot tell whether they own a preimage request for the
+		// lookup hash, so keep the historical behavior and unconditionally request one. The
+		// `schedule*` dispatchables use `do_schedule_inner` with a precise flag instead.
+		Self::do_schedule_inner(when, priority, origin, call, true)
+	}
+
+	/// V12 audit #162453: returns `true` if `call` is large enough that `StorePreimage::bound`
+	/// will store it as a preimage lookup AND its hash carries a live request already (i.e.
+	/// `bound` will not register a fresh request count for it). Only then must the scheduling
+	/// task add its own request reference; otherwise the note made by `bound` is exactly the
+	/// reference the task owns. Must be called on the raw call, before `bound`.
+	fn lookup_already_requested(call: &<T as Config>::RuntimeCall) -> bool {
+		call.using_encoded(|encoded| {
+			// `StorePreimage::bound` only falls back to a preimage lookup when the encoded call
+			// exceeds the inline bound.
+			encoded.len() > BoundedInline::bound() &&
+				T::Preimages::is_requested(&T::Hashing::hash(encoded))
+		})
+	}
+
+	/// Release the preimage a failed schedule owns. Mirrors the ownership rule applied on the
+	/// success path: when `request_preimage` is set, `bound` did not register a count for this
+	/// task and the task holds no reference until the post-success `request()`, so dropping here
+	/// would consume the *caller's* reference instead of its own.
+	fn drop_unscheduled_preimage(call: &BoundedCallOf<T>, request_preimage: bool) {
+		if !request_preimage {
+			T::Preimages::drop(call);
+		}
+	}
+
+	fn do_schedule_inner(
+		when: DispatchTime<BlockNumberFor<T>, T::Moment>,
+		priority: schedule::Priority,
+		origin: T::PalletsOrigin,
+		call: BoundedCallOf<T>,
+		request_preimage: bool,
+	) -> Result<TaskAddressOf<T>, DispatchError> {
+		// `call` may carry a preimage noted by `StorePreimage::bound` (called by the scheduler
+		// entrypoints before this). If any later fallible step fails, drop that preimage — but
+		// only when this task owns it — so a failed schedule leaves neither an unowned,
+		// system-requested preimage behind as state bloat nor an over-released caller reference.
+		let when = match Self::resolve_time(when) {
+			Ok(when) => when,
+			Err(e) => {
+				Self::drop_unscheduled_preimage(&call, request_preimage);
+				return Err(e)
+			},
+		};
+		let lookup_hash = call.lookup_hash();
+		let task = Scheduled { maybe_id: None, priority, call, origin, _phantom: PhantomData };
+		let res = match Self::place_task(when, task) {
+			Ok(res) => res,
+			Err((e, task)) => {
+				Self::drop_unscheduled_preimage(&task.call, request_preimage);
+				return Err(e)
+			},
+		};
+		// V12 audit #162453: only request the preimage if it was already requested before the
+		// caller's `StorePreimage::bound` (in which case `bound` did not bump the request count
+		// and the task needs its own reference). Otherwise `bound` itself noted the hash as
+		// `Requested { count: 1, .. }`, which is exactly the reference this task owns, and
+		// requesting again would orphan the count since every terminal path drops only once.
+		if let Some(hash) = lookup_hash.filter(|_| request_preimage) {
+			T::Preimages::request(&hash);
+		}
+		Ok(res)
+	}
+
+	fn do_cancel(
+		origin: Option<T::PalletsOrigin>,
+		(when, index): TaskAddressOf<T>,
+	) -> Result<(), DispatchError> {
+		let scheduled = Agenda::<T>::try_mutate(when, |agenda| {
+			agenda.get_mut(index as usize).map_or(
+				Ok(None),
+				|s| -> Result<Option<Scheduled<_, _, _, _, _, _>>, DispatchError> {
+					if let (Some(ref o), Some(ref s)) = (origin, s.borrow()) {
+						Self::ensure_privilege(o, &s.origin)?;
+					};
+					Ok(s.take())
+				},
+			)
+		})?;
+		if let Some(s) = scheduled {
+			T::Preimages::drop(&s.call);
+			if let Some(id) = s.maybe_id {
+				Lookup::<T>::remove(id);
+			}
+			Retries::<T>::remove((when, index));
+			Self::cleanup_agenda(when);
+			Self::deposit_event(Event::Canceled { when, index });
+			Ok(())
+		} else {
+			Err(Error::<T>::NotFound.into())
+		}
+	}
+
+	fn do_reschedule(
+		(when, index): TaskAddressOf<T>,
+		new_time: DispatchTime<BlockNumberFor<T>, T::Moment>,
+	) -> Result<TaskAddressOf<T>, DispatchError> {
+		let new_time = Self::resolve_time(new_time)?;
+
+		if new_time == when {
+			return Err(Error::<T>::RescheduleNoChange.into());
+		}
+
+		// Validate and copy the task, leaving the source slot untouched until placement at
+		// the destination has succeeded: a failed placement (e.g. an Exhausted target
+		// agenda) must be a complete no-op rather than destroy the task, its preimage
+		// reference and its retry configuration.
+		let task = {
+			let agenda = Agenda::<T>::get(when);
+			let slot = agenda.get(index as usize).ok_or(Error::<T>::NotFound)?;
+			let task = slot.as_ref().ok_or(Error::<T>::NotFound)?;
+			ensure!(task.maybe_id.is_none(), Error::<T>::Named);
+			task.clone()
+		};
+		let new_address = Self::place_task(new_time, task).map_err(|x| x.0)?;
+
+		// Placement succeeded: vacate the source slot and move the associated state.
+		Agenda::<T>::mutate(when, |agenda| {
+			if let Some(slot) = agenda.get_mut(index as usize) {
+				*slot = None;
+			}
+		});
+		Self::cleanup_agenda(when);
+		Self::deposit_event(Event::Canceled { when, index });
+		// Transfer retry configuration to the new address
+		if let Some(retry_config) = Retries::<T>::take((when, index)) {
+			Retries::<T>::insert(new_address, retry_config);
+		}
+		Ok(new_address)
+	}
+
+	fn do_schedule_named(
+		id: TaskName,
+		when: DispatchTime<BlockNumberFor<T>, T::Moment>,
+		priority: schedule::Priority,
+		origin: T::PalletsOrigin,
+		call: BoundedCallOf<T>,
+	) -> Result<TaskAddressOf<T>, DispatchError> {
+		// See `do_schedule`: keep unconditionally requesting the preimage for callers that hand
+		// over an already-`Bounded` call; the dispatchables use `do_schedule_named_inner`.
+		Self::do_schedule_named_inner(id, when, priority, origin, call, true)
+	}
+
+	fn do_schedule_named_inner(
+		id: TaskName,
+		when: DispatchTime<BlockNumberFor<T>, T::Moment>,
+		priority: schedule::Priority,
+		origin: T::PalletsOrigin,
+		call: BoundedCallOf<T>,
+		request_preimage: bool,
+	) -> Result<TaskAddressOf<T>, DispatchError> {
+		// See `do_schedule_inner`: drop the preimage noted by `StorePreimage::bound` on every
+		// fallible path, but only when this task owns it.
+		if Lookup::<T>::contains_key(id) {
+			Self::drop_unscheduled_preimage(&call, request_preimage);
+			return Err(Error::<T>::FailedToSchedule.into());
+		}
+		let when = match Self::resolve_time(when) {
+			Ok(when) => when,
+			Err(e) => {
+				Self::drop_unscheduled_preimage(&call, request_preimage);
+				return Err(e)
+			},
+		};
+		let lookup_hash = call.lookup_hash();
+		let task =
+			Scheduled { maybe_id: Some(id), priority, call, origin, _phantom: Default::default() };
+		let res = match Self::place_task(when, task) {
+			Ok(res) => res,
+			Err((e, task)) => {
+				Self::drop_unscheduled_preimage(&task.call, request_preimage);
+				return Err(e)
+			},
+		};
+		// See `do_schedule_inner` (V12 audit #162453).
+		if let Some(hash) = lookup_hash.filter(|_| request_preimage) {
+			T::Preimages::request(&hash);
+		}
+		Ok(res)
+	}
+
+	fn do_cancel_named(origin: Option<T::PalletsOrigin>, id: TaskName) -> DispatchResult {
+		Lookup::<T>::try_mutate_exists(id, |lookup| -> DispatchResult {
+			if let Some((when, index)) = lookup.take() {
+				let i = index as usize;
+				Agenda::<T>::try_mutate(when, |agenda| -> DispatchResult {
+					// These defensive checks handle cases where Lookup and Agenda have fallen out
+					// of sync, which indicates an internal invariant violation rather than a
+					// user-triggerable error.
+					let slot = agenda.get_mut(i).defensive_ok_or(Error::<T>::NotFound)?;
+					let task = slot.as_ref().defensive_ok_or(Error::<T>::NotFound)?;
+
+					// Check privilege if origin is provided.
+					if let Some(ref o) = origin {
+						Self::ensure_privilege(o, &task.origin)?;
+					}
+
+					// Clean up task resources.
+					Retries::<T>::remove((when, index));
+					T::Preimages::drop(&task.call);
+
+					// Clear the slot.
+					*slot = None;
+					Ok(())
+				})?;
+				Self::cleanup_agenda(when);
+				Self::deposit_event(Event::Canceled { when, index });
+				Ok(())
+			} else {
+				Err(Error::<T>::NotFound.into())
+			}
+		})
+	}
+
+	fn do_reschedule_named(
+		id: TaskName,
+		new_time: DispatchTime<BlockNumberFor<T>, T::Moment>,
+	) -> Result<TaskAddressOf<T>, DispatchError> {
+		let new_time = Self::resolve_time(new_time)?;
+
+		let lookup = Lookup::<T>::get(id);
+		let (when, index) = lookup.ok_or(Error::<T>::NotFound)?;
+
+		if new_time == when {
+			return Err(Error::<T>::RescheduleNoChange.into());
+		}
+
+		// Validate and copy the task, leaving the source slot (and the Lookup entry
+		// pointing at it) untouched until placement at the destination has succeeded:
+		// a failed placement must be a complete no-op.
+		let task = {
+			let agenda = Agenda::<T>::get(when);
+			// These defensive checks handle cases where Lookup and Agenda have fallen out of sync,
+			// which indicates an internal invariant violation rather than a user-triggerable error.
+			let slot = agenda.get(index as usize).defensive_ok_or(Error::<T>::NotFound)?;
+			slot.as_ref().defensive_ok_or(Error::<T>::NotFound)?.clone()
+		};
+		// On success this re-points the Lookup entry to the new address.
+		let new_address = Self::place_task(new_time, task).map_err(|x| x.0)?;
+
+		// Placement succeeded: vacate the source slot and move the associated state.
+		Agenda::<T>::mutate(when, |agenda| {
+			if let Some(slot) = agenda.get_mut(index as usize) {
+				*slot = None;
+			}
+		});
+		Self::cleanup_agenda(when);
+		Self::deposit_event(Event::Canceled { when, index });
+		// Transfer retry configuration to the new address
+		if let Some(retry_config) = Retries::<T>::take((when, index)) {
+			Retries::<T>::insert(new_address, retry_config);
+		}
+		Ok(new_address)
+	}
+
+	fn do_cancel_retry(
+		origin: &T::PalletsOrigin,
+		(when, index): TaskAddressOf<T>,
+	) -> Result<(), DispatchError> {
+		let agenda = Agenda::<T>::get(when);
+		// Use defensive check: callers are privileged (ScheduleOrigin) and for cancel_retry_named
+		// the address comes from Lookup, so a miss here indicates either stale input or
+		// Lookup/Agenda desync.
+		let scheduled = agenda
+			.get(index as usize)
+			.and_then(Option::as_ref)
+			.defensive_ok_or(Error::<T>::NotFound)?;
+		Self::ensure_privilege(origin, &scheduled.origin)?;
+		Retries::<T>::remove((when, index));
+		Ok(())
+	}
+}
+
+enum ServiceTaskError {
+	/// Could not be executed due to missing preimage.
+	Unavailable,
+	/// Could not be executed due to weight limitations.
+	Overweight,
+}
+use ServiceTaskError::*;
+
+impl<T: Config> Pallet<T> {
+	/// Service up to `max` block-based agendas starting from earliest incompletely executed agenda.
+	fn service_block_agendas(
+		weight: &mut WeightMeter,
+		executed: &mut u32,
+		current_block: BlockNumberFor<T>,
+		max: u32,
+	) {
+		let next_block = current_block.saturating_add(One::one());
+		let start_block = IncompleteBlockSince::<T>::take().unwrap_or(current_block);
+		let mut when = start_block;
+		let mut incomplete_since = next_block;
+
+		let max_items = T::MaxScheduledPerBlock::get();
+		let mut count_down = max;
+		let service_agenda_base_weight = T::WeightInfo::service_agenda_base(max_items);
+
+		while count_down > 0 &&
+			when <= current_block &&
+			weight.can_consume(service_agenda_base_weight)
+		{
+			if !Self::service_agenda(
+				weight,
+				executed,
+				BlockNumberOrTimestamp::BlockNumber(current_block),
+				BlockNumberOrTimestamp::BlockNumber(when),
+				u32::MAX,
+			) {
+				incomplete_since = incomplete_since.min(when);
+			}
+			when = when.saturating_add(One::one());
+			count_down.saturating_dec();
+		}
+
+		// Store incomplete since if needed
+		incomplete_since = incomplete_since.min(when);
+		if incomplete_since <= current_block {
+			IncompleteBlockSince::<T>::put(incomplete_since);
+		}
+	}
+
+	/// Service up to `max` timestamp-based agendas starting from earliest incompletely executed
+	/// agenda.
+	fn service_timestamp_agendas(
+		weight: &mut WeightMeter,
+		executed: &mut u32,
+		current_time: T::Moment,
+		max: u32,
+	) {
+		let normalized_time =
+			BlockNumberOrTimestamp::<BlockNumberFor<T>, T::Moment>::Timestamp(current_time)
+				.normalize(T::TimestampBucketSize::get())
+				.as_timestamp()
+				.unwrap_or(T::Moment::zero());
+
+		log::debug!(target: "scheduler", "service_timestamp_agendas: normalized_time: {:?}", normalized_time);
+
+		let next_bucket = normalized_time.saturating_add(T::TimestampBucketSize::get());
+
+		// Start from incomplete timestamp if exists, otherwise from last processed timestamp
+		let start_time = if let Some(incomplete) = IncompleteTimestampSince::<T>::take() {
+			incomplete
+		} else {
+			// on the very first processing cycle just set this to current time
+			LastProcessedTimestamp::<T>::get().unwrap_or(normalized_time)
+		};
+		log::debug!(target: "scheduler", "service_timestamp_agendas: start_time: {:?}", start_time);
+
+		let mut when = start_time;
+		let mut incomplete_since = next_bucket;
+
+		let max_items = T::MaxScheduledPerBlock::get();
+		let mut count_down = max;
+		let service_agenda_base_weight = T::WeightInfo::service_agenda_base(max_items);
+
+		while count_down > 0 &&
+			when <= normalized_time &&
+			weight.can_consume(service_agenda_base_weight)
+		{
+			log::debug!(target: "scheduler", "service_timestamp_agendas: when: {:?}", when);
+			if !Self::service_agenda(
+				weight,
+				executed,
+				BlockNumberOrTimestamp::Timestamp(normalized_time),
+				BlockNumberOrTimestamp::Timestamp(when),
+				u32::MAX,
+			) {
+				incomplete_since = incomplete_since.min(when);
+			}
+			when = when.saturating_add(T::TimestampBucketSize::get());
+			count_down.saturating_dec();
+		}
+
+		// Store incomplete since if needed
+		incomplete_since = incomplete_since.min(when);
+		if incomplete_since <= normalized_time {
+			IncompleteTimestampSince::<T>::put(incomplete_since);
+		}
+
+		// Always update the last processed timestamp to the current block's normalized time.
+		// The scheduler's correctness is maintained by `IncompleteTimestampSince`,
+		// which is always checked first and takes priority.
+		LastProcessedTimestamp::<T>::put(normalized_time);
+	}
+
+	/// Returns `true` if the agenda was fully completed, `false` if it should be revisited at a
+	/// later block.
+	/// Process all tasks scheduled for time `when`. Executes up to `max` tasks in priority
+	/// order, constrained by available block weight. Returns `true` if fully processed (no
+	/// tasks were postponed to a future block).
+	fn service_agenda(
+		weight: &mut WeightMeter,
+		executed: &mut u32,
+		now: BlockNumberOrTimestampOf<T>,
+		when: BlockNumberOrTimestampOf<T>,
+		max: u32,
+	) -> bool {
+		// Load the agenda from storage. This is a BoundedVec<Option<Scheduled>> where None
+		// slots are holes left by previously cancelled tasks.
+		let mut agenda = Agenda::<T>::get(when);
+		log::debug!(target: "scheduler", "service_agenda: agenda: {agenda:?}");
+
+		// Collect (index, priority) pairs for non-empty slots, then sort by priority
+		// (lower number = higher priority = executes first).
+		let mut ordered = agenda
+			.iter()
+			.enumerate()
+			.filter_map(|(index, maybe_item)| {
+				maybe_item.as_ref().map(|item| (index as u32, item.priority))
+			})
+			.collect::<Vec<_>>();
+		ordered.sort_by_key(|k| k.1);
+
+		// Charge the base weight for iterating this agenda (scales with task count).
+		let within_limit = weight
+			.try_consume(T::WeightInfo::service_agenda_base(ordered.len() as u32))
+			.is_ok();
+		debug_assert!(within_limit, "weight limit should have been checked in advance");
+
+		log::debug!(target: "scheduler", "service_agenda: iterating over items: {:?}", ordered.len());
+
+		// Tasks beyond the per-block limit are already known to be postponed.
+		let mut postponed = (ordered.len() as u32).saturating_sub(max);
+
+		// Process up to `max` tasks in priority order.
+		for (agenda_index, _) in ordered.into_iter().take(max as usize) {
+			// Take the task out of the agenda slot, leaving None.
+			let task = match agenda[agenda_index as usize].take() {
+				None => continue, // we already filtered out empty slots, this never happens.
+				Some(t) => t,
+			};
+
+			let base_weight = T::WeightInfo::service_task(
+				task.call.lookup_len().map(|x| x as usize),
+				task.maybe_id.is_some(),
+			);
+
+			// If the block can't afford even the base cost, put the task back and stop.
+			if !weight.can_consume(base_weight) {
+				agenda[agenda_index as usize] = Some(task);
+				postponed += 1;
+				break;
+			}
+
+			// Execute the task.
+			let result = Self::service_task(weight, now, when, agenda_index, *executed == 0, task);
+
+			// Put the task back in the agenda if it was not executed.
+			agenda[agenda_index as usize] = match result {
+				// Preimage unavailable or permanently overweight -- task is removed (None).
+				// Not counted as postponed since re-processing this block won't help.
+				// V12 audit #181231: still counts as serviced work so its charged weight cannot
+				// cause a later task to be misclassified as permanently overweight against a
+				// fresh scheduler meter next block.
+				Err((Unavailable, slot)) => {
+					*executed += 1;
+					slot
+				},
+				// Too heavy for this block but may fit next block.
+				Err((Overweight, slot)) => {
+					postponed += 1;
+					slot
+				},
+				// Successfully executed -- clear the slot.
+				Ok(()) => {
+					*executed += 1;
+					None
+				},
+			};
+		}
+
+		// Write back if any tasks remain, otherwise delete the storage entry entirely.
+		if agenda.iter().any(|s| s.is_some()) {
+			Agenda::<T>::insert(when, agenda);
+		} else {
+			Agenda::<T>::remove(when);
+		}
+
+		// True when no tasks were deferred -- the agenda is fully processed.
+		postponed == 0
+	}
+
+	/// Service (i.e. execute) the given task, being careful not to overflow the `weight` counter.
+	///
+	/// This involves:
+	/// - removing and potentially replacing the `Lookup` entry for the task.
+	/// - realizing the task's call which can include a preimage lookup.
+	///
+	/// Returns `Ok(())` on successful dispatch, or `Err` with the task back (`Some`) for
+	/// retry / postponement, or `None` if permanently removed.
+	fn service_task(
+		weight: &mut WeightMeter,
+		now: BlockNumberOrTimestampOf<T>,
+		when: BlockNumberOrTimestampOf<T>,
+		agenda_index: u32,
+		is_first: bool,
+		task: ScheduledOf<T>,
+	) -> Result<(), (ServiceTaskError, Option<ScheduledOf<T>>)> {
+		// NOTE: Lookup removal is deferred until terminal outcomes (successful dispatch,
+		// permanently overweight, or preimage unavailable). Tasks that return to the Agenda
+		// due to temporary overweight keep their Lookup intact so they remain reachable by
+		// name for cancel_named/reschedule_named.
+
+		// Try to retrieve the actual call data. For inline calls this is a no-op decode.
+		// For lookup calls this fetches from the preimage store.
+		let (call, lookup_len) = match T::Preimages::peek(&task.call) {
+			Ok(c) => c,
+			Err(_) => {
+				// Preimage not available. This is a terminal failure: the task cannot
+				// execute without its call data. Clean up completely (Lookup, Retries,
+				// preimage reference) and remove from Agenda by returning None.
+				if let Some(ref id) = task.maybe_id {
+					Lookup::<T>::remove(id);
+				}
+				Retries::<T>::remove((when, agenda_index));
+				T::Preimages::drop(&task.call);
+
+				Self::deposit_event(Event::CallUnavailable {
+					task: (when, agenda_index),
+					id: task.maybe_id,
+				});
+
+				let _ = weight.try_consume(T::WeightInfo::service_task(
+					task.call.lookup_len().map(|x| x as usize),
+					task.maybe_id.is_some(),
+				));
+
+				return Err((Unavailable, None));
+			},
+		};
+
+		let _ = weight.try_consume(T::WeightInfo::service_task(
+			lookup_len.map(|x| x as usize),
+			task.maybe_id.is_some(),
+		));
+
+		match Self::execute_dispatch(weight, task.origin.clone(), call) {
+			Err(()) if is_first => {
+				// Terminal outcome: permanently overweight. Remove Lookup since task won't retry.
+				if let Some(ref id) = task.maybe_id {
+					Lookup::<T>::remove(id);
+				}
+				// V12 audit #162524: also drop the retry configuration, mirroring the
+				// `CallUnavailable` arm above - a permanently removed task must not retain one.
+				Retries::<T>::remove((when, agenda_index));
+				T::Preimages::drop(&task.call);
+				Self::deposit_event(Event::PermanentlyOverweight {
+					task: (when, agenda_index),
+					id: task.maybe_id,
+				});
+				Err((Unavailable, None))
+			},
+			Err(()) => Err((Overweight, Some(task))),
+			Ok(result) => {
+				// Terminal outcome: dispatch completed. Remove Lookup since task is done.
+				if let Some(ref id) = task.maybe_id {
+					Lookup::<T>::remove(id);
+				}
+
+				let failed = result.is_err();
+				let maybe_retry_config = Retries::<T>::take((when, agenda_index));
+
+				Self::deposit_event(Event::Dispatched {
+					task: (when, agenda_index),
+					id: task.maybe_id,
+					result,
+				});
+
+				// Handle retry and preimage ownership:
+				// - If retry succeeds, ownership transfers to the retry clone (don't drop)
+				// - If retry fails or no retry configured, drop the original preimage
+				let retry_scheduled = if let Some(retry_config) = maybe_retry_config {
+					if failed {
+						Self::schedule_retry(weight, now, when, agenda_index, &task, retry_config)
+					} else {
+						// Task succeeded, no retry needed
+						false
+					}
+				} else {
+					// No retry config
+					false
+				};
+
+				// Only drop preimage if retry wasn't scheduled (ownership not transferred)
+				if !retry_scheduled {
+					T::Preimages::drop(&task.call);
+				}
+				Ok(())
+			},
+		}
+	}
+
+	/// Make a dispatch to the given `call` from the given `origin`, ensuring that the `weight`
+	/// counter does not exceed its limit and that it is counted accurately (e.g. accounted using
+	/// post info if available).
+	///
+	/// NOTE: Only the weight for this function will be counted (origin lookup, dispatch and the
+	/// call itself).
+	///
+	/// Returns an error if the call is overweight.
+	fn execute_dispatch(
+		weight: &mut WeightMeter,
+		origin: T::PalletsOrigin,
+		call: <T as Config>::RuntimeCall,
+	) -> Result<DispatchResult, ()> {
+		let base_weight = match origin.as_system_ref() {
+			Some(&RawOrigin::Signed(_)) => T::WeightInfo::execute_dispatch_signed(),
+			_ => T::WeightInfo::execute_dispatch_unsigned(),
+		};
+		let call_weight = call.get_dispatch_info().call_weight;
+		// We only allow a scheduled call if it cannot push the weight past the limit.
+		let max_weight = base_weight.saturating_add(call_weight);
+
+		if !weight.can_consume(max_weight) {
+			return Err(());
+		}
+
+		let dispatch_origin = origin.into();
+		let (maybe_actual_call_weight, result) = match call.dispatch(dispatch_origin) {
+			Ok(post_info) => (post_info.actual_weight, Ok(())),
+			Err(error_and_info) =>
+				(error_and_info.post_info.actual_weight, Err(error_and_info.error)),
+		};
+		let call_weight = maybe_actual_call_weight.unwrap_or(call_weight);
+		let _ = weight.try_consume(base_weight);
+		let _ = weight.try_consume(call_weight);
+		Ok(result)
+	}
+
+	/// Check if a task has a retry configuration in place and, if so, try to reschedule it.
+	///
+	/// Possible causes for failure to schedule a retry for a task:
+	/// - there wasn't enough weight to run the task reschedule logic
+	/// - there was no retry configuration in place
+	/// - there were no more retry attempts left
+	/// - the agenda was full.
+	///
+	/// Returns `true` if a retry was successfully scheduled, `false` otherwise.
+	/// The caller should only drop the original task's preimage reference if this returns `false`,
+	/// as a successful retry transfers ownership of that reference to the retry clone.
+	fn schedule_retry(
+		weight: &mut WeightMeter,
+		now: BlockNumberOrTimestampOf<T>,
+		when: BlockNumberOrTimestampOf<T>,
+		agenda_index: u32,
+		task: &ScheduledOf<T>,
+		retry_config: RetryConfig<BlockNumberOrTimestampOf<T>>,
+	) -> bool {
+		if weight
+			.try_consume(T::WeightInfo::schedule_retry(T::MaxScheduledPerBlock::get()))
+			.is_err()
+		{
+			Self::deposit_event(Event::RetryFailed {
+				task: (when, agenda_index),
+				id: task.maybe_id,
+			});
+			return false;
+		}
+
+		let RetryConfig { total_retries, mut remaining, period } = retry_config;
+		remaining = match remaining.checked_sub(1) {
+			Some(n) => n,
+			None => return false,
+		};
+		match now.saturating_add(&period) {
+			Ok(wake) => match Self::place_task(wake, task.as_retry()) {
+				Ok(address) => {
+					// Retry successfully placed. The retry clone now "owns" the preimage
+					// reference that was held by the original task. The caller should NOT
+					// drop the original task's preimage since ownership has transferred.
+					Retries::<T>::insert(address, RetryConfig { total_retries, remaining, period });
+					true
+				},
+				Err((_, retry_task)) => {
+					// Retry placement failed (agenda full). The retry clone was never
+					// successfully placed, so it doesn't own a preimage reference.
+					// Do NOT drop the retry clone's preimage here - it never acquired one.
+					// The caller will drop the original task's preimage.
+					Self::deposit_event(Event::RetryFailed {
+						task: (when, agenda_index),
+						id: retry_task.maybe_id,
+					});
+					false
+				},
+			},
+			Err(_) => {
+				// Period type mismatch (saturating_add failed).
+				Self::deposit_event(Event::RetryFailed {
+					task: (when, agenda_index),
+					id: task.maybe_id,
+				});
+				false
+			},
+		}
+	}
+
+	/// Ensure that `left` has at least the same level of privilege or higher than `right`.
+	///
+	/// Returns an error if `left` has a lower level of privilege or the two cannot be compared.
+	fn ensure_privilege(
+		left: &<T as Config>::PalletsOrigin,
+		right: &<T as Config>::PalletsOrigin,
+	) -> Result<(), DispatchError> {
+		if matches!(T::OriginPrivilegeCmp::cmp_privilege(left, right), Some(Ordering::Less) | None)
+		{
+			return Err(BadOrigin.into());
+		}
+		Ok(())
+	}
+
+	/// Ensure the retry period type matches the task's scheduling type and its value is usable.
+	///
+	/// Block-scheduled tasks (with a `BlockNumber` address) require a block-number retry period,
+	/// and timestamp-scheduled tasks require a timestamp retry period. The period must also be
+	/// non-zero — and, for timestamps, a whole multiple of [`Config::TimestampBucketSize`] —
+	/// otherwise the retry would be placed in an agenda that is never serviced (or is clobbered
+	/// by the write-back of the agenda currently being serviced) and silently lost.
+	fn ensure_period_matches_task_type(
+		task_when: &BlockNumberOrTimestampOf<T>,
+		period: &BlockNumberOrTimestampOf<T>,
+	) -> Result<(), DispatchError> {
+		match (task_when, period) {
+			(BlockNumberOrTimestamp::BlockNumber(_), BlockNumberOrTimestamp::BlockNumber(p)) => {
+				// A zero period makes `schedule_retry` place the retry clone into the
+				// agenda currently being serviced; `service_agenda`'s stale write-back
+				// then discards the clone while its `Retries` row survives, orphaned.
+				ensure!(!p.is_zero(), Error::<T>::InvalidRetryPeriod);
+			},
+			(BlockNumberOrTimestamp::Timestamp(_), BlockNumberOrTimestamp::Timestamp(p)) => {
+				// Beyond the zero-period hazard above, `schedule_retry` computes
+				// `wake = now + period` without re-normalizing to a bucket boundary, so
+				// a period that is not a whole number of buckets lands the retry in an
+				// agenda key the bucket-stepping servicing loop never visits: the retry
+				// would silently never execute and its preimage would be held forever.
+				let bucket = T::TimestampBucketSize::get();
+				ensure!(!p.is_zero() && (*p % bucket).is_zero(), Error::<T>::InvalidRetryPeriod);
+			},
+			_ => return Err(Error::<T>::RetryPeriodMismatch.into()),
+		}
+		Ok(())
+	}
+}
+
+use schedule::v3::TaskName;
+
+// Shims for Substrate's v3 scheduler traits, required by pallet_referenda.
+// Periodic scheduling is intentionally unsupported.
+impl<T: Config> schedule::v3::Anon<BlockNumberFor<T>, <T as Config>::RuntimeCall, T::PalletsOrigin>
+	for Pallet<T>
+{
+	type Address = TaskAddressOf<T>;
+	type Hasher = T::Hashing;
+
+	fn schedule(
+		when: DispatchBlock<BlockNumberFor<T>>,
+		maybe_periodic: Option<schedule::Period<BlockNumberFor<T>>>,
+		priority: schedule::Priority,
+		origin: T::PalletsOrigin,
+		call: BoundedCallOf<T>,
+	) -> Result<Self::Address, DispatchError> {
+		if maybe_periodic.is_some() {
+			return Err(Error::<T>::PeriodicNotSupported.into());
+		}
+		Self::do_schedule(when.into(), priority, origin, call)
+	}
+
+	fn cancel((when, index): Self::Address) -> Result<(), DispatchError> {
+		Self::do_cancel(None, (when, index)).map_err(map_err_to_v3_err::<T>)
+	}
+
+	fn reschedule(
+		address: Self::Address,
+		when: DispatchBlock<BlockNumberFor<T>>,
+	) -> Result<Self::Address, DispatchError> {
+		Self::do_reschedule(address, when.into()).map_err(map_err_to_v3_err::<T>)
+	}
+
+	fn next_dispatch_time(
+		(when, index): Self::Address,
+	) -> Result<BlockNumberFor<T>, DispatchError> {
+		Agenda::<T>::get(when)
+			.get(index as usize)
+			.and_then(|slot| slot.as_ref()) // Verify slot contains a task, not just exists
+			.ok_or(DispatchError::Unavailable)
+			.and_then(|_| when.as_block_number().ok_or(DispatchError::Unavailable))
+	}
+}
+
+impl<T: Config> schedule::v3::Named<BlockNumberFor<T>, <T as Config>::RuntimeCall, T::PalletsOrigin>
+	for Pallet<T>
+{
+	type Address = TaskAddressOf<T>;
+	type Hasher = T::Hashing;
+
+	fn schedule_named(
+		id: TaskName,
+		when: DispatchBlock<BlockNumberFor<T>>,
+		maybe_periodic: Option<schedule::Period<BlockNumberFor<T>>>,
+		priority: schedule::Priority,
+		origin: T::PalletsOrigin,
+		call: BoundedCallOf<T>,
+	) -> Result<Self::Address, DispatchError> {
+		if maybe_periodic.is_some() {
+			return Err(Error::<T>::PeriodicNotSupported.into());
+		}
+		Self::do_schedule_named(id, when.into(), priority, origin, call)
+	}
+
+	fn cancel_named(id: TaskName) -> Result<(), DispatchError> {
+		Self::do_cancel_named(None, id).map_err(map_err_to_v3_err::<T>)
+	}
+
+	fn reschedule_named(
+		id: TaskName,
+		when: DispatchBlock<BlockNumberFor<T>>,
+	) -> Result<Self::Address, DispatchError> {
+		Self::do_reschedule_named(id, when.into()).map_err(map_err_to_v3_err::<T>)
+	}
+
+	fn next_dispatch_time(id: TaskName) -> Result<BlockNumberFor<T>, DispatchError> {
+		let Some((when, index)) = Lookup::<T>::get(id) else {
+			return Err(DispatchError::Unavailable);
+		};
+		// If Lookup succeeds but Agenda doesn't have the task, this is an invariant violation.
+		let agenda = Agenda::<T>::get(when);
+		let task_exists = agenda.get(index as usize).and_then(|slot| slot.as_ref()).is_some();
+		if !task_exists {
+			defensive!("Lookup/Agenda inconsistency in next_dispatch_time (Named trait)");
+			return Err(DispatchError::Unavailable);
+		}
+		when.as_block_number().ok_or(DispatchError::Unavailable)
+	}
+}
+
+impl<T: Config>
+	ScheduleNamed<
+		BlockNumberFor<T>,
+		<T as Config>::Moment,
+		<T as Config>::RuntimeCall,
+		T::PalletsOrigin,
+	> for Pallet<T>
+{
+	type Address = TaskAddressOf<T>;
+	type Hasher = T::Hashing;
+	fn schedule_named(
+		id: TaskName,
+		when: DispatchTime<BlockNumberFor<T>, T::Moment>,
+		priority: schedule::Priority,
+		origin: T::PalletsOrigin,
+		call: BoundedCallOf<T>,
+	) -> Result<Self::Address, DispatchError> {
+		Self::do_schedule_named(id, when, priority, origin, call)
+	}
+
+	fn cancel_named(id: TaskName) -> Result<(), DispatchError> {
+		Self::do_cancel_named(None, id).map_err(map_err_to_v3_err::<T>)
+	}
+
+	fn reschedule_named(
+		id: TaskName,
+		when: DispatchTime<BlockNumberFor<T>, T::Moment>,
+	) -> Result<Self::Address, DispatchError> {
+		Self::do_reschedule_named(id, when).map_err(map_err_to_v3_err::<T>)
+	}
+
+	fn next_dispatch_time(id: TaskName) -> Result<BlockNumberFor<T>, DispatchError> {
+		let (when, index) = Lookup::<T>::get(id).ok_or(DispatchError::Unavailable)?;
+		// If Lookup succeeds but Agenda doesn't have the task, this is an invariant violation.
+		let agenda = Agenda::<T>::get(when);
+		let task_exists = agenda.get(index as usize).and_then(|slot| slot.as_ref()).is_some();
+		if !task_exists {
+			defensive!("Lookup/Agenda inconsistency in next_dispatch_time (ScheduleNamed trait)");
+			return Err(DispatchError::Unavailable);
+		}
+		when.as_block_number().ok_or(DispatchError::Unavailable)
+	}
+}
+
+/// Maps a pallet error to an `schedule::v3` error.
+fn map_err_to_v3_err<T: Config>(err: DispatchError) -> DispatchError {
+	if err == DispatchError::from(Error::<T>::NotFound) {
+		DispatchError::Unavailable
+	} else {
+		err
+	}
+}

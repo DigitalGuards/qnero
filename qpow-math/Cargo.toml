@@ -1,0 +1,19 @@
+[package]
+edition = "2021"
+name = "qpow-math"
+version = "0.1.0"
+
+[dependencies]
+hex = { workspace = true, features = ["alloc"] }
+log = { workspace = true }
+primitive-types = { workspace = true }
+qp-poseidon-core = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[features]
+default = ["std"]
+std = [
+	"primitive-types/std",
+]

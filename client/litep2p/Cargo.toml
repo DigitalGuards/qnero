@@ -1,0 +1,83 @@
+[package]
+description = "Post-quantum peer-to-peer networking library for Quantus Network"
+edition = "2021"
+license = "MIT"
+name = "litep2p"
+repository = "https://github.com/Quantus-Network/chain"
+version = "0.13.3"
+
+[build-dependencies]
+prost-build = { workspace = true }
+
+[dependencies]
+async-trait = { workspace = true }
+bs58 = { workspace = true }
+bytes = { workspace = true }
+cid = { workspace = true }
+clatter = { workspace = true }
+enum-display = { workspace = true }
+futures = { workspace = true }
+futures-timer = { workspace = true }
+hickory-resolver = { workspace = true }
+indexmap = { workspace = true }
+ip_network = { workspace = true }
+libc = { workspace = true }
+mockall = { workspace = true }
+multiaddr = { workspace = true }
+multihash = { workspace = true, features = ["std"] }
+multihash-codetable = { workspace = true }
+network-interface = { workspace = true }
+parking_lot = { workspace = true }
+pin-project = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true, features = ["getrandom", "std", "std_rng"] }
+serde = { workspace = true }
+sha2 = { workspace = true }
+simple-dns = { workspace = true }
+smallvec = { workspace = true }
+socket2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "parking_lot", "rt", "sync", "time"] }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true, features = ["codec", "compat", "io"] }
+tracing = { workspace = true, features = ["log"] }
+uint = { workspace = true }
+unsigned-varint = { workspace = true }
+url = { workspace = true }
+x509-parser = { workspace = true }
+yamux = { workspace = true }
+yasna = { workspace = true }
+zeroize = { workspace = true }
+
+# Post-quantum cryptography
+qp-rusty-crystals-dilithium = { workspace = true }
+
+# Websocket
+tokio-tungstenite = { workspace = true, optional = true }
+
+# Fuzzing
+serde_millis = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures_ringbuf = { workspace = true }
+hex-literal = { workspace = true }
+quickcheck = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+tracing-subscriber = { workspace = true }
+
+[features]
+default = ["websocket"]
+fuzz = [
+	"bytes/serde",
+	"cid/serde",
+	"dep:serde_millis",
+	"multihash/serde",
+	"serde/derive",
+	"serde/rc",
+]
+websocket = ["dep:tokio-tungstenite"]
+# Compatibility feature - RSA support removed in favor of post-quantum Dilithium
+rsa = []
+
+[lints]
+workspace = true

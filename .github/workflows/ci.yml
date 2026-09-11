@@ -1,0 +1,101 @@
+---
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 1
+  CARGO_PROFILE_TEST_DEBUG: 1
+
+jobs:
+  fast-checks:
+    name: 🏁 Fast Checks (Format)
+    runs-on: Large-Linux-x64-Runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ubuntu
+      - name: Install taplo
+        run: |
+          curl -fsSL https://github.com/tamasfe/taplo/releases/download/0.9.3/taplo-linux-x86_64.gz | gunzip > taplo
+          chmod +x taplo
+          sudo mv taplo /usr/local/bin/
+      - name: Run format checks
+        run: |
+          taplo format --check --config taplo.toml
+          scripts/fmt.sh --all -- --check
+
+  build-and-test-matrix:
+    name: 🛠️ Check & Test Matrix
+    needs: fast-checks
+    runs-on: ${{ matrix.os }}
+    # Production default is 53 (build.rs). Do not override here — CI must exercise
+    # the same public-batch circuit size as release builds (fixtures regenerated
+    # for 53; weights measured against that verifier).
+    strategy:
+      fail-fast: true
+      matrix:
+        os:
+          - Large-Linux-x64-Runner
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Ubuntu
+        if: matrix.os == 'Large-Linux-x64-Runner'
+        uses: ./.github/actions/ubuntu
+      - name: Setup macOS
+        if: matrix.os == 'macos-latest'
+        uses: ./.github/actions/macos
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "build-${{ matrix.os == 'Large-Linux-x64-Runner' && 'ubuntu' || matrix.os }}"
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      # Feature-gate only: catch runtime-benchmarks/try-runtime breakages without a
+      # full build. Tests use different features (fast-governance), so a prior
+      # `cargo build` was mostly thrown away. Leave WASM enabled here so PR/main
+      # still exercises runtime wasm via build.rs; tests keep SKIP_WASM_BUILD=1.
+      - name: check feature gates
+        run: cargo check --locked --workspace --features runtime-benchmarks,try-runtime
+      - name: test
+        run: SKIP_WASM_BUILD=1 cargo nextest run --locked --workspace --features quantus-runtime/fast-governance
+      - name: doctest
+        run: SKIP_WASM_BUILD=1 cargo test --locked --workspace --doc --features quantus-runtime/fast-governance
+
+  analysis:
+    name: 🤖 Analysis (Clippy & Doc)
+    needs: fast-checks
+    runs-on: Large-Linux-x64-Runner
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Ubuntu
+        uses: ./.github/actions/ubuntu
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Match the Linux matrix job so clippy/doc can reuse its cache.
+          shared-key: "build-ubuntu"
+      - name: Install required components
+        run: rustup component add rust-src clippy
+      - name: Run clippy
+        run: SKIP_WASM_BUILD=1 cargo clippy --locked --workspace -- -D warnings
+      - name: Run doc
+        run: SKIP_WASM_BUILD=1 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
