@@ -12,6 +12,7 @@
 //! would build, prove and verify against itself while diverging from every
 //! wallet-side commitment, so the choice is pinned by the parity tests.
 
+use plonky2::field::types::Field as _;
 use plonky2::hash::hash_types::HashOutTarget;
 use plonky2::hash::poseidon2::Poseidon2Hash;
 use plonky2::iop::target::Target;
@@ -76,6 +77,21 @@ pub fn note_commitment(
     value: Target,
 ) -> HashOutTarget {
     hash_with_domain(builder, domain::CM, &[&inner.elements, &[value]])
+}
+
+/// `rho = H(RHO, nf, index)`: the nullifier seed of output note `index`.
+///
+/// The mirror of `qnero_notes::output_rho`. An output's `rho` is derived from
+/// the leaf's first published nullifier, so a sender cannot hand two notes the
+/// same `rho` and strand one of them; see that function for the griefing
+/// vector this closes.
+pub fn output_rho(
+    builder: &mut CircuitBuilder<F, D>,
+    nullifier: HashOutTarget,
+    index: u64,
+) -> HashOutTarget {
+    let index = builder.constant(F::from_canonical_u64(index));
+    hash_with_domain(builder, domain::RHO, &[&nullifier.elements, &[index]])
 }
 
 /// `nf = H(NF, nk, rho)`.

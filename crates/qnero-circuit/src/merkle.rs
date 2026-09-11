@@ -527,6 +527,50 @@ mod tests {
         );
     }
 
+    /// The node rule again, this time against the route `pallets/zk-tree`
+    /// takes: sort the four 32-byte forms, concatenate to 128 bytes, decode at
+    /// 8 bytes per element, hash to bytes. Qnero copies the children's limbs
+    /// straight into 16 field elements instead, which is the same function
+    /// only as long as the byte decode and the limb order agree.
+    ///
+    /// `node_hashing_matches_the_in_circuit_sponge` cannot see a divergence
+    /// here: it compares this crate's off-circuit hash against plonky2's
+    /// sponge, so a change in `qp-poseidon-core`'s byte handling would leave
+    /// every test in this crate green while every path fetched from the chain
+    /// reached a different root. The expected value is pinned as bytes for the
+    /// same reason `qnero-notes` pins its note vectors: a dependency bump must
+    /// not be able to move it quietly.
+    #[test]
+    fn node_hashing_matches_the_pallet_byte_route() {
+        let children = [
+            Digest::from_bytes(&[0x01; 32]).unwrap(),
+            Digest::from_bytes(&[0x02; 32]).unwrap(),
+            Digest::from_bytes(&[0x03; 32]).unwrap(),
+            empty_digest(),
+        ];
+
+        let mut sorted: [[u8; 32]; ARITY] = core::array::from_fn(|i| children[i].to_bytes());
+        sorted.sort();
+        let mut concatenated = Vec::with_capacity(ARITY * 32);
+        for child in &sorted {
+            concatenated.extend_from_slice(child);
+        }
+        let felts: Vec<Felt> =
+            qp_poseidon_core::serialization::bytes_to_u64s_compact(&concatenated)
+                .into_iter()
+                .map(Felt::from_u64)
+                .collect();
+        assert_eq!(felts.len(), ARITY * 4);
+        let pallet_route = qp_poseidon_core::hash_to_bytes(&felts);
+
+        let parent = hash_node(&children);
+        assert_eq!(parent.to_bytes(), pallet_route);
+        assert_eq!(
+            parent.to_hex(),
+            "af921c8f15cad25901d3789b67281a09c3fc3aa7d13a1b9b66d55593bdfc5c00"
+        );
+    }
+
     #[test]
     fn node_hashing_is_order_independent() {
         let a = leaf(b"a");

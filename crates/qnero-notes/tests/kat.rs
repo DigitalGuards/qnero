@@ -2,7 +2,7 @@
 //! qnero-notes --test kat` and review the diff; any change here is a
 //! consensus-breaking change to key or note derivation.
 
-use qnero_notes::{Digest, Note, SpendingKey};
+use qnero_notes::{output_rho, Digest, Note, SpendingKey};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -18,6 +18,11 @@ struct Vector {
     inner: String,
     cm: String,
     nf: String,
+    /// `rho` the spend circuit derives for output 0 of a leaf whose first
+    /// nullifier is `nf`. Consensus-critical: the circuit computes it from the
+    /// same rule and a note whose `rho` does not match is not the note the
+    /// leaf committed to.
+    output_rho_0: String,
 }
 
 fn make(seed_byte: u8) -> Vector {
@@ -39,6 +44,7 @@ fn make(seed_byte: u8) -> Vector {
         inner: note.inner().to_hex(),
         cm: note.commitment().to_hex(),
         nf: note.nullifier(&sk.nk()).to_hex(),
+        output_rho_0: output_rho(&note.nullifier(&sk.nk()), 0).to_hex(),
     }
 }
 

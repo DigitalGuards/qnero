@@ -140,6 +140,28 @@ pub fn validate_circuit_config(config: &CircuitConfig) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// `qnero_circuit::params` is what `qnero-verifier` holds an artifact to,
+    /// and it compiles without plonky2, so nothing but this test ties it to
+    /// the config the prover actually builds with.
+    #[test]
+    fn the_canonical_config_matches_the_published_parameters() {
+        use crate::params;
+
+        let config = qnero_leaf_circuit_config();
+        assert_eq!(config.security_bits, params::SECURITY_BITS);
+        assert_eq!(config.num_challenges, params::NUM_CHALLENGES);
+        assert_eq!(
+            config.fri_config.num_query_rounds,
+            params::FRI_NUM_QUERY_ROUNDS
+        );
+        assert_eq!(config.fri_config.rate_bits, params::FRI_RATE_BITS);
+        assert_eq!(config.fri_config.cap_height, params::FRI_CAP_HEIGHT);
+        assert_eq!(
+            config.fri_config.proof_of_work_bits,
+            params::FRI_PROOF_OF_WORK_BITS
+        );
+    }
+
     #[test]
     fn canonical_configs_pass() {
         validate_circuit_config(&qnero_leaf_circuit_config()).unwrap();

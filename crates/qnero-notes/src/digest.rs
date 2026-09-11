@@ -77,4 +77,8 @@ pub mod domain {
     pub const NOTE: Felt = Felt::new(0x716e_0003);
     pub const CM: Felt = Felt::new(0x716e_0004);
     pub const NF: Felt = Felt::new(0x716e_0005);
+    /// Seed of an output note's `rho`. The circuit derives it from the leaf's
+    /// first published nullifier, so two outputs can never carry the same
+    /// `rho`.
+    pub const RHO: Felt = Felt::new(0x716e_0006);
 }

@@ -54,7 +54,8 @@ Per input note, twice:
 - a Merkle path: 16 levels of 3 sibling digests plus a position hint per level.
 - `is_dummy` (1 bit).
 
-Per output note, twice: `pk` (4), `value` (1), `rho` (4), `r` (4).
+Per output note, twice: `pk` (4), `value` (1), `r` (4). Its `rho` is derived
+in circuit, see section 3.
 
 Plus the header preimage (`parent_hash`, `state_root`, `extrinsics_root`,
 `zk_tree_root`, 28 felts of digest logs) and one `depth` shared by both paths.
@@ -62,7 +63,8 @@ Plus the header preimage (`parent_hash`, `state_root`, `extrinsics_root`,
 `pk` is never witnessed for an input. It is derived in circuit from `ask` and
 `nk`, so a wrong credential produces a commitment that is not in the tree.
 Witnessing `pk` and constraining it to equal the derived value is equivalent
-and costs one more equality.
+and costs one more equality. An output's `rho` is likewise derived, for a
+different reason: see section 3.
 
 ## 3. Hash rules
 
@@ -72,16 +74,36 @@ what the circuit publishes against `Note::commitment` and `Note::nullifier`
 for the same witness.
 
 ```text
-ak    = H(AK,   ask)
-pk    = H(PK,   ak, nk)
-inner = H(NOTE, pk, rho, r)
-cm    = H(CM,   inner, value)
-nf    = H(NF,   nk, rho)
+ak        = H(AK,   ask)
+pk        = H(PK,   ak, nk)
+inner     = H(NOTE, pk, rho, r)
+cm        = H(CM,   inner, value)
+nf        = H(NF,   nk, rho)
+rho_out_j = H(RHO,  nf_1, j)
 ```
 
 `H(tag, parts...)` is Poseidon2 over the concatenation with the one-felt domain
 tag first. `value` is a single field element over its full 62-bit range, not
 the two 32-bit limbs the Wormhole leaf uses for a `u64`.
+
+**An output's `rho` is derived by the circuit.** `rho_out_j = H(RHO, nf_1, j)`,
+where `nf_1` is the nullifier the leaf publishes for input slot 0 and `j` is
+the output index. A sender who could pick `rho` freely could grief a
+recipient: `nf = H(NF, nk, rho)` depends on the recipient's key and `rho`
+alone, so paying one recipient twice with one `rho` creates two notes that
+share a nullifier, of which the recipient can spend exactly one, and the other
+is stranded permanently. Constraint 5 catches that only inside a single leaf,
+and the chain's used-nullifier set catches it only after the victim has spent
+one of the two. Deriving `rho` removes the choice: `nf_1` is settled once over
+the life of the chain, so `(nf_1, j)` is unique. This is the same binding
+Sapling and Orchard make between an output's `rho` and a spent nullifier.
+
+It holds for a dummy input slot too, and it is where the leaf leans on the
+chain: a dummy publishes a nullifier like any other input, so a second leaf
+reusing that dummy's `rho` is refused only if the chain settles **both**
+published nullifiers without trying to tell a dummy from a real spend. It
+cannot tell them apart, which is the point of publishing both; section 4
+records this as an M4 obligation.
 
 The header hash keeps the chain's preimage order:
 
@@ -89,6 +111,18 @@ The header hash keeps the chain's preimage order:
 block_hash = Poseidon2(parent_hash(4) || block_number(1) || state_root(4)
                        || extrinsics_root(4) || zk_tree_root(4) || digest(28))
 ```
+
+The four 32-byte fields in that preimage are not decoded the same way, and the
+asymmetry is the chain's. `parent_hash` is a previous block hash and
+`zk_tree_root` is a Poseidon2 node hash, so both are four canonical Goldilocks
+limbs and `HeaderInputs::new` takes them as validated `Digest` values.
+`state_root` and `extrinsics_root` are Blake2-256 outputs, which are not field
+elements at all: roughly one header in 500 million has a limb at or above the
+modulus. The chain hashes those two through the reducing 8-bytes-per-felt
+decode, making `block_hash` a lossy commitment to them, so `HeaderInputs::new`
+takes them as raw `[u8; 32]` and reduces them identically. Validating them
+instead would leave a wallet unable to prove any spend anchored at such a
+block, with an error naming a hash the chain considers perfectly valid.
 
 ## 4. Leaf hash rule (the M4 contract)
 
@@ -129,8 +163,12 @@ reproduces the chain's shape so the adapter is covered by a test.
 
 Today `Leaves` is `StorageMap<_, Identity, u64, ZkLeaf<AccountId, AssetId,
 Balance>>` and `get_leaf_hash` always recomputes `hash_leaf` from those four
-typed fields. There is no slot for a raw hash, and `insert_leaf(to,
-transfer_count, asset_id, amount)` is the only entry point.
+typed fields. There is no slot for a raw hash. The entry points into that typed
+leaf are `insert_leaf(to, transfer_count, asset_id, amount)`, the public trait
+`ZkTreeRecorder::record_transfer` with the same four arguments (which is what
+`pallet-wormhole` actually calls), the `Pallet::leaf` storage getter, and the
+runtime API `ZkTreeApi::get_merkle_proof`, which calls `tree::hash_leaf`
+directly to fill `ZkMerkleProofRpc`.
 
 The fork is small and mechanical:
 
@@ -155,15 +193,45 @@ The fork is small and mechanical:
    Hash256) -> bool`, and the public wrapper `Pallet::verify_proof` follows.
    Both take a `ZkLeaf` today and call `hash_leaf` on it, so they are the one
    pair of signatures in this list that has to change.
-6. `tree::hash_node`, `update_range`, `grow_tree`, `generate_proof`, the
-   `Nodes` map, depth growth and the `on_finalize` root publication are all
-   unchanged. They reach a leaf only through `get_leaf_hash`, whose body
-   changes and whose signature does not.
+6. `ZkTreeRecorder::record_transfer` becomes `record_transfer(commitment:
+   Hash256) -> u64`, or the trait goes away entirely. `pallet-shielded` appends
+   commitments itself, and the other callers (mining rewards, vesting,
+   reversible transfers) go through `TransferProofRecorder`. Leaving the
+   four-argument signature in place would leave a second path into the tree
+   that still builds a typed leaf.
+7. `Pallet::leaf` now returns `Hash256`. `ZkTreeApi::get_merkle_proof` in
+   `runtime/src/apis.rs` reads that stored commitment directly and its
+   `hash_leaf` call goes away, with `ZkMerkleProofRpc::leaf_data` either
+   dropped or set to the commitment bytes. Missing this one is how the fork
+   ships an RPC whose `leaf_hash` is no longer what the tree stores.
+8. `process_pending_leaves` must clamp growth at `CIRCUIT_MAX_TREE_DEPTH`, and
+   the settlement extrinsic must reject an append that would pass
+   `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)`. Today the loop is `while
+   capacity_at_depth(depth) < leaf_count { depth += 1 }` with only a
+   `debug_assert` against `MAX_TREE_DEPTH = 32`, so a release runtime silently
+   grows to depth 17 once the pool passes 4^16 leaves. At that point every
+   existing note needs a 17-level path, which both `SpendWitness::validate` and
+   the in-circuit depth bound reject, and the whole pool becomes unspendable
+   with no error from the chain and no migration path. The circuit is what caps
+   the tree and the pallet does not know it. Cover it with a test that an
+   insert past capacity errors and leaves the depth where it was.
+9. `tree::hash_node`, `update_range`, `grow_tree`, `generate_proof`, the
+   `Nodes` map and the `on_finalize` root publication are unchanged. They reach
+   a leaf only through `get_leaf_hash`, whose body changes and whose signature
+   does not.
 
 Two properties of the pallet that the wallet must respect and that do not
 change: a leaf appended in block N is only provable after that block's
 `on_finalize`, so a note cannot be minted and spent in the same block; and
-`CIRCUIT_MAX_TREE_DEPTH` must stay equal to the circuit's `MAX_DEPTH`.
+`CIRCUIT_MAX_TREE_DEPTH` must stay equal to the circuit's `MAX_DEPTH`, which
+item 8 above is what actually enforces.
+
+One obligation the circuit places on `pallet-shielded`: **settle both published
+nullifiers of every leaf.** A dummy input slot publishes a nullifier like a
+real one, by design, so the chain cannot tell them apart and must not try. It
+is also what makes the derived output `rho` of section 3 unique, since a second
+leaf reusing a dummy's `rho` is refused only because its `nf_1` was already
+settled.
 
 ### Why not pack a commitment into the existing typed leaf
 
@@ -200,8 +268,10 @@ attack on Poseidon2.
    one leaf, which a chain that inserts both nullifiers from one transaction
    without intra-transaction dedup would not catch. This is an addition over
    the Wormhole leaf, which has a single nullifier.
-6. Per output: `cm_out = H(CM, H(NOTE, pk, rho, r), value)` bound to the public
-   commitment, and `value < 2^62`.
+6. Per output: `rho = H(RHO, nf_1, j)` derived from the leaf's first published
+   nullifier and the output index, `cm_out = H(CM, H(NOTE, pk, rho, r), value)`
+   bound to the public commitment, and `value < 2^62`. See section 3 for why
+   `rho` is derived here.
 7. `fee < 2^62`.
 8. `v_in_1 + v_in_2 == v_out_1 + v_out_2 + fee`, as a field equation. Every
    term is below `2^62`, so the left side is below `2^63` and the right side
@@ -221,8 +291,16 @@ attack on Poseidon2.
    nullifier set and two slots of a depth-16 tree sized for the life of the
    chain. Settlement extrinsics are unsigned and fee-free in the pallet this
    forks, so the leaf's own `fee` public input is the only cost, and an
-   all-dummy leaf sets it to zero. Requiring a real input bounds a leaf's cost
-   by the prover's own note supply, since each note is spendable once.
+   all-dummy leaf sets it to zero.
+
+   What the constraint achieves is exactly this: every leaf must consume a note
+   already in the tree, under a spend credential the prover holds, so a leaf
+   cannot be produced with no key and no note at all. It is **not** a bound on
+   how many leaves a prover can produce. A leaf consumes at most two notes and
+   always mints two, so one real input of any value, including zero, plus a
+   dummy leaves the prover with one more spendable note than they started with.
+   The minimum fee per non-padding leaf in section 8 is the anti-spam
+   mechanism, and it is the only one.
 
 ### Dummy inputs
 
@@ -249,13 +327,13 @@ development workstation, single threaded (plonky2's `parallel` feature is off
 so a prover cannot saturate a machine unasked):
 
 ```
-gates before padding : 315
+gates before padding : 317
 degree_bits          : 9
 public inputs        : 26
 zero knowledge       : false
-build                : 63 ms
-prove, warm          : 221 ms
-verify               : 2.5 ms
+build                : 62 ms
+prove, warm          : 155 ms
+verify               : 2.3 ms
 proof bytes          : 105500
 ```
 
@@ -290,21 +368,43 @@ with a clear error unless `qnero-circuit`'s `zk` feature is on.
   a dummy slot, trusting no invariant that crosses a circuit boundary.
   Constraint 9 has to be gated on that same sentinel: a padding leaf has no
   real input, so it must stay provable, while every leaf whose `block_hash`
-  binds a real block must spend something. M4 should also require a minimum fee
-  per non-padding leaf, since a leaf with one real input can still pay zero on
-  a fee-free extrinsic.
+  binds a real block must spend something.
+- **Minimum fee per non-padding leaf.** This is the anti-spam mechanism, and
+  after the correction to constraint 9 it is the only one. A leaf consumes at
+  most two notes and always mints two, so requiring a real input does not bound
+  how many leaves a prover can produce: one note of any value, including zero,
+  spent with a dummy in the other slot, yields two spendable notes and can be
+  repeated every block. Each repetition writes two nullifier entries and two
+  commitment slots into permanent state, and settlement extrinsics are fee-free
+  in the pallet this forks, so `fee` is the only cost and nothing currently
+  bounds it below. Either the circuit enforces `MIN_LEAF_FEE <= fee` next to
+  constraint 9, gated on the same padding sentinel and using the comparison
+  gadget already present, or `pallet-shielded` rejects a settlement extrinsic
+  whose per-leaf fee is below a floor and charges the submitter for the
+  commitment slots consumed. Until one of the two lands, constraint 9 only
+  stops a prover who holds no notes at all.
 - **Verifier artifact pinning.** `qnero-verifier` loads verifier data from
-  bytes behind a size cap, with no keccak pin yet: there is no tagged circuit
-  release to pin. The first release adds the pin, and every circuit change
-  after that invalidates it.
+  bytes behind a size cap and a parameter floor: public-input count,
+  `security_bits`, `num_challenges`, FRI query rounds, grinding bits, rate,
+  cap height and the leaf's degree, all pinned to `qnero_circuit::params`,
+  which the circuit crate tests against the config the prover builds with. That
+  floor is what stops an artifact built over this same layout with one query
+  round from verifying forged proofs; plonky2's own check on deserialized
+  config rejects only a zero challenge count, a zero constant count and fewer
+  than three routed wires. Provenance is a separate question. The keccak pin on
+  the artifact bytes still needs a tagged circuit release to pin, and every
+  circuit change after that invalidates it.
 - **Coinbase and deposit range checks.** Every value that enters the pool
   outside a spend must be range checked to 62 bits by the pallet, or the
   balance argument in constraint 8 does not hold for notes created that way.
-- **Nullifier seed uniqueness.** `nf = H(NF, nk, rho)` means two notes to the
-  same recipient with the same `rho` share a nullifier and only one is ever
-  spendable. The sender picks `rho`; M5's wallet must sample it fresh, and M4
-  should consider whether the chain can cheaply reject a duplicate `rho` at
-  deposit time.
+- **Nullifier seed uniqueness outside a spend.** Inside a spend this is
+  settled: `rho_out_j = H(RHO, nf_1, j)` is derived in circuit, so a sender has
+  no choice to abuse (section 3). Every other path that creates a note still
+  has to pick one. A deposit or a coinbase note has no spent nullifier to
+  derive from, so M4 must give those a rule of their own, for example a
+  per-block counter or the deposit's own unique identifier, and must reject a
+  repeat. The recipient is the last line: a wallet should refuse a received
+  note whose nullifier duplicates one it already holds or one already settled.
 - **Witness zeroization.** `ask` and `nk` live in plain `Digest` values inside
   `InputNote`, protected only by redacting `Debug`. Upstream wraps the
   equivalent material in a zeroize-on-drop container. Worth doing before a

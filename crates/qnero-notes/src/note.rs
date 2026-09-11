@@ -80,3 +80,21 @@ pub fn nullifier(nk: &Digest, rho: &Digest) -> Digest {
 pub fn commitment_from_inner(inner: &Digest, value: u64) -> Digest {
     Digest::hash_felts(domain::CM, &[inner.felts(), &[Felt::new(value)]])
 }
+
+/// `rho = H(RHO, nf, index)`: the nullifier seed of output note `index` of a
+/// spend whose first published nullifier is `nf`.
+///
+/// A sender does not choose an output's `rho`. The spend circuit derives it
+/// from the nullifier it publishes for its first input, so that every note
+/// the pool ever creates has a distinct `rho`: the chain refuses a nullifier
+/// it has already seen, which makes `nf` unique over the life of the chain,
+/// and `index` separates the two outputs of one spend.
+///
+/// A freely chosen `rho` is a griefing vector. `nf = H(NF, nk, rho)` depends
+/// only on the recipient's key and `rho`, so a sender who pays the same
+/// recipient twice with one `rho` creates two notes that share a nullifier,
+/// of which the recipient can spend exactly one; the other is stranded for
+/// good, at the cost of the smaller note.
+pub fn output_rho(nf: &Digest, index: u64) -> Digest {
+    Digest::hash_felts(domain::RHO, &[nf.felts(), &[Felt::new(index)]])
+}

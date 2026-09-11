@@ -8,8 +8,9 @@
 //! [`config::qnero_leaf_circuit_config`].
 //!
 //! Layout and the tree leaf rule are documented in `docs/CIRCUIT.md`; the
-//! public-input indices live in [`layout`], which compiles on its own so a
-//! verifier can read them without the prover stack.
+//! public-input indices live in [`layout`] and the proof-system parameters a
+//! verifier must insist on in [`params`]. Both compile on their own, so a
+//! verifier reads them without the prover stack.
 //!
 //! Forked from Quantus-Network/qp-zk-circuits (MIT); see NOTICE and CHANGES.md.
 
@@ -17,6 +18,7 @@
 #![cfg_attr(not(feature = "circuit"), no_std)]
 
 pub mod layout;
+pub mod params;
 
 /// Plonky2 configuration shared by every Qnero circuit. `D = 2` is the field
 /// extension degree, `C` the Poseidon-over-Goldilocks config, `F` Goldilocks.

@@ -33,7 +33,7 @@ use crate::layout::{NUM_INPUTS, NUM_OUTPUTS};
 use crate::merkle::{
     active_level_flags_from_bits, merkle_root_from_path, MerklePathTargets, DEPTH_BITS, MAX_DEPTH,
 };
-use crate::note_gadget::{derive_pk, note_commitment, note_inner, note_nullifier};
+use crate::note_gadget::{derive_pk, note_commitment, note_inner, note_nullifier, output_rho};
 use crate::{C, D, F};
 
 /// Private targets for one input note.
@@ -69,10 +69,13 @@ impl InputNoteTargets {
 }
 
 /// Private targets for one output note.
+///
+/// There is no `rho` target. An output's nullifier seed is derived in circuit
+/// from the leaf's first published nullifier, so a sender cannot choose it;
+/// see [`crate::note_gadget::output_rho`].
 #[derive(Debug, Clone)]
 pub struct OutputNoteTargets {
     pub pk: HashOutTarget,
-    pub rho: HashOutTarget,
     pub r: HashOutTarget,
     pub value: Target,
 }
@@ -81,7 +84,6 @@ impl OutputNoteTargets {
     fn new(builder: &mut CircuitBuilder<F, D>) -> Self {
         Self {
             pk: builder.add_virtual_hash(),
-            rho: builder.add_virtual_hash(),
             r: builder.add_virtual_hash(),
             value: builder.add_virtual_target(),
         }
@@ -221,8 +223,17 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
     // two entries in the nullifier set and two slots of a depth-16 tree that is
     // sized for the life of the chain. Settlement extrinsics are fee-free, so
     // the leaf's own `fee` public input is the only cost, and an all-dummy leaf
-    // sets it to zero. Requiring a real input bounds the cost by the prover's
-    // own note supply, since each note is spendable once.
+    // sets it to zero.
+    //
+    // What this constraint achieves, exactly: every leaf must consume a note
+    // that is already in the tree, under a spend credential the prover holds.
+    // A prover with no key and no note cannot produce one at all. It is not a
+    // bound on how many leaves a prover can produce, because a leaf consumes
+    // at most two notes and always mints two: one real input of any value,
+    // including zero, plus a dummy yields two spendable notes, so a prover
+    // holding a single note never runs out. A minimum fee per non-padding
+    // leaf, charged at M4, is what bounds leaf count; see `docs/CIRCUIT.md`
+    // section 8.
     //
     // For M3: when the batch layer picks its padding sentinel, gate this
     // product on the same flag that gates the header binding, so a padding leaf
@@ -233,11 +244,25 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
     }
     builder.connect(all_dummy, zero);
 
-    // 6. Output notes.
+    // 6. Output notes. `rho` is derived from the first published nullifier.
+    // The reason: `nf = H(NF, nk, rho)` is a function of the recipient's
+    // key and `rho` alone, so a sender free to repeat a `rho` could pay one
+    // recipient twice with notes that share a nullifier and strand whichever
+    // of the two the recipient does not spend first. `nf_1` is unique over the
+    // life of the chain, because the chain refuses a nullifier it has already
+    // settled, and the output index separates the two outputs of one leaf.
+    //
+    // This holds when input 0 is a dummy as well: a dummy publishes a
+    // nullifier like any other input, and the chain settles it like any other,
+    // so a second leaf reusing that dummy's `rho` is rejected on chain. It
+    // does require the chain to settle both published nullifiers without
+    // trying to tell a dummy slot from a real one, which is exactly what it
+    // cannot do; `docs/CIRCUIT.md` section 4 states it as an M4 obligation.
     let mut output_values = Vec::with_capacity(NUM_OUTPUTS + 1);
     for (index, output) in targets.outputs.iter().enumerate() {
         builder.range_check(output.value, VALUE_BITS as usize);
-        let inner = note_inner(builder, output.pk, output.rho, output.r);
+        let rho = output_rho(builder, targets.nullifiers[0], index as u64);
+        let inner = note_inner(builder, output.pk, rho, output.r);
         let commitment = note_commitment(builder, inner, output.value);
         builder.connect_hashes(commitment, targets.commitments[index]);
         output_values.push(output.value);

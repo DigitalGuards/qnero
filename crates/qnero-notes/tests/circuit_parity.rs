@@ -7,7 +7,7 @@ use plonky2::field::types::{Field, PrimeField64};
 use plonky2::hash::poseidon2::Poseidon2Hash;
 use plonky2::plonk::config::Hasher;
 use qnero_notes::digest::domain;
-use qnero_notes::{Digest, Felt, Note, SpendingKey};
+use qnero_notes::{output_rho, Digest, Felt, Note, SpendingKey};
 
 fn to_p2(f: &Felt) -> GoldilocksField {
     GoldilocksField::from_canonical_u64(f.as_canonical_u64())
@@ -50,8 +50,15 @@ fn commitment_and_nullifier_match_plonky2_poseidon2() {
         as_u64s(&note.commitment()),
         plonky2_hash(domain::CM, &[inner.felts(), &[Felt::new(777)]])
     );
+    let nf = note.nullifier(&nk);
     assert_eq!(
-        as_u64s(&note.nullifier(&nk)),
+        as_u64s(&nf),
         plonky2_hash(domain::NF, &[nk.felts(), rho.felts()])
     );
+    for index in 0..2u64 {
+        assert_eq!(
+            as_u64s(&output_rho(&nf, index)),
+            plonky2_hash(domain::RHO, &[nf.felts(), &[Felt::new(index)]])
+        );
+    }
 }

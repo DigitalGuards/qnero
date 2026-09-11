@@ -118,8 +118,12 @@ built from, and the two agree.
 
 One leaf = one shielded transfer: up to 2 inputs, exactly 2 outputs.
 
-Private inputs: for each input, the note `(pk, v, rho, r)`, `ask`, `nk`,
-Merkle path to `zk_tree_root`, dummy flag; for each output, the note fields.
+Private inputs: for each input, `(v, rho, r)` plus `ask`, `nk`, a Merkle path
+to `zk_tree_root` and a dummy flag; for each output, `pk`, `v` and `r`. An
+input's `pk` is derived in circuit from `ask` and `nk`, so a wrong credential
+yields a commitment that is not in the tree, and an
+output's `rho` is derived from the leaf's first published nullifier, so a
+sender cannot hand two notes the same nullifier seed.
 
 Public inputs (felts): `block_hash(4)`, `block_number(1)`, `nf_1(4)`,
 `nf_2(4)`, `cm_out_1(4)`, `cm_out_2(4)`, `fee(1)`, `ct_digest(4)`.
@@ -132,8 +136,8 @@ Constraints:
    `nf = H(nk, rho)`. Dummy inputs have `v = 0` and a random nullifier
    preimage (existing dummy pattern), and at least one input must be real, so
    a leaf always consumes a note.
-3. For each output: `cm_out` recomputed from the note; `v_out` range-checked
-   to 62 bits.
+3. For each output: `rho` derived as `H(RHO, nf_1, j)`; `cm_out` recomputed
+   from the note; `v_out` range-checked to 62 bits.
 4. Balance: `v_in_1 + v_in_2 = v_out_1 + v_out_2 + fee`, all values 62-bit so
    no field wrap.
 5. `ct_digest` is a free public input. The chain recomputes
@@ -160,7 +164,7 @@ batch is the on-chain transaction unit. Public batch: unchanged in shape.
 | # | Deliverable | Estimate |
 |---|---|---|
 | M1 | `qnero-notes` crate: keys, addresses, note commitment, ML-KEM note encryption, scan; KATs pinned | DONE 2026-09-11 |
-| M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (315 gates, degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
+| M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (317 gates, degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
 | M3 | Private and public batch aggregators on the new PI layout | 1 week |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | 2 weeks |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | 2 weeks |

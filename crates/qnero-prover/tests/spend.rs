@@ -21,7 +21,7 @@ use qnero_circuit::merkle::{CommitmentTree, MerklePath};
 use qnero_circuit::witness::{fill_witness, InputNote, OutputNote, SpendWitness};
 use qnero_circuit::{C, D, F};
 use qnero_notes::keys::DerivedKeys;
-use qnero_notes::{Digest, Note, SpendingKey, MAX_VALUE};
+use qnero_notes::{output_rho, Digest, Note, SpendingKey, MAX_VALUE};
 use qnero_prover::{prove_leaf, QneroProver};
 use qnero_verifier::{parse_public_input_felts, LeafPublicInputs, QneroVerifier};
 
@@ -45,8 +45,8 @@ fn header_for(root: Digest) -> HeaderInputs {
     HeaderInputs::new(
         digest("parent"),
         BLOCK_NUMBER,
-        digest("state-root"),
-        digest("extrinsics-root"),
+        digest("state-root").to_bytes(),
+        digest("extrinsics-root").to_bytes(),
         root,
         &[0xAB; qnero_circuit::header::DIGEST_LOGS_SIZE],
     )
@@ -78,14 +78,15 @@ fn tree_with(owned: &[Digest]) -> (CommitmentTree, Vec<usize>) {
 
 /// Two real inputs of 500 and 300, paying 700 out with 90 change and a fee of
 /// 10.
+///
+/// An output carries no `rho`: the circuit derives it from the leaf's first
+/// published nullifier, and `SpendWitness::output_rho` is the wallet-side
+/// mirror of that rule.
 fn two_real_inputs() -> SpendWitness {
     let keys = sender_keys();
     let note_a = Note::new(keys.pk(), 500, digest("rho-a"), digest("r-a")).unwrap();
     let note_b = Note::new(keys.pk(), 300, digest("rho-b"), digest("r-b")).unwrap();
     let (tree, indices) = tree_with(&[note_a.commitment(), note_b.commitment()]);
-
-    let payment = Note::new(recipient_pk(), 700, digest("rho-out"), digest("r-out")).unwrap();
-    let change = Note::new(keys.pk(), 90, digest("rho-change"), digest("r-change")).unwrap();
 
     SpendWitness {
         header: header_for(tree.root()),
@@ -94,7 +95,10 @@ fn two_real_inputs() -> SpendWitness {
             InputNote::real(&keys, &note_a, tree.path(indices[0]).unwrap()).unwrap(),
             InputNote::real(&keys, &note_b, tree.path(indices[1]).unwrap()).unwrap(),
         ],
-        outputs: [OutputNote::new(&payment), OutputNote::new(&change)],
+        outputs: [
+            OutputNote::new(recipient_pk(), 700, digest("r-out")),
+            OutputNote::new(keys.pk(), 90, digest("r-change")),
+        ],
         fee: 10,
         ct_digest: digest("ciphertexts"),
     }
@@ -107,9 +111,6 @@ fn one_real_one_dummy() -> SpendWitness {
     let note = Note::new(keys.pk(), 500, digest("rho-solo"), digest("r-solo")).unwrap();
     let (tree, indices) = tree_with(&[note.commitment()]);
 
-    let payment = Note::new(recipient_pk(), 480, digest("rho-out2"), digest("r-out2")).unwrap();
-    let change = Note::new(keys.pk(), 15, digest("rho-change2"), digest("r-change2")).unwrap();
-
     SpendWitness {
         header: header_for(tree.root()),
         depth: tree.depth(),
@@ -117,7 +118,10 @@ fn one_real_one_dummy() -> SpendWitness {
             InputNote::real(&keys, &note, tree.path(indices[0]).unwrap()).unwrap(),
             InputNote::dummy(&keys, digest("dummy-rho"), digest("dummy-r"), tree.depth()),
         ],
-        outputs: [OutputNote::new(&payment), OutputNote::new(&change)],
+        outputs: [
+            OutputNote::new(recipient_pk(), 480, digest("r-out2")),
+            OutputNote::new(keys.pk(), 15, digest("r-change2")),
+        ],
         fee: 5,
         ct_digest: digest("ciphertexts-2"),
     }
@@ -206,10 +210,13 @@ fn published_nullifiers_and_commitments_match_qnero_notes() {
     let keys = sender_keys();
     let note_a = Note::new(keys.pk(), 500, digest("rho-a"), digest("r-a")).unwrap();
     let note_b = Note::new(keys.pk(), 300, digest("rho-b"), digest("r-b")).unwrap();
-    let payment = Note::new(recipient_pk(), 700, digest("rho-out"), digest("r-out")).unwrap();
-    let change = Note::new(keys.pk(), 90, digest("rho-change"), digest("r-change")).unwrap();
 
     let witness = two_real_inputs();
+    // The output notes as `qnero-notes` sees them, carrying the `rho` the leaf
+    // derives.
+    let nf_1 = note_a.nullifier(&keys.nk);
+    let payment = Note::new(recipient_pk(), 700, output_rho(&nf_1, 0), digest("r-out")).unwrap();
+    let change = Note::new(keys.pk(), 90, output_rho(&nf_1, 1), digest("r-change")).unwrap();
     let proof = prove_with_shared_circuit(&witness).expect("leaf proves");
     let public = public_of(&proof);
 
@@ -270,7 +277,10 @@ fn one_real_input_and_one_dummy_prove_and_verify() {
 /// in the tree, zero value, zero fee. It would still publish two nullifiers and
 /// two output commitments, which the chain writes into permanent state, and
 /// settlement extrinsics are fee-free, so nothing else would charge for it.
-/// Constraint 9 is what bounds a leaf's cost by the prover's own notes.
+/// Constraint 9 is what stops a prover who holds no notes at all from producing
+/// a leaf. It does not bound how many leaves a prover can produce: a leaf mints
+/// two notes and consumes at most two, so one note is enough to keep going. A
+/// minimum fee at M4 is what bounds leaf count.
 #[test]
 fn both_inputs_dummy_cannot_prove() {
     let keys = sender_keys();
@@ -298,18 +308,8 @@ fn both_inputs_dummy_cannot_prove() {
             ),
         ],
         outputs: [
-            OutputNote {
-                pk: recipient_pk(),
-                value: 0,
-                rho: digest("all-dummy-out-rho-1"),
-                r: digest("all-dummy-out-r-1"),
-            },
-            OutputNote {
-                pk: recipient_pk(),
-                value: 0,
-                rho: digest("all-dummy-out-rho-2"),
-                r: digest("all-dummy-out-r-2"),
-            },
+            OutputNote::new(recipient_pk(), 0, digest("all-dummy-out-r-1")),
+            OutputNote::new(recipient_pk(), 0, digest("all-dummy-out-r-2")),
         ],
         fee: 0,
         ct_digest: digest("ciphertexts-all-dummy"),
@@ -350,18 +350,8 @@ fn an_input_value_of_two_to_the_62_cannot_prove() {
             InputNote::real(&keys, &second, tree.path(indices[1]).unwrap()).unwrap(),
         ],
         outputs: [
-            OutputNote {
-                pk: recipient_pk(),
-                value: MAX_VALUE,
-                rho: digest("rho-in-out-1"),
-                r: digest("r-in-out-1"),
-            },
-            OutputNote {
-                pk: keys.pk(),
-                value: 1,
-                rho: digest("rho-in-out-2"),
-                r: digest("r-in-out-2"),
-            },
+            OutputNote::new(recipient_pk(), MAX_VALUE, digest("r-in-out-1")),
+            OutputNote::new(keys.pk(), 1, digest("r-in-out-2")),
         ],
         fee: 0,
         ct_digest: digest("ciphertexts-input-range"),
@@ -479,18 +469,8 @@ fn an_output_value_of_two_to_the_62_cannot_prove() {
         ],
         outputs: [
             // MAX_VALUE + 1 = 2^62, one above the range.
-            OutputNote {
-                pk: recipient_pk(),
-                value: MAX_VALUE + 1,
-                rho: digest("rho-overflow"),
-                r: digest("r-overflow"),
-            },
-            OutputNote {
-                pk: keys.pk(),
-                value: 0,
-                rho: digest("rho-zero"),
-                r: digest("r-zero"),
-            },
+            OutputNote::new(recipient_pk(), MAX_VALUE + 1, digest("r-overflow")),
+            OutputNote::new(keys.pk(), 0, digest("r-zero")),
         ],
         fee: 0,
         ct_digest: digest("ciphertexts-overflow"),
@@ -528,18 +508,8 @@ fn a_fee_above_the_value_range_cannot_prove() {
             InputNote::real(&keys, &note_b, tree.path(indices[1]).unwrap()).unwrap(),
         ],
         outputs: [
-            OutputNote {
-                pk: recipient_pk(),
-                value: 0,
-                rho: digest("rho-fee-out"),
-                r: digest("r-fee-out"),
-            },
-            OutputNote {
-                pk: keys.pk(),
-                value: 0,
-                rho: digest("rho-fee-change"),
-                r: digest("r-fee-change"),
-            },
+            OutputNote::new(recipient_pk(), 0, digest("r-fee-out")),
+            OutputNote::new(keys.pk(), 0, digest("r-fee-change")),
         ],
         fee,
         ct_digest: digest("ciphertexts-fee"),
@@ -568,9 +538,6 @@ fn two_identical_nullifiers_cannot_prove() {
     let (tree, indices) = tree_with(&[note.commitment()]);
     let path = tree.path(indices[0]).unwrap();
 
-    let payment = Note::new(recipient_pk(), 995, digest("rho-o"), digest("r-o")).unwrap();
-    let change = Note::new(keys.pk(), 0, digest("rho-c"), digest("r-c")).unwrap();
-
     // The same note offered as both inputs: the tree accepts both paths, so
     // only the in-circuit distinctness check stands in the way.
     let witness = SpendWitness {
@@ -580,7 +547,10 @@ fn two_identical_nullifiers_cannot_prove() {
             InputNote::real(&keys, &note, path.clone()).unwrap(),
             InputNote::real(&keys, &note, path).unwrap(),
         ],
-        outputs: [OutputNote::new(&payment), OutputNote::new(&change)],
+        outputs: [
+            OutputNote::new(recipient_pk(), 995, digest("r-o")),
+            OutputNote::new(keys.pk(), 0, digest("r-c")),
+        ],
         fee: 5,
         ct_digest: digest("ciphertexts-double"),
     };
@@ -621,8 +591,6 @@ fn a_forged_tree_cannot_reuse_an_honest_block_hash() {
     let minted = Note::new(keys.pk(), 1_000_000, digest("rho-mint"), digest("r-mint")).unwrap();
     let (forged_tree, indices) = tree_with(&[minted.commitment()]);
 
-    let payment = Note::new(recipient_pk(), 999_999, digest("rho-m1"), digest("r-m1")).unwrap();
-    let change = Note::new(keys.pk(), 0, digest("rho-m2"), digest("r-m2")).unwrap();
     let witness = SpendWitness {
         header: header_for(forged_tree.root()),
         depth: forged_tree.depth(),
@@ -635,7 +603,10 @@ fn a_forged_tree_cannot_reuse_an_honest_block_hash() {
                 forged_tree.depth(),
             ),
         ],
-        outputs: [OutputNote::new(&payment), OutputNote::new(&change)],
+        outputs: [
+            OutputNote::new(recipient_pk(), 999_999, digest("r-m1")),
+            OutputNote::new(keys.pk(), 0, digest("r-m2")),
+        ],
         fee: 1,
         ct_digest: digest("ciphertexts-mint"),
     };
@@ -657,6 +628,13 @@ fn a_forged_tree_cannot_reuse_an_honest_block_hash() {
 fn the_built_circuit_matches_the_documented_layout() {
     let (_, data) = circuit();
     assert_eq!(data.common.num_public_inputs, PUBLIC_INPUT_LEN);
+    // `qnero-verifier` refuses an artifact whose degree does not match this,
+    // so a circuit that grows past 512 rows has to say so in `params` and in
+    // any regenerated artifact.
+    assert_eq!(
+        data.common.fri_params.degree_bits,
+        qnero_circuit::params::LEAF_DEGREE_BITS
+    );
     assert_eq!(PUBLIC_INPUT_LEN, 26);
     assert_eq!(nullifier_index(0), 5);
     assert_eq!(commitment_index(0), 13);
@@ -707,24 +685,220 @@ fn a_zero_knowledge_leaf_proves_and_verifies() {
     data.verify(proof).expect("a blinded leaf verifies");
 }
 
+/// An output's `rho` is derived from the leaf's first published nullifier, so
+/// a sender cannot choose it and cannot repeat one.
+///
+/// A free `rho` is a griefing vector, because `nf = H(NF, nk, rho)` does not
+/// depend on the note's value or on `r`: a sender paying one recipient twice
+/// with the same `rho` creates two notes that share a nullifier, of which the
+/// recipient can spend exactly one. The circuit's distinctness check
+/// (constraint 5) catches that only inside a single leaf, and the chain's
+/// used-nullifier set catches it only after the victim has already spent one
+/// of the two, by which point the other is stranded for good.
+#[test]
+fn output_rho_is_derived_from_the_published_nullifier() {
+    let witness = two_real_inputs();
+    let proof = prove_with_shared_circuit(&witness).expect("leaf proves");
+    let public = public_of(&proof);
+
+    // The rule, stated against `qnero-notes` as well as against the witness
+    // helper, so both copies of it are pinned.
+    let nf_1 = witness.inputs[0].nullifier();
+    for index in 0..2 {
+        assert_eq!(witness.output_rho(index), output_rho(&nf_1, index as u64));
+
+        let derived = Note::new(
+            witness.outputs[index].pk,
+            witness.outputs[index].value,
+            witness.output_rho(index),
+            witness.outputs[index].r,
+        )
+        .unwrap();
+        assert_eq!(
+            public.commitments[index],
+            digest_to_felts(&derived.commitment()),
+            "output {index} did not commit to the derived rho"
+        );
+
+        // What the leaf would have published had the sender picked `rho`.
+        let chosen = Note::new(
+            witness.outputs[index].pk,
+            witness.outputs[index].value,
+            digest("a-rho-the-sender-picked"),
+            witness.outputs[index].r,
+        )
+        .unwrap();
+        assert_ne!(
+            public.commitments[index],
+            digest_to_felts(&chosen.commitment())
+        );
+    }
+
+    // The two outputs of one leaf differ, and no other leaf can reach either
+    // value: `nf_1` is settled once, so a second leaf reusing it is refused on
+    // chain before its outputs exist.
+    assert_ne!(witness.output_rho(0), witness.output_rho(1));
+    let other = one_real_one_dummy();
+    for a in 0..2 {
+        for b in 0..2 {
+            assert_ne!(witness.output_rho(a), other.output_rho(b));
+        }
+    }
+}
+
+/// A `u64` at or above the Goldilocks modulus is the one range the circuit
+/// cannot police: the witness carries it as its reduction, which is below
+/// `2^32` and therefore inside the 62-bit range check. It is also the range a
+/// wallet lands in by accident, since a wrapping `total_in - payment - fee`
+/// underflows to `2^64 - k`. So it is rejected before the circuit, and this
+/// pins that the front door is the only place it can be.
+#[test]
+fn a_value_at_or_above_the_field_modulus_is_rejected() {
+    const ORDER: u64 = 0xFFFF_FFFF_0000_0001;
+
+    for value in [ORDER, ORDER + 1000, u64::MAX] {
+        let mut witness = two_real_inputs();
+        witness.inputs[0].value = value;
+        assert!(
+            witness.validate().is_err(),
+            "input value {value} reached the circuit, which would prove its reduction"
+        );
+
+        let mut witness = two_real_inputs();
+        witness.outputs[0].value = value;
+        assert!(
+            witness.validate().is_err(),
+            "output value {value} reached the circuit"
+        );
+
+        let mut witness = two_real_inputs();
+        witness.fee = value;
+        assert!(
+            witness.validate().is_err(),
+            "fee {value} reached the circuit"
+        );
+    }
+
+    // One below the modulus still reaches the circuit, which rejects it on the
+    // 62-bit range check. The front door bounds nothing the circuit can see.
+    let mut witness = two_real_inputs();
+    witness.inputs[0].value = ORDER - 1;
+    witness
+        .validate()
+        .expect("a canonical value is the circuit\'s business");
+    assert_rejected(&witness, "input value just below the modulus");
+}
+
+/// Verifier artifacts arrive as bytes, and a public-input count of 26 says
+/// nothing about whether verification means anything. Plonky2's own check on
+/// deserialized config rejects only a zero challenge count, a zero constant
+/// count and fewer than three routed wires, so an artifact over this exact
+/// layout with one query round and no grinding would otherwise be accepted and
+/// would verify forged proofs.
+#[test]
+fn a_weakened_verifier_artifact_is_rejected() {
+    let mut weak = qnero_leaf_circuit_config();
+    weak.security_bits = 1;
+    weak.num_challenges = 1;
+    weak.fri_config.num_query_rounds = 1;
+    weak.fri_config.proof_of_work_bits = 0;
+
+    let artifact = QneroSpendCircuit::new(weak)
+        .expect("a weak config is still structurally valid")
+        .build_verifier()
+        .to_bytes(&plonky2::util::serialization::DefaultGateSerializer)
+        .expect("verifier data serializes");
+
+    // It is shaped like a leaf: same layout, same public-input count.
+    let error = QneroVerifier::from_artifact_bytes(&artifact)
+        .expect_err("a downgraded artifact must be refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("below the canonical"),
+        "unexpected rejection reason: {message}"
+    );
+}
+
+/// Proof bytes are the natural transaction identity at M4. Plonky2 stops
+/// reading when it has a whole proof and never checks the buffer is empty, and
+/// it decodes each public input with an unreduced constructor whose range check
+/// is a debug assertion, so without a canonical-encoding check one leaf has
+/// unlimited distinct encodings.
+#[test]
+fn only_the_canonical_proof_encoding_is_accepted() {
+    const ORDER: u64 = 0xFFFF_FFFF_0000_0001;
+
+    let verifier = QneroVerifier::from_artifact_bytes(
+        &circuit()
+            .1
+            .verifier_data()
+            .to_bytes(&plonky2::util::serialization::DefaultGateSerializer)
+            .expect("verifier data serializes"),
+    )
+    .expect("the canonical artifact is accepted");
+
+    let proof = prove_with_shared_circuit(&two_real_inputs()).expect("leaf proves");
+    let bytes = proof.to_bytes();
+    verifier
+        .verify_proof_bytes(&bytes)
+        .expect("the canonical encoding verifies");
+
+    // Trailing padding. The proof reads identically and, unchecked, verifies.
+    let mut padded = bytes.clone();
+    padded.extend_from_slice(&[0u8; 1024]);
+    assert!(
+        verifier.verify_proof_bytes(&padded).is_err(),
+        "a proof with 1 KiB appended was accepted"
+    );
+
+    // A public input re-encoded as `x + p`. The public inputs are the tail of
+    // the encoding, `PUBLIC_INPUT_LEN` field elements of 8 little-endian bytes
+    // each, so the block number sits at a known offset.
+    let tail = bytes.len() - PUBLIC_INPUT_LEN * 8;
+    let at = tail + BLOCK_NUMBER_INDEX * 8;
+    let mut aliased = bytes.clone();
+    let limb = u64::from_le_bytes(aliased[at..at + 8].try_into().unwrap());
+    assert_eq!(
+        limb, BLOCK_NUMBER as u64,
+        "public inputs are not where expected"
+    );
+    aliased[at..at + 8].copy_from_slice(&(limb + ORDER).to_le_bytes());
+    assert!(
+        verifier.verify_proof_bytes(&aliased).is_err(),
+        "a non-canonical public-input limb was accepted"
+    );
+}
+
 /// Reports the leaf's size. Ignored by default because it is a measurement,
 /// not an assertion: run it with
 /// `cargo test -p qnero-prover --release -- --ignored --nocapture`.
+///
+/// One circuit instance throughout. Proving through the shared `OnceLock`
+/// circuit would build a second copy inside the cold timer, so the first
+/// number would be a build plus a prove, and the proof would then be verified
+/// against a different instance than it was produced by.
 #[test]
 #[ignore]
 fn leaf_gate_count() {
     let build_start = std::time::Instant::now();
     let circuit = QneroSpendCircuit::default();
     let gates = circuit.num_gates();
+    let targets = circuit.targets();
     let data = circuit.build();
     let build = build_start.elapsed();
 
     let witness = two_real_inputs();
+    let prove_once = || {
+        let mut pw = PartialWitness::<F>::new();
+        fill_witness(&mut pw, &witness, &targets).unwrap();
+        data.prove(pw).unwrap()
+    };
+
     let cold_start = std::time::Instant::now();
-    let _cold_proof = prove_with_shared_circuit(&witness).unwrap();
+    let _cold_proof = prove_once();
     let cold = cold_start.elapsed();
     let warm_start = std::time::Instant::now();
-    let proof = prove_with_shared_circuit(&witness).unwrap();
+    let proof = prove_once();
     let warm = warm_start.elapsed();
 
     let verify_start = std::time::Instant::now();
@@ -740,7 +914,7 @@ fn leaf_gate_count() {
         data.common.config.zero_knowledge
     );
     println!("  build                : {build:?}");
-    println!("  prove, first in run  : {cold:?}");
+    println!("  prove, cold          : {cold:?}");
     println!("  prove, warm          : {warm:?}");
     println!("  verify               : {verify:?}");
     println!("  proof bytes          : {}", proof.to_bytes().len());

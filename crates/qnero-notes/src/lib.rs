@@ -18,6 +18,7 @@
 //! inner     = H(NOTE, pk, rho, r)
 //! cm        = H(CM, inner, v)
 //! nf        = H(NF, nk, rho)
+//! rho_out_j = H(RHO, nf_1, j)                   seed of output j of a spend
 //! ```
 //!
 //! `H` is Poseidon2 over field elements with a one-felt domain tag; `H_bytes`
@@ -40,4 +41,6 @@ pub use error::NotesError;
 pub use keys::{
     derive_ak, derive_pk, DerivedKeys, FullViewingKey, IncomingViewingKey, SpendingKey,
 };
-pub use note::{commitment_from_inner, note_inner, nullifier, Note, MAX_VALUE, VALUE_BITS};
+pub use note::{
+    commitment_from_inner, note_inner, nullifier, output_rho, Note, MAX_VALUE, VALUE_BITS,
+};

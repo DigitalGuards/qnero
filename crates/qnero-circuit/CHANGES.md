@@ -50,6 +50,30 @@ circuit; the note fragments replace the Wormhole transfer fragments.
   permanent state, at zero fee on a fee-free extrinsic.
 - `nf_1 != nf_2` (constraint 5), for the same reason: upstream's leaf has one
   nullifier, so intra-leaf double spending is not a shape it can have.
+- An output note's `rho` is a derived value, `H(RHO, nf_1, j)` over the leaf's
+  first published nullifier and the output index. Upstream has no note outputs
+  at all. A freely chosen `rho` lets a sender pay one recipient
+  twice with notes that share a nullifier, of which the recipient can spend
+  exactly one; the other is stranded permanently. Sapling and Orchard bind an
+  output's `rho` to a spent nullifier for the same reason. Costs two Poseidon2
+  permutations, and places one obligation on the chain: settle both published
+  nullifiers of every leaf, including a dummy slot's.
+- `SpendWitness::validate` rejects a note value or fee at or above the
+  Goldilocks modulus. It is the one range the circuit cannot police, because
+  the witness carries such a value as its reduction, which is below `2^32` and
+  therefore inside the 62-bit range check, and it is the range a wallet reaches
+  by accident through a wrapping subtraction. Everything below the modulus is
+  left to the circuit.
+- `HeaderInputs::new` takes `state_root` and `extrinsics_root` as raw bytes and
+  reduces them mod p, while `parent_hash` and `zk_tree_root` stay validated
+  digests. Upstream decodes all four with the reducing decode; Qnero's `Digest`
+  is strict by construction, so the two Blake2-256 roots, which need not be
+  canonical, would otherwise be rejected and no spend could be anchored at such
+  a block.
+- `params`, the proof-system parameters of the canonical leaf, next to
+  `layout` and compiled without the circuit feature. `qnero-verifier` holds an
+  artifact to them; upstream pins a keccak hash of the artifact instead, which
+  Qnero cannot do until there is a tagged release.
 - `MerklePath::from_unsorted`, ported from upstream's
   `ZkMerkleProofData::from_unsorted`: the chain hands out siblings in
   child-index order with no position hint, and the circuit needs them sorted

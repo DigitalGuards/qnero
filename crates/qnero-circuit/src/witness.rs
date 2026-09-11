@@ -8,11 +8,12 @@
 //! time with a clear error. The alternative is a proof nobody can use.
 
 use anyhow::{ensure, Result};
-use plonky2::field::types::Field as _;
+use core::fmt::Arguments;
+use plonky2::field::types::{Field as _, Field64 as _};
 use plonky2::iop::witness::{PartialWitness, WitnessWrite};
 use plonky2::plonk::circuit_data::CircuitConfig;
 use qnero_notes::keys::{derive_pk, DerivedKeys};
-use qnero_notes::note::{commitment_from_inner, note_inner, nullifier};
+use qnero_notes::note::{commitment_from_inner, note_inner, nullifier, output_rho};
 use qnero_notes::{Digest, Note};
 
 use crate::circuit::{QneroSpendCircuit, SpendTargets};
@@ -111,11 +112,14 @@ impl InputNote {
 
 /// One output note. The circuit knows nothing about the recipient beyond
 /// `pk`.
+///
+/// There is no `rho` field. An output's nullifier seed is a function of the
+/// leaf it is created in, [`SpendWitness::output_rho`], so it cannot be
+/// supplied here and cannot be repeated across two notes.
 #[derive(Clone)]
 pub struct OutputNote {
     pub pk: Digest,
     pub value: u64,
-    pub rho: Digest,
     pub r: Digest,
 }
 
@@ -126,26 +130,22 @@ impl core::fmt::Debug for OutputNote {
         f.debug_struct("OutputNote")
             .field("pk", &"[REDACTED]")
             .field("value", &"[REDACTED]")
-            .field("rho", &"[REDACTED]")
             .field("r", &"[REDACTED]")
             .finish()
     }
 }
 
 impl OutputNote {
-    pub fn new(note: &Note) -> Self {
-        Self {
-            pk: note.pk,
-            value: note.value,
-            rho: note.rho,
-            r: note.r,
-        }
+    pub fn new(pk: Digest, value: u64, r: Digest) -> Self {
+        Self { pk, value, r }
     }
 
+    /// The commitment this output carries, given the `rho` its leaf derives.
+    ///
     /// See [`InputNote::commitment`] for why this does not go through
     /// [`Note`].
-    pub fn commitment(&self) -> Digest {
-        commitment_from_inner(&note_inner(&self.pk, &self.rho, &self.r), self.value)
+    pub fn commitment_with_rho(&self, rho: &Digest) -> Digest {
+        commitment_from_inner(&note_inner(&self.pk, rho, &self.r), self.value)
     }
 }
 
@@ -175,7 +175,25 @@ impl SpendWitness {
     /// constraint are the authority on those, and a witness that violates one
     /// must reach them. A front door here that turned them away would hide
     /// whether the circuit constrains them at all.
+    ///
+    /// The circuit is that authority only for canonical values. A `u64` at or
+    /// above the Goldilocks modulus is the one range the circuit provably
+    /// cannot see: the witness carries it as a field element, which is its
+    /// reduction `v - p`, always below `2^32` and therefore always inside the
+    /// 62-bit check. It is also the range a wallet reaches by accident, since
+    /// a wrapping `total_in - payment - fee` underflows to `2^64 - k` and any
+    /// `k` below `2^32` lands in it. So the bound is enforced here, where a
+    /// non-canonical value can still be distinguished from its reduction, and
+    /// the whole window `[2^62, p)` is left to the circuit.
     pub fn validate(&self) -> Result<()> {
+        for (index, input) in self.inputs.iter().enumerate() {
+            ensure_canonical(input.value, format_args!("input {index} value"))?;
+        }
+        for (index, output) in self.outputs.iter().enumerate() {
+            ensure_canonical(output.value, format_args!("output {index} value"))?;
+        }
+        ensure_canonical(self.fee, format_args!("fee"))?;
+
         ensure!(
             (1..=MAX_DEPTH).contains(&self.depth),
             "tree depth {} must be in 1..={}",
@@ -212,6 +230,35 @@ impl SpendWitness {
         Ok(())
     }
 
+    /// `rho` of output note `index`, as the circuit derives it.
+    ///
+    /// `rho = H(RHO, nf_1, index)` where `nf_1` is the nullifier published for
+    /// input slot 0. A wallet needs this to build the ciphertext the recipient
+    /// decrypts, since `rho` is part of the note plaintext.
+    pub fn output_rho(&self, index: usize) -> Digest {
+        output_rho(&self.inputs[0].nullifier(), index as u64)
+    }
+
+    /// The commitment output note `index` publishes.
+    pub fn output_commitment(&self, index: usize) -> Digest {
+        self.outputs[index].commitment_with_rho(&self.output_rho(index))
+    }
+
+    /// Output note `index` as a whole [`Note`], for a wallet that has to
+    /// encrypt it to its recipient.
+    ///
+    /// Errors when the value is out of range, which is the one case the
+    /// checked [`Note`] constructor exists to catch.
+    pub fn output_note(&self, index: usize) -> Result<Note> {
+        let output = &self.outputs[index];
+        Ok(Note::new(
+            output.pk,
+            output.value,
+            self.output_rho(index),
+            output.r,
+        )?)
+    }
+
     /// The public inputs this witness produces, in layout order.
     pub fn public_inputs(&self) -> Vec<F> {
         let mut public = Vec::with_capacity(PUBLIC_INPUT_LEN);
@@ -220,14 +267,30 @@ impl SpendWitness {
         for input in &self.inputs {
             public.extend_from_slice(&digest_to_felts(&input.nullifier()));
         }
-        for output in &self.outputs {
-            public.extend_from_slice(&digest_to_felts(&output.commitment()));
+        for index in 0..NUM_OUTPUTS {
+            public.extend_from_slice(&digest_to_felts(&self.output_commitment(index)));
         }
         public.push(F::from_noncanonical_u64(self.fee));
         public.extend_from_slice(&digest_to_felts(&self.ct_digest));
         debug_assert_eq!(public.len(), PUBLIC_INPUT_LEN);
         public
     }
+}
+
+/// Reject a `u64` the field cannot hold, before it is silently reduced.
+///
+/// `F::from_noncanonical_u64` does not reduce, and every comparison on the
+/// resulting element does, so a value in `[p, 2^64)` is proved as `v - p`.
+fn ensure_canonical(value: u64, what: Arguments<'_>) -> Result<()> {
+    ensure!(
+        value < F::ORDER,
+        "{} is {}, at or above the Goldilocks modulus {}; the circuit would \
+         range-check its reduction instead",
+        what,
+        value,
+        F::ORDER
+    );
+    Ok(())
 }
 
 /// Write a witness into the circuit's targets.
@@ -256,10 +319,10 @@ pub fn fill_witness(
             digest_to_hashout(&input.nullifier()),
         )?;
     }
-    for (index, output) in witness.outputs.iter().enumerate() {
+    for index in 0..NUM_OUTPUTS {
         pw.set_hash_target(
             targets.commitments[index],
-            digest_to_hashout(&output.commitment()),
+            digest_to_hashout(&witness.output_commitment(index)),
         )?;
     }
     pw.set_target(targets.fee, F::from_noncanonical_u64(witness.fee))?;
@@ -319,11 +382,10 @@ pub fn fill_witness(
         }
     }
 
-    // Output notes.
+    // Output notes. `rho` has no target: the circuit derives it.
     for (index, output) in witness.outputs.iter().enumerate() {
         let output_targets = &targets.outputs[index];
         pw.set_hash_target(output_targets.pk, digest_to_hashout(&output.pk))?;
-        pw.set_hash_target(output_targets.rho, digest_to_hashout(&output.rho))?;
         pw.set_hash_target(output_targets.r, digest_to_hashout(&output.r))?;
         pw.set_target(output_targets.value, F::from_noncanonical_u64(output.value))?;
     }

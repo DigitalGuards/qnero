@@ -14,6 +14,18 @@
 //! `block_hash` commits to the header, the header commits to the root, and the
 //! root is reached by hashing each note's Merkle path. That chain is what
 //! makes a leaf unforgeable against a tree the chain never had.
+//!
+//! The four 32-byte fields are not decoded the same way, and the asymmetry is
+//! the chain's. `parent_hash` is a previous block hash and `zk_tree_root` is a
+//! Poseidon2 node hash, so both are four canonical Goldilocks limbs and take
+//! the strict [`Digest`] decode. `state_root` and `extrinsics_root` are
+//! Blake2-256 outputs, which are not field elements at all: roughly one header
+//! in 500 million has a limb at or above the modulus. The chain hashes those
+//! two through the reducing 8-bytes-per-felt decode, making `block_hash` a
+//! lossy commitment to them, so this fragment takes them as raw bytes and
+//! reduces them the same way. Validating them instead would leave a wallet
+//! unable to prove any spend anchored at such a block, with an error naming a
+//! hash the chain considers perfectly valid.
 
 use anyhow::{ensure, Result};
 use plonky2::field::types::Field as _;
@@ -23,6 +35,7 @@ use plonky2::iop::target::Target;
 use plonky2::plonk::circuit_builder::CircuitBuilder;
 use plonky2::plonk::config::Hasher;
 use qnero_notes::Digest;
+use qp_poseidon_core::serialization::bytes_to_digest_lossy;
 
 use crate::convert::{digest_from_felts, digest_to_felts};
 use crate::{D, F};
@@ -79,7 +92,9 @@ impl HeaderTargets {
 pub struct HeaderInputs {
     pub parent_hash: Digest,
     pub block_number: u32,
+    /// Blake2-256, already reduced mod p by [`HeaderInputs::new`].
     pub state_root: Digest,
+    /// Blake2-256, already reduced mod p by [`HeaderInputs::new`].
     pub extrinsics_root: Digest,
     pub zk_tree_root: Digest,
     pub digest: [F; DIGEST_LOGS_FELTS],
@@ -102,13 +117,19 @@ impl core::fmt::Debug for HeaderInputs {
 }
 
 impl HeaderInputs {
-    /// Build from raw digest-log bytes, encoded the way the chain encodes
-    /// them (4 bytes per field element plus a terminator).
+    /// Build from a header's fields.
+    ///
+    /// `state_root` and `extrinsics_root` are taken as raw bytes and reduced
+    /// mod p, because they are Blake2-256 outputs that need not be canonical;
+    /// `parent_hash` and `zk_tree_root` are Poseidon2 outputs and are taken as
+    /// validated digests. See the module docs for why the two halves differ.
+    /// `digest_logs` is encoded the way the chain encodes it, 4 bytes per
+    /// field element plus a terminator.
     pub fn new(
         parent_hash: Digest,
         block_number: u32,
-        state_root: Digest,
-        extrinsics_root: Digest,
+        state_root: [u8; Digest::LEN],
+        extrinsics_root: [u8; Digest::LEN],
         zk_tree_root: Digest,
         digest_logs: &[u8],
     ) -> Result<Self> {
@@ -130,8 +151,8 @@ impl HeaderInputs {
         Ok(Self {
             parent_hash,
             block_number,
-            state_root,
-            extrinsics_root,
+            state_root: Digest(bytes_to_digest_lossy(&state_root)),
+            extrinsics_root: Digest(bytes_to_digest_lossy(&extrinsics_root)),
             zk_tree_root,
             digest,
         })
@@ -181,12 +202,73 @@ mod tests {
         HeaderInputs::new(
             Digest::hash_bytes(&[b"parent"]),
             42,
-            Digest::hash_bytes(&[b"state"]),
-            Digest::hash_bytes(&[b"extrinsics"]),
+            Digest::hash_bytes(&[b"state"]).to_bytes(),
+            Digest::hash_bytes(&[b"extrinsics"]).to_bytes(),
             Digest::hash_bytes(&[b"zk-tree"]),
             &[0xEE; DIGEST_LOGS_SIZE],
         )
         .unwrap()
+    }
+
+    /// The block hash against a fixed preimage, pinned as bytes.
+    ///
+    /// Everything else in this crate compares Qnero against Qnero: the
+    /// in-circuit sponge against `Poseidon2Hash::hash_no_pad`, the header
+    /// against itself. The chain computes this same value through
+    /// `qp-poseidon-core`'s byte API over the same 45 field elements, so a
+    /// change in either sponge or in the digest-log encoding would leave every
+    /// test green while no leaf could bind to a real block. This is the vector
+    /// that fails instead.
+    #[test]
+    fn the_block_hash_of_a_fixed_header_is_pinned() {
+        let header = HeaderInputs::new(
+            Digest::from_bytes(&[0x11; 32]).unwrap(),
+            7,
+            [0x22; 32],
+            [0x33; 32],
+            Digest::from_bytes(&[0x44; 32]).unwrap(),
+            &[0x55; DIGEST_LOGS_SIZE],
+        )
+        .unwrap();
+        assert_eq!(
+            header.preimage().len(),
+            4 + 1 + 4 + 4 + 4 + DIGEST_LOGS_FELTS
+        );
+        assert_eq!(
+            header.block_hash().to_hex(),
+            "5055010c6fc864a8da3afb365632f7ffe95264cfd83aa033a9a9fe8979688574"
+        );
+    }
+
+    /// `state_root` and `extrinsics_root` are Blake2-256 outputs, which need
+    /// not be canonical field elements. The chain reduces them mod p when it
+    /// hashes a header, so this fragment must reduce them too: validating them
+    /// would leave a wallet unable to prove any spend anchored at a block
+    /// whose state root has a limb at or above the modulus, which is roughly
+    /// one header in 500 million, with an error naming a hash the chain
+    /// considers perfectly valid.
+    #[test]
+    fn the_blake2_roots_are_reduced_rather_than_validated() {
+        const ORDER: u64 = 0xFFFF_FFFF_0000_0001;
+
+        let mut aliased = [0u8; 32];
+        aliased[..8].copy_from_slice(&(ORDER + 1).to_le_bytes());
+        let mut reduced = [0u8; 32];
+        reduced[..8].copy_from_slice(&1u64.to_le_bytes());
+
+        let build = |state_root: [u8; 32]| {
+            HeaderInputs::new(
+                Digest::hash_bytes(&[b"parent"]),
+                9,
+                state_root,
+                [0x33; 32],
+                Digest::hash_bytes(&[b"zk-tree"]),
+                &[0x55; DIGEST_LOGS_SIZE],
+            )
+            .unwrap()
+        };
+
+        assert_eq!(build(aliased).block_hash(), build(reduced).block_hash());
     }
 
     #[test]
@@ -194,8 +276,8 @@ mod tests {
         assert!(HeaderInputs::new(
             Digest::hash_bytes(&[b"a"]),
             1,
-            Digest::hash_bytes(&[b"b"]),
-            Digest::hash_bytes(&[b"c"]),
+            Digest::hash_bytes(&[b"b"]).to_bytes(),
+            Digest::hash_bytes(&[b"c"]).to_bytes(),
             Digest::hash_bytes(&[b"d"]),
             &[0u8; DIGEST_LOGS_SIZE - 1],
         )

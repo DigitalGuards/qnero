@@ -26,6 +26,7 @@ use qnero_circuit::layout::{
     commitment_index, nullifier_index, BLOCK_HASH_START, BLOCK_NUMBER_INDEX, CT_DIGEST_START,
     DIGEST_FELTS, FEE_INDEX, NUM_INPUTS, NUM_OUTPUTS, PUBLIC_INPUT_LEN,
 };
+use qnero_circuit::params;
 use qp_plonky2_verifier::util::serialization::DefaultGateSerializer;
 use qp_plonky2_verifier::{ProofWithPublicInputs, VerifierCircuitData, C, D, F};
 
@@ -88,12 +89,26 @@ pub struct QneroVerifier {
 }
 
 impl QneroVerifier {
-    /// Wrap verifier data, checking that it is shaped like a leaf circuit.
+    /// Wrap verifier data, checking that it is shaped like a leaf circuit and
+    /// that its proof-system parameters are the canonical ones.
     ///
     /// The public-input count is the cheapest signal that the verifier and the
     /// prover were built from the same circuit. It does not catch a
     /// permutation of the layout at the same length, which is why both sides
     /// share one definition of the layout constants.
+    ///
+    /// The parameter floor is the second half. Public-input count alone says
+    /// nothing about soundness: verifier data built over this exact layout
+    /// with one FRI query round and no grinding deserializes cleanly, because
+    /// plonky2's own check on deserialized config rejects only a zero
+    /// challenge count, a zero constant count and fewer than three routed
+    /// wires. Such an artifact verifies a forged proof with high probability,
+    /// and this crate is what a runtime and the batch aggregator call. So the
+    /// security-relevant parameters are pinned to [`qnero_circuit::params`],
+    /// which the circuit crate tests against the config the prover builds
+    /// with. It is a floor. Provenance is a separate question: the keccak pin
+    /// on a tagged artifact is still to come, and until it lands the caller
+    /// owns where the bytes came from.
     pub fn new(circuit_data: VerifierCircuitData<F, C, D>) -> Result<Self> {
         ensure!(
             circuit_data.common.num_public_inputs == PUBLIC_INPUT_LEN,
@@ -101,16 +116,83 @@ impl QneroVerifier {
             circuit_data.common.num_public_inputs,
             PUBLIC_INPUT_LEN
         );
+
+        let config = &circuit_data.common.config;
+        let fri = &config.fri_config;
+        for (name, value, expected, exact) in [
+            (
+                "security_bits",
+                config.security_bits,
+                params::SECURITY_BITS,
+                false,
+            ),
+            (
+                "num_challenges",
+                config.num_challenges,
+                params::NUM_CHALLENGES,
+                false,
+            ),
+            (
+                "fri_config.num_query_rounds",
+                fri.num_query_rounds,
+                params::FRI_NUM_QUERY_ROUNDS,
+                false,
+            ),
+            (
+                "fri_config.proof_of_work_bits",
+                fri.proof_of_work_bits as usize,
+                params::FRI_PROOF_OF_WORK_BITS as usize,
+                false,
+            ),
+            (
+                "fri_config.rate_bits",
+                fri.rate_bits,
+                params::FRI_RATE_BITS,
+                true,
+            ),
+            (
+                "fri_config.cap_height",
+                fri.cap_height,
+                params::FRI_CAP_HEIGHT,
+                true,
+            ),
+            (
+                "fri_params.degree_bits",
+                circuit_data.common.fri_params.degree_bits,
+                params::LEAF_DEGREE_BITS,
+                true,
+            ),
+        ] {
+            if exact {
+                ensure!(
+                    value == expected,
+                    "verifier data has {} = {}, the canonical Qnero leaf has {}",
+                    name,
+                    value,
+                    expected
+                );
+            } else {
+                ensure!(
+                    value >= expected,
+                    "verifier data has {} = {}, below the canonical Qnero leaf's {}",
+                    name,
+                    value,
+                    expected
+                );
+            }
+        }
+
         Ok(Self { circuit_data })
     }
 
     /// Load verifier data from its serialized form.
     ///
     /// This is the shape a runtime uses: it holds bytes produced by a trusted
-    /// build, never a prover. There is deliberately no keccak pin on those
-    /// bytes yet, because Qnero has no tagged circuit release to pin; the pin
-    /// lands with the first one, together with the batch verifier. Until then
-    /// the caller owns artifact provenance.
+    /// build, never a prover. The bytes are capped, parsed, and then held to
+    /// the parameter floor in [`QneroVerifier::new`]. There is deliberately no
+    /// keccak pin on them yet, because Qnero has no tagged circuit release to
+    /// pin; the pin lands with the first one, together with the batch
+    /// verifier. Until then the caller owns artifact provenance.
     pub fn from_artifact_bytes(bytes: &[u8]) -> Result<Self> {
         ensure!(
             bytes.len() <= MAX_VERIFIER_ARTIFACT_BYTES,
@@ -140,6 +222,23 @@ impl QneroVerifier {
             &self.circuit_data.common,
         )
         .map_err(|e| anyhow!("failed to deserialize the proof: {}", e))?;
+
+        // One proof, one encoding. Plonky2's reader stops when it has read a
+        // whole proof and never checks that the buffer is exhausted, and it
+        // builds each public input with an unreduced `u64` constructor whose
+        // range check is a debug assertion, while every comparison on the
+        // resulting field element reduces. So `proof || padding` and a proof
+        // whose serialized limbs each carry `+ p` both parse to this same
+        // proof and verify. Value soundness is unaffected, but proof bytes are
+        // the natural mempool key and transaction identity at M4, and under
+        // those rules one leaf has unlimited distinct identities. Writing is
+        // deterministic and canonicalizing, so one round trip rejects trailing
+        // bytes and non-canonical limbs together.
+        ensure!(
+            proof.to_bytes() == proof_bytes,
+            "proof bytes are not the canonical encoding of the proof they decode to"
+        );
+
         self.verify_and_parse(proof)
     }
 

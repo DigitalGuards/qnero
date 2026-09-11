@@ -10,7 +10,8 @@
     "note_value": 1000000001,
     "inner": "ca7d5357f655118456d710fc21e4ef78913b621a7961e4127b1f94c09e6699ea",
     "cm": "c37e78890aacab334252d6999c1d07f97c2281da9bb52769c70da8054fd7fcc9",
-    "nf": "48c2ca2a353e55d48b5ad0ebefaac63084bb15c980aebb700d39d07cae3ad08c"
+    "nf": "48c2ca2a353e55d48b5ad0ebefaac63084bb15c980aebb700d39d07cae3ad08c",
+    "output_rho_0": "935f722cb773fb59718de2be9b0e3ec0e963f6f9118ee13545f1d08af0c3a75d"
   },
   {
     "seed_byte": 2,
@@ -23,7 +24,8 @@
     "note_value": 1000000002,
     "inner": "a747b705646cf4599f39d0676eebb203b7635ec9c32ff6c2d1a90f7e664e30c1",
     "cm": "073a20aa97bd70269473b62be19d984140fabcadf5f6dbe229e5710295dbcbc8",
-    "nf": "885ed10e6941632aea0d63b8d26a4322f3e287598865bce45a1cf07b46efaf43"
+    "nf": "885ed10e6941632aea0d63b8d26a4322f3e287598865bce45a1cf07b46efaf43",
+    "output_rho_0": "2582735fe2d11e234b7a97e8cb93f9bc7d2ec59b1eb4f0b4241e9f8d675541d3"
   },
   {
     "seed_byte": 255,
@@ -36,6 +38,7 @@
     "note_value": 1000000255,
     "inner": "3f6c3d8ac6b67ff88f88099103c2bbc6ff4f12f290cba7b7ccb51163d2cd9d52",
     "cm": "ad6926bfa755226abb1786760d01327dd5af5abf0f9e25c9f20182de06514691",
-    "nf": "3e31f5394c16bf4e3e3cf18aac4723aa180d13ee64889165df36680ba96c2334"
+    "nf": "3e31f5394c16bf4e3e3cf18aac4723aa180d13ee64889165df36680ba96c2334",
+    "output_rho_0": "51bdaaf3e3bd03de5d22e888ef5f5e7d8694b850f0460cae93fcbd4b165a8a31"
   }
 ]
