@@ -159,3 +159,62 @@ is wallet-side proving time and memory for a 2-in/2-out leaf plus a
 4. Fee visibility: fees are public, as in Monero. Fixed-fee tiers would reduce
    fingerprinting; decide at M4.
 5. Memo field size and whether it is mandatory (Zcash pads to 512 bytes).
+
+## 10. Positioning: Qnero vs Hegemon
+
+Hegemon (Pauli-Group/Hegemon, MIT, alpha) is the closest existing project:
+shielded-only pool, PoW, ML-DSA / SLH-DSA / ML-KEM-1024, hash commitments,
+STARK proofs, MASP multi-asset notes, viewing keys, proofs of disclosure.
+Surveyed 2026-09-11 at b819911.
+
+| | Hegemon | Qnero |
+|---|---|---|
+| Started | Nov 2025, v0.10.0 Mar 2026, still alpha | Sep 2026 |
+| Team | one main author (1936 of 1979 commits), 16 stars | DigitalGuards, QRL ecosystem |
+| Proof system | in-house "SmallWood" STARK backend plus an in-house lattice folding layer, both `candidate_under_review`; Plonky3 dropped | Plonky2 (Polygon lineage, years in production), unchanged |
+| External review | one review pass by an LLM (Codex), verdict "claim unsupported" for the 128-bit claim; no audit firm | Eiger audit of the Wormhole circuits and Poseidon, Substrate audit of the chain, both by a firm |
+| Chain stack | everything custom: consensus, p2p, sled state, sync | Substrate plus Quantus PQ p2p, already running a public network |
+| Tx proof size | about 105 KB per tx, 524 KB block artifact | to measure (private batch proof; 7 tx per proof amortizes it) |
+| Tx shape | 2 in, 2 out fixed | 2 in, 2 out in v0 |
+| Codebase | 271k lines of Rust, docs and Lean proofs generated at machine scale, hard to review | small delta on top of audited upstream |
+| Narrative | "post-quantum shielded money", governance and versioning heavy | post-quantum Monero: private by default, proof of work, CPU mining |
+
+Where Hegemon is ahead: it runs, it has a wallet, a desktop app, a testnet
+with seed nodes, multi-asset notes, diversified addresses, disclosure proofs.
+None of that is in Qnero yet, and 12 weeks will not close all of it.
+
+Where Qnero beats it, if we execute:
+1. Trust. Every cryptographic component in Qnero is either standardized
+   (ML-DSA, ML-KEM, SHA3) or externally audited by a firm (Plonky2 circuits,
+   Poseidon, Substrate runtime). Hegemon's soundness rests on a novel proof
+   backend that its own review package calls unsupported. For private money
+   this is the whole argument.
+2. Narrative. Monero has the largest privacy community in crypto and no
+   post-quantum path. Qnero speaks Monero: spend key and view key, private by
+   default, no transparent pool, proof of work, the anonymity set is the
+   whole chain. Hegemon speaks protocol governance.
+3. Ecosystem. Explorer, web wallet, mobile wallet, desktop wallet, connect
+   SDK and dApp tooling already exist in the QRL stack and can be pointed at
+   Qnero. Hegemon has one Electron app.
+4. Reviewability. A reviewer can read Qnero's delta over Quantus in a day.
+5. Mining story. Consider RandomX in place of QPoW so Monero miners can move
+   over with the software they already run. Decision deferred to M4.
+
+Concrete "beat it" targets for the first testnet:
+- proof per tx smaller than 105 KB, or clearly amortized below it per batch
+- wallet proving under 5 s on a laptop, under 60 s on a phone
+- audit-grade claim: no cryptographic component without a firm's review
+- a running public testnet with the explorer and web wallet attached
+
+## 11. Narrative
+
+One line: Monero's principles, rebuilt without elliptic curves.
+
+Pillars, in this order:
+1. Private by default. There is no transparent pool. Every output is a
+   sealed note, every spend is a proof.
+2. Proof of work. No stake, no validators, no foundation keys in consensus.
+3. Post-quantum from genesis. Hash-based proofs, lattice signatures and
+   encapsulation, nothing for Shor to break.
+4. Audited parts only. Standardized primitives and firm-audited circuits.
+   No novel cryptography.
