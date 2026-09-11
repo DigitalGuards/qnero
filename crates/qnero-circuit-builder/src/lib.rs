@@ -35,8 +35,9 @@
 //! This runs on a build host that is trusted for the duration of the run. A
 //! local filesystem adversary racing the publisher is out of scope. What is in
 //! scope, and enforced: the padding templates are validated before they are
-//! published, and the set is staged and swapped in whole so a failed run
-//! cannot leave a mixed generation behind.
+//! published, every verifier file is read back through `qnero-verifier`'s own
+//! profile before the set is committed, and the set is staged and swapped in
+//! whole so a failed run cannot leave a mixed generation behind.
 //!
 //! Forked in shape from Quantus-Network/qp-zk-circuits (MIT); see NOTICE and
 //! CHANGES.md.
@@ -48,13 +49,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use qnero_aggregator::artifacts::{
-    canonical_public_batch_verifier_data, commit_artifact_set,
+    canonical_public_batch_verifier_data, commit_artifact_set, read_artifact_file,
     serialize_public_batch_verifier_data, serialize_verifier_data,
 };
 use qnero_aggregator::private_batch::QneroPrivateBatchProver;
 use qnero_aggregator::{generate_padding_leaf_proof, CircuitBinsConfig};
 use qnero_circuit::config::{qnero_leaf_circuit_config, qnero_private_batch_circuit_config};
 use qnero_circuit::QneroSpendCircuit;
+use qnero_verifier::{QneroPrivateBatchVerifier, QneroPublicBatchVerifier, QneroVerifier};
 
 /// The file a pallet's `build.rs` includes to learn the dimensions.
 pub const CIRCUIT_CONFIG_SNIPPET: &str = "qnero_circuit_config.rs";
@@ -66,9 +68,9 @@ pub const CIRCUIT_CONFIG_SNIPPET: &str = "qnero_circuit_config.rs";
 /// aggregator-side cost decision, amortizing one on-chain verification across
 /// many wallets.
 ///
-/// They live in the library rather than in the CLI so that a pallet's
-/// `build.rs`, which calls [`generate_all_artifacts`] directly and cannot
-/// depend on a bin target, reads the same numbers the CLI and the docs do.
+/// They live in the library, so that a pallet's `build.rs`, which calls
+/// [`generate_all_artifacts`] directly and cannot depend on a bin target,
+/// reads the same numbers the CLI and the docs do.
 /// Shipping `N = 6` is an open decision (`docs/BENCH.md`), and when it lands
 /// it has to move in one place.
 pub const DEFAULT_NUM_LEAF_PROOFS: usize = 7;
@@ -135,6 +137,11 @@ fn generate_into(
         ],
         &[],
     )?;
+    check_staged_artifact(
+        staging,
+        "leaf_verifier.bin",
+        QneroVerifier::from_artifact_bytes,
+    )?;
 
     // --- private batch ---
     //
@@ -164,6 +171,9 @@ fn generate_into(
         remove_stale.push("padding_private_batch_proof.bin");
     }
     commit_artifact_set(staging, &files, &remove_stale)?;
+    check_staged_artifact(staging, "private_batch_verifier.bin", |bytes| {
+        QneroPrivateBatchVerifier::from_artifact_bytes(bytes, config.num_leaf_proofs)
+    })?;
 
     // --- public batch ---
     if let Some(num_inner) = config.num_private_batch_proofs {
@@ -180,6 +190,9 @@ fn generate_into(
             config.num_leaf_proofs,
         )?;
         commit_artifact_set(staging, &[("public_batch_verifier.bin", bytes)], &[])?;
+        check_staged_artifact(staging, "public_batch_verifier.bin", |bytes| {
+            QneroPublicBatchVerifier::from_artifact_bytes(bytes, num_inner, config.num_leaf_proofs)
+        })?;
     }
 
     commit_artifact_set(
@@ -192,11 +205,42 @@ fn generate_into(
     )
 }
 
+/// Read a staged verifier file back through the loader its consumer uses.
+///
+/// The builder writes what it built, so every profile check in
+/// `qnero-verifier` would otherwise first run inside the pallet that embeds
+/// the set: on another machine, and after the tens of minutes a set at the
+/// chain dimensions costs. A batch artifact's degree grows with its
+/// dimensions and is held to a ceiling
+/// ([`qnero_circuit::params::MAX_BATCH_DEGREE_BITS`]), and each layer's
+/// expected [`CircuitConfig`](qp_plonky2::plonk::circuit_data::CircuitConfig)
+/// is restated inside the verifier, so the two crates can drift. Reading the
+/// published bytes back costs milliseconds and turns the staging-then-rename
+/// guarantee from "this set is complete" into "this set is loadable".
+///
+/// It reads the file back, so a short write is caught here too.
+fn check_staged_artifact<T>(
+    staging: &Path,
+    name: &str,
+    load: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<()> {
+    let bytes = read_artifact_file(&staging.join(name))
+        .with_context(|| format!("failed to read the staged {name} back"))?;
+    load(&bytes).with_context(|| {
+        format!(
+            "the staged {name} does not load through qnero-verifier's profile; refusing to \
+             publish a set a consumer would reject"
+        )
+    })?;
+    Ok(())
+}
+
 /// The dimensions as Rust constants, for a pallet to `include!`.
 ///
 /// `NUM_PRIVATE_BATCH_PROOFS` is emitted only for a set that has a public
 /// batch, so a pallet that needs it fails to compile against a
-/// private-batch-only set rather than embedding a number nothing produced.
+/// private-batch-only set, where it would otherwise embed a number nothing
+/// produced.
 pub fn circuit_config_snippet(config: CircuitBinsConfig) -> String {
     let mut snippet = String::from(
         "// Generated by qnero-circuit-builder. Do not edit.\n\
@@ -341,10 +385,17 @@ fn commit_staging_dir(staging: &Path, output_dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn temp_dir(tag: &str) -> PathBuf {
+    /// A directory of this test's own, created empty.
+    ///
+    /// Every output path a test passes lives inside its sandbox, so no test
+    /// writes a `.staging-` entry into the shared temporary directory. A run
+    /// killed mid-build would otherwise leave one there and fail an unrelated
+    /// assertion on every later run.
+    fn sandbox(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("qnero-builder-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the sandbox directory is created");
         dir
     }
 
@@ -368,19 +419,56 @@ mod tests {
     /// costs nothing and leaves no staging directory behind.
     #[test]
     fn out_of_range_dimensions_are_refused_before_anything_is_written() {
-        let dir = temp_dir("bad-dimensions");
+        let root = sandbox("bad-dimensions");
+        let dir = root.join("artifacts");
         assert!(generate_all_artifacts(&dir, 0, None, false).is_err());
         assert!(generate_all_artifacts(&dir, 1, Some(0), false).is_err());
         assert!(!dir.exists());
-        assert!(staging_siblings(&dir).is_empty());
+        // A staging directory would have been created beside `dir`, which is
+        // inside this test's own sandbox.
+        assert!(staging_entries(&root).is_empty());
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// An output path that is a file is refused, and the staged set is cleaned
-    /// up rather than left beside it.
+    /// A verifier file that its own consumer cannot load never reaches the
+    /// published set.
+    ///
+    /// The three generator stages read every verifier file back through
+    /// `qnero-verifier` before the staged set is committed, so a profile
+    /// mismatch between the crate that builds an artifact and the crate that
+    /// loads it surfaces on the build host. Without the read-back it would
+    /// first surface inside the pallet that embeds the set.
+    #[test]
+    fn a_staged_verifier_file_that_does_not_load_is_refused() {
+        let root = sandbox("unloadable-artifact");
+        std::fs::write(root.join("leaf_verifier.bin"), b"not a verifier").unwrap();
+
+        let error = check_staged_artifact(
+            &root,
+            "leaf_verifier.bin",
+            QneroVerifier::from_artifact_bytes,
+        )
+        .expect_err("an artifact that does not load must be refused");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("qnero-verifier's profile"),
+            "got: {message}"
+        );
+
+        // A missing file is refused the same way.
+        assert!(
+            check_staged_artifact(&root, "absent.bin", QneroVerifier::from_artifact_bytes).is_err()
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// An output path that is a file is refused, and the staged set is
+    /// cleaned up.
     #[test]
     fn a_file_at_the_output_path_is_refused() {
-        let root = temp_dir("output-is-a-file");
-        std::fs::create_dir_all(&root).unwrap();
+        let root = sandbox("output-is-a-file");
         let output = root.join("artifacts");
         std::fs::write(&output, b"not a directory").unwrap();
 
@@ -397,8 +485,7 @@ mod tests {
     /// generation does not survive into the new directory.
     #[test]
     fn publishing_replaces_the_previous_set() {
-        let root = temp_dir("replace");
-        std::fs::create_dir_all(&root).unwrap();
+        let root = sandbox("replace");
         let output = root.join("artifacts");
         std::fs::create_dir_all(&output).unwrap();
         std::fs::write(output.join("stale.bin"), b"from an older generation").unwrap();
@@ -412,14 +499,19 @@ mod tests {
             std::fs::read(output.join("leaf_verifier.bin")).unwrap(),
             b"fresh"
         );
-        assert!(staging_siblings(&root).is_empty());
+        assert!(staging_entries(&root).is_empty());
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    fn staging_siblings(dir: &Path) -> Vec<PathBuf> {
-        let parent = dir.parent().unwrap_or(Path::new("."));
-        let Ok(entries) = std::fs::read_dir(parent) else {
+    /// Staging entries left inside `dir`.
+    ///
+    /// It lists the directory it is handed. An earlier version resolved
+    /// `dir.parent()`, which made one caller assert against the shared
+    /// temporary directory: a `.staging-` entry another test left behind
+    /// failed this one, and a leak in the directory under test went unseen.
+    fn staging_entries(dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
         };
         entries

@@ -16,14 +16,21 @@ use qnero_verifier::{QneroPrivateBatchVerifier, QneroPublicBatchVerifier, QneroV
 const NUM_LEAVES: usize = 2;
 const NUM_INNER: usize = 2;
 
+/// An output directory inside a sandbox of this test's own.
+///
+/// The builder stages a set in a hidden sibling of its output directory, so an
+/// output path directly under the shared temporary directory leaves a
+/// `.staging-` entry there when a run is killed mid-build. One sandbox per
+/// test keeps that inside the test.
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+    let sandbox = std::env::temp_dir().join(format!(
         "qnero-artifact-round-trip-{}-{}",
         tag,
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+    let _ = std::fs::remove_dir_all(&sandbox);
+    std::fs::create_dir_all(&sandbox).expect("the sandbox directory is created");
+    sandbox.join("artifacts")
 }
 
 fn file_names(dir: &Path) -> Vec<String> {
@@ -140,7 +147,8 @@ fn the_artifact_set_round_trips_through_the_loaders() {
         .expect("a batch proved from the published artifacts verifies against them");
     assert!(!public.is_padding());
 
-    std::fs::remove_dir_all(&dir).unwrap();
+    // The sandbox, and with it the output directory inside it.
+    std::fs::remove_dir_all(dir.parent().expect("the output dir sits in a sandbox")).unwrap();
 }
 
 /// (d) A corrupted artifact does not quietly become a working verifier.
@@ -198,7 +206,8 @@ fn a_bit_flipped_artifact_never_verifies_a_real_proof() {
         );
     }
 
-    std::fs::remove_dir_all(&dir).unwrap();
+    // The sandbox, and with it the output directory inside it.
+    std::fs::remove_dir_all(dir.parent().expect("the output dir sits in a sandbox")).unwrap();
 }
 
 /// A runtime build skips the all-padding private batch, which costs a full
@@ -219,5 +228,6 @@ fn a_set_without_the_padding_batch_carries_no_stale_one() {
     );
     assert!(dir.join("public_batch_verifier.bin").exists());
 
-    std::fs::remove_dir_all(&dir).unwrap();
+    // The sandbox, and with it the output directory inside it.
+    std::fs::remove_dir_all(dir.parent().expect("the output dir sits in a sandbox")).unwrap();
 }

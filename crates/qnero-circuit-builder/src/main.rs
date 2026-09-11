@@ -30,8 +30,8 @@ const ENV_NUM_PRIVATE_BATCH_PROOFS: &str = "QNERO_NUM_PRIVATE_BATCH_PROOFS";
 
 /// How a dimension is looked up in the environment.
 ///
-/// A parameter rather than a direct `std::env::var` call, because the process
-/// environment is global: a test that asserted the defaults against the real
+/// A parameter, taken so the code under test never reads the process
+/// environment directly, which is global: a test that asserted the defaults against the real
 /// environment would have to skip itself whenever an override was exported,
 /// and a skip that reports as a pass is worse than no test. `main` passes the
 /// real lookup; the tests pass an empty one.
@@ -167,8 +167,7 @@ mod tests {
         parse_args(values.iter().map(|value| value.to_string()), env)
     }
 
-    /// The defaults are asserted against an empty environment, never against
-    /// the process one: a shell that exports an override must not turn this
+    /// The defaults are asserted against an empty environment: a shell that exports an override must not turn this
     /// into a silent pass.
     #[test]
     fn the_defaults_are_the_chain_defaults() {
@@ -194,8 +193,8 @@ mod tests {
         assert_eq!(parsed.num_private_batch_proofs, Some(11));
     }
 
-    /// A malformed override is an error rather than a silent fall back to the
-    /// default, which would publish a set built for dimensions nobody asked
+    /// A malformed override is an error. A silent fall back to the default
+    /// would publish a set built for dimensions nobody asked
     /// for.
     #[test]
     fn a_malformed_environment_override_is_an_error() {
@@ -235,9 +234,9 @@ mod tests {
         assert_eq!(parsed.num_private_batch_proofs, None);
     }
 
-    /// A flag with no value, or a value that is not a number, must be an error
-    /// rather than a silent default: an operator who mistypes a dimension
-    /// would otherwise publish a set built for something else.
+    /// A flag with no value, or a value that is not a number, must be an
+    /// error: an operator who mistypes a dimension would otherwise publish a
+    /// set built for something else.
     #[test]
     fn malformed_arguments_are_errors() {
         assert!(args(&["--num-leaf-proofs"]).is_err());

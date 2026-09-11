@@ -17,7 +17,7 @@
 //! # What the private batch is for
 //!
 //! Two things, and they are separate. It amortizes verification: the chain
-//! verifies one proof instead of N. And it is where zero knowledge is applied,
+//! verifies one proof for N. And it is where zero knowledge is applied,
 //! because a leaf proof's FRI openings leak the structure of the notes it
 //! spends and must never leave the wallet.
 //!

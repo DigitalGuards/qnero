@@ -1,6 +1,7 @@
 use qnero_notes::{
     ct_digest, encrypt_note, try_receive, Address, Note, NotesError, SpendingKey, MAX_VALUE,
 };
+use qnero_pqcrypto::note_encryption::NotePlaintext;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -164,6 +165,32 @@ fn note_debug_does_not_leak_the_note() {
     assert!(!dump.contains(&format!("{:?}", note.rho)), "got: {dump}");
     assert!(!dump.contains(&format!("{:?}", note.r)), "got: {dump}");
     assert!(!dump.contains(&format!("{:?}", note.pk)), "got: {dump}");
+}
+
+/// The plaintext on the decrypt path redacts the same values.
+///
+/// `NotePlaintext` is the vendored crate's type, and it is what `decrypt_note`
+/// binds before it builds the redacted `Note` and `ReceivedNote`. A wallet
+/// that logged that intermediate value would leak the amount, both seeds and
+/// the memo, past the two redactions below.
+#[test]
+fn note_plaintext_debug_does_not_leak_the_note() {
+    let plaintext = NotePlaintext::new(
+        987_654_321,
+        0,
+        [0xab; 32],
+        [0xcd; 32],
+        b"top-secret-memo".to_vec(),
+    );
+
+    let dump = format!("{plaintext:?}");
+    assert!(dump.contains("REDACTED"), "got: {dump}");
+    assert!(!dump.contains("987654321"), "got: {dump}");
+    assert!(!dump.contains("top-secret-memo"), "got: {dump}");
+    assert!(!dump.contains("171"), "got: {dump}");
+    assert!(!dump.contains("205"), "got: {dump}");
+    // The asset id names the pool and is public.
+    assert!(dump.contains("asset_id: 0"), "got: {dump}");
 }
 
 #[test]

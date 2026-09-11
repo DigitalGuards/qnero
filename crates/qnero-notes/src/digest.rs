@@ -69,7 +69,7 @@ impl core::fmt::Debug for Digest {
     }
 }
 
-/// Domain tags. One felt each, first sponge input, never reused.
+/// Domain tags. One felt each, first sponge input, one tag per rule.
 pub mod domain {
     use super::Felt;
     pub const AK: Felt = Felt::new(0x716e_0001); // "qn" 0001

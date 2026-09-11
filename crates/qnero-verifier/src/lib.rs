@@ -79,7 +79,7 @@ pub(crate) fn digest_at(public_inputs: &[F], start: usize) -> [F; DIGEST_FELTS] 
 /// host has other unbounded parameters to reach for, inside individual gates,
 /// and an artifact is only as trustworthy as the build that produced it. What
 /// this closes is the case a runtime can actually meet: a corrupted or
-/// truncated file that would otherwise hang the verifier instead of failing.
+/// truncated file that would otherwise hang the verifier where it should fail.
 pub(crate) fn ensure_common_data_is_structurally_sound(
     common: &CommonCircuitData<F, D>,
     label: &str,

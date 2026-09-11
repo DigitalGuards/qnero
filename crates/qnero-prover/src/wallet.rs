@@ -13,9 +13,9 @@
 //! # }
 //! ```
 //!
-//! Compiled rather than `ignore`d: nothing here runs (building the circuits
-//! takes seconds), but a rename of either method breaks the build instead of
-//! leaving the docs describing an API that is gone.
+//! Compiled, so a rename of either method breaks the build and these docs
+//! cannot drift into describing an API that is gone. Nothing here runs:
+//! building the circuits takes seconds.
 //!
 //! # What a wallet actually submits
 //!

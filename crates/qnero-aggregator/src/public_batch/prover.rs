@@ -275,7 +275,10 @@ impl QneroPublicBatchProver {
 /// A caller-supplied padding inner is refused outright for the same reason.
 /// The padding template is a published artifact anybody can download, it
 /// settles nothing, and padding is this prover's to append. Accepting one as
-/// an input would let anyone burn an aggregator's slots with a file.
+/// an input would let anyone burn an aggregator's slots with a file. That one
+/// rule also covers a vector of nothing but padding, which is why no
+/// all-padding check follows the loop: the first padding proof bails, whatever
+/// position it sits in.
 ///
 /// `docs/CIRCUIT.md` section 8.3 records which half of the distinctness rule
 /// is a circuit constraint and which is an admission rule.
@@ -288,8 +291,9 @@ fn ensure_inner_batch_compatible(proofs: &[Proof], num_leaves: usize) -> Result<
             core::array::from_fn(|i| proof.public_inputs[BLOCK_HASH_START + i].to_canonical_u64());
         if block_hash == PADDING_BLOCK_HASH {
             bail!(
-                "private-batch proof {} carries the padding sentinel; a padding batch settles \
-                 nothing and padding is appended by this prover, never supplied by a caller",
+                "private-batch proof {} carries the padding sentinel. A padding batch settles \
+                 nothing, and padding is this prover's to append, so every supplied proof has \
+                 to be a real private batch",
                 index
             );
         }
@@ -334,12 +338,6 @@ fn ensure_inner_batch_compatible(proofs: &[Proof], num_leaves: usize) -> Result<
         }
     }
 
-    if reference.is_none() {
-        bail!(
-            "every supplied private-batch proof is padding: such a batch settles nothing; \
-             supply at least one real private batch"
-        );
-    }
     Ok(())
 }
 

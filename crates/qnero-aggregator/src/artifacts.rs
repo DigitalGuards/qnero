@@ -18,13 +18,12 @@
 //!
 //! # How an artifact is pinned
 //!
-//! By serializing a canonical rebuild and comparing raw bytes, never by
-//! deserializing the untrusted side first. `CommonCircuitData::from_bytes`
+//! By serializing a canonical rebuild and comparing raw bytes, with the
+//! untrusted side left undeserialized. `CommonCircuitData::from_bytes`
 //! reserves vector capacity from length fields in the artifact before those
 //! lengths are proven consistent with the rest of the file, so a small but
 //! poisoned buffer can force a large transient allocation before any check
-//! runs. The `load_canonical_*` functions therefore return the **rebuild**,
-//! not the parsed bytes.
+//! runs. The `load_canonical_*` functions therefore return the **rebuild**.
 
 use anyhow::{anyhow, bail, Context, Result};
 use plonky2::plonk::circuit_data::VerifierCircuitData;

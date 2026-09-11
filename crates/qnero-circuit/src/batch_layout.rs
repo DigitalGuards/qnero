@@ -40,6 +40,14 @@
 //! Total: `4 + n_inner * (5 + 21 * N)` felts. Forwarding is order preserving
 //! and each inner owns one contiguous segment, so the chain can attribute a
 //! settlement failure to one inner proof.
+//!
+//! A padding inner keeps the sentinel block hash and has its whole slot region
+//! zeroed, so a chain must skip such a segment whole and must never settle a
+//! zero nullifier: every padding segment of every batch publishes the same
+//! `2N` all-zero values, and settling them rejects the next padding segment as
+//! a double spend. `qnero_verifier::PrivateBatchPublicInputs::is_padding` is
+//! that test and `PublicBatchPublicInputs::settleable_batches` applies it. See
+//! `docs/CIRCUIT.md` section 8.6 for the whole settlement contract.
 
 /// Felts in a 32-byte Poseidon2 digest.
 pub const DIGEST_FELTS: usize = 4;

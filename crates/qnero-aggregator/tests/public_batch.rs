@@ -216,19 +216,6 @@ fn inner_batches_from_two_blocks_are_refused() {
     );
 }
 
-/// An all-padding public batch settles nothing, so the prover refuses it.
-#[test]
-fn an_all_padding_public_batch_is_refused() {
-    let (_, padding) = inner_proofs();
-    let error = public_batch_prover()
-        .prove_batch(PublicBatchInputs {
-            proofs: vec![padding.clone()],
-            aggregator_address: aggregator_address(),
-        })
-        .expect_err("an all-padding public batch must be refused");
-    assert!(error.to_string().contains("padding"), "got: {error}");
-}
-
 /// A leaf proof is not a private-batch proof, and the length check says so
 /// before any proving starts.
 #[test]
@@ -307,7 +294,7 @@ fn the_same_inner_proof_twice_is_refused() {
 }
 
 /// Two distinct private batches that spend the same note are refused for the
-/// same reason, so the rule is about nullifiers rather than about proof bytes.
+/// same reason, so the rule keys on nullifiers.
 #[test]
 fn two_inner_batches_settling_one_note_are_refused() {
     let block = common::block_with_notes("public-batch-shared-note", 1);
@@ -332,21 +319,35 @@ fn two_inner_batches_settling_one_note_are_refused() {
     assert!(error.to_string().contains("nullifier"), "got: {error}");
 }
 
-/// Padding is this prover's to append, never a caller's to supply.
+/// Padding is this prover's to append. A caller supplying it is refused
+/// wherever the padding sits, and a vector of nothing but padding falls under
+/// the same rule.
 ///
 /// The all-padding template is a published artifact anyone can download. It
 /// settles nothing, so accepting one as an input would let anyone burn an
-/// aggregator's slots with a file they did not prove.
+/// aggregator's slots with a file they did not prove. Both shapes are asserted
+/// on the sentinel message: one admission rule covers them, and a test that
+/// asserted only on the word "padding" would pass on the other rule's message
+/// too.
 #[test]
 fn a_caller_supplied_padding_inner_is_refused() {
     let (real, padding) = inner_proofs();
-    let error = public_batch_prover()
-        .prove_batch(PublicBatchInputs {
-            proofs: vec![real.clone(), padding.clone()],
-            aggregator_address: aggregator_address(),
-        })
-        .expect_err("a caller-supplied padding inner must be refused");
-    assert!(error.to_string().contains("padding"), "got: {error}");
+    for proofs in [
+        vec![real.clone(), padding.clone()],
+        vec![padding.clone(), real.clone()],
+        vec![padding.clone()],
+    ] {
+        let error = public_batch_prover()
+            .prove_batch(PublicBatchInputs {
+                proofs,
+                aggregator_address: aggregator_address(),
+            })
+            .expect_err("a caller-supplied padding inner must be refused");
+        assert!(
+            error.to_string().contains("carries the padding sentinel"),
+            "got: {error}"
+        );
+    }
 }
 
 /// A real private batch is not the all-padding template.

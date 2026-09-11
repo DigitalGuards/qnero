@@ -32,8 +32,8 @@
 //!   block hash, so the chain has one rule to recognise padding by.
 //!
 //! The preimage is public by design. Its `parent_hash` is a domain-separated
-//! Poseidon2 digest rather than a block hash, so no chain can ever produce a
-//! header equal to it; every other field is zero, including the block number
+//! Poseidon2 digest, which is outside the image of any chain's block hashing,
+//! so no chain can ever produce a header equal to it; every other field is zero, including the block number
 //! and the empty commitment-tree root.
 
 /// Block number a padding leaf publishes.
@@ -180,7 +180,7 @@ mod gadget {
     }
 
     /// `block_hash == PADDING_BLOCK_HASH`: the padding flag, derived in
-    /// circuit from a public input and a constant, never witnessed.
+    /// circuit from a public input and a constant. No witness feeds it.
     pub fn is_padding_block_hash(
         builder: &mut CircuitBuilder<F, D>,
         block_hash: HashOutTarget,
@@ -217,8 +217,8 @@ mod tests {
         );
     }
 
-    /// The sentinel is a Poseidon2 output, so it is not the all-zero digest
-    /// Wormhole uses and not a value a real header reaches by accident.
+    /// The sentinel is a Poseidon2 output, so it is neither the all-zero
+    /// digest Wormhole uses nor a value a real header reaches by accident.
     #[test]
     fn the_sentinel_is_not_the_zero_digest() {
         assert_ne!(PADDING_BLOCK_HASH, [0u64; 4]);

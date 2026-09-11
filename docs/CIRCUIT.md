@@ -276,10 +276,12 @@ change: a leaf appended in block N is only provable after that block's
 item 8 above is what actually enforces.
 
 One obligation the circuit places on `pallet-shielded`: **settle both published
-nullifiers of every leaf.** A dummy input slot publishes a nullifier like a
-real one, by design, so the chain cannot tell them apart and must not try. Both
-values are needed for double-spend safety: a note spent from slot 1 is marked
-used only if slot 1's nullifier is settled. Uniqueness of the derived output
+nullifiers of every leaf of a non-padding batch segment.** A dummy input slot
+publishes a nullifier like a real one, by design, so inside such a segment the
+chain cannot tell them apart and must not try. Both values are needed for
+double-spend safety: a note spent from slot 1 is marked used only if slot 1's
+nullifier is settled. Section 8.6 says which segments are non-padding and why a
+padding one settles nothing at all. Uniqueness of the derived output
 `rho` does **not** depend on this, since `rho_out_j` is derived from both
 nullifiers and at least one of them belongs to a real note (section 3).
 
@@ -445,7 +447,7 @@ to the wallet's own private-batch aggregator and must never cross a trust
 boundary: `standard_recursion_config` does not blind, so the proof bytes leak
 witness structure. Privacy is applied one layer up, at the private batch
 (section 8), which is the only layer that blinds and the only proof that
-leaves a wallet. Two things enforce that shape rather than describe it:
+leaves a wallet. Two things enforce that shape:
 `qnero-verifier`'s leaf entry points are behind a non-default feature, so a
 runtime cannot reach them, and `qnero_prover::WalletProver` keeps its leaf
 proofs inside and hands back the batch.
@@ -514,8 +516,9 @@ upstream's, which enforces a volume fee over 32-bit amounts in circuit with a
 
 **Slot order carries no meaning.** The prover shuffles the leaf proofs
 uniformly, and the circuit picks the batch's block reference by a prefix scan
-over the first non-padding slot rather than from slot 0, so every position is
-equivalent. That shuffle is also what hides where the padding sits. Upstream
+over the first non-padding slot, so every position is equivalent and a batch of
+several transfers publishes them in no order of the wallet's. Which slots hold
+padding stays public: section 8.4 says why. Upstream
 additionally permutes its emitted nullifier region through a switch network,
 because its exit-slot region is grouped and stays correlated with slot order;
 Qnero forwards each slot's six values as one unit, so the proof shuffle already
@@ -557,12 +560,12 @@ per leaf that has to become `2N`, or one leaf proof replayed across slots
 aggregates twice against a single settled nullifier.
 
 The prover mirrors both rules off circuit so an impossible batch is refused in
-milliseconds instead of after the recursive proving run, and the two must be
-kept in lockstep. The circuit remains the enforcer, and `qnero-aggregator`'s
+milliseconds, ahead of the recursive proving run, and the two must be kept in
+lockstep. The circuit remains the enforcer, and `qnero-aggregator`'s
 own tests fill the witness directly, past the prover's checks, to prove it.
 
-**At the public batch, distinctness across inner proofs is an admission rule
-and not a circuit constraint.** Cross-slot distinctness inside one private
+**At the public batch, distinctness across inner proofs is an admission
+rule.** Cross-slot distinctness inside one private
 batch is a constraint, `2N` digests compared pairwise. Across inner proofs it
 would be `n * 2N` against each other, 742 nullifiers at the chain defaults, and
 that is not affordable. So the public batch forwards each segment verbatim with
@@ -574,6 +577,15 @@ and it refuses a caller-supplied padding inner in the same pass because padding
 is the prover's to append. Without those checks, one attacker resubmitting a
 proof another wallet already paid for would make the chain reject the whole
 settlement, destroying an aggregator's batch at no cost.
+
+That map binds the honest prover path alone. `QneroPublicBatchCircuit` is
+public, the circuit is a deterministic function of the compiled code, and a
+witness can be filled through plonky2's own API, so anyone willing to rebuild
+the circuit reaches it with the same segment in every slot and gets a proof
+that verifies against the published `public_batch_verifier.bin`. The chain's
+settled-nullifier set is the backstop, which is why section 8.6 makes a
+settlement all or nothing and makes a nullifier repeated across segments abort
+it before any state changes.
 
 ### 8.4 The padding rule
 
@@ -616,22 +628,35 @@ moves nothing.
 invariant that crosses a circuit boundary:
 
 - both nullifiers become `H(NF_BATCH_PADDING, preimage)` over fresh randomness
-  the prover draws per slot per proving run. They are unique and unlinkable, so
-  the chain settles every published nullifier by one rule and never learns
-  which slots were padding, and cloning one padding template into many slots
-  cannot collide. The domain tag is what keeps a prover-chosen value outside
-  the image of both leaf nullifier functions, for the same reason `NF_DUMMY`
-  exists (section 3);
+  the prover draws per slot per proving run. They are unique, so the chain can
+  settle every published nullifier by one rule, settling a padding one is
+  inert, and cloning one padding template into many slots cannot collide. The
+  domain tag is what keeps a prover-chosen value outside the image of both leaf
+  nullifier functions, for the same reason `NF_DUMMY` exists (section 3);
 - both commitments become zero, which is the absence sentinel the commitment
   tree already refuses to store, so the chain appends nothing for that slot;
 - the fee and `ct_digest` become zero.
+
+**A padding slot is identifiable, and the batch's real-transfer count is
+public.** The mask zeroes a padding slot's commitment pair, and a real slot's
+commitments are Poseidon2 outputs, so anyone reading the 152 published felts of
+a `N = 7` batch filters the slots on `commitments == 0` and learns exactly how
+many transfers the submission carries and which positions they sit in.
+`BatchLeafSlot::is_padding` is that classifier, and the chain needs it to know
+which commitments to append. What the padding buys is a fixed proof shape and a
+fixed public-input length: every submission is one 152-felt private batch of
+the same size, whatever it carries. Hiding the count would mean giving a
+padding slot commitments indistinguishable from a real one's and telling the
+chain by another route which to append, which is a design change; section 8.6
+carries it as an open decision, together with whether a padding slot's two
+nullifiers are worth their permanent state.
 
 At the public batch, a padding inner keeps its sentinel header, so the chain
 recognises the segment and skips it whole, and its slot region is zeroed. The
 zeroing is load bearing there: that template is a published artifact cloned
 into every empty slot, so its nullifiers would otherwise repeat across slots
-and batches. Zeroed nullifiers are not settleable values, which is why the skip
-is an obligation and not an optimization; section 8.6 states it.
+and batches. Zeroed nullifiers are not settleable values, which makes the
+skip an obligation; section 8.6 states it.
 
 ### 8.5 Artifacts
 
@@ -711,8 +736,8 @@ needs a tagged circuit to pin.
   nullifier settled, no commitment appended, no fee accounted.
   `PrivateBatchPublicInputs::is_padding` is that check, and
   `PublicBatchPublicInputs::settleable_batches` is the iterator that applies
-  it, so the skip is the default path rather than something to remember. Two
-  things force it. A padding inner of a public batch keeps its sentinel header
+  it, so the skip is the default path a pallet already walks. Two things force
+  it. A padding inner of a public batch keeps its sentinel header
   and has its whole slot region zeroed, so it publishes `2N` all-zero
   nullifiers; a chain that settled those would insert the zero nullifier and
   then reject its own next slot as a double spend, which at 53 inner slots is
@@ -725,11 +750,36 @@ needs a tagged circuit to pin.
   section 1 obligation that `block_hash` is the hash of the block at
   `block_number`.
 - **Inside a non-padding segment, settle both nullifiers of every slot, and
-  skip a zero commitment.** A padding slot of a real batch publishes two
-  nullifiers that look like any other, by design, so within such a segment the
-  chain must settle every published nullifier without trying to tell them
-  apart. It must append only nonzero commitments: a zero commitment is the
-  absence sentinel, and it is how a padding slot says it created no note.
+  skip a zero commitment.** A padding slot's two nullifiers are hashes of
+  randomness drawn for that proving run, so they are unique and settling one is
+  inert. Settling every published nullifier of the segment is therefore the
+  safe default, and it is one rule for the whole segment. The alternative,
+  skipping a padding slot's two, is the open decision below; the slot is
+  identifiable either way. Commitments have no such choice: append the
+  nonzero ones and skip the zero digest, which is the absence sentinel and is
+  how a padding slot says it created no note.
+- **Settlement of one public batch is all or nothing.** The chain verifies one
+  public-batch proof and then walks `n` segments; nothing in circuit stops the
+  same inner segment appearing twice, and nothing stops one nullifier appearing
+  in two segments (section 8.3). A settlement extrinsic must therefore collect
+  every nullifier of every settleable segment, reject the batch when one
+  repeats, and mutate no state before that check passes. A pallet that settled
+  segment by segment without transactional rollback would half-settle such a
+  batch.
+- **Whether a padding slot's nullifiers are worth their state, and whether the
+  real-transfer count should be hidden at all.** These are one decision. A
+  padding slot is identifiable today, because the wrapper zeroes its
+  commitments and the chain needs that to know what to append (section 8.4), so
+  a one-transfer batch at `N = 7` publishes twelve unlinkable padding
+  nullifiers that buy no count hiding and that a chain settling by one rule
+  writes into permanent state. Either the chain skips a padding slot's
+  nullifiers the way it already skips a zero commitment, which removes
+  `2 * (N - 1)` entries per partly full batch and costs nothing since those
+  values are inert, or the count is hidden properly: give a padding slot
+  commitments a reader cannot tell from a real note's and tell the chain by
+  another route which to append. The second is a circuit change and a
+  settlement-format change together, and it is the only version that makes the
+  shuffle buy anything.
 - **Pallet-side `ct_digest` recomputation.** The rule is fixed (section 1) and
   implemented once in `qnero_notes::ct_digest`. What M4 owes is the call:
   recompute the digest over the ciphertexts in the settlement extrinsic, in

@@ -71,8 +71,8 @@ fn batch_of_two() -> &'static (Vec<Proof>, Proof) {
     })
 }
 
-/// The verifier a runtime would hold: built from the serialized artifact, held
-/// to the private-batch profile, never from a live prover.
+/// The verifier a runtime would hold: built from the serialized artifact and
+/// held to the private-batch profile.
 fn batch_verifier() -> &'static QneroPrivateBatchVerifier {
     static VERIFIER: OnceLock<QneroPrivateBatchVerifier> = OnceLock::new();
     VERIFIER.get_or_init(|| {
@@ -152,6 +152,12 @@ fn one_real_leaf_and_six_padding_slots_aggregate_and_verify() {
     assert_eq!(public.slots.len(), NUM_LEAVES);
     assert!(!public.is_padding());
 
+    // This filter is also what any observer can run over the 152 published
+    // felts: a padding slot's commitment pair is zero and a real slot's cannot
+    // be, so a batch's real-transfer count and the positions it uses are
+    // public. The padding buys a fixed proof shape and a fixed public-input
+    // length; `docs/CIRCUIT.md` section 8.4 states that, and 8.6 carries
+    // hiding the count as an open decision.
     let real: Vec<&BatchLeafSlot> = public
         .slots
         .iter()
@@ -194,9 +200,10 @@ fn one_real_leaf_and_six_padding_slots_aggregate_and_verify() {
 /// other test in this file and silently drop each leaf's `nf_2`, leaving a
 /// note spent from input slot 1 unmarked and spendable again.
 ///
-/// Slot order is not asserted: the prover shuffles uniformly, which is what
-/// hides where the padding sits, and the circuit picks its block reference by
-/// prefix scan so no position means anything.
+/// Slot order is not asserted: the prover shuffles uniformly, so the slot a
+/// leaf lands in is independent of the order it was supplied in, and the
+/// circuit picks its block reference by prefix scan so no position means
+/// anything.
 #[test]
 fn two_real_leaves_land_in_the_documented_slots() {
     let (leaves, batch) = batch_of_two();
@@ -301,7 +308,7 @@ fn the_same_leaf_proof_twice_is_refused() {
 /// A batch of nothing but padding settles nothing, so the prover refuses to
 /// spend a proving window on it. The artifact builder produces exactly such a
 /// batch as the public batch's padding template, and it fills the witness
-/// directly rather than coming through here.
+/// directly, past this path.
 #[test]
 fn an_all_padding_batch_is_refused() {
     let error = prover()

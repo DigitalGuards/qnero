@@ -8,6 +8,10 @@ description = "Generates the Qnero circuit artifact set a pallet build script em
 [dependencies]
 qnero-aggregator = { workspace = true }
 qnero-circuit = { workspace = true, features = ["zk"] }
+# The consumer's own loader, used to read every published verifier file back
+# before the set is committed. The `leaf` feature is on because the set carries
+# a leaf verifier a wallet loads.
+qnero-verifier = { workspace = true, features = ["leaf"] }
 qp-plonky2 = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 rand = { workspace = true }

@@ -113,7 +113,7 @@ inner     = H(NOTE, pk, rho, r)
 cm        = H(CM, inner, v)
 nf        = H(NF, nk, rho, r)                 real input slot
 nf_dummy  = H(NF_DUMMY, nk, rho, r)           padding input slot, tag selected in circuit
-rho_out_j = H(RHO, nf_1, nf_2, j)             a spend output's rho is derived in circuit, never chosen
+rho_out_j = H(RHO, nf_1, nf_2, j)             a spend output's rho is derived in circuit
 ```
 
 The 62-bit cap on `v` is a consensus rule. The no-wrap argument behind the
@@ -192,15 +192,30 @@ preimage, and the wrapper masks every value such a slot publishes.
 
 ## 7. Pallet changes (`pallet-shielded`, forked from `pallet-wormhole`)
 
+`docs/CIRCUIT.md` section 8.6 is the full settlement contract; this is its
+shape.
+
 1. Parse the new PI layout; keep the block-hash-at-height check and nullifier
    dedupe.
-2. For each real leaf: mark both published nullifiers used, including a dummy
-   slot's, which the chain cannot and must not try to tell apart; append
-   `cm_out_1`,
-   `cm_out_2` to `pallet-zk-tree`, emit the ciphertexts in an event and store
-   them by leaf index for wallet sync.
-3. Fee: sum of leaf fees, split burn / block author as Wormhole does today.
-4. Entry in v0: Wormhole-style deposit from a transparent account into a note
+2. Skip every batch segment carrying `PADDING_BLOCK_HASH`. Such a segment
+   settles nothing at all: no nullifier entered, no commitment appended, no fee
+   accounted. Its slot region is zeroed, so a chain that settled it would
+   insert the all-zero nullifier and reject its own next padding segment as a
+   double spend, which at 53 inner slots is close to every batch.
+   `PublicBatchPublicInputs::settleable_batches` is that filter, and a zero
+   nullifier must never enter the nullifier set.
+3. Inside a segment that survives the filter, for every slot: mark both
+   published nullifiers used, including a dummy input's, which the chain
+   cannot tell from a real one; append `cm_out_1` and `cm_out_2` to
+   `pallet-zk-tree`, skipping a zero commitment, which is how a padding slot
+   says it created no note; recompute `ct_digest` over the submitted
+   ciphertexts and compare; emit the ciphertexts in an event and store them by
+   leaf index for wallet sync.
+4. Fee: sum of the leaf fees of those same segments, split burn / block author
+   as Wormhole does today.
+5. Settlement of one public batch is all or nothing, and a nullifier repeated
+   across segments aborts it before any state change.
+6. Entry in v0: Wormhole-style deposit from a transparent account into a note
    (public `v`, coinbase-style commitment). Exit in v0: a leaf whose output
    is a transparent account with public `v`. Both removed in v1.
 

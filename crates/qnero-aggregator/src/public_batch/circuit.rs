@@ -86,9 +86,10 @@ impl QneroPublicBatchCircuit {
     /// `num_leaves` slots each.
     ///
     /// The private-batch verifier key is baked in as constants. The inner
-    /// public-input count is checked at runtime rather than asserted, because
-    /// every offset below is derived from `num_leaves` and an inner circuit of
-    /// another shape would index out of bounds in a release build.
+    /// public-input count is checked at runtime, because a debug assertion
+    /// compiles out and every offset below is derived from `num_leaves`: an
+    /// inner circuit of another shape would index out of bounds in a release
+    /// build.
     pub fn new(
         config: CircuitConfig,
         private_batch_common: &CommonCircuitData<F, D>,

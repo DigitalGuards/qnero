@@ -26,8 +26,8 @@ MIT).
   `padding_leaf_proof.bin`, `padding_private_batch_proof.bin`. Upstream's leaf
   files are `common.bin`, `verifier.bin` and `dummy_proof.bin`.
 - The generated Rust snippet is written by this crate, next to the artifacts it
-  describes, rather than by the consuming pallet's build script. A set's
-  dimensions and its artifacts cannot then disagree.
+  describes. Upstream leaves it to the consuming pallet's build script, where a
+  set's dimensions and its artifacts can disagree.
 - No `clap`. The CLI parses its flags by hand, which keeps the dependency tree
   of a crate that runs on a build host to what the circuits already need.
 - The dimensions can come from `QNERO_NUM_LEAF_PROOFS` and
@@ -39,6 +39,13 @@ MIT).
 
 ## Added
 
+- Every verifier file is read back through `qnero-verifier`'s own loader before
+  the staged set is committed: the leaf profile, the private-batch profile at
+  the set's `num_leaf_proofs`, and the public-batch profile at both dimensions.
+  Upstream publishes what it built and leaves every profile check to the pallet
+  that embeds the set, which is another machine and, at the chain dimensions,
+  tens of minutes later. The read-back costs milliseconds and makes the
+  staging-then-rename guarantee cover "this set is loadable".
 - `include_padding_batch`, which controls only the all-padding private-batch
   proof. A runtime build does not need it and would pay a full recursive
   proving run for it; an aggregator does. Upstream's `include_prover` flag

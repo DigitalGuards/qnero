@@ -65,8 +65,18 @@ pub const PRIVATE_BATCH_NUM_ROUTED_WIRES: usize = 60;
 /// Unlike [`LEAF_DEGREE_BITS`], a batch circuit's degree is a function of how
 /// many proofs it aggregates, so a verifier cannot pin it to one value. What
 /// it can do is refuse an artifact whose degree is larger than any supported
-/// batch: `2^20` rows is far above the private batch at 64 leaves, and the
-/// bound keeps a malformed artifact from driving an LDE allocation of
+/// batch, which keeps a malformed artifact from driving an LDE allocation of
 /// `1 << (degree_bits + rate_bits)` field elements per committed polynomial
 /// before verification fails for an unrelated reason.
+///
+/// `2^20` rows covers both layers at every supported dimension. The private
+/// batch is measured: seven leaves reach `degree_bits = 16`
+/// (`docs/BENCH.md`), one recursive verifier per slot, so 64 leaves stay
+/// several bits below the ceiling. The larger circuit is the public batch at
+/// the chain default of 53 inner proofs, which is 53 recursive verifiers over
+/// a `degree_bits = 16` inner plus an 8056-felt forwarded region, and which
+/// has not been built or measured yet (`docs/BENCH.md`). Its expected degree
+/// is about `2^18`. `qnero-circuit-builder` reads every verifier file it
+/// publishes back through this ceiling, so a public batch that outgrew it
+/// would fail on the build host.
 pub const MAX_BATCH_DEGREE_BITS: usize = 20;

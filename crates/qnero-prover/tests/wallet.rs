@@ -1,7 +1,7 @@
 //! The wallet's path from notes to a submittable transaction.
 //!
-//! Two slots rather than the chain default, because this test is about the
-//! API's shape and not about batch size.
+//! Two slots, which is the cheapest batch that exercises the API's shape.
+//! Batch size is `docs/BENCH.md`'s subject.
 
 use plonky2::field::types::PrimeField64;
 use qnero_aggregator::artifacts::serialize_verifier_data;

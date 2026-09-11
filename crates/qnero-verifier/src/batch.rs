@@ -3,7 +3,8 @@
 //!
 //! These are the two artifacts a runtime holds. Both loaders are fail closed:
 //! an artifact that does not match the expected profile is refused, and the
-//! caller gets no verifier at all rather than a weak one.
+//! caller gets no verifier at all. There is no path that hands back a
+//! weakened one.
 //!
 //! # The profile
 //!
@@ -76,11 +77,22 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchLeafSlot {
     /// Both nullifiers the leaf published. A padding slot inside a real batch
-    /// carries hashes of randomness the prover drew for this batch, so within
-    /// such a batch the chain settles every slot's nullifiers by one rule and
-    /// never learns which slots were padding.
+    /// carries hashes of randomness the prover drew for this batch, so no two
+    /// padding slots publish the same value and a padding nullifier cannot
+    /// collide with a real one. Settling them is therefore inert, and the
+    /// chain may settle every slot's nullifiers by one rule.
     ///
-    /// That rule holds **inside a non-padding segment only**. A padding
+    /// **A padding slot is identifiable**, so that one rule buys no count
+    /// hiding. The wrapper zeroes a padding slot's commitment pair and no real
+    /// slot's can be zero ([`BatchLeafSlot::is_padding`]), so the number of
+    /// real transfers in a submission and the positions they occupy are
+    /// public. What the padding does buy is a fixed proof shape and a fixed
+    /// public-input length. Whether the chain keeps settling a padding slot's
+    /// two nullifiers or skips them the way it already skips a zero
+    /// commitment is an M4 decision (`docs/CIRCUIT.md` section 8.6): skipping
+    /// them saves `2 * (N - 1)` permanent entries on a one-transfer batch.
+    ///
+    /// Settling by one rule holds **inside a non-padding segment only**. A padding
     /// segment of a public batch has its whole slot region zeroed
     /// ([`PrivateBatchPublicInputs::is_padding`]), so its nullifiers are the
     /// all-zero digest and repeat across every padding segment of every batch.
@@ -92,8 +104,8 @@ pub struct BatchLeafSlot {
     /// Both output commitments. Zero in a padding slot.
     pub commitments: [[F; DIGEST_FELTS]; NUM_OUTPUTS],
     /// That leaf's fee. Zero in a padding slot. Fees are summed by the chain
-    /// in native arithmetic, never in circuit: `N` 62-bit values overflow the
-    /// field.
+    /// in native arithmetic: `N` 62-bit values overflow the field, so the
+    /// circuit leaves the sum alone.
     pub fee: F,
     /// The digest of that leaf's output ciphertexts. Zero in a padding slot.
     pub ct_digest: [F; DIGEST_FELTS],
@@ -153,9 +165,8 @@ pub struct PublicBatchPublicInputs {
 impl PublicBatchPublicInputs {
     /// The segments a chain settles: every inner batch that is not padding.
     ///
-    /// This is the default settlement path, and it exists so the skip is
-    /// something a consumer gets for free rather than something it has to
-    /// rediscover. A padding segment keeps its sentinel header and has its
+    /// This is the default settlement path, and it exists so a consumer gets
+    /// the skip for free. A padding segment keeps its sentinel header and has its
     /// whole slot region zeroed, so iterating [`Self::batches`] directly and
     /// settling every published nullifier inserts the all-zero nullifier once
     /// per padding slot and fails on the second one. At the chain default of
@@ -269,7 +280,7 @@ pub fn parse_public_batch_public_inputs(
 
 /// The config the private-batch circuit is built with.
 ///
-/// Restated here rather than imported: see the module docs.
+/// Restated here, for the reason the module docs give.
 pub fn expected_private_batch_config() -> CircuitConfig {
     CircuitConfig {
         num_wires: params::PRIVATE_BATCH_NUM_WIRES,
@@ -347,8 +358,8 @@ pub const PUBLIC_BATCH_ARTIFACT_HEADER_LEN: usize = 16;
 /// loads cleanly under the other, verifies genuine proofs, and the chain then
 /// splits those proofs into segments at the wrong offsets: it would read one
 /// inner's block hash as another's nullifier and write junk into the nullifier
-/// set rather than refuse the artifact. Carrying the dimensions beside the
-/// bytes closes that, and it costs sixteen bytes.
+/// set, with nothing anywhere refusing the artifact. Carrying the dimensions
+/// beside the bytes closes that, and it costs sixteen bytes.
 ///
 /// The private batch needs no such header: `5 + 21 * N` determines `N`
 /// uniquely from a length, so its public-input check already binds it.
@@ -467,8 +478,8 @@ impl QneroPrivateBatchVerifier {
 
     /// Load verifier data from its serialized form.
     ///
-    /// This is the shape a runtime uses: bytes produced by a trusted build,
-    /// never by a prover. There is deliberately no hash pin on them, because
+    /// This is the shape a runtime uses: bytes that come out of a trusted
+    /// build. There is deliberately no hash pin on them, because
     /// the bytes depend on `num_leaves`; the profile above stands in its
     /// place, and the caller owns provenance.
     pub fn from_artifact_bytes(bytes: &[u8], num_leaves: usize) -> Result<Self> {

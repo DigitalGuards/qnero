@@ -258,7 +258,7 @@ impl QneroVerifier {
     /// Verify a serialized proof and read its public inputs.
     ///
     /// Bytes are the real boundary: a proof reaches a verifier over the
-    /// network or out of a block, never as a live struct.
+    /// network or out of a block.
     pub fn verify_proof_bytes(&self, proof_bytes: &[u8]) -> Result<LeafPublicInputs> {
         ensure!(
             proof_bytes.len() <= MAX_PROOF_BYTES,

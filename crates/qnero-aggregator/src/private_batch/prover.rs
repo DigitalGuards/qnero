@@ -50,7 +50,7 @@ pub struct PrivateBatchBuildMetrics {
 
 /// Proves private batches over one fixed slot count.
 pub struct QneroPrivateBatchProver {
-    /// Full circuit data rather than prover-only data: the few hundred
+    /// Full circuit data, prover and verifier both: the few hundred
     /// kilobytes of verifier data it adds are what let a wallet verify its own
     /// batch before submitting it, and what the artifact builder pins the
     /// published verifier against.
@@ -257,10 +257,14 @@ impl QneroPrivateBatchProver {
         }
 
         let mut rng = rand::rng();
-        // Uniform shuffle, which is what hides where the padding sits. The
-        // circuit picks its block reference by prefix scan and forwards each
-        // slot's values as one unit, so no slot position means anything and no
-        // separate permutation of the emitted region is needed.
+        // Uniform shuffle: the slot a leaf lands in is independent of the
+        // order the caller supplied its proofs, so a batch of several
+        // transfers publishes them in no order of the wallet's. The circuit
+        // picks its block reference by prefix scan and forwards each slot's
+        // values as one unit, so no slot position means anything and no
+        // separate permutation of the emitted region is needed. Which slots
+        // are padding stays public: the wrapper zeroes their commitments
+        // (`docs/CIRCUIT.md` section 8.4).
         proofs.shuffle(&mut rng);
 
         let preimages = padding_nullifier_preimages_for_build(&mut rng, self.num_leaves);
@@ -275,9 +279,10 @@ impl QneroPrivateBatchProver {
 /// padded leaf publishes.
 ///
 /// Fresh on every proving run, so two batches never publish the same padding
-/// nullifier, and a padding slot is not recognisable by a repeated value.
+/// nullifier and one cloned template in many slots cannot collide with
+/// itself.
 /// Every limb is reduced into the field, so the preimage is a canonical field
-/// element rather than a `u64` the witness would silently reduce.
+/// element. A raw `u64` would be silently reduced by the witness.
 pub(crate) fn padding_nullifier_preimages_for_build<R: RngCore>(
     rng: &mut R,
     slots: usize,
@@ -301,7 +306,7 @@ pub(crate) fn padding_nullifier_preimages_for_build<R: RngCore>(
 /// - at least one leaf is non-padding, since an all-padding batch settles
 ///   nothing and only burns a proving window. The artifact builder produces
 ///   exactly such a batch as the public batch's padding template, and it fills
-///   the witness directly rather than coming through here.
+///   the witness directly, past this path.
 ///
 /// The circuit remains the enforcer. This is about failure latency and error
 /// quality.

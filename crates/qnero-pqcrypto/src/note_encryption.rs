@@ -30,13 +30,33 @@ const AEAD_KEY_SIZE: usize = 32;
 const AEAD_NONCE_SIZE: usize = 12;
 
 /// Note plaintext data
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NotePlaintext {
     pub value: u64,
     pub asset_id: u64,
     pub rho: [u8; 32],
     pub r: [u8; 32],
     pub memo: Vec<u8>,
+}
+
+/// Redacting `Debug`, a local divergence from the vendored crate (see
+/// CHANGES.md).
+///
+/// This is the decrypted note: the value, both seeds and the memo. The shield
+/// publishes `nf = H(NF, nk, rho, r)` on chain, so a log line carrying `rho`
+/// and `r` beside a settled nullifier links that nullifier to an amount and a
+/// recipient. `qnero_notes::Note` and `ReceivedNote` redact the same values,
+/// and this type is what `decrypt_note` binds on the way to building them.
+impl core::fmt::Debug for NotePlaintext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NotePlaintext")
+            .field("asset_id", &self.asset_id)
+            .field("value", &"[REDACTED]")
+            .field("rho", &"[REDACTED]")
+            .field("r", &"[REDACTED]")
+            .field("memo", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl NotePlaintext {
@@ -93,13 +113,27 @@ pub struct NoteCiphertext {
 }
 
 /// Internal payload structure for serialization
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct NotePayload {
     value: u64,
     asset_id: u64,
     rho: [u8; 32],
     r: [u8; 32],
     pk_recipient: [u8; 32],
+}
+
+/// Redacting `Debug`, for the same reason [`NotePlaintext`] has one: this
+/// carries `rho`, `r` and the recipient key.
+impl core::fmt::Debug for NotePayload {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NotePayload")
+            .field("asset_id", &self.asset_id)
+            .field("value", &"[REDACTED]")
+            .field("rho", &"[REDACTED]")
+            .field("r", &"[REDACTED]")
+            .field("pk_recipient", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl NotePayload {

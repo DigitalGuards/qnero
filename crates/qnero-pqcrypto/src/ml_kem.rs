@@ -16,8 +16,8 @@ use ml_kem::array::Array;
 use ml_kem::kem::{Decapsulate, KeyExport};
 // `ExpandedKeyEncoding` is deprecated in favour of `DecapsulationKey::from_seed`.
 // Switching would change the stored secret-key encoding, which the pinned KAT
-// vectors cover, so the move belongs in its own change with regenerated
-// vectors rather than as a lint fix.
+// vectors cover, so the move belongs in its own change, with regenerated
+// vectors.
 #[allow(deprecated)]
 use ml_kem::{DecapsulationKey, EncapsulationKey, ExpandedKeyEncoding, MlKem1024};
 

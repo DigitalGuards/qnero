@@ -404,8 +404,7 @@ fn the_padding_leaf_proves_and_publishes_the_sentinel() {
 /// values to zero, and the balance equation then has zero on its left side.
 /// A nonzero fee makes the right side nonzero and the leaf unprovable. The
 /// batch wrapper masks a padding slot's fee anyway; this is the leaf-side half
-/// of that pair, and it is what makes the mask a second line rather than the
-/// only one.
+/// of that pair, and it is what makes the mask a second line of defense.
 #[test]
 fn a_padding_leaf_cannot_carry_a_fee() {
     let mut witness = qnero_circuit::padding::padding_leaf_witness();

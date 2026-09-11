@@ -100,9 +100,9 @@ impl QneroPrivateBatchCircuit {
     ///
     /// The checks run before `CircuitBuilder::new`, in the order a failure is
     /// cheapest: the config policy, the slot count, then the inner circuit's
-    /// public-input count. The last one is a runtime check rather than a debug
-    /// assertion because the constraints below index fixed offsets into each
-    /// leaf's public inputs, and a leaf of another shape would read a
+    /// public-input count. The last one is a runtime check, because a debug
+    /// assertion compiles out and the constraints below index fixed offsets
+    /// into each leaf's public inputs: a leaf of another shape would read a
     /// commitment where a nullifier should be.
     pub fn new(
         config: CircuitConfig,
@@ -178,9 +178,12 @@ fn digest_at(pis: &[Target], start: usize) -> [Target; DIGEST_FELTS] {
 /// `H(NF_BATCH_PADDING, preimage)`: the nullifier a padding slot publishes.
 ///
 /// The preimage is fresh randomness the prover supplies per slot per proving
-/// run, so two padding slots never publish the same value and the chain
-/// settles them like any other nullifier, without learning which slots were
-/// padding.
+/// run, so two padding slots never publish the same value and cloning one
+/// padding template into many slots cannot collide. The chain can settle them
+/// like any other nullifier, and settling them is inert. It does not hide
+/// which slots were padding: the wrapper zeroes a padding slot's commitment
+/// pair and a real slot's commitments are Poseidon2 outputs, so the padding
+/// positions are public either way (`docs/CIRCUIT.md` section 8.4).
 ///
 /// The domain tag is the point. A padding nullifier is unauthenticated by
 /// construction: the prover picks the preimage. Under the real `NF` tag that
@@ -229,8 +232,8 @@ fn build_private_batch_constraints(
 
     // --- 3. the block reference, from the first non-padding slot ---
     //
-    // A prefix scan rather than "slot 0 decides", so the prover can shuffle
-    // the slots uniformly and no position is special. An all-padding batch
+    // A prefix scan, so no position is special and the prover can shuffle the
+    // slots uniformly. An all-padding batch
     // keeps the sentinel as its reference, which the chain recognises as a
     // batch that settles nothing: the public-batch layer uses exactly that to
     // pad itself.
@@ -349,28 +352,18 @@ mod tests {
     use plonky2::iop::witness::PartialWitness;
     use plonky2::plonk::circuit_data::CircuitData;
     use plonky2::plonk::proof::ProofWithPublicInputs;
-    use qnero_circuit::circuit::{QneroSpendCircuit, SpendTargets};
     use qnero_circuit::config::qnero_private_batch_circuit_config;
-    use qnero_circuit::header::{HeaderInputs, DIGEST_LOGS_SIZE};
-    use qnero_circuit::merkle::CommitmentTree;
-    use qnero_circuit::witness::{fill_witness, InputNote, OutputNote, SpendWitness};
-    use qnero_notes::{Digest, Note, SpendingKey};
 
     use super::*;
     use crate::private_batch::witness::fill_private_batch_witness;
+    // One leaf circuit and one leaf witness shape for the whole lib test
+    // binary. A second copy here would build the leaf circuit twice and would
+    // keep proving the old witness shape after the shared one changed.
+    use crate::test_fixtures::{leaf_circuit, leaf_proof};
 
     /// Two slots: enough to exercise every cross-slot constraint, and the
     /// cheapest circuit that can.
     const SLOTS: usize = 2;
-
-    fn leaf_circuit() -> &'static (SpendTargets, CircuitData<F, C, D>) {
-        static CIRCUIT: OnceLock<(SpendTargets, CircuitData<F, C, D>)> = OnceLock::new();
-        CIRCUIT.get_or_init(|| {
-            let circuit = QneroSpendCircuit::default();
-            let targets = circuit.targets();
-            (targets, circuit.build())
-        })
-    }
 
     fn batch_circuit() -> &'static (PrivateBatchTargets, CircuitData<F, C, D>) {
         static CIRCUIT: OnceLock<(PrivateBatchTargets, CircuitData<F, C, D>)> = OnceLock::new();
@@ -386,65 +379,6 @@ mod tests {
             let targets = circuit.targets();
             (targets, circuit.build())
         })
-    }
-
-    /// A leaf proof spending one note in a block named by `tag`.
-    fn leaf_proof(tag: &str) -> ProofWithPublicInputs<F, C, D> {
-        let keys = SpendingKey::from_bytes([5u8; 32]).derived();
-        let note = Note::new(
-            keys.pk(),
-            100,
-            Digest::hash_bytes(&[b"circuit-test/rho", tag.as_bytes()]),
-            Digest::hash_bytes(&[b"circuit-test/r", tag.as_bytes()]),
-        )
-        .unwrap();
-        let leaves = [
-            Digest::hash_bytes(&[b"circuit-test/decoy", tag.as_bytes()]),
-            note.commitment(),
-        ];
-        let tree = CommitmentTree::new(&leaves, 1).unwrap();
-        let header = HeaderInputs::new(
-            Digest::hash_bytes(&[b"circuit-test/parent", tag.as_bytes()]),
-            9,
-            [0x11; Digest::LEN],
-            [0x22; Digest::LEN],
-            tree.root(),
-            &[0u8; DIGEST_LOGS_SIZE],
-        )
-        .unwrap();
-
-        let witness = SpendWitness {
-            header,
-            depth: tree.depth(),
-            inputs: [
-                InputNote::real(&keys, &note, tree.path(1).unwrap()).unwrap(),
-                InputNote::dummy(
-                    &keys,
-                    Digest::hash_bytes(&[b"circuit-test/dummy-rho", tag.as_bytes()]),
-                    Digest::hash_bytes(&[b"circuit-test/dummy-r", tag.as_bytes()]),
-                    tree.depth(),
-                ),
-            ],
-            outputs: [
-                OutputNote::new(
-                    keys.pk(),
-                    90,
-                    Digest::hash_bytes(&[b"out-r", tag.as_bytes()]),
-                ),
-                OutputNote::new(
-                    keys.pk(),
-                    5,
-                    Digest::hash_bytes(&[b"change-r", tag.as_bytes()]),
-                ),
-            ],
-            fee: 5,
-            ct_digest: Digest::hash_bytes(&[b"ct", tag.as_bytes()]),
-        };
-
-        let (targets, data) = leaf_circuit();
-        let mut pw = PartialWitness::<F>::new();
-        fill_witness(&mut pw, &witness, targets).unwrap();
-        data.prove(pw).unwrap()
     }
 
     fn preimages() -> Vec<crate::private_batch::witness::SlotPaddingPreimages> {

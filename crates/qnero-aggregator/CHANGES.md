@@ -5,14 +5,14 @@ aggregation layers; the public-input layouts and the padding rule are Qnero's.
 
 ## Kept
 
-- Recursive verification against a **constant** inner verifier key, never a
-  witnessed one. A witnessed key lets a prover substitute a circuit with no
-  constraints and have the wrapper accept its proof.
+- Recursive verification against a **constant** inner verifier key. A
+  witnessed key lets a prover substitute a circuit with no constraints and have
+  the wrapper accept its proof.
 - No prover artifact is emitted or loaded, at any layer. Prover data decides
   which witness values become public inputs.
 - Untrusted verifier artifacts are pinned by comparing raw bytes against a
-  canonical rebuild, never by deserializing the untrusted side first, and the
-  `load_canonical_*` functions return the rebuild.
+  canonical rebuild, with the untrusted side left undeserialized, and the
+  `load_canonical_*` functions return that rebuild.
 - The full proof-shape preflight before `set_proof_with_pis_target`, which
   panics, silently half-assigns or silently leaves targets unset depending on
   which length disagrees.
@@ -20,7 +20,7 @@ aggregation layers; the public-input layouts and the padding rule are Qnero's.
   included, and the sentinel is checked before the cryptographic verify.
 - Admission checks run before the recursive proving run: every inner proof is
   verified against the pinned inner verifier, and a batch the circuit could
-  never prove is refused in milliseconds rather than after minutes.
+  never prove is refused in milliseconds, ahead of the minutes a run costs.
 - The low-level witness fillers stay crate-private, guarded by a `compile_fail`
   doctest plus a passing companion that pins the same path prefix, so a crate
   or module rename cannot make the negative test pass vacuously.
@@ -39,9 +39,9 @@ aggregation layers; the public-input layouts and the padding rule are Qnero's.
   `nf_2` at this boundary: a note spent from input slot 1 would never be marked
   used and could be spent again without limit. `docs/CIRCUIT.md` section 8
   names this as the one place a port goes wrong quietly.
-- **Pairwise distinctness covers all `2N` nullifiers**, not `N`. At two per
-  leaf, constraining one per leaf leaves the same leaf proof replayable across
-  slots.
+- **Pairwise distinctness covers all `2N` nullifiers.** Upstream constrains
+  `N`, one per leaf, and at two per leaf that leaves the same leaf proof
+  replayable across slots.
 - **The padding sentinel is a fixed header preimage.** Upstream's sentinel is
   an all-zero `block_hash`, which no preimage produces, so it has to make the
   leaf's header binding conditional. Qnero's padding leaf hashes a real
@@ -49,11 +49,14 @@ aggregation layers; the public-input layouts and the padding rule are Qnero's.
   `qnero_circuit::padding`.
 - **A padding slot's nullifiers are replaced, its other values zeroed.** The
   replacement is `H(NF_BATCH_PADDING, preimage)` over fresh randomness the
-  prover draws per slot per run, so the chain settles every published nullifier
-  by one rule; its commitments, fee and `ct_digest` become zero, which is how
-  the chain knows to append nothing. Upstream masks exits and amounts for the
-  same reason and calls it defense in depth; here it is the enforcement, since
-  the leaf's own rule is not what keeps a padding slot from settling.
+  prover draws per slot per run, so a padding nullifier is unique and settling
+  one is inert; its commitments, fee and `ct_digest` become zero, which is how
+  the chain knows to append nothing. The zeroed commitments also make a padding
+  slot identifiable, so the mask buys a fixed proof shape and no count hiding
+  (`docs/CIRCUIT.md` sections 8.4 and 8.6). Upstream masks exits and amounts
+  for the same reason and calls it defense in depth; here it is the
+  enforcement, since the leaf's own rule is not what keeps a padding slot from
+  settling.
 - **No fee arithmetic in circuit.** Upstream enforces a volume fee over 32-bit
   amounts, with a 52-bit range check that assumes 64 leaves of `u32`. A Qnero
   leaf's fee is a 62-bit field element, so `N` of them overflow Goldilocks for
@@ -66,9 +69,9 @@ aggregation layers; the public-input layouts and the padding rule are Qnero's.
   each slot's six values as one unit, so the prover's uniform shuffle of the
   proof vector already randomizes every emitted position.
 - **The public batch forwards each inner proof's public inputs verbatim** into
-  one contiguous segment, header included, rather than hoisting a shared header
-  and re-emitting grouped exit slots. A padding inner keeps its sentinel header
-  and has its slot region zeroed.
+  one contiguous segment, header included. Upstream hoists a shared header and
+  re-emits grouped exit slots. A padding inner keeps its sentinel header and
+  has its slot region zeroed.
 - **One verifier file per layer**, holding common data and verifier-only data
   together. Upstream writes two files per layer, which a consumer has to pair
   up correctly.

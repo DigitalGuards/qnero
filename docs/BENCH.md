@@ -86,7 +86,7 @@ cannot saturate a machine unasked.
 The spread is the measurement itself. The FRI challenge carries 16 grinding
 bits and the search for them is a geometric random variable seeded by the
 transcript, which dominates a circuit this small. Compare means over the same
-sample count, never one warm number against another.
+sample count.
 
 ## Private batch: N = 7 leaf slots, one real transfer and six padding
 

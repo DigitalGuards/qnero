@@ -49,8 +49,8 @@ use crate::{C, D, F};
 /// Private targets for one input note.
 #[derive(Debug, Clone)]
 pub struct InputNoteTargets {
-    /// Spend authorizing key. `pk` is derived from it, never witnessed, so a
-    /// wrong `ask` produces a commitment that is not in the tree.
+    /// Spend authorizing key. `pk` is derived from it in circuit, so a wrong
+    /// `ask` produces a commitment that is not in the tree.
     pub ask: HashOutTarget,
     /// Nullifier key. Feeds both `pk` and the published nullifier, which is
     /// what ties the nullifier to the note being spent.
@@ -195,7 +195,7 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
         let dummy_value = builder.mul(input.value, input.is_dummy.target);
         builder.connect(dummy_value, zero);
 
-        // pk is derived, never witnessed: a wrong ask or nk yields a
+        // pk is derived here in circuit: a wrong ask or nk yields a
         // commitment that is not in the tree.
         let pk = derive_pk(builder, input.ask, input.nk);
         let inner = note_inner(builder, pk, input.rho, input.r);

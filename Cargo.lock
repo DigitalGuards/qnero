@@ -709,6 +709,7 @@ dependencies = [
  "anyhow",
  "qnero-aggregator",
  "qnero-circuit",
+ "qnero-verifier",
  "qp-plonky2",
  "rand 0.9.5",
 ]
