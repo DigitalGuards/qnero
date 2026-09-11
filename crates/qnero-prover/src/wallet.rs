@@ -22,8 +22,10 @@
 //! The private batch proof. A leaf is built with `standard_recursion_config`,
 //! which does not blind, so its FRI openings leak the structure of the notes
 //! it spends, and it exists only to be aggregated. Zero knowledge is applied
-//! one layer up, and [`WalletProver`] is shaped so that the leaf proofs never
-//! leave it.
+//! one layer up. [`WalletProver::prove_submission`] keeps its leaf proofs
+//! inside the call and is the method a wallet should use;
+//! [`WalletProver::prove_leaf`] is an advanced seam, and what it returns must
+//! not cross a trust boundary.
 //!
 //! # Cost
 //!
@@ -126,6 +128,12 @@ impl WalletProver {
     /// two conflicting field elements: a note's amount, or the limbs that
     /// place it in the tree. Logging that would write the spent note's value
     /// next to the nullifier about to be published.
+    ///
+    /// The proof this returns is not zero knowledge and is not a
+    /// transaction. It is an input to [`Self::aggregate`], and handing one to
+    /// anything outside the wallet publishes the structure of the notes it
+    /// spends. Callers that do not need the two steps apart should use
+    /// [`Self::prove_submission`], which keeps them inside one call.
     ///
     /// [`Note`]: qnero_notes::Note
     pub fn prove_leaf(&self, witness: &SpendWitness) -> Result<Proof> {

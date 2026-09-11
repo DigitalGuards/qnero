@@ -447,10 +447,13 @@ to the wallet's own private-batch aggregator and must never cross a trust
 boundary: `standard_recursion_config` does not blind, so the proof bytes leak
 witness structure. Privacy is applied one layer up, at the private batch
 (section 8), which is the only layer that blinds and the only proof that
-leaves a wallet. Two things enforce that shape:
+leaves a wallet. One thing enforces that shape:
 `qnero-verifier`'s leaf entry points are behind a non-default feature, so a
-runtime cannot reach them, and `qnero_prover::WalletProver` keeps its leaf
-proofs inside and hands back the batch.
+runtime taking the crate with default features cannot name a leaf verifier.
+On the wallet side it is a convention the types do not carry:
+`qnero_prover::WalletProver::prove_submission` keeps its leaf proofs inside
+the call and is what a wallet should call, and `prove_leaf` is a public
+advanced seam whose output must not cross a trust boundary.
 
 The plumbing for a ZK leaf is kept: `qnero_leaf_zk_circuit_config()` returns
 the row-blinding config, and `QneroSpendCircuit::new` accepts it. Plonky2
@@ -546,8 +549,8 @@ or it will settle batches whose fees are payable to someone else;
 ### 8.3 The forwarding contract
 
 **Every non-padding slot's two nullifiers, two output commitments, fee and
-`ct_digest` reach the aggregated public inputs unchanged, and all `2N` real
-nullifiers are constrained pairwise distinct.**
+`ct_digest` reach the aggregated public inputs unchanged, and all `2N`
+nullifiers the batch publishes are constrained pairwise distinct.**
 
 This is the one place a mechanical port of upstream's private batch goes wrong
 quietly. Upstream's leaf has a single nullifier, so its wrapper carries
@@ -559,33 +562,49 @@ limit. Upstream also constrains only `N` nullifiers pairwise distinct; at two
 per leaf that has to become `2N`, or one leaf proof replayed across slots
 aggregates twice against a single settled nullifier.
 
+The comparison is on the values the wrapper emits, and no slot is exempt from
+it. A padding slot's emitted nullifiers are hashes of free witness targets, so
+exempting padding slots would leave them unconstrained: a caller filling the
+witness through plonky2's own API repeats one preimage in two padding slots and
+publishes one nullifier twice inside one settleable segment. Reading the
+emitted values is also what makes the rule satisfiable at all: the padding
+template is one proof cloned into every empty slot, so every padding slot's
+leaf-side nullifiers are identical.
+
 The prover mirrors both rules off circuit so an impossible batch is refused in
 milliseconds, ahead of the recursive proving run, and the two must be kept in
 lockstep. The circuit remains the enforcer, and `qnero-aggregator`'s
 own tests fill the witness directly, past the prover's checks, to prove it.
 
-**At the public batch, distinctness across inner proofs is an admission
-rule.** Cross-slot distinctness inside one private
-batch is a constraint, `2N` digests compared pairwise. Across inner proofs it
-would be `n * 2N` against each other, 742 nullifiers at the chain defaults, and
-that is not affordable. So the public batch forwards each segment verbatim with
-no cross-inner check, and the same private-batch proof in two inner slots
-proves and verifies: the same nullifiers, commitments and fee are republished
-once per copy. `QneroPublicBatchProver::prove_batch` is the only thing that
-stops it, by keying every inner's `2N` nullifiers into one map before proving,
-and it refuses a caller-supplied padding inner in the same pass because padding
-is the prover's to append. Without those checks, one attacker resubmitting a
-proof another wallet already paid for would make the chain reject the whole
-settlement, destroying an aggregator's batch at no cost.
+**At the public batch the rule splits in two.** A repeated inner proof is a
+circuit constraint; a nullifier shared between two different inner proofs is an
+admission rule and a settlement rule.
 
-That map binds the honest prover path alone. `QneroPublicBatchCircuit` is
-public, the circuit is a deterministic function of the compiled code, and a
-witness can be filled through plonky2's own API, so anyone willing to rebuild
-the circuit reaches it with the same segment in every slot and gets a proof
-that verifies against the published `public_batch_verifier.bin`. The chain's
-settled-nullifier set is the backstop, which is why section 8.6 makes a
-settlement all or nothing and makes a nullifier repeated across segments abort
-it before any state changes.
+The constraint keys each inner by the first nullifier of its first slot and
+requires the non-padding keys pairwise distinct. That digest is a Poseidon2
+output whichever kind of slot it came from, a note's nullifier from a real slot
+or a hash of the private-batch prover's randomness from a padding one, so two
+distinct inner proofs share a key only on a collision while a repeated one
+shares it by construction. It costs `n * (n - 1) / 2` equality checks against
+`n` recursive verifiers, which is noise. The keys are compared for equality: a
+lexicographic ordering would need the canonical 64-bit split
+`qnero_circuit::gadgets` deliberately does not carry, and distinctness is all
+an ordering would have bought. Padding inners are exempt,
+because padding is one published artifact cloned into every empty slot and its
+whole slot region is zeroed anyway.
+
+What stays off circuit is the general nullifier comparison. Every inner's `2N`
+nullifiers against every other's is `n * 2N` digests, 742 at the chain
+defaults, and that is not affordable. So two *different* private batches that
+settle the same note prove and verify here.
+`QneroPublicBatchProver::prove_batch` is what stops that, by keying every
+inner's `2N` nullifiers into one map before proving, and it refuses a
+caller-supplied padding inner in the same pass because padding is the prover's
+to append. That map binds the honest prover path alone:
+`QneroPublicBatchCircuit` is public and a witness can be filled through
+plonky2's own API. The chain's settled-nullifier set is the backstop, which is
+why section 8.6 makes a settlement all or nothing and makes a nullifier
+repeated across segments abort it before any state changes.
 
 ### 8.4 The padding rule
 
@@ -758,14 +777,14 @@ needs a tagged circuit to pin.
   identifiable either way. Commitments have no such choice: append the
   nonzero ones and skip the zero digest, which is the absence sentinel and is
   how a padding slot says it created no note.
-- **Settlement of one public batch is all or nothing.** The chain verifies one
-  public-batch proof and then walks `n` segments; nothing in circuit stops the
-  same inner segment appearing twice, and nothing stops one nullifier appearing
-  in two segments (section 8.3). A settlement extrinsic must therefore collect
-  every nullifier of every settleable segment, reject the batch when one
-  repeats, and mutate no state before that check passes. A pallet that settled
-  segment by segment without transactional rollback would half-settle such a
-  batch.
+- **Settlement of one public batch is all or nothing.** This is a blocking
+  acceptance item for M4. The circuit stops the same inner segment appearing
+  twice; nothing in it stops one nullifier appearing in two different segments
+  (section 8.3). A settlement extrinsic
+  must therefore collect every nullifier of every settleable segment, reject
+  the batch when one repeats, and mutate no state before that check passes. A
+  pallet that settled segment by segment without transactional rollback would
+  half-settle such a batch.
 - **Whether a padding slot's nullifiers are worth their state, and whether the
   real-transfer count should be hidden at all.** These are one decision. A
   padding slot is identifiable today, because the wrapper zeroes its

@@ -8,10 +8,12 @@
 //! same nullifier, all before proving, which at production sizes takes tens of
 //! seconds.
 //!
-//! The nullifier rule is the one with no circuit counterpart: comparing every
-//! inner's `2N` nullifiers against every other's is not affordable in circuit
-//! at the chain's dimensions, so this is the only place a duplicated inner is
-//! caught before the chain rejects the whole settlement.
+//! A repeated inner proof is refused by the circuit as well, keyed on the
+//! first nullifier of its first slot. What has no circuit counterpart is the
+//! general nullifier rule: comparing every inner's `2N` nullifiers against
+//! every other's is not affordable at the chain's dimensions, so two
+//! *different* private batches that settle one note are caught here and
+//! nowhere else before the chain rejects the whole settlement.
 //!
 //! The low-level witness filler is crate-private for the same reason it is at
 //! the private batch:

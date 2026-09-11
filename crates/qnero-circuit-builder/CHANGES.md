@@ -13,7 +13,8 @@ MIT).
 - No prover artifact, at any layer. Every prover rebuilds its circuit from
   source; see `qnero-aggregator`'s `artifacts` module for why.
 - The padding templates are validated before they are published, on the build
-  path as well as on the loading paths.
+  path as well as on the loading paths, and both are read back out of the
+  staging directory through the validator their consumer runs.
 
 ## Changed
 
@@ -39,13 +40,17 @@ MIT).
 
 ## Added
 
-- Every verifier file is read back through `qnero-verifier`'s own loader before
-  the staged set is committed: the leaf profile, the private-batch profile at
-  the set's `num_leaf_proofs`, and the public-batch profile at both dimensions.
-  Upstream publishes what it built and leaves every profile check to the pallet
-  that embeds the set, which is another machine and, at the chain dimensions,
-  tens of minutes later. The read-back costs milliseconds and makes the
-  staging-then-rename guarantee cover "this set is loadable".
+- Every published file is read back out of the staging directory before the set
+  is committed: each verifier file through `qnero-verifier`'s own loader (the
+  leaf profile, the private-batch profile at the set's `num_leaf_proofs`, and
+  the public-batch profile at both dimensions) and each padding proof through
+  the validator its consumer runs. Upstream publishes what it built and leaves
+  every check to the pallet or aggregator that loads the set, which is another
+  machine and, at the chain dimensions, tens of minutes later. The read-back
+  costs milliseconds and makes the staging-then-rename guarantee cover "this
+  set is loadable". The padding proofs are also the largest files in the set,
+  105 KB and 157 KB against 1.7 KB for a verifier, so they are the ones a
+  truncated write hits.
 - `include_padding_batch`, which controls only the all-padding private-batch
   proof. A runtime build does not need it and would pay a full recursive
   proving run for it; an aggregator does. Upstream's `include_prover` flag

@@ -685,6 +685,7 @@ dependencies = [
  "qnero-notes",
  "qnero-verifier",
  "qp-plonky2",
+ "qp-plonky2-verifier",
  "rand 0.9.5",
  "serde",
  "serde_json",

@@ -91,9 +91,16 @@ pub mod domain {
     /// Nullifier a padding slot of a private batch publishes. The batch
     /// wrapper hashes a fresh random preimage under this tag and emits the
     /// result in place of the padding leaf's own nullifiers, so the chain can
-    /// settle every published nullifier by one rule without learning which
-    /// slots were padding. Its own tag keeps that prover-chosen value outside
-    /// the image of both leaf nullifier functions: a padding slot must never
-    /// be able to settle a nullifier that belongs to a note.
+    /// settle every published nullifier of a segment by one rule. Its own tag
+    /// keeps that prover-chosen value outside the image of both leaf
+    /// nullifier functions: a padding slot must never be able to settle a
+    /// nullifier that belongs to a note.
+    ///
+    /// This buys a fixed proof shape and a fixed public-input length. It does
+    /// not hide the count: the wrapper zeroes a padding slot's commitment
+    /// pair and no real slot's can be zero, so which slots were padding, and
+    /// how many real transfers a batch carries, are public. Whether a chain
+    /// settles a padding slot's nullifiers at all is an open decision,
+    /// `docs/CIRCUIT.md` section 8.6.
     pub const NF_BATCH_PADDING: Felt = Felt::new(0x716e_0008);
 }

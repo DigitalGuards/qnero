@@ -271,16 +271,13 @@ fn each_inner_segment_is_forwarded_verbatim() {
     );
 }
 
-/// The same private-batch proof in two inner slots is refused.
+/// The same private-batch proof in two inner slots is refused, here in
+/// milliseconds, ahead of the proving run.
 ///
-/// Nothing in circuit stops it: the public batch forwards each segment
-/// verbatim, and a full pairwise comparison of `n * 2N` nullifiers is not
-/// affordable at the chain's dimensions. So the batch would prove and verify
-/// while republishing one wallet's nullifiers, commitments and fee twice. The
-/// chain rejects the second copy against its settled-nullifier set and reverts
-/// the whole settlement, which means one attacker resubmitting a proof someone
-/// else paid for destroys an aggregator's entire batch. The admission check is
-/// where that is stopped, and this is the test that holds it there.
+/// The circuit refuses it too, keyed on the first nullifier of the inner's
+/// first slot; `the_circuit_refuses_a_replayed_inner_batch` is that test. This
+/// one holds the admission check, which is what an honest aggregator meets and
+/// what keeps the refusal off the expensive path.
 #[test]
 fn the_same_inner_proof_twice_is_refused() {
     let (real, _) = inner_proofs();
@@ -294,7 +291,10 @@ fn the_same_inner_proof_twice_is_refused() {
 }
 
 /// Two distinct private batches that spend the same note are refused for the
-/// same reason, so the rule keys on nullifiers.
+/// same reason, so the rule keys on nullifiers. This half has no circuit
+/// counterpart: comparing every inner's `2N` nullifiers against every other's
+/// is not affordable at the chain's dimensions, so the admission check and the
+/// chain's settled-nullifier set are the only things that see it.
 #[test]
 fn two_inner_batches_settling_one_note_are_refused() {
     let block = common::block_with_notes("public-batch-shared-note", 1);

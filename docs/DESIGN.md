@@ -168,7 +168,11 @@ Constraints:
    recomputed from the note; Merkle path from `cm` to `zk_tree_root`;
    `nf = H(NF, nk, rho, r)`. Dummy inputs have `v = 0` and a random nullifier
    preimage under a separate domain tag (`NF_DUMMY`), and at least one input
-   must be real, so a leaf always consumes a note.
+   must be real unless the leaf is the batch padding leaf
+   (`docs/CIRCUIT.md` constraint 9), so every leaf that binds a real block
+   consumes a note. That does not bound how many leaves a prover can produce;
+   see `docs/CIRCUIT.md` section 8.6 on the minimum per-leaf fee, which is the
+   anti-spam mechanism.
 3. For each output: `rho` derived as `H(RHO, nf_1, nf_2, j)`; `cm_out`
    recomputed from the note; `v_out` range-checked to 62 bits.
 4. Balance: `v_in_1 + v_in_2 = v_out_1 + v_out_2 + fee`, all values 62-bit so
@@ -225,7 +229,7 @@ shape.
 |---|---|---|
 | M1 | `qnero-notes` crate: keys, addresses, note commitment, ML-KEM note encryption, scan; KATs pinned | DONE 2026-09-11 |
 | M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (319 gates at M2, 320 after the M3 padding sentinel; degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
-| M3 | Private and public batch aggregators on the new PI layout | DONE 2026-09-11 (private batch 5 + 21N public inputs, ZK, N = 7; public batch forwards each inner verbatim under an aggregator address; see `docs/CIRCUIT.md` section 8) |
+| M3 | Private and public batch aggregators on the new PI layout | DONE 2026-09-11 (private batch 5 + 21N public inputs, ZK, N = 7; public batch forwards each inner verbatim under an aggregator address and refuses a repeated inner in circuit; see `docs/CIRCUIT.md` section 8) |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | 2 weeks |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | 2 weeks |
 | M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | 2 weeks |

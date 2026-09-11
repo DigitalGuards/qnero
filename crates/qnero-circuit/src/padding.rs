@@ -33,8 +33,8 @@
 //!
 //! The preimage is public by design. Its `parent_hash` is a domain-separated
 //! Poseidon2 digest, which is outside the image of any chain's block hashing,
-//! so no chain can ever produce a header equal to it; every other field is zero, including the block number
-//! and the empty commitment-tree root.
+//! so no chain can ever produce a header equal to it; every other field is
+//! zero, including the block number and the empty commitment-tree root.
 
 /// Block number a padding leaf publishes.
 pub const PADDING_BLOCK_NUMBER: u32 = 0;

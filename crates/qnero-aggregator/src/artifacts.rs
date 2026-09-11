@@ -12,9 +12,8 @@
 //! leaf. **No layer ever emits or loads prover data.** Prover data
 //! carries the witness generators and the target list that decides which
 //! witness values become public inputs, so a poisoned prover artifact could
-//! make a wallet publish its own spend credential, or the preimages that
-//! reveal which slots were padding. Every prover in this crate rebuilds its
-//! circuit from source, which it has to do anyway.
+//! make a wallet publish its own spend credential. Every prover in this crate
+//! rebuilds its circuit from source, which it has to do anyway.
 //!
 //! # How an artifact is pinned
 //!

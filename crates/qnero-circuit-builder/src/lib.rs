@@ -34,10 +34,11 @@
 //!
 //! This runs on a build host that is trusted for the duration of the run. A
 //! local filesystem adversary racing the publisher is out of scope. What is in
-//! scope, and enforced: the padding templates are validated before they are
-//! published, every verifier file is read back through `qnero-verifier`'s own
-//! profile before the set is committed, and the set is staged and swapped in
-//! whole so a failed run cannot leave a mixed generation behind.
+//! scope, and enforced: every file this builder publishes is read back from
+//! the staging directory before the set is committed, a verifier file through
+//! `qnero-verifier`'s own profile and a padding template through the
+//! validator its consumer runs, and the set is staged and swapped in whole so
+//! a failed run cannot leave a mixed generation behind.
 //!
 //! Forked in shape from Quantus-Network/qp-zk-circuits (MIT); see NOTICE and
 //! CHANGES.md.
@@ -46,14 +47,18 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use qnero_aggregator::artifacts::{
     canonical_public_batch_verifier_data, commit_artifact_set, read_artifact_file,
     serialize_public_batch_verifier_data, serialize_verifier_data,
 };
+use qnero_aggregator::padding_proof::load_padding_leaf_proof;
 use qnero_aggregator::private_batch::QneroPrivateBatchProver;
-use qnero_aggregator::{generate_padding_leaf_proof, CircuitBinsConfig};
+use qnero_aggregator::public_batch::prover::validate_padding_private_batch_template;
+use qnero_aggregator::{
+    generate_padding_leaf_proof, validate_padding_leaf_template, CircuitBinsConfig, Proof,
+};
 use qnero_circuit::config::{qnero_leaf_circuit_config, qnero_private_batch_circuit_config};
 use qnero_circuit::QneroSpendCircuit;
 use qnero_verifier::{QneroPrivateBatchVerifier, QneroPublicBatchVerifier, QneroVerifier};
@@ -86,6 +91,15 @@ pub const DEFAULT_NUM_PRIVATE_BATCH_PROOFS: usize = 53;
 /// The set is staged in a hidden sibling directory and swapped into place by
 /// rename once every stage has succeeded. Any previous contents of
 /// `output_dir` are replaced wholesale.
+///
+/// **`output_dir` must be a directory this builder owns and nothing else
+/// writes.** It is renamed away and replaced, so anything else inside it is
+/// deleted, and the hidden staging directory is created in its *parent*. A
+/// build script therefore passes a dedicated subdirectory,
+/// `Path::new(&env::var("OUT_DIR")?).join("qnero-artifacts")`, and never
+/// `OUT_DIR` itself: passing `OUT_DIR` deletes everything else that build
+/// script generated and litters Cargo's `build/<pkg>-<hash>/` directory with
+/// the staging entries.
 pub fn generate_all_artifacts<P: AsRef<Path>>(
     output_dir: P,
     num_leaf_proofs: usize,
@@ -142,6 +156,10 @@ fn generate_into(
         "leaf_verifier.bin",
         QneroVerifier::from_artifact_bytes,
     )?;
+    check_staged_artifact(staging, "padding_leaf_proof.bin", |bytes| {
+        let proof = load_padding_leaf_proof(bytes.to_vec(), &leaf_verifier.common)?;
+        validate_padding_leaf_template(&proof, &leaf_verifier)
+    })?;
 
     // --- private batch ---
     //
@@ -174,6 +192,22 @@ fn generate_into(
     check_staged_artifact(staging, "private_batch_verifier.bin", |bytes| {
         QneroPrivateBatchVerifier::from_artifact_bytes(bytes, config.num_leaf_proofs)
     })?;
+    if include_padding_batch {
+        check_staged_artifact(staging, "padding_private_batch_proof.bin", |bytes| {
+            let proof =
+                Proof::from_bytes(bytes.to_vec(), &private_batch_verifier.common).map_err(|e| {
+                    anyhow!(
+                        "failed to deserialize the staged padding private-batch proof: {}",
+                        e
+                    )
+                })?;
+            validate_padding_private_batch_template(
+                &proof,
+                &private_batch_verifier,
+                config.num_leaf_proofs,
+            )
+        })?;
+    }
 
     // --- public batch ---
     if let Some(num_inner) = config.num_private_batch_proofs {
@@ -205,7 +239,7 @@ fn generate_into(
     )
 }
 
-/// Read a staged verifier file back through the loader its consumer uses.
+/// Read a staged file back through the loader or validator its consumer uses.
 ///
 /// The builder writes what it built, so every profile check in
 /// `qnero-verifier` would otherwise first run inside the pallet that embeds

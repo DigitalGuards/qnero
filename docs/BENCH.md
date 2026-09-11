@@ -95,15 +95,15 @@ Zero knowledge, so these numbers include row blinding. Mean of 3 proofs.
 
 | | single threaded | `--features parallel`, `RAYON_NUM_THREADS=4` |
 |---|---:|---:|
-| build | 8.8 s | 4.8 s |
-| prove, mean of 3 | 19.9 s | 6.3 s |
-| prove, min / max | 19.8 / 20.3 s | 6.2 / 6.4 s |
-| verify | 4.2 ms | 4.2 ms |
-| peak RSS of the run | 1.82 GiB | 2.08 GiB |
+| build | 8.6 s | 4.7 s |
+| prove, mean of 3 | 20.0 s | 6.4 s |
+| prove, min / max | 19.8 / 20.4 s | 6.3 / 6.5 s |
+| verify | 4.2 ms | 4.1 ms |
+| peak RSS of the run | 1.82 GiB | 2.06 GiB |
 
 | | |
 |---|---|
-| gates before padding | 24538 |
+| gates before padding | 24530 |
 | degree_bits | 16 |
 | padded gates | 65536 |
 | public inputs | 152 |
@@ -120,8 +120,8 @@ Reading these:
   transaction. At seven real transfers that is 22 KB each; at one real
   transfer it is worse than theirs, which is the cost of a fixed-size
   anonymity shape.
-- **The recursive verifiers are the circuit.** 24324 of the 24538 gates are the
-  seven recursive verifications; the wrapper's own constraints are 214 gates,
+- **The recursive verifiers are the circuit.** 24324 of the 24530 gates are the
+  seven recursive verifications; the wrapper's own constraints are 206 gates,
   including the `2N` pairwise nullifier comparisons. Nothing in the wrapper is
   worth optimizing.
 - **`N = 7` sits just past a degree boundary.** Blinding adds about 9000 rows

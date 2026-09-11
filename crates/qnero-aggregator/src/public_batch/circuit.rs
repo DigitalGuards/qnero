@@ -22,6 +22,16 @@
 //! cloned into every empty slot, so its nullifiers would otherwise repeat
 //! across slots and across batches.
 //!
+//! # What binds one segment to another
+//!
+//! One rule: no non-padding inner proof appears twice, keyed by the first
+//! nullifier of its first slot. Order is free, sizes are free, and the values
+//! inside a segment are the inner proof's own. A nullifier shared between two
+//! *different* inner proofs is not caught here, and is left to
+//! [`QneroPublicBatchProver::prove_batch`](super::QneroPublicBatchProver::prove_batch)
+//! and to the chain's settled-nullifier set; `docs/CIRCUIT.md` section 8.3
+//! says which half is which and why.
+//!
 //! # The aggregator address
 //!
 //! Four felts of pure witness, registered as the first four public inputs and
@@ -42,8 +52,8 @@ use plonky2::plonk::circuit_data::{
 use plonky2::plonk::proof::ProofWithPublicInputsTarget;
 
 use qnero_circuit::batch_layout::{
-    private_batch_pi_len, public_batch_pi_len, AGGREGATOR_ADDRESS_LEN, BLOCK_HASH_START,
-    BLOCK_NUMBER_INDEX, DIGEST_FELTS, HEADER_LEN,
+    private_batch_pi_len, public_batch_pi_len, slot_nullifier_index, AGGREGATOR_ADDRESS_LEN,
+    BLOCK_HASH_START, BLOCK_NUMBER_INDEX, DIGEST_FELTS, HEADER_LEN,
 };
 use qnero_circuit::config::{ensure_zk_supported, validate_circuit_config};
 use qnero_circuit::gadgets::digests_are_equal;
@@ -226,6 +236,46 @@ fn build_public_batch_constraints(
         builder.connect(number_ok.target, one);
     }
 
+    // No non-padding inner proof appears twice.
+    //
+    // Each inner is keyed by the first nullifier of its first slot. That
+    // digest is a Poseidon2 output whichever kind of slot it came from: a real
+    // slot publishes a note's nullifier, a padding slot publishes a hash of
+    // randomness the private-batch prover drew for that run. So two distinct
+    // inner proofs share a key only on a collision, and a repeated one shares
+    // it by construction.
+    //
+    // Padding inners are exempt because they are all the same published
+    // artifact, cloned into every empty slot, and their whole slot region is
+    // zeroed below.
+    //
+    // What this closes is the duplicated segment, which is the case the chain
+    // cannot price: a proof anyone can lift off the mempool, republished `n`
+    // times in one batch. A nullifier repeated between two *different* inners
+    // stays an admission rule and a settlement rule, because comparing every
+    // inner's `2N` nullifiers against every other's is 742 digests at the
+    // chain defaults; one key per inner is `n * (n - 1) / 2` equality checks
+    // against `n` recursive verifiers, which is noise. The keys are compared
+    // for equality: a lexicographic ordering would need the canonical 64-bit
+    // split `qnero_circuit::gadgets` deliberately does not carry, and
+    // distinctness is all an ordering would have bought here.
+    let is_real: Vec<BoolTarget> = is_padding
+        .iter()
+        .map(|padding| builder.not(*padding))
+        .collect();
+    let keys: Vec<[Target; DIGEST_FELTS]> = inner_pis
+        .iter()
+        .map(|pis| core::array::from_fn(|i| pis[slot_nullifier_index(0, 0) + i]))
+        .collect();
+    for (i, left) in keys.iter().enumerate() {
+        for (j, right) in keys.iter().enumerate().skip(i + 1) {
+            let both_real = builder.and(is_real[i], is_real[j]);
+            let equal = digests_are_equal(builder, *left, *right);
+            let collision = builder.and(both_real, equal);
+            builder.connect(collision.target, zero);
+        }
+    }
+
     let mut output: Vec<Target> = Vec::with_capacity(public_batch_pi_len(num_inner, num_leaves));
     output.extend_from_slice(&targets.aggregator_address);
 
@@ -355,6 +405,42 @@ mod tests {
                 "two blocks in one public batch: the circuit produced a proof that verified"
             );
         }
+    }
+
+    /// The same inner proof in two slots cannot be aggregated.
+    ///
+    /// The admission check in `prove_batch` refuses this too, and it is the
+    /// one an honest aggregator meets. This test goes past it, because the
+    /// circuit is public and a caller willing to fill the witness through
+    /// plonky2's own API never reaches that check: without a constraint here,
+    /// such a caller republishes one wallet's nullifiers, commitments and fee
+    /// `n` times in a proof that verifies against the published
+    /// `public_batch_verifier.bin`.
+    #[test]
+    fn the_circuit_refuses_a_replayed_inner_batch() {
+        let inner = inner_proof("replayed");
+        let inners = [inner.clone(), inner];
+        let (_, data) = public_batch_circuit();
+        if let Ok(proof) = prove_directly(&inners) {
+            assert!(
+                data.verify(proof).is_err(),
+                "one inner proof in both slots: the circuit produced a proof that verified"
+            );
+        }
+    }
+
+    /// Two padding inners are the same proof twice, and that has to stay
+    /// provable: padding is one published artifact cloned into every empty
+    /// slot, so every batch an aggregator pads carries it more than once.
+    #[test]
+    fn the_circuit_accepts_the_padding_template_in_several_slots() {
+        let padding = private_batch_prover()
+            .prove_padding_batch()
+            .expect("the all-padding private batch proves");
+        let inners = [padding.clone(), padding];
+        let (_, data) = public_batch_circuit();
+        let proof = prove_directly(&inners).expect("a batch of nothing but padding proves");
+        data.verify(proof).expect("and verifies");
     }
 
     /// A padding inner's slot region is zeroed in circuit, header apart.

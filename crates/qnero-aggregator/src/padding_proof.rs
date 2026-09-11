@@ -63,9 +63,9 @@ pub fn load_padding_leaf_proof(bytes: Vec<u8>, common: &CommonCircuitData<F, D>)
 /// The public-input comparison is exact, because the padding witness is fully
 /// determined: any deviation is a template that is not the padding leaf. A
 /// field-by-field sentinel check would pass on whatever the sentinel leaves
-/// out. Upstream can only check a handful of fields, because its dummy leaf carries prover-chosen values the sentinel
-/// does not cover, and that gap is what forces its wrapper to re-mask exit
-/// accounts.
+/// out. Upstream can only check a handful of fields, because its dummy leaf
+/// carries prover-chosen values the sentinel does not cover, and that gap is
+/// what forces its wrapper to re-mask exit accounts.
 ///
 /// What this stops: a real leaf proof planted where the padding template is
 /// read from. The wrapper masks a padding slot's published values, so such a

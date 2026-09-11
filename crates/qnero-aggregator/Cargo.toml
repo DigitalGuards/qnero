@@ -28,6 +28,11 @@ qnero-verifier = { workspace = true, features = ["leaf"] }
 # circuits into the artifact set, and the artifact round-trip test belongs
 # beside the fixtures the other batch tests use.
 qnero-circuit-builder = { workspace = true }
+# The runtime-side verifier types, so a test can corrupt a deserialized
+# artifact in place, with no guessing at byte offsets. `qp-plonky2-verifier`
+# carries its own copy of the circuit-data types, so they are not the ones
+# `qp-plonky2` exposes and a test that crosses that seam has to name both.
+qp-plonky2-verifier = { workspace = true, features = ["std"] }
 rand = { workspace = true }
 
 [features]

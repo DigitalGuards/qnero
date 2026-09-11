@@ -39,9 +39,15 @@ aggregation layers; the public-input layouts and the padding rule are Qnero's.
   `nf_2` at this boundary: a note spent from input slot 1 would never be marked
   used and could be spent again without limit. `docs/CIRCUIT.md` section 8
   names this as the one place a port goes wrong quietly.
-- **Pairwise distinctness covers all `2N` nullifiers.** Upstream constrains
-  `N`, one per leaf, and at two per leaf that leaves the same leaf proof
-  replayable across slots.
+- **Pairwise distinctness covers all `2N` nullifiers, on the emitted values
+  and with no slot exempt.** Upstream constrains `N`, one per leaf, and
+  exempts its padding slots; at two nullifiers per leaf the first leaves the
+  same leaf proof replayable across slots, and the second leaves the padding
+  slots' published values unconstrained, since their preimages are free
+  witnesses. The comparison is on the values the wrapper emits, which is also
+  what makes the rule satisfiable: the padding template is one proof cloned
+  into every empty slot, so every padding slot's leaf-side nullifiers are
+  identical.
 - **The padding sentinel is a fixed header preimage.** Upstream's sentinel is
   an all-zero `block_hash`, which no preimage produces, so it has to make the
   leaf's header binding conditional. Qnero's padding leaf hashes a real
@@ -95,13 +101,20 @@ aggregation layers; the public-input layouts and the padding rule are Qnero's.
   way. `docs/BENCH.md` reports both.
 - `prove_padding_batch`, which is the one batch proved without the admission
   checks, and the only proof the artifact builder produces at this layer.
-- The public batch refuses two inner proofs that publish the same nullifier,
-  and refuses a caller-supplied padding inner. Upstream has neither check: its
-  public batch admits any set of inner proofs that agree on a block. A full
-  cross-inner distinctness constraint is not affordable in circuit at 53 inner
-  proofs over 7 leaves, so this is an admission rule, and it is what stops one
-  attacker from resubmitting a proof another wallet paid for and making the
-  chain revert the aggregator's whole settlement.
+- The public batch refuses a repeated inner proof **in circuit**, keyed on the
+  first nullifier of the inner's first slot, so the cheap replay is
+  unprovable and the admission check below is left to cover failure latency.
+  It costs `n * (n - 1) / 2` equality checks against `n` recursive verifiers.
+  The keys are compared for equality: a lexicographic ordering would need the
+  canonical 64-bit split the comparison gadget deliberately does not carry,
+  and distinctness is all an ordering would have bought.
+- The public batch also refuses, off circuit, two inner proofs that publish the
+  same nullifier, and a caller-supplied padding inner. Upstream has neither
+  check: its public batch admits any set of inner proofs that agree on a block.
+  The general nullifier comparison stays off circuit because `n * 2N` digests
+  against each other is 742 at 53 inner proofs over 7 leaves, so two
+  *different* batches settling one note are caught here and by the chain's
+  settled-nullifier set.
 - `serialize_public_batch_verifier_data` is the only way the public-batch
   artifact is written, and it prepends the dimension header
   `qnero-verifier` requires.

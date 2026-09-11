@@ -77,9 +77,11 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchLeafSlot {
     /// Both nullifiers the leaf published. A padding slot inside a real batch
-    /// carries hashes of randomness the prover drew for this batch, so no two
-    /// padding slots publish the same value and a padding nullifier cannot
-    /// collide with a real one. Settling them is therefore inert, and the
+    /// carries hashes of randomness the prover drew for this batch, and the
+    /// circuit constrains all `2N` published nullifiers of a segment pairwise
+    /// distinct, padding slots included, so no two slots of one segment carry
+    /// the same value and a padding nullifier is outside the image of both
+    /// leaf nullifier functions. Settling them is therefore inert, and the
     /// chain may settle every slot's nullifiers by one rule.
     ///
     /// **A padding slot is identifiable**, so that one rule buys no count

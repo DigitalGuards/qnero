@@ -73,7 +73,11 @@ pub(crate) fn digest_at(public_inputs: &[F], start: usize) -> [F; DIGEST_FELTS] 
 /// published artifact is enough, and it survives everything else this crate
 /// checks, because the circuit digest does not cover the selector layout and a
 /// parameter floor never looks at it. Bounding the ranges by the gate list
-/// turns that into a refused artifact.
+/// turns that into a refused artifact, and bounding each gate's selector index
+/// by the group count turns the other reading of the same structure, which is
+/// an out-of-bounds panic mid-verification, into one as well. Plonky2's
+/// deserializer reads the index vector and the group vector independently and
+/// relates neither to the other.
 ///
 /// This is not a general defence against a crafted artifact. A hostile build
 /// host has other unbounded parameters to reach for, inside individual gates,
@@ -101,6 +105,22 @@ pub(crate) fn ensure_common_data_is_structurally_sound(
             group.start,
             group.end,
             gates
+        );
+    }
+    // The other half of the index structure. Bounding the groups leaves the
+    // values that pick a group unbounded, and constraint evaluation indexes
+    // `groups[selector_indices[gate]]` directly: one flipped bit there is an
+    // out-of-bounds panic at the first verification, which traps a wasm
+    // runtime and aborts a wallet. Bounding it makes that a refused artifact.
+    let groups = common.selectors_info.groups.len();
+    for (gate, index) in common.selectors_info.selector_indices.iter().enumerate() {
+        ensure!(
+            *index < groups,
+            "the {} artifact's gate {} selects selector group {} of {}",
+            label,
+            gate,
+            index,
+            groups
         );
     }
     ensure!(

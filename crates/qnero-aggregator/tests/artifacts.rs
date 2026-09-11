@@ -12,6 +12,11 @@ use qnero_aggregator::private_batch::QneroPrivateBatchProver;
 use qnero_aggregator::CircuitBinsConfig;
 use qnero_circuit_builder::{generate_all_artifacts, CIRCUIT_CONFIG_SNIPPET};
 use qnero_verifier::{QneroPrivateBatchVerifier, QneroPublicBatchVerifier, QneroVerifier};
+// `qp-plonky2-verifier` carries its own copy of the circuit-data types, so
+// these are not the ones `qp-plonky2` exposes and both have to be named here.
+use qp_plonky2_verifier::{
+    VerifierCircuitData as RuntimeVerifierData, C as RuntimeC, D as RUNTIME_D, F as RuntimeF,
+};
 
 const NUM_LEAVES: usize = 2;
 const NUM_INNER: usize = 2;
@@ -205,6 +210,49 @@ fn a_bit_flipped_artifact_never_verifies_a_real_proof() {
             "an artifact with a flipped bit at byte {position} verified a real proof"
         );
     }
+
+    // The sandbox, and with it the output directory inside it.
+    std::fs::remove_dir_all(dir.parent().expect("the output dir sits in a sandbox")).unwrap();
+}
+
+/// (d) A corrupted selector index is refused at load, and does not become a
+/// panic at the first verification.
+///
+/// `selectors_info` carries two vectors that plonky2 deserializes
+/// independently: one range per selector group, and one group index per gate.
+/// The profile bounded the ranges, which closed the non-terminating gate
+/// filter, and left the indices unbounded. Constraint evaluation reads
+/// `groups[selector_indices[gate]]` directly, so an index past the group count
+/// survives every other check in the profile and then panics inside plonky2:
+/// a trap in the wasm runtime that embeds the artifact, an abort in a wallet.
+/// The bit-flip test above misses it because its four positions never land in
+/// the index region.
+#[test]
+fn a_selector_index_past_the_group_count_is_refused_at_load() {
+    let dir = temp_dir("selector-index");
+    generate_all_artifacts(&dir, NUM_LEAVES, None, false).expect("the artifact set generates");
+    let artifact = read_artifact_file(&dir.join("private_batch_verifier.bin")).unwrap();
+
+    let mut data = RuntimeVerifierData::<RuntimeF, RuntimeC, RUNTIME_D>::from_bytes(
+        artifact.clone(),
+        &qp_plonky2_verifier::util::serialization::DefaultGateSerializer,
+    )
+    .expect("the published artifact deserializes");
+
+    // Unmodified, it passes the profile: the failure below is the index alone.
+    QneroPrivateBatchVerifier::new(data.clone(), NUM_LEAVES)
+        .expect("the canonical artifact passes its profile");
+
+    let groups = data.common.selectors_info.groups.len();
+    assert!(groups > 0, "the artifact has selector groups to index");
+    data.common.selectors_info.selector_indices[0] = groups;
+
+    let error = QneroPrivateBatchVerifier::new(data, NUM_LEAVES)
+        .expect_err("an out-of-range selector index must be refused");
+    assert!(
+        error.to_string().contains("selects selector group"),
+        "got: {error}"
+    );
 
     // The sandbox, and with it the output directory inside it.
     std::fs::remove_dir_all(dir.parent().expect("the output dir sits in a sandbox")).unwrap();

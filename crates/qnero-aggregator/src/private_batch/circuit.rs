@@ -18,7 +18,8 @@
 //! 5. Every slot's six published values are forwarded, masked when the slot is
 //!    padding: nullifiers become hashes of caller-supplied fresh randomness,
 //!    while commitments, fee and `ct_digest` become zero.
-//! 6. The `2N` nullifiers of non-padding slots are pairwise distinct.
+//! 6. The `2N` nullifiers the batch publishes are pairwise distinct, padding
+//!    slots included.
 //!
 //! # Why the `2N` in constraint 6
 //!
@@ -28,6 +29,13 @@
 //! it sees twice and refuses the second, but only after the batch has been
 //! accepted as a whole. Constraining all `2N` makes such a batch unprovable.
 //! The chain's persistent nullifier set remains the cross-batch boundary.
+//!
+//! The comparison is on the emitted values, and no slot is exempt. A padding
+//! slot's emitted nullifiers are hashes of free witness targets, so a caller
+//! filling the witness through plonky2's own API could otherwise repeat one
+//! preimage across two padding slots and publish one nullifier twice inside
+//! one segment. A chain settling the segment by one rule would then insert a
+//! duplicate or take an error path mid-settlement.
 //!
 //! # Why the fees are not summed here
 //!
@@ -285,22 +293,26 @@ fn build_private_batch_constraints(
     // own balance equation, and its commitments are hashes of zero-value
     // notes; masking here is what makes a padding slot settle nothing even if
     // a template were substituted or the leaf's rule changed.
-    let mut real_nullifiers: Vec<([Target; DIGEST_FELTS], BoolTarget)> =
+    let mut emitted_nullifiers: Vec<[Target; DIGEST_FELTS]> =
         Vec::with_capacity(num_leaves * NUM_INPUTS);
     for slot in 0..num_leaves {
         let pis = leaf_pis[slot];
         let padding = is_padding[slot];
-        let is_real = builder.not(padding);
 
         for input in 0..NUM_INPUTS {
             let published = digest_at(pis, nullifier_index(input));
             let replacement =
                 padding_nullifier(builder, targets.padding_nullifier_preimages[slot][input]);
-            for (limb, published_limb) in published.iter().enumerate() {
-                let selected = builder.select(padding, replacement[limb], *published_limb);
-                output.push(selected);
-            }
-            real_nullifiers.push((published, is_real));
+            // What the slot actually publishes, which is what constraint 6
+            // below compares. A padding slot carries the padding template's
+            // own nullifiers, and that template is one artifact cloned into
+            // every empty slot, so the leaf-side values repeat across padding
+            // slots and only the emitted ones can be compared.
+            let emitted: [Target; DIGEST_FELTS] = core::array::from_fn(|limb| {
+                builder.select(padding, replacement[limb], published[limb])
+            });
+            output.extend_from_slice(&emitted);
+            emitted_nullifiers.push(emitted);
         }
 
         for note in 0..NUM_OUTPUTS {
@@ -321,17 +333,21 @@ fn build_private_batch_constraints(
         }
     }
 
-    // --- 6. the 2N real nullifiers are pairwise distinct ---
+    // --- 6. the 2N emitted nullifiers are pairwise distinct ---
     //
-    // Padding slots are exempt: their published values are replaced above with
-    // hashes of fresh randomness, so a collision between two of them, or
-    // between one of them and a real nullifier, is a Poseidon2 collision.
-    for (i, (left, left_is_real)) in real_nullifiers.iter().enumerate() {
-        for (right, right_is_real) in real_nullifiers.iter().skip(i + 1) {
-            let both_real = builder.and(*left_is_real, *right_is_real);
+    // Every pair, padding slots included, because this is the vector the
+    // batch publishes and the chain settles. Exempting padding slots would
+    // leave their emitted values unconstrained: the preimages are free
+    // witnesses, so one repeated preimage in two padding slots publishes one
+    // nullifier twice inside a single settleable segment. An honest batch
+    // always satisfies this. Two real slots is the rule that was always
+    // here, a real slot against a padding one is separated by the
+    // `NF_BATCH_PADDING` tag, and two padding slots are separated by the
+    // fresh randomness the prover draws per slot per run.
+    for (i, left) in emitted_nullifiers.iter().enumerate() {
+        for right in emitted_nullifiers.iter().skip(i + 1) {
             let equal = digests_are_equal(builder, *left, *right);
-            let collision = builder.and(both_real, equal);
-            builder.connect(collision.target, zero);
+            builder.connect(equal.target, zero);
         }
     }
 
@@ -402,9 +418,19 @@ mod tests {
     /// preflight as the only thing rejecting these batches, and a caller that
     /// reached the circuit another way would get a proof.
     fn assert_batch_refused(proofs: &[ProofWithPublicInputs<F, C, D>], what: &str) {
+        assert_batch_refused_with(proofs, &preimages(), what);
+    }
+
+    /// [`assert_batch_refused`] with the padding randomness chosen by the
+    /// caller, for the cases where that randomness is the defect.
+    fn assert_batch_refused_with(
+        proofs: &[ProofWithPublicInputs<F, C, D>],
+        padding_preimages: &[crate::private_batch::witness::SlotPaddingPreimages],
+        what: &str,
+    ) {
         let (targets, data) = batch_circuit();
         let mut pw = PartialWitness::<F>::new();
-        fill_private_batch_witness(&mut pw, targets, proofs, &preimages())
+        fill_private_batch_witness(&mut pw, targets, proofs, padding_preimages)
             .expect("witness filling must succeed, so only the circuit can reject the batch");
         if let Ok(proof) = data.prove(pw) {
             assert!(
@@ -412,6 +438,16 @@ mod tests {
                 "{what}: the circuit produced a proof that verified"
             );
         }
+    }
+
+    /// The padding leaf, proved once for this module.
+    fn padding_leaf() -> &'static ProofWithPublicInputs<F, C, D> {
+        static PADDING: OnceLock<ProofWithPublicInputs<F, C, D>> = OnceLock::new();
+        PADDING.get_or_init(|| {
+            let (targets, data) = leaf_circuit();
+            crate::padding_proof::generate_padding_leaf_proof(data, targets)
+                .expect("the padding leaf proves")
+        })
     }
 
     /// Two leaves anchored at different blocks cannot be aggregated.
@@ -434,6 +470,40 @@ mod tests {
         let proof = leaf_proof("replayed");
         let proofs = [proof.clone(), proof];
         assert_batch_refused(&proofs, "one leaf proof in both slots");
+    }
+
+    /// Two padding slots may not publish the same nullifier.
+    ///
+    /// The padding preimages are free witness targets and this circuit is
+    /// public, so the only thing keeping two padding slots apart on the honest
+    /// path is the fresh randomness the prover draws. A caller filling the
+    /// witness directly repeats one preimage set across both slots; the
+    /// emitted nullifiers then collide, and constraint 6 has to be what
+    /// refuses that. It cannot be, if the comparison reads the leaf's own
+    /// published values or exempts padding slots: the padding template is one
+    /// proof cloned into every empty slot, so every padding slot's published
+    /// nullifiers are already identical.
+    #[test]
+    fn the_circuit_refuses_two_padding_slots_with_one_preimage() {
+        let padding = padding_leaf().clone();
+        let proofs = [padding.clone(), padding];
+        let repeated: Vec<crate::private_batch::witness::SlotPaddingPreimages> =
+            vec![preimages()[0]; SLOTS];
+        assert_batch_refused_with(&proofs, &repeated, "one padding preimage set in both slots");
+    }
+
+    /// The same batch with distinct randomness proves, so the test above fails
+    /// on the repeat and not on something the padding path does anyway.
+    #[test]
+    fn an_all_padding_batch_with_fresh_preimages_proves() {
+        let padding = padding_leaf().clone();
+        let proofs = [padding.clone(), padding];
+        let (targets, data) = batch_circuit();
+        let mut pw = PartialWitness::<F>::new();
+        fill_private_batch_witness(&mut pw, targets, &proofs, &preimages())
+            .expect("the witness fills");
+        let proof = data.prove(pw).expect("an all-padding batch proves");
+        data.verify(proof).expect("and verifies");
     }
 
     /// The inner circuit's public-input count is checked at construction, so a

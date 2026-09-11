@@ -167,8 +167,8 @@ mod tests {
         parse_args(values.iter().map(|value| value.to_string()), env)
     }
 
-    /// The defaults are asserted against an empty environment: a shell that exports an override must not turn this
-    /// into a silent pass.
+    /// The defaults are asserted against an empty environment: a shell that
+    /// exports an override must not turn this into a silent pass.
     #[test]
     fn the_defaults_are_the_chain_defaults() {
         let parsed = args(&[]).unwrap().unwrap();

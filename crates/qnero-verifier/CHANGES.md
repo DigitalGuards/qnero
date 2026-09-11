@@ -28,9 +28,14 @@ plus the batch-verifier loading in `quantus-chain/pallets/wormhole`.
 - Both loaders refuse an artifact whose index structure does not describe its
   own gate list. A gate's filter is a product over its selector group, so a
   group of `0..2^40` is not a wrong answer but a verifier that never returns,
-  and one flipped bit in a length byte produces exactly that. Nothing else
-  catches it: the circuit digest does not cover the selector layout. Upstream
-  relies on its keccak pin, which a batch artifact cannot have.
+  and one flipped bit in a length byte produces exactly that. The other half of
+  the same structure is the per-gate index that picks a group: plonky2 reads
+  the two vectors independently and relates neither to the other, and
+  constraint evaluation indexes `groups[selector_indices[gate]]` directly, so
+  an index past the group count is an out-of-bounds panic at the first
+  verification, which traps a wasm runtime. Both are bounded here. Nothing else
+  catches either: the circuit digest does not cover the selector layout.
+  Upstream relies on its keccak pin, which a batch artifact cannot have.
 - The expected batch configs are restated here from `qnero_circuit::params`,
   because `qnero-circuit`'s own constructors live behind its circuit feature
   and pull in plonky2's prover, which cannot be compiled into a runtime.

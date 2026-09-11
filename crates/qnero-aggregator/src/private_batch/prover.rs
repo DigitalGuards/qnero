@@ -5,9 +5,8 @@
 //!
 //! No prover artifact is ever read or written. `ProverOnlyCircuitData` carries
 //! the target list that decides which witness values become public inputs, so
-//! a poisoned one could publish the padding preimages, which say which slots
-//! were padding. The circuit is rebuilt from source, which the prover has to
-//! do anyway.
+//! a poisoned one could make a wallet publish its own spend credential. The
+//! circuit is rebuilt from source, which the prover has to do anyway.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -307,6 +306,12 @@ pub(crate) fn padding_nullifier_preimages_for_build<R: RngCore>(
 ///   nothing and only burns a proving window. The artifact builder produces
 ///   exactly such a batch as the public batch's padding template, and it fills
 ///   the witness directly, past this path.
+///
+/// The circuit goes further on the second one: it compares the `2N` values the
+/// wrapper emits, padding slots included, which this path cannot do because
+/// the padding randomness is drawn after it runs. Every batch this path admits
+/// still satisfies the wider rule, since that randomness is fresh per slot per
+/// run.
 ///
 /// The circuit remains the enforcer. This is about failure latency and error
 /// quality.

@@ -107,14 +107,20 @@ impl QneroPublicBatchProver {
     /// The private-batch artifacts are pinned to a canonical rebuild over the
     /// canonical leaf, so the verifier key baked into this circuit is a
     /// function of the compiled circuit code and `num_leaves` alone.
+    ///
+    /// The dimensions are `(num_inner, num_leaves)`, the order every other
+    /// public-batch entry point takes them in. Both are `usize`, so a
+    /// transposed pair compiles and then spends minutes building a
+    /// private-batch circuit over the wrong number of leaves before the byte
+    /// pin refuses it.
     pub fn new_from_artifact_bytes(
         private_batch_verifier_bytes: &[u8],
         padding_private_batch_proof_bytes: &[u8],
-        num_leaves: usize,
         num_inner: usize,
+        num_leaves: usize,
     ) -> Result<Self> {
-        validate_proof_count(num_leaves, "num_leaf_proofs")?;
         validate_proof_count(num_inner, "num_private_batch_proofs")?;
+        validate_proof_count(num_leaves, "num_leaf_proofs")?;
 
         let leaf = crate::artifacts::canonical_leaf_verifier_data();
         let private_batch = load_canonical_private_batch_verifier_data(
@@ -156,7 +162,7 @@ impl QneroPublicBatchProver {
         };
         let verifier = read_artifact_file(&bins_dir.join("private_batch_verifier.bin"))?;
         let padding = read_artifact_file(&bins_dir.join("padding_private_batch_proof.bin"))?;
-        Self::new_from_artifact_bytes(&verifier, &padding, config.num_leaf_proofs, num_inner)
+        Self::new_from_artifact_bytes(&verifier, &padding, num_inner, config.num_leaf_proofs)
     }
 
     pub fn num_inner(&self) -> usize {
@@ -216,7 +222,9 @@ impl QneroPublicBatchProver {
                  expected"
             );
         }
-        self.verifier_data()
+        // `circuit_data.verify` borrows; `verifier_data()` would deep-clone
+        // the whole common data for one call and drop it.
+        self.circuit_data
             .verify(proof)
             .map_err(|e| anyhow!("public-batch proof verification failed: {}", e))
     }
@@ -259,18 +267,17 @@ impl QneroPublicBatchProver {
 /// Two of them mirror circuit constraints and exist here for failure latency:
 /// every non-padding inner shares one block hash and one block number.
 ///
-/// The third has no circuit counterpart and is the only thing enforcing it.
-/// **The `2N` nullifiers of one inner proof must not repeat in another.** The
-/// public batch forwards each segment verbatim with no cross-inner check, and
-/// a full pairwise comparison in circuit would be `n * 2N` digests against
-/// each other, which at the chain default of 53 inners over 7 leaves is 742
-/// nullifiers and is not affordable. So a duplicated inner proves and verifies
-/// as readily as a distinct one: the same 2N nullifiers, the same 2N
-/// commitments and the same per-leaf fee are republished once per copy. The
-/// chain's settled-nullifier set catches the second copy, and its whole
-/// settlement extrinsic then reverts, so one attacker resubmitting a proof
-/// somebody else already paid for destroys an aggregator's entire batch at no
-/// cost. This check is where that is stopped.
+/// The third goes further than the circuit does. **The `2N` nullifiers of one
+/// inner proof must not repeat in another.** The circuit refuses a *repeated*
+/// inner, keyed on the first nullifier of its first slot, so the cheap replay
+/// is unprovable. It does not compare the rest: `n * 2N` digests against each
+/// other is 742 nullifiers at the chain default of 53 inners over 7 leaves and
+/// is not affordable. So two different private batches that settle one note
+/// prove and verify, republishing that note's nullifier in two segments. The
+/// chain's settled-nullifier set catches the second, and its whole settlement
+/// extrinsic then reverts, so one attacker submitting a batch that overlaps a
+/// proof somebody else already paid for destroys an aggregator's entire batch
+/// at no cost. This check is where that is stopped.
 ///
 /// A caller-supplied padding inner is refused outright for the same reason.
 /// The padding template is a published artifact anybody can download, it
@@ -281,7 +288,8 @@ impl QneroPublicBatchProver {
 /// position it sits in.
 ///
 /// `docs/CIRCUIT.md` section 8.3 records which half of the distinctness rule
-/// is a circuit constraint and which is an admission rule.
+/// is a circuit constraint and which is an admission rule, and section 8.6
+/// makes the settlement-side backstop a blocking M4 item.
 fn ensure_inner_batch_compatible(proofs: &[Proof], num_leaves: usize) -> Result<()> {
     let mut reference: Option<(usize, [u64; DIGEST_FELTS], u64)> = None;
     let mut seen: HashMap<[u64; DIGEST_FELTS], (usize, usize, usize)> = HashMap::new();

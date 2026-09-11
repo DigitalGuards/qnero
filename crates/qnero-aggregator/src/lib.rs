@@ -25,7 +25,7 @@
 //!
 //! Every non-padding slot's **two** nullifiers, **two** output commitments,
 //! fee and `ct_digest` reach the aggregated public inputs unchanged, and all
-//! `2N` real nullifiers are constrained pairwise distinct. A wrapper that
+//! `2N` nullifiers the batch publishes are constrained pairwise distinct. A wrapper that
 //! carried one nullifier per leaf, which is the shape upstream's private batch
 //! has, would drop every leaf's `nf_2` at this boundary: a note spent from
 //! input slot 1 would never be marked used and could be spent again without

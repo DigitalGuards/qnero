@@ -227,7 +227,8 @@ impl QneroVerifier {
         );
         ensure!(
             !circuit_data.common.fri_params.leaf_hiding,
-            "verifier data claims hiding FRI leaves; the canonical Qnero leaf does not blind,              and privacy is applied at the private batch"
+            "verifier data claims hiding FRI leaves; the canonical Qnero leaf does not \
+             blind, and privacy is applied at the private batch"
         );
 
         Ok(Self { circuit_data })
