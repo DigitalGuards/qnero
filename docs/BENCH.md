@@ -83,7 +83,7 @@ cannot saturate a machine unasked.
 | verify | 2.2 ms |
 | proof bytes | 105500 |
 
-The spread is the measurement, not noise. The FRI challenge carries 16 grinding
+The spread is the measurement itself. The FRI challenge carries 16 grinding
 bits and the search for them is a geometric random variable seeded by the
 transcript, which dominates a circuit this small. Compare means over the same
 sample count, never one warm number against another.
@@ -115,10 +115,11 @@ Reading these:
 - **Verify is flat and cheap.** 4.2 ms for a batch that settles up to seven
   transfers, against 2.2 ms for one leaf. That is the whole point of recursion,
   and it is what the chain pays.
-- **Proof size is a property of the FRI config, not of `N`.** 157 KB carries up
-  to seven transfers, where Hegemon reports about 105 KB per transaction. At
-  seven real transfers that is 22 KB each; at one real transfer it is worse
-  than theirs, which is the cost of a fixed-size anonymity shape.
+- **Proof size is a property of the FRI config.** `N` barely moves it: 157 KB
+  carries up to seven transfers, where Hegemon reports about 105 KB per
+  transaction. At seven real transfers that is 22 KB each; at one real
+  transfer it is worse than theirs, which is the cost of a fixed-size
+  anonymity shape.
 - **The recursive verifiers are the circuit.** 24324 of the 24538 gates are the
   seven recursive verifications; the wrapper's own constraints are 214 gates,
   including the `2N` pairwise nullifier comparisons. Nothing in the wrapper is
