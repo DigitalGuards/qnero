@@ -472,6 +472,27 @@ mod tests {
         );
     }
 
+    /// `qnero-verifier` restates both batch configs, because
+    /// `qnero-circuit`'s own constructors live behind its circuit feature and
+    /// pull in plonky2's prover, which cannot be compiled into a runtime. This
+    /// crate is the one place that sees both sides, so it is where the
+    /// duplication is held honest. Without it, a config change here would
+    /// leave every published artifact refused by the runtime that is supposed
+    /// to load it, and nothing would say why.
+    #[test]
+    fn the_verifier_expects_the_configs_this_crate_builds_with() {
+        assert_eq!(
+            qnero_private_batch_circuit_config(),
+            qnero_verifier::batch::expected_private_batch_config(),
+            "the private-batch config and the one qnero-verifier expects have drifted"
+        );
+        assert_eq!(
+            qnero_circuit::config::qnero_public_batch_circuit_config(),
+            qnero_verifier::batch::expected_public_batch_config(),
+            "the public-batch config and the one qnero-verifier expects have drifted"
+        );
+    }
+
     #[test]
     fn canonical_leaf_artifacts_pass_their_own_pin() {
         let canonical = canonical_leaf_verifier_data();
