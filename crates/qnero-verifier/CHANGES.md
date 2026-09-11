@@ -17,7 +17,14 @@ Upstream shape is `qp-wormhole-verifier` (Quantus-Network/qp-zk-circuits, MIT).
   layout with one query round and no grinding deserializes cleanly, since
   plonky2's own check rejects only a zero challenge count, a zero constant
   count and fewer than three routed wires, and it would then verify forged
-  proofs with high probability.
+  proofs with high probability. The floor also requires the artifact's two
+  copies of the FRI configuration, `common.config.fri_config` and
+  `common.fri_params.config`, to be equal. They deserialize independently from
+  the same bytes and plonky2 never compares them, while the FRI verifier reads
+  the grinding bits, the query count and the rate from the `fri_params` copy,
+  so a floor over one copy alone leaves an artifact whose
+  `fri_params.config.proof_of_work_bits` is zero accepted and verified with no
+  grinding.
 - Proof bytes must be the canonical encoding. Plonky2's reader stops when it
   has read a whole proof without checking that the buffer is exhausted, and it
   decodes public inputs with an unreduced constructor whose range check is a

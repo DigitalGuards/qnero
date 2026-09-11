@@ -26,9 +26,9 @@ survives: the pool is the only place value lives.
 |---|---|---|
 | Ed25519 spend/view keys | Hash-derived spend key, ML-KEM decapsulation key as view key | new + `clatter`/rust-crypto ML-KEM already in Quantus deps |
 | Stealth address (ECDH) | ML-KEM encapsulation per output, AEAD note ciphertext | new |
-| Pedersen commitment | Poseidon note commitment `cm = H(H(pk, rho, r), v)` | new, `qp-poseidon` |
+| Pedersen commitment | Poseidon note commitment `cm = H(CM, H(NOTE, pk, rho, r), v)` | new, `qp-poseidon` |
 | Bulletproofs+ range proof | 62-bit range check inside the Plonky2 circuit | plonky2 gadget |
-| CLSAG ring + key image | Merkle membership proof in the 4-ary Poseidon tree + nullifier `nf = H(nk, rho)` | `qp-zk-circuits` `zk_merkle`, `nullifier` fragments |
+| CLSAG ring + key image | Merkle membership proof in the 4-ary Poseidon tree + nullifier `nf = H(NF, nk, rho, r)`, or `nf = H(NF_DUMMY, nk, rho, r)` for a padding input slot | `qp-zk-circuits` `zk_merkle`, `nullifier` fragments |
 | Ring size / decoys | Anonymity set = the whole tree (all notes ever) | `pallet-zk-tree` |
 | Transaction signature | Spend proof bound to the transaction digest as a public input | plonky2 public inputs |
 | RandomX PoW | QPoW (kept for v0) | `pallets/qpow` |
@@ -38,6 +38,12 @@ Field: Goldilocks. Hash: Poseidon (Quantus parameters, Eiger reviewed). Proof
 system: Plonky2 (FRI), conjectured 100-bit security at the Quantus config.
 Every primitive is hash-based or lattice-based; there are no elliptic curves in
 the transaction path.
+
+The two hash rules above are quoted for orientation. Section 5 and
+`docs/CIRCUIT.md` section 3 are the authority on them, and both `r` in the
+nullifier preimage and the separate padding tag are load bearing: they are what
+keeps `nk` a viewing-tier secret and what stops a padding slot from settling a
+real note's nullifier. Section 4 explains both.
 
 ## 3. What is reused from Quantus, verbatim or by fork
 

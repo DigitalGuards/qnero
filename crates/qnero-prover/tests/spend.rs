@@ -6,6 +6,7 @@
 use std::sync::OnceLock;
 
 use plonky2::field::types::{Field, PrimeField64};
+use plonky2::fri::FriConfig;
 use plonky2::iop::witness::PartialWitness;
 use plonky2::plonk::circuit_data::CircuitData;
 use plonky2::plonk::proof::ProofWithPublicInputs;
@@ -880,6 +881,69 @@ fn a_weakened_verifier_artifact_is_rejected() {
         message.contains("below the canonical"),
         "unexpected rejection reason: {message}"
     );
+}
+
+/// A verifier artifact carries the FRI configuration twice, and verification
+/// reads the copy a floor over `common.config.fri_config` never looks at.
+///
+/// `read_common_circuit_data` reads a `CircuitConfig`, whose `fri_config` is
+/// what the parameter floor checks, and then reads a `FriParams` that carries
+/// a second full `FriConfig` of its own. Nothing in plonky2 relates the two:
+/// its structural check on a deserialized artifact reads `common.config` plus
+/// `fri_params.degree_bits`. Verification then takes the grinding bits from
+/// `fri_params.config` (`fri_verify_proof_of_work`), the query count from it
+/// (`params.config.num_query_rounds == proof.query_round_proofs.len()`) and
+/// the rate from it (`params.lde_size()`). So an artifact whose two copies
+/// disagree is verified under the weak one while presenting the canonical one
+/// to every check that reads `config.fri_config`, and the 16 grinding bits
+/// drop straight out of the claimed 100-bit level.
+///
+/// `a_weakened_verifier_artifact_is_rejected` cannot see this: it builds its
+/// artifact through `QneroSpendCircuit::new`, which writes both copies from
+/// one config. Only a hand-edited artifact reaches this shape, which is
+/// exactly the attacker who supplies an artifact and a proof together.
+#[test]
+fn an_artifact_whose_two_fri_configs_disagree_is_rejected() {
+    let serializer = plonky2::util::serialization::DefaultGateSerializer;
+    let canonical = circuit().1.verifier_data();
+    QneroVerifier::from_artifact_bytes(
+        &canonical
+            .to_bytes(&serializer)
+            .expect("verifier data serializes"),
+    )
+    .expect("the canonical artifact is accepted");
+
+    // One case per field the FRI verifier reads from the second copy.
+    type Weakening = (&'static str, fn(&mut FriConfig));
+    let weakenings: [Weakening; 3] = [
+        ("proof_of_work_bits", |fri| fri.proof_of_work_bits = 0),
+        ("num_query_rounds", |fri| fri.num_query_rounds = 1),
+        ("rate_bits", |fri| fri.rate_bits = 1),
+    ];
+
+    for (field, weaken) in weakenings {
+        let mut divergent = canonical.clone();
+        weaken(&mut divergent.common.fri_params.config);
+        assert_ne!(
+            divergent.common.fri_params.config, divergent.common.config.fri_config,
+            "the mutation of {field} left the two copies equal"
+        );
+
+        let artifact = divergent
+            .to_bytes(&serializer)
+            .expect("verifier data serializes");
+        let error = match QneroVerifier::from_artifact_bytes(&artifact) {
+            Ok(_) => panic!(
+                "an artifact whose fri_params.config.{field} was weakened below \
+                 common.config.fri_config was accepted"
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("fri_params.config"),
+            "unexpected rejection reason for {field}: {error}"
+        );
+    }
 }
 
 /// Proof bytes are the natural transaction identity at M4. Plonky2 stops

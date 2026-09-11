@@ -489,7 +489,17 @@ with a clear error unless `qnero-circuit`'s `zk` feature is on.
   floor is what stops an artifact built over this same layout with one query
   round from verifying forged proofs; plonky2's own check on deserialized
   config rejects only a zero challenge count, a zero constant count and fewer
-  than three routed wires. Provenance is a separate question. The keccak pin on
+  than three routed wires. The floor also requires the artifact's two copies of
+  the FRI configuration to agree. One lives in `common.config.fri_config` and a
+  second in `common.fri_params.config`, deserialized independently from the
+  same bytes, and verification reads the second: the grinding bits it checks
+  the proof-of-work response against, the query count it compares the round
+  proofs against, and the rate that sizes the LDE domain all come from
+  `fri_params.config`. Plonky2 never compares the two, so a floor over
+  `config.fri_config` alone would accept an artifact whose
+  `fri_params.config.proof_of_work_bits` is zero and verify proofs under it
+  with no grinding at all, while the canonical 16 stayed on display in the copy
+  that was checked. Provenance is a separate question. The keccak pin on
   the artifact bytes still needs a tagged circuit release to pin, and every
   circuit change after that invalidates it.
 - **Pallet-side `ct_digest` recomputation.** The rule is fixed (section 1) and

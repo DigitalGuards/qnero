@@ -109,12 +109,43 @@ impl QneroVerifier {
     /// with. It is a floor. Provenance is a separate question: the keccak pin
     /// on a tagged artifact is still to come, and until it lands the caller
     /// owns where the bytes came from.
+    ///
+    /// The floor covers both copies of the FRI configuration. An artifact
+    /// carries one inside `common.config` and a second inside
+    /// `common.fri_params`, verification reads the second, and plonky2 never
+    /// compares them, so the two are required to agree before the floor is
+    /// applied to the first.
     pub fn new(circuit_data: VerifierCircuitData<F, C, D>) -> Result<Self> {
         ensure!(
             circuit_data.common.num_public_inputs == PUBLIC_INPUT_LEN,
             "verifier data has {} public inputs, expected {} for a Qnero leaf",
             circuit_data.common.num_public_inputs,
             PUBLIC_INPUT_LEN
+        );
+
+        // The artifact carries the FRI configuration twice, and verification
+        // reads the copy the table below does not. `read_common_circuit_data`
+        // reads a `CircuitConfig`, whose `fri_config` is what the table holds
+        // to the floor, and then reads a `FriParams` carrying a second full
+        // `FriConfig` deserialized independently from the same bytes.
+        // Plonky2 never relates the two: its structural check on a
+        // deserialized artifact reads `common.config` plus
+        // `fri_params.degree_bits`, while `verify_fri_proof` takes the
+        // grinding bits, the query count and the rate from
+        // `fri_params.config`. A floor over one copy alone is no floor: an
+        // artifact whose `fri_params.config.proof_of_work_bits` is zero
+        // presents the canonical 16 to every check that reads
+        // `config.fri_config` and is verified with no grinding at all,
+        // dropping those 16 bits out of the claimed security level. Requiring
+        // the two to agree makes the checked copy govern both. A genuine
+        // artifact always satisfies it, because `FriConfig::fri_params` clones
+        // the config it is called on.
+        ensure!(
+            circuit_data.common.fri_params.config == circuit_data.common.config.fri_config,
+            "verifier data carries two different FRI configurations: fri_params.config is {:?}, \
+             config.fri_config is {:?}",
+            circuit_data.common.fri_params.config,
+            circuit_data.common.config.fri_config
         );
 
         let config = &circuit_data.common.config;
