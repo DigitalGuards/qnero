@@ -224,7 +224,7 @@ pub fn coinbase_rho(block_number: u32) -> Digest {
 /// `r` of the coinbase note a block mints to its author.
 ///
 /// ```text
-/// r = H(R_COINBASE, cvk, H(genesis_hash), block_number)
+/// r = H(R_COINBASE, cvk, H_bytes("qnero/coinbase-chain", genesis_hash), block_number)
 /// ```
 ///
 /// Every other note reaches its recipient as an ML-KEM ciphertext carrying

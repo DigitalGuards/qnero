@@ -910,8 +910,7 @@ parameter_types! {
 /// - Multisig pallet: validates calls in `propose()` extrinsic
 /// - Transaction extensions: validates calls for high-security EOAs
 ///
-/// Whitelist: the delayed, reversible operations, plus the two calls that move
-/// the signer's own balance out of the transparent layer.
+/// Whitelist: the delayed, reversible operations.
 /// - `schedule_transfer`: delayed native transfer; dest must be `MultiAddress::Id` so a stolen key
 ///   cannot pad `MultiAddress::Raw` and exfiltrate via the length fee
 /// - `cancel`: Cancel pending delayed transfer
@@ -1055,7 +1054,7 @@ parameter_types! {
 	/// that a wallet can finish proving: about 20 seconds single threaded at
 	/// `N = 6`, plus propagation.
 	pub const ShieldedBlockHashWindow: BlockNumber = 256;
-	/// Minimum fee per real leaf slot, in pool quanta: one quantum, 0.01 QTC.
+	/// Minimum fee per real leaf slot, in pool quanta: one quantum, 0.01 QNR.
 	///
 	/// The anti-spam mechanism, and the only one. The leaf circuit requires a
 	/// real input, which does not bound how many leaves a prover can produce:

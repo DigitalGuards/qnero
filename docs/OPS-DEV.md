@@ -112,6 +112,15 @@ cd chain
 nice -n 19 ./target/release/quantus-node --dev --tmp
 ```
 
+`--dev` is what picks the chain here. Every `--chain` id the node accepts
+(`dev`, `heisenberg`, `planck`, `mainnet`, and the `<profile>_live_spec`
+aliases) builds its genesis from a preset compiled into the binary, so all of
+them run this tree's runtime. A command line carrying neither `--chain` nor
+`--dev` is refused with those ids named: the three raw specs the binary used to
+embed were upstream Quantus networks whose genesis runtime had no shielded
+pool, no coinbase inherent and no call filter, and the empty id resolved to one
+of them.
+
 ### Mining under v1: the miner key
 
 From M6 every block mints its reward as one shielded note, and that is the only
@@ -135,7 +144,7 @@ nice -n 19 ./target/release/quantus-node --dev --tmp
 without one builds blocks that carry no coinbase inherent, and every node
 refuses those, its own import included, so the node refuses to start instead.
 
-Two properties of that string:
+Three properties of that string:
 
 - **It is secret-bearing, and the address is not.** `cvk` is what a coinbase note's `r` is derived
   from, so whoever holds the miner key can pick that miner's coinbase notes out of the tree. It
@@ -607,7 +616,7 @@ What changed, and what a node operator sees:
   exactly as before. A griefed public batch of six-slot inners that loses one
   inner owes six quanta more than its settling slots' own minimums. At the far
   end, a batch that settles one slot beside 317 skipped ones owes 318 minimums,
-  3.18 QTC at the runtime's parameters, and the aggregator's alternative is to
+  3.18 QNR at the runtime's parameters, and the aggregator's alternative is to
   recompose a fresh public batch without the conflicted inners for the cost of
   one proof.
 - **No structural metadata change.** No call, storage item, constant or error
@@ -2329,7 +2338,7 @@ tree depth        3
 ```
 
 41 quanta is the emission at genesis supply, `(21_000_000 - 0) / 50_000_000`
-QTC quantized down to a whole pool quantum. The occasional 42 is the carry: a
+QNR quantized down to a whole pool quantum. The occasional 42 is the carry: a
 block's credit is not a whole number of quanta, the remainder waits in
 `PendingCoinbaseFee`, and every eighth block or so it completes one. Nothing is
 lost between the two books and nothing is created.
@@ -2788,7 +2797,8 @@ does.
   miner key on a testnet and on mainnet published byte-identical `inner` values at equal heights on
   both, so anyone who could name that operator's coinbase notes on the chain that matters less named
   them on the other by comparing 32 bytes, with no keys involved. `r` now hashes the genesis:
-  `r = H(R_COINBASE, cvk, H(genesis_hash), block_number)`. The node reads the genesis from its own
+  `r = H(R_COINBASE, cvk, H_bytes("qnero/coinbase-chain", genesis_hash), block_number)`. The node
+  reads the genesis from its own
   client and the wallet from the store it is already bound to, so a scan pays nothing.
 - **What the binding does not cover, measured rather than assumed.** Two candidates at one height on
   one chain still carry one note; the header's author label `H(cvk, parent_hash)` is already
@@ -2805,7 +2815,7 @@ does.
   green, because the pot's endowment is computed from the schedule totals and so covers a payee
   nobody can sign for. Every beneficiary is checked against a per-preset table now.
 - **The 27% genesis allocation is not a note, and five sentences said it was.** `mainnet_vesting`
-  mints 5,670,000 QTC at genesis as transparent balances and every planck of it reaches its holder
+  mints 5,670,000 QNR at genesis as transparent balances and every planck of it reaches its holder
   through `Vesting::claim`. "Value enters circulation in exactly one place" is true of value created
   after genesis, which is what DESIGN 7.1, the pillar list, the M6 row, CIRCUIT section 10, the
   runtime's `NoTransferProofNeeded` comment, `qp-coinbase` and the `--rewards-miner-key` help now
@@ -2958,3 +2968,196 @@ only evidence that a green test means anything:
 - A fourth dev vesting schedule paying a keyless address:
   `every_genesis_planck_is_reachable_under_the_call_filter` fails, naming the address and the
   missing list.
+
+## The fourth M6 review fix pass, 2026-09-12
+
+Eight findings against the third pass: one medium, seven low. The medium is the
+only one that changes what a binary does, and it changes it completely: the
+chain the shipped node started by default was not a Qnero chain. The token
+symbol was in scope for this pass whatever the review found.
+
+### What changed
+
+- **The default chain was somebody else's network.** Three raw specs were embedded in the node
+  (`heisenberg.json`, `planck.json`, `mainnet.json`), and `sc_cli` maps both a missing `--chain` and
+  a missing `--dev` to the empty id, which resolved to the first of them. Their genesis `:code` is a
+  775,278-byte compressed `quantus-runtime`: decompressed it holds zero occurrences of `qnero`,
+  `Shielded`, `CoinbaseValues`, `coinbase` and `QneroCallFilter`, and fifteen of `Wormhole`. So
+  `quantus-node --validator --rewards-inner-hash 0x… --rewards-miner-key qnm1…`, the invocation this
+  runbook demands of an authority, started a node on the upstream Quantus network: transparent
+  transfers succeeded there, no coinbase inherent existed so nothing read the miner key, and the
+  wormhole exit was live, while the author-label seam still derived a fresh reward account every
+  block from `H(cvk, parent_hash)` whose preimage nobody holds. All three files are deleted, every
+  `--chain` id now builds its genesis from a preset compiled into the binary, and the empty id is a
+  refusal that names the ids. A raw spec comes back when one is generated from a Qnero preset
+  against a live Qnero network; `chain/docs/CHAINSPEC_CREATION.md` says so and keeps the procedure.
+- **One token symbol, `QNR`.** The symbol had split four ways (`QNR` on dev, `HEI` on Heisenberg,
+  `PLK` on Planck, `QTC` on mainnet) with the docs saying `QTC`. Every preset reads one
+  `qnero_properties()` map now, and the docs say `QNR`. The symbol is the one chain-spec field a
+  runtime upgrade cannot correct, because wallets, explorers and exchanges read it out of a spec
+  file an operator already holds.
+- **The surface named a hook that does not exist.** `RUNTIME_SURFACE.md` attributed the mint to
+  `pallet-shielded::on_finalize`. The pallet declares only `on_initialize`; the mint runs in
+  `pallet-mining-rewards`' `on_finalize` through `CoinbaseSink`, and that indirection is load
+  bearing: hooks run in pallet-index order, `MiningRewards` is 6 and `ZkTree` is 21, so a mint from
+  a hook of `Shielded` at index 24 would append every coinbase leaf after `ZkTree` folded the block,
+  one block late against the root its own header carries. No test in the tree would have caught it.
+- **`PendingCoinbaseFee` does carry, on most blocks.** CIRCUIT 10.1 said it survives its block only
+  when a block mints no note at all. A successful mint writes `total % POOL_QUANTUM` straight back
+  into it, which on the dev chain completes one extra quantum roughly every eighth block. Read as
+  written, any supply audit or try-runtime invariant built on that sentence would flag healthy
+  state as a missing coinbase on most blocks.
+- **The high-security whitelist doc claimed two calls it does not admit.** `HighSecurityConfig`'s
+  type doc still offered "the two calls that move the signer's own balance out of the transparent
+  layer". The second review pass took `Shielded::shield` and `Balances::burn` off, and the code, the
+  function comment below it, `RUNTIME_SURFACE.md` section 5 and
+  `the_high_security_whitelist_admits_only_reversible_calls` all say so. An account enrolled before
+  v1 has no exit at all, which is the documented cost.
+- **One coinbase `r` rule, written the same way everywhere.** DESIGN 7.1 gave it without the inner
+  hash and `digest.rs` gave it without the genesis at all, so the tag's own definition still carried
+  the pre-fix formula. All seven statements now read
+  `r = H(R_COINBASE, cvk, H_bytes("qnero/coinbase-chain", genesis_hash), block_number)`, the
+  two column diagrams naming that inner hash `chain` on its own line.
+  `qnero_note_core::coinbase_r` stays the authority.
+- **The node crate's tests are a gate now.** Every earlier gate ran `cargo test` for the pallets and
+  the runtime and only `clippy --all-targets` for `quantus-node`, and clippy compiles a test without
+  running it. The four tests pinning the node's inherent payload against `MinerKey::coinbase_note`
+  had therefore never executed, including across the pass that edited both sides of that agreement.
+  They pass. The gate list below runs them, and node tests stay wasm-independent so
+  `SKIP_WASM_BUILD=1` keeps working.
+- **"Two properties of that string" introduced three bullets.** The genesis-binding pass appended
+  the third without updating the count.
+
+### Gates
+
+```
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   38 suites ok, 0 failed
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+
+# the chain workspace
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
+  -p pallet-shielded -p pallet-mining-rewards -p quantus-runtime --release
+   74 + 31 + (42 lib + 9 call_filter + 60 integration) passed, 0 failed
+LIBCLANG_PATH=/usr/lib/llvm-18/lib RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 \
+  cargo test -j 4 -p quantus-node --release
+   68 passed, 0 failed
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p pallet-shielded -p pallet-mining-rewards --all-targets
+   no warnings
+LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p quantus-node -p qp-coinbase -p quantus-runtime --all-targets
+   no warnings
+cargo +nightly-2026-08-30 fmt --all -- --check
+   clean
+```
+
+The node test line is new and stays in the list. It is the only automated
+statement that the node's `build_payload` equals `MinerKey::coinbase_note`,
+which is the agreement the wallet's whole coinbase scan rests on.
+
+### The run
+
+The chain id resolution first, against the rebuilt binary, because that is the
+finding a green test suite would not have shown anybody:
+
+```
+$ ./target/release/quantus-node build-spec
+Error: Input("no chain was named. Pass --dev for a throwaway development chain,
+or --chain with one of dev, heisenberg, planck, mainnet, or the path to a chain
+spec file")
+
+$ ./target/release/quantus-node build-spec --chain heisenberg   # properties, genesis shape
+{'ss58Format': 189, 'tokenDecimals': 12, 'tokenSymbol': 'QNR'}
+genesis keys ['runtimeGenesis']
+```
+
+Before this pass the first command printed `"name": "Heisenberg"`, `"id":
+"heisenberg"`, `"tokenSymbol": "HEI"` and a raw genesis carrying the upstream
+runtime.
+
+Fresh chain, fresh miner wallet, the binary built from this tree
+(`1.0.1-3358f799ff8`):
+
+```
+$ QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6fix5/miner.seed miner-address | tail -1) \
+    nice -n 19 ./target/release/quantus-node --dev --tmp
+2026-09-12 23:42:58 📋 Chain specification: Qnero DevNet
+2026-09-12 23:42:58 ⛏️ Coinbase notes are minted for miner key qnm1qyuytz60…rdjtv2fg
+
+$ qnero-wallet --file /tmp/qnero-m6fix5/miner.seed sync
+chain       recorded this node's genesis in the store
+scanned leaves 0..44 at block 44
+received 44 note(s) worth 1818 quanta
+
+$ qnero-wallet --file /tmp/qnero-m6fix5/miner.seed status
+runtime           spec 101, transaction 7
+chain head        44
+tree leaves       44
+tree depth        3
+```
+
+Forty-four blocks, forty-four coinbase notes, all forty-four this wallet's.
+
+```
+$ QNERO_DEV_NODE=http://127.0.0.1:9944 QNERO_MINER_SEED=/tmp/qnero-m6fix5/miner.seed \
+    RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --release -p qnero-wallet \
+    --features parallel --test dev_node_e2e -- --nocapture
+
+sync: 32 leaves, 32 coinbase leaves, 32 of them this wallet's, 3141 quanta
+shield of 1000 quanta included at block 77 (505.37ms), leaf 76
+5 quanta to B at fee 8: included at block 87, change 29
+coinbase of block 87: 45 quanta against 41 to 43 elsewhere, author share 4
+system_dryRun of a transparent transfer: 0x0001030005000000
+system_dryRun of set_high_security: 0x0001030005000000
+system_dryRun of a vesting claim: 0x0001031602000000
+test the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused ... ok
+300 quanta to B: proved in 6.29s, 150908 proof bytes, included at block 88
+100 quanta back to A: proved in 2.99s, included at block 92
+test a_shield_a_payment_and_a_payment_back_settle_end_to_end ... ok
+
+test result: ok. 2 passed; 0 failed
+```
+
+```
+$ kill $(cat node.pid), then wait for 9944 to close
+port 9944 closed
+node stopped
+```
+
+### Verifying the new guard against the defect it names
+
+The two `load_spec` tests were written before the fix and run against the tree
+as it stood, which is the only evidence that a green test means anything:
+
+```
+---- command::tests::every_chain_id_this_node_accepts_is_a_qnero_chain ----
+assertion `left == right` failed: --chain heisenberg resolves to a spec this tree's runtime did not build
+  left: {"ss58Format": 189, "tokenDecimals": 12, "tokenSymbol": "HEI"}
+ right: {"ss58Format": 189, "tokenDecimals": 12, "tokenSymbol": "QNR"}
+
+---- command::tests::an_empty_chain_id_names_the_chains_this_node_has ----
+an empty chain id must not resolve to a chain: ChainSpec(name = "Heisenberg", id = "heisenberg")
+```
+
+Both hold under `SKIP_WASM_BUILD=1`, which is what makes them worth running in
+a gate. A spec built from a preset needs `WASM_BINARY` and fails without it; a
+raw spec carries its properties in its JSON and loads either way, so any id that
+answers at all with properties this tree's runtime did not build fails the test.
+
+### Timings
+
+| Step | Wall | Peak RSS |
+|---|---|---|
+| `cargo build -j 4 --release -p quantus-node`, the one rebuild this pass owes | 9:23 | 5.4 GB |
+| `pallet-shielded` suite | 25.3 s | |
+| node crate suite | under 1 s | |
+| the end-to-end, both tests, three proofs | 15.0 s | |
+
+The rebuild is a full one because `qnero-note-core` changed: only doc comments
+moved, and it sits under `pallet-shielded`, so the runtime, its WASM and the
+node all rebuilt below it.

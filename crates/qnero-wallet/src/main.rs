@@ -18,7 +18,7 @@ use qnero_wallet::wallet::{
 };
 use qnero_wallet::POOL_QUANTUM;
 
-/// Amounts are in pool quanta. One quantum is 10^10 planck, 0.01 QTC.
+/// Amounts are in pool quanta. One quantum is 10^10 planck, 0.01 QNR.
 #[derive(Debug, Parser)]
 #[command(
     name = "qnero-wallet",
@@ -26,7 +26,7 @@ use qnero_wallet::POOL_QUANTUM;
     about = "Qnero v0 shielded wallet",
     long_about = "Qnero v0 shielded wallet.
 
-Amounts are in POOL QUANTA. One quantum is 10^10 planck (0.01 QTC) and every
+Amounts are in POOL QUANTA. One quantum is 10^10 planck (0.01 QNR) and every
 value inside the pool, fees included, is counted in them.
 
 KEY HANDLING IS DEV GRADE. The seed is 32 bytes of hex in a file with mode

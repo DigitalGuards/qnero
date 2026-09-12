@@ -18,7 +18,8 @@
 //!
 //! ```text
 //! rho   = H(RHO_COINBASE, block_number)
-//! r     = H(R_COINBASE, cvk, H(genesis_hash), block_number)
+//! chain = H_bytes("qnero/coinbase-chain", genesis_hash)
+//! r     = H(R_COINBASE, cvk, chain, block_number)
 //! inner = H(NOTE, pk, rho, r)
 //! ```
 //!

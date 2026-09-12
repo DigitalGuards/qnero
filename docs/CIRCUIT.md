@@ -1246,7 +1246,7 @@ pays nine. This floor and the submission floor below it are the anti-spam
 mechanism, and they are the only one, for the reason section 8.6 gives.
 
 The payload term exists because the flat floor alone prices permanent state at
-whatever the ciphertext cap allows: one quantum, 0.01 QTC, would buy 4096 bytes
+whatever the ciphertext cap allows: one quantum, 0.01 QNR, would buy 4096 bytes
 of state that is never pruned and never parsed, and half of every fee comes back
 to a settler that is also the block author. The divisor has to sit below the
 slack between the real ciphertext size and the cap, or the term prices none of
@@ -1665,11 +1665,20 @@ shielded leaf already uses.
 coinbase. A wallet reads it in the same batch as the other three, so a coinbase
 costs one extra storage key per leaf on a sync and no extra round trip.
 
-Two more items are per block rather than per leaf, and neither survives its
-block: `PendingCoinbase`, the payload the inherent recorded, killed at the start
-of every block and taken by the mint; and `PendingCoinbaseFee`, the author's
-share of the fees settled so far, which the mint folds into the note's value and
-which only carries into the next block when a block mints no note at all.
+Two more items are per block rather than per leaf. `PendingCoinbase` is the
+payload the inherent recorded, killed at the start of every block and taken by
+the mint, so it never survives its block. `PendingCoinbaseFee` is the author's
+share of the fees settled so far, which the mint folds into the note's value.
+
+`PendingCoinbaseFee` does normally carry. A note's value is a whole number of
+pool quanta, so a successful mint writes `total % POOL_QUANTUM` straight back
+into it (`pallets/shielded/src/lib.rs`, `mint_coinbase`, pinned by
+`sub_quantum_change_stays_for_the_next_coinbase`), and that sub-quantum
+remainder is what a healthy chain shows at the start of most blocks: on the dev
+chain it completes one extra quantum roughly every eighth block. A non-zero
+value there says nothing on its own about whether the previous block minted.
+The second reason it can be non-empty is the one section 10.6 lists: a block
+that mints no note at all leaves the whole share sitting in it.
 
 The event is `CoinbaseMinted { block_number, leaf_index, inner, value,
 has_ciphertext }`. It publishes `inner`, which the storage does not, so a wallet
@@ -1687,8 +1696,9 @@ coinbase leaves one miner produced.
 ### 10.2 The two rules the note is built from
 
 ```text
-rho   = H(RHO_COINBASE, block_number)              0x716e_000a
-r     = H(R_COINBASE, cvk, H(genesis_hash), block_number)   0x716e_000b
+chain = H_bytes("qnero/coinbase-chain", genesis_hash)
+rho   = H(RHO_COINBASE, block_number)                   0x716e_000a
+r     = H(R_COINBASE, cvk, chain, block_number)         0x716e_000b
 inner = H(NOTE, pk, rho, r)
 cm    = H(CM, inner, value)
 ```

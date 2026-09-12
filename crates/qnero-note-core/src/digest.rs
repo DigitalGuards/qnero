@@ -127,13 +127,21 @@ pub mod domain {
     /// [`super::coinbase_rho`] is the rule.
     pub const RHO_COINBASE: Felt = Felt::new(0x716e_000a);
     /// `r` of a coinbase note: the commitment randomness the block author's
-    /// node derives from its coinbase viewing key and the block number.
+    /// node derives from its coinbase viewing key, the chain it is on and the
+    /// block number.
     ///
     /// A coinbase note is the one note whose recipient is decided before the
     /// block exists, by an operator configuring a node, so it is derived rather
-    /// than encrypted: `r = H(R_COINBASE, cvk, block_number)`, and a wallet
-    /// holding `cvk` recomputes it for every block. Its own tag keeps that
-    /// value out of the image of [`RHO_COINBASE`], which hashes the same block
+    /// than encrypted:
+    /// `r = H(R_COINBASE, cvk, H_bytes("qnero/coinbase-chain", genesis_hash), block_number)`,
+    /// and a wallet holding `cvk` recomputes it for every block. The genesis is
+    /// in the preimage because the derivation is bound to one chain: without
+    /// it, one miner key run on a testnet and on mainnet mints byte-identical
+    /// `inner` values at equal heights on both, and 32 bytes carry an
+    /// identification from one chain to the other. [`super::coinbase_r`] is the
+    /// rule and carries the full argument.
+    ///
+    /// This tag is separate from [`RHO_COINBASE`], which hashes the same block
     /// number, so a coinbase note's `rho` and its `r` can never be one value.
     pub const R_COINBASE: Felt = Felt::new(0x716e_000b);
 }

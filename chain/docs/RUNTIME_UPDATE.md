@@ -66,9 +66,10 @@ referendum index is only known **after** you submit — capture it from the `lis
 
 ## Endpoints
 
-The chain-spec (`node/src/chain-specs/{heisenberg,planck}.json`) only defines **p2p boot
-nodes**, not RPC URLs — but each network also exposes the Substrate RPC over **wss://**
-(TLS, port 443 — no port number needed).
+The chain-spec that `--chain heisenberg` and `--chain planck` build
+(`node/src/chain_spec.rs`) defines **p2p boot nodes** and no RPC URLs. Each
+network also exposes the Substrate RPC over **wss://** (TLS, port 443, so no
+port number is needed).
 
 | Testnet | RPC endpoint (`--node-url`) | Backup |
 |---|---|---|

@@ -16,7 +16,7 @@ pub mod wallet;
 /// Planck per pool quantum.
 ///
 /// The pool counts values in quanta and the chain's balance is `u128` planck
-/// at twelve decimals, so one quantum is 0.01 QTC. It is
+/// at twelve decimals, so one quantum is 0.01 QNR. It is
 /// `pallet_shielded::POOL_QUANTUM`, a constant of the pallet crate with no
 /// `#[pallet::constant]` declaration, so it has no metadata surface for a
 /// wallet to read and this copy is the one value here that could drift from

@@ -15,6 +15,24 @@ For a profile `<profile>` (e.g. `mainnet`):
 | `node/src/chain-specs/<profile-with-dashes>.json` | the committed raw spec |
 | `<profile>` | `--chain` id that loads the committed JSON (what operators use) |
 
+## Under v1 no raw spec is committed
+
+The three raw specs this repository used to embed (`heisenberg.json`,
+`planck.json`, `mainnet.json`) were upstream Quantus networks: their genesis
+`:code` was a `quantus-runtime` with no `pallet-shielded`, no coinbase inherent
+and no `QneroCallFilter`, so a node started on one ran none of Qnero v1's
+mandatory-privacy rules. They are gone, and every `--chain` id this node
+accepts now builds its genesis from a preset compiled into the binary:
+`<profile>` and `<profile>_live_spec` are the same chain. A node handed no
+`--chain` and no `--dev` refuses to start and names the ids it has.
+
+Follow the steps below when a Qnero network goes live, so the committed JSON is
+generated from a Qnero preset against that network. Until then, the arm in step
+3 is what re-introduces a raw spec, and
+`every_chain_id_this_node_accepts_is_a_qnero_chain` (`node/src/command.rs`) is
+the test that refuses any spec whose properties this tree's runtime did not
+build.
+
 ## Prerequisites
 
 - The runtime preset exists in `runtime/src/genesis_config_presets/` and is

@@ -11,11 +11,25 @@ use serde_json::json;
 /// Specialized `ChainSpec`. This is a specialization of the general Substrate ChainSpec type.
 pub type ChainSpec = sc_service::GenericChainSpec;
 
-pub fn development_chain_spec() -> Result<ChainSpec, String> {
+/// Chain properties, one set for every preset this node builds.
+///
+/// The token symbol is `QNR` on every Qnero chain, dev and live alike. It is
+/// one function rather than four literals because the symbol is the one field
+/// of a chain spec a runtime upgrade cannot correct: wallets, explorers and
+/// exchanges read it out of the spec file an operator already holds, so a
+/// preset that shipped another symbol would keep naming another unit until
+/// every one of them was handed a new file. `every_preset_names_the_token_qnr`
+/// is the test.
+pub(crate) fn qnero_properties() -> Properties {
 	let mut properties = Properties::new();
 	properties.insert("tokenDecimals".into(), json!(12));
 	properties.insert("tokenSymbol".into(), json!("QNR"));
 	properties.insert("ss58Format".into(), json!(189));
+	properties
+}
+
+pub fn development_chain_spec() -> Result<ChainSpec, String> {
+	let properties = qnero_properties();
 
 	Ok(ChainSpec::builder(
 		WASM_BINARY.ok_or_else(|| "Qnero DevNet wasm not available".to_string())?,
@@ -40,10 +54,7 @@ pub fn development_chain_spec() -> Result<ChainSpec, String> {
 /// secrets. Tokens have no monetary value; the network may be reset. Do not
 /// treat Heisenberg key material, balances, or authority as production-grade.
 pub fn heisenberg_chain_spec() -> Result<ChainSpec, String> {
-	let mut properties = Properties::new();
-	properties.insert("tokenDecimals".into(), json!(12));
-	properties.insert("tokenSymbol".into(), json!("HEI"));
-	properties.insert("ss58Format".into(), json!(189));
+	let properties = qnero_properties();
 
 	let telemetry_endpoints = TelemetryEndpoints::new(vec![(
 		"/dns/shard-telemetry.quantus.cat/tcp/443/x-parity-wss/%2Fsubmit%2F".to_string(),
@@ -80,10 +91,7 @@ pub fn heisenberg_chain_spec() -> Result<ChainSpec, String> {
 /// building panics until that table is finalized. Bootnodes are added once
 /// infrastructure exists (`bootNodes` is outside genesis).
 pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
-	let mut properties = Properties::new();
-	properties.insert("tokenDecimals".into(), json!(12));
-	properties.insert("tokenSymbol".into(), json!("QTC"));
-	properties.insert("ss58Format".into(), json!(189));
+	let properties = qnero_properties();
 
 	let telemetry_endpoints = TelemetryEndpoints::new(vec![(
 		"/dns/shard-telemetry.quantus.cat/tcp/443/x-parity-wss/%2Fsubmit%2F".to_string(),
@@ -107,10 +115,7 @@ pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
 
 /// Planck network — live treasury signers + faucet; dev dilithium accounts for testing.
 pub fn planck_chain_spec() -> Result<ChainSpec, String> {
-	let mut properties = Properties::new();
-	properties.insert("tokenDecimals".into(), json!(12));
-	properties.insert("tokenSymbol".into(), json!("PLK"));
-	properties.insert("ss58Format".into(), json!(189));
+	let properties = qnero_properties();
 
 	let telemetry_endpoints = TelemetryEndpoints::new(vec![(
 		"/dns/shard-telemetry.quantus.cat/tcp/443/x-parity-wss/%2Fsubmit%2F".to_string(),
@@ -143,4 +148,71 @@ pub fn planck_chain_spec() -> Result<ChainSpec, String> {
 	.with_genesis_config_preset_name(PLANCK_RUNTIME_PRESET)
 	.with_properties(properties)
 	.build())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Every preset this node builds names the same token, `QNR`.
+	///
+	/// The symbol reached v1 split four ways: `QNR` on the dev preset, `HEI`
+	/// on Heisenberg, `PLK` on Planck and `QTC` on mainnet, with the docs
+	/// saying `QTC`. A wallet, an explorer and an exchange each read the symbol
+	/// out of the chain spec rather than out of the runtime, so a split symbol
+	/// is a split unit for every one of them, and no runtime upgrade corrects
+	/// it: the spec file is already in the operator's hand.
+	///
+	/// Two halves, and the split is deliberate. [`qnero_properties`] is the one
+	/// map every builder reads, so pinning it pins every preset's symbol
+	/// wherever this test runs, `SKIP_WASM_BUILD=1` included. Building each
+	/// preset is what proves the builders still read it, and that half needs
+	/// the runtime wasm, so without it every builder returns its own
+	/// "wasm not available" and the match below demands exactly that error and
+	/// nothing else.
+	///
+	/// It also pins the preset list. A preset added to the runtime without a
+	/// row here is a spec whose properties nothing checks, so the count is
+	/// asserted against `genesis_config_presets::preset_names`, which is the
+	/// runtime's own list.
+	#[test]
+	fn every_preset_names_the_token_qnr() {
+		let properties = qnero_properties();
+		assert_eq!(
+			properties.get("tokenSymbol").and_then(|symbol| symbol.as_str()),
+			Some("QNR"),
+			"the one properties map every preset reads does not name the token QNR"
+		);
+		assert_eq!(properties.get("tokenDecimals").and_then(|value| value.as_u64()), Some(12));
+		assert_eq!(properties.get("ss58Format").and_then(|value| value.as_u64()), Some(189));
+
+		let built: [(&str, Result<ChainSpec, String>); 4] = [
+			("dev", development_chain_spec()),
+			(HEISENBERG_RUNTIME_PRESET, heisenberg_chain_spec()),
+			(PLANCK_RUNTIME_PRESET, planck_chain_spec()),
+			(MAINNET_RUNTIME_PRESET, mainnet_chain_spec()),
+		];
+
+		assert_eq!(
+			built.len(),
+			quantus_runtime::genesis_config_presets::preset_names().len(),
+			"the runtime's preset list moved; every preset needs a builder here or its \
+			 chain properties are checked by nothing"
+		);
+
+		for (name, spec) in built {
+			match spec {
+				Ok(spec) => assert_eq!(
+					spec.properties(),
+					properties,
+					"preset {name:?} does not carry the one Qnero properties map"
+				),
+				Err(error) => assert!(
+					error.contains("wasm not available"),
+					"preset {name:?} failed to build for a reason that is not a missing \
+					 runtime wasm: {error}"
+				),
+			}
+		}
+	}
 }

@@ -30,7 +30,7 @@ pub use pallet::*;
 
 /// Smallest leaf-quantum count at which a 4 bps Wormhole volume fee is exact
 /// (`2500 * 4 / 10_000 = 1`). Non-final claims pay a multiple of
-/// `NON_FINAL_PAYOUT_QUANTA * PayoutQuantum` (25 QTC at the runtime leaf quantum).
+/// `NON_FINAL_PAYOUT_QUANTA * PayoutQuantum` (25 QNR at the runtime leaf quantum).
 pub const NON_FINAL_PAYOUT_QUANTA: u128 = 2_500;
 
 /// Capacity of the genesis schedule table. Offset genesis schedules are rebased in the

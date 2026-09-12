@@ -302,27 +302,41 @@ impl SubstrateCli for Cli {
 		2017
 	}
 
+	/// Every id here builds its genesis from a preset compiled into this
+	/// binary, so every chain this node starts on its own runs this tree's
+	/// runtime.
+	///
+	/// Three raw specs used to be embedded beside them, one of which the empty
+	/// id resolved to, and all three were upstream Quantus networks: their
+	/// genesis `:code` carried a `quantus-runtime` with no `pallet-shielded`,
+	/// no coinbase inherent and no `QneroCallFilter`. A node started with no
+	/// `--chain` therefore ran none of v1's mandatory-privacy rules, while the
+	/// author-label seam still derived a fresh reward account every block from
+	/// `H(cvk, parent_hash)` whose wormhole preimage nobody held. A raw spec
+	/// belongs back here once one is generated from a Qnero preset against a
+	/// live Qnero network, and `every_chain_id_this_node_accepts_is_a_qnero_chain`
+	/// is what holds the line in the meantime.
+	///
+	/// The empty id is a refusal that names the chains, since `sc_cli` maps
+	/// both a missing `--chain` and a missing `--dev` to it and a network is
+	/// too large a thing to pick for an operator who named none.
 	fn load_spec(&self, id: &str) -> Result<Box<dyn sc_service::ChainSpec>, String> {
 		Ok(match id {
 			// `--dev` resolves to this id, so it stays "dev" while the spec it
 			// builds is Qnero's.
 			"dev" | "qnero-dev" =>
 				Box::new(chain_spec::development_chain_spec()?) as Box<dyn sc_service::ChainSpec>,
-			"heisenberg_live_spec" =>
+			"heisenberg" | "heisenberg_live_spec" =>
 				Box::new(chain_spec::heisenberg_chain_spec()?) as Box<dyn sc_service::ChainSpec>,
-			"" | "heisenberg" => Box::new(chain_spec::ChainSpec::from_json_bytes(include_bytes!(
-				"chain-specs/heisenberg.json"
-			))?) as Box<dyn sc_service::ChainSpec>,
-			"planck_live_spec" =>
+			"planck" | "planck_live_spec" =>
 				Box::new(chain_spec::planck_chain_spec()?) as Box<dyn sc_service::ChainSpec>,
-			"planck" => Box::new(chain_spec::ChainSpec::from_json_bytes(include_bytes!(
-				"chain-specs/planck.json"
-			))?) as Box<dyn sc_service::ChainSpec>,
-			"mainnet_live_spec" =>
+			"mainnet" | "mainnet_live_spec" =>
 				Box::new(chain_spec::mainnet_chain_spec()?) as Box<dyn sc_service::ChainSpec>,
-			"mainnet" => Box::new(chain_spec::ChainSpec::from_json_bytes(include_bytes!(
-				"chain-specs/mainnet.json"
-			))?) as Box<dyn sc_service::ChainSpec>,
+			"" =>
+				return Err("no chain was named. Pass --dev for a throwaway development chain, \
+				            or --chain with one of dev, heisenberg, planck, mainnet, or the path \
+				            to a chain spec file"
+					.to_string()),
 			path =>
 				Box::new(chain_spec::ChainSpec::from_json_file(std::path::PathBuf::from(path))?)
 					as Box<dyn sc_service::ChainSpec>,
@@ -789,6 +803,81 @@ mod tests {
 			TEST_WORMHOLE_PREIMAGE,
 		},
 	};
+
+	/// Every `--chain` id this node accepts resolves to a Qnero chain.
+	///
+	/// Three foreign raw specs used to ship inside this binary, and the empty
+	/// id `sc_cli` hands `load_spec` when an operator passes neither `--chain`
+	/// nor `--dev` resolved to one of them. Their genesis `:code` was an
+	/// upstream `quantus-runtime` with no `pallet-shielded`, no coinbase
+	/// inherent and no `QneroCallFilter`, so the default network of the
+	/// shipped binary had none of v1's mandatory-privacy rules: a transparent
+	/// transfer succeeded there, nothing read the configured miner key, and
+	/// the wormhole exit was live.
+	///
+	/// The chain properties are what this checks, because they separate the
+	/// two families in a build with no runtime wasm. A spec built from a
+	/// preset needs `WASM_BINARY` and fails without it, which is what
+	/// `SKIP_WASM_BUILD=1` leaves; a raw spec carries its properties in its
+	/// JSON and loads either way. So a spec that comes back at all carrying
+	/// anything but the one Qnero properties map is a spec this tree's runtime
+	/// did not build.
+	#[test]
+	fn every_chain_id_this_node_accepts_is_a_qnero_chain() {
+		use clap::Parser;
+		use sc_cli::SubstrateCli;
+
+		let cli = crate::cli::Cli::try_parse_from(["quantus-node", "--validator"])
+			.expect("parse a bare authority command line");
+
+		for id in [
+			"dev",
+			"qnero-dev",
+			"heisenberg",
+			"heisenberg_live_spec",
+			"planck",
+			"planck_live_spec",
+			"mainnet",
+			"mainnet_live_spec",
+		] {
+			match cli.load_spec(id) {
+				Ok(spec) => assert_eq!(
+					spec.properties(),
+					crate::chain_spec::qnero_properties(),
+					"--chain {id} resolves to a spec this tree's runtime did not build"
+				),
+				Err(error) => assert!(
+					error.contains("wasm not available"),
+					"--chain {id} failed for a reason that is not a missing runtime wasm: {error}"
+				),
+			}
+		}
+	}
+
+	/// A command line that names no chain gets an error naming the chains this
+	/// node has.
+	///
+	/// `sc_cli` maps a missing `--chain` and a missing `--dev` to the id `""`,
+	/// and that id used to load the embedded Heisenberg raw spec, so the
+	/// shortest authority invocation in the runbook started a node on somebody
+	/// else's network. An operator has to name the chain now.
+	#[test]
+	fn an_empty_chain_id_names_the_chains_this_node_has() {
+		use clap::Parser;
+		use sc_cli::SubstrateCli;
+
+		let cli = crate::cli::Cli::try_parse_from(["quantus-node", "--validator"])
+			.expect("parse a bare authority command line");
+
+		let error = cli.load_spec("").expect_err("an empty chain id must not resolve to a chain");
+		for id in ["dev", "heisenberg", "planck", "mainnet"] {
+			assert!(
+				error.contains(id),
+				"the refusal does not name the {id} chain, so it does not tell an operator \
+				 what to pass: {error}"
+			);
+		}
+	}
 
 	#[test]
 	fn force_authoring_flag_is_parsed() {
