@@ -46,9 +46,7 @@ fn the_block_reward_goes_to_the_coinbase_and_not_to_an_account() {
 			"v1 mints nothing to a transparent account"
 		);
 		assert_eq!(Balances::total_issuance(), initial_balance * 2);
-		System::assert_has_event(
-			Event::CoinbaseCredited { author: MINER_1.account_id(), amount: miner_reward }.into(),
-		);
+		System::assert_has_event(Event::CoinbaseCredited { amount: miner_reward }.into());
 	});
 }
 
@@ -66,9 +64,7 @@ fn transaction_fees_ride_into_the_coinbase_with_the_reward() {
 		MiningRewards::on_finalize(1);
 
 		assert_eq!(MockCoinbaseSink::credits(), vec![miner_reward]);
-		System::assert_has_event(
-			Event::CoinbaseCredited { author: MINER_1.account_id(), amount: miner_reward }.into(),
-		);
+		System::assert_has_event(Event::CoinbaseCredited { amount: miner_reward }.into());
 	});
 }
 
@@ -119,9 +115,7 @@ fn each_block_credits_its_own_author() {
 		let (block_1_reward, _) = miner_payout(10);
 		MiningRewards::on_finalize(1);
 
-		System::assert_has_event(
-			Event::CoinbaseCredited { author: MINER_1.account_id(), amount: block_1_reward }.into(),
-		);
+		System::assert_has_event(Event::CoinbaseCredited { amount: block_1_reward }.into());
 
 		let block_1 = System::finalize();
 		System::initialize(&2, &block_1.hash(), &Digest { logs: vec![] });
@@ -130,9 +124,7 @@ fn each_block_credits_its_own_author() {
 		let (block_2_reward, _) = miner_payout(20);
 		MiningRewards::on_finalize(2);
 
-		System::assert_has_event(
-			Event::CoinbaseCredited { author: MINER_2.account_id(), amount: block_2_reward }.into(),
-		);
+		System::assert_has_event(Event::CoinbaseCredited { amount: block_2_reward }.into());
 		assert_eq!(MockCoinbaseSink::credits(), vec![block_1_reward, block_2_reward]);
 		assert_eq!(Balances::free_balance(MINER_1.account_id()), ExistentialDeposit::get());
 		assert_eq!(Balances::free_balance(MINER_2.account_id()), ExistentialDeposit::get());
@@ -242,9 +234,7 @@ fn a_refused_coinbase_is_retained_and_recovered() {
 		assert_eq!(Balances::free_balance(&miner), miner_before);
 		assert_eq!(Balances::total_issuance(), issuance_before);
 		assert_eq!(MockCoinbaseSink::total(), 0);
-		System::assert_has_event(
-			Event::CoinbaseRejected { author: miner.clone(), amount: quantize(lost).0 }.into(),
-		);
+		System::assert_has_event(Event::CoinbaseRejected { amount: quantize(lost).0 }.into());
 		assert_eq!(
 			MiningRewards::collected_fees(),
 			lost,
@@ -398,11 +388,9 @@ fn fees_and_rewards_are_credited_under_the_authors_derived_address() {
 		assert_eq!(
 			Balances::free_balance(&miner_wormhole_address),
 			0,
-			"the derived address labels the event and is paid nothing"
+			"the derived address is paid nothing, and no event names it"
 		);
-		System::assert_has_event(
-			Event::CoinbaseCredited { author: miner_wormhole_address, amount: miner_reward }.into(),
-		);
+		System::assert_has_event(Event::CoinbaseCredited { amount: miner_reward }.into());
 	});
 }
 
@@ -422,9 +410,7 @@ fn the_coinbase_credit_is_quantized_and_dust_is_held() {
 
 		assert_eq!(MockCoinbaseSink::credits(), vec![quantized]);
 		assert_eq!(MiningRewards::collected_fees(), dust);
-		System::assert_has_event(
-			Event::CoinbaseCredited { author: MINER_1.account_id(), amount: quantized }.into(),
-		);
+		System::assert_has_event(Event::CoinbaseCredited { amount: quantized }.into());
 	});
 }
 
@@ -740,21 +726,78 @@ fn the_emission_measures_the_shielded_pool_as_supply() {
 	});
 }
 
-/// The author is read through the one seam, and the address on the event is the
-/// one the consensus digest derives.
+/// A block with nothing of its own to mint still gives the pool its turn.
+///
+/// The pool holds the author's share of every fee the block's settlements
+/// paid, and a mint is the only thing that drains it. Once the emission rounds
+/// to zero, which is where `MaxSupply` sends this chain, a block whose only
+/// traffic is settlements has no reward and no collected fees, because a
+/// settlement is `Pays::No`. If this pallet returned early on a zero credit,
+/// that block would never mint, the author's share would sit in the pool
+/// counted as supply and backed by no note, and the next block would repeat
+/// it. So the sink is called either way, and it decides.
 #[test]
-fn the_author_seam_derives_the_address_the_event_names() {
+fn a_block_with_no_emission_still_reaches_the_pool() {
 	new_test_ext().execute_with(|| {
-		let preimage = [42u8; 32];
-		let author = sp_core::crypto::AccountId32::from(
-			derive_wormhole_address(preimage).expect("test preimage limbs are canonical"),
+		set_miner_preimage_digest(MINER_1.preimage());
+		// Every planck is already supply, so the emission is zero. The pallet
+		// subtracts saturating; the helper above does not, which is why the
+		// measure is taken here rather than read off it.
+		ShieldedSupply::set(MaxSupply::get());
+		assert_eq!(
+			MaxSupply::get()
+				.saturating_sub(Balances::total_issuance().saturating_add(ShieldedSupply::get())),
+			0,
+			"no supply left to emit"
 		);
+		assert_eq!(MiningRewards::collected_fees(), 0);
 
-		set_miner_preimage_digest(preimage);
+		MiningRewards::on_finalize(1);
+
+		assert_eq!(
+			MockCoinbaseSink::credits(),
+			vec![0],
+			"the pool is asked even when this pallet has nothing to add, because \
+			 what it owes the author may already be inside it"
+		);
+	});
+}
+
+/// The author seam decides whether a block pays at all, and nothing else.
+///
+/// The digest is read through `Config::FindAuthor`, so the engine swap keeps
+/// this pallet untouched. What the seam answers is a yes or a no: with an
+/// author the credit goes to the pool, without one it waits for the next
+/// block. The account it derives is never published, because an account beside
+/// every block's credit is a mining identity attached to every coinbase note.
+#[test]
+fn the_author_seam_decides_whether_the_block_pays() {
+	new_test_ext().execute_with(|| {
+		set_miner_preimage_digest([42u8; 32]);
 		MiningRewards::on_finalize(1);
 
 		let amount = MockCoinbaseSink::total();
 		assert!(amount > 0);
-		System::assert_has_event(Event::CoinbaseCredited { author, amount }.into());
+		System::assert_has_event(Event::CoinbaseCredited { amount }.into());
+		assert!(
+			!System::events().iter().any(|record| matches!(
+				record.event,
+				RuntimeEvent::MiningRewards(Event::PayoutDeferred { .. })
+			)),
+			"a block with an author pays"
+		);
+	});
+
+	// The same block without the digest item pays nobody and holds the credit.
+	new_test_ext().execute_with(|| {
+		MiningRewards::on_finalize(1);
+		assert_eq!(MockCoinbaseSink::total(), 0);
+		assert!(
+			System::events().iter().any(|record| matches!(
+				record.event,
+				RuntimeEvent::MiningRewards(Event::PayoutDeferred { .. })
+			)),
+			"a block with no author holds its credit for the next one"
+		);
 	});
 }

@@ -644,8 +644,15 @@ pub fn run() -> sc_cli::Result<()> {
 								sc_cli::Error::Input("Non-canonical inner hash".into())
 							})?,
 						);
+						// Not the reward recipient. Under v1 no account is
+						// paid: the block reward is a note, and the wallet
+						// behind --rewards-miner-key is who it is for. This
+						// value is the fallback author label for a node with
+						// no miner key, which cannot author a valid block
+						// anyway, and the derived address is logged only so an
+						// operator can recognise the hash it pasted.
 						log::info!(
-							"⛏️ Rewards wormhole address: {}",
+							"⛏️ Consensus author fallback, paid nothing: {}",
 							wormhole_address.to_ss58check()
 						);
 						AccountId32::new(inner_bytes)
@@ -694,9 +701,17 @@ pub fn run() -> sc_cli::Result<()> {
 								);
 								sc_cli::Error::Input("Invalid miner key".into())
 							})?;
+						// The reward recipient, and the one value worth
+						// checking against what `qnero-wallet miner-address`
+						// printed. Both ends of the bech32m string, because a
+						// mistyped or stale key mines correct blocks into
+						// notes the operator's wallet cannot open, and the
+						// only other symptom is a balance that never grows.
+						let encoded_key = key.encode();
 						log::info!(
-							"⛏️ Coinbase notes are minted for pk {}…",
-							&hex::encode(key.pk.to_bytes())[..16]
+							"⛏️ Coinbase notes are minted for miner key {}…{}",
+							&encoded_key[..12],
+							&encoded_key[encoded_key.len() - 8..]
 						);
 						Some(key)
 					},

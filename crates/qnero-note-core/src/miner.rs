@@ -108,6 +108,29 @@ impl MinerKey {
         Self::from_bytes(&bytes)
     }
 
+    /// The 32 bytes this key's node publishes in the `PreRuntime` digest of a
+    /// block whose parent is `parent_hash`.
+    ///
+    /// Consensus needs one author item per block, and the header commits to
+    /// exactly `[PreRuntime(32), Seal(64)]`, so the item is there whatever it
+    /// carries. What it must not carry is a value that is the same in every
+    /// block one operator wins: `Shielded::CoinbaseValues` publishes each
+    /// coinbase note's amount and `Shielded::LeafBlocks` dates it, so a
+    /// constant label partitions the tree by miner and reads out each miner's
+    /// income block by block. That is more than a Monero coinbase reveals, and
+    /// it is exactly what a shielded coinbase exists to deny.
+    ///
+    /// `cvk` is the secret that makes the label unlinkable. An observer sees
+    /// 32 bytes that change every block and cannot group them; a miner that
+    /// wants to prove a block is its own can show `cvk`, or simply open the
+    /// note. The chain reads nothing out of the label but the fact that it is
+    /// there and hashes to an account, which is why any Poseidon digest does:
+    /// four canonical limbs, so the runtime's derivation can never fail on it
+    /// and turn a won block into a dead one.
+    pub fn author_label(&self, parent_hash: &[u8]) -> Digest {
+        Digest::hash_bytes(&[b"qnero/author-label", &self.cvk.to_bytes(), parent_hash])
+    }
+
     /// The coinbase note this key mints at `block_number`, worth `value` pool
     /// quanta.
     ///
@@ -154,6 +177,30 @@ mod tests {
             MinerKey::decode("qn1qqqq").is_err(),
             "an address is not a miner key"
         );
+    }
+
+    /// One label per block, and no two blocks share one. A constant label
+    /// would name every block an operator won, beside the public value of the
+    /// coinbase note in it.
+    #[test]
+    fn an_author_label_changes_with_the_block_and_hides_the_miner() {
+        let key = key();
+        let a = key.author_label(&[1u8; 32]);
+        let b = key.author_label(&[2u8; 32]);
+        assert_ne!(a, b, "two parents, two labels");
+        assert_eq!(a, key.author_label(&[1u8; 32]), "one parent, one label");
+
+        let other = MinerKey::new(key.pk, Digest::hash_bytes(&[b"another cvk"]));
+        assert_ne!(
+            a,
+            other.author_label(&[1u8; 32]),
+            "the label is the miner's secret, so the address alone cannot predict it"
+        );
+
+        // The runtime derives an account from these bytes and treats a
+        // non-canonical item as no author at all, which would make the block
+        // invalid. A Poseidon output is canonical by construction.
+        assert!(Digest::from_bytes(&a.to_bytes()).is_ok());
     }
 
     /// The note the node builds and the note the wallet looks for are one

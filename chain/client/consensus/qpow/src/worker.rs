@@ -52,8 +52,11 @@ pub struct MiningMetadata<H, D> {
 	pub best_hash: H,
 	/// Mining pre-hash.
 	pub pre_hash: H,
-	/// Rewards preimage (32 bytes) - stored in block headers, hashed to derive wormhole address.
-	pub rewards_preimage: [u8; 32],
+	/// The block's author label (32 bytes), as it goes into the header's
+	/// `PreRuntime` item. The runtime hashes it into the account it calls the
+	/// block's author, and it changes from block to block: see
+	/// `crate::AuthorLabel`.
+	pub author_label: [u8; 32],
 	/// Mining target difficulty.
 	pub difficulty: D,
 }

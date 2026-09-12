@@ -17,6 +17,19 @@ use qp_header::{check_digest_commitment_window, DIGEST_LOGS_SIZE};
 
 use crate::worker::UntilImportedOrTransaction;
 pub use crate::worker::{MiningBuild, MiningHandle, MiningMetadata, RebuildTrigger};
+
+/// What an authoring node publishes in the `PreRuntime` digest item of the
+/// block it proposes, given the parent it is building on.
+///
+/// One item per block, 32 bytes, and the header commits to exactly that item
+/// and the seal. The runtime derives the block's author account from it and
+/// reads nothing else out of it, so what it must not be is a constant: a value
+/// that is the same in every block one operator wins labels each of those
+/// blocks, which on Qnero means labelling the coinbase note in it. The node
+/// supplies a function rather than a value for that reason. It must return
+/// four canonical Goldilocks limbs, because the runtime treats an item it
+/// cannot derive an account from as a block with no author.
+pub type AuthorLabel = Arc<dyn Fn(H256) -> [u8; 32] + Send + Sync>;
 use futures::{Future, Stream, StreamExt};
 use log::*;
 use prometheus_endpoint::Registry;
@@ -553,7 +566,7 @@ pub fn start_mining_worker<Block, C, E, L, CIDP, TxHash, TxStream>(
 	client: Arc<C>,
 	mut env: E,
 	justification_sync_link: L,
-	rewards_preimage: [u8; 32],
+	author_label: AuthorLabel,
 	create_inherent_data_providers: CIDP,
 	tx_notifications: TxStream,
 	build_time: Duration,
@@ -639,7 +652,7 @@ where
 				&mut env,
 				&create_inherent_data_providers,
 				target_hash,
-				rewards_preimage,
+				&author_label,
 				build_time,
 			)
 			.await
@@ -662,7 +675,7 @@ async fn create_proposal<Block, C, E, CIDP>(
 	env: &mut E,
 	create_inherent_data_providers: &CIDP,
 	best_hash: Block::Hash,
-	rewards_preimage: [u8; 32],
+	author_label: &AuthorLabel,
 	build_time: Duration,
 ) -> Option<MiningBuild<Block, <E::Proposer as Proposer<Block>>::Proof>>
 where
@@ -721,8 +734,12 @@ where
 		},
 	};
 
+	// One item per block, and this block's own. See [`AuthorLabel`]: a label
+	// that did not change from block to block would name every block this
+	// operator wins.
+	let author_label = author_label(best_hash);
 	let mut inherent_digest = Digest::default();
-	inherent_digest.push(DigestItem::PreRuntime(POW_ENGINE_ID, rewards_preimage.to_vec()));
+	inherent_digest.push(DigestItem::PreRuntime(POW_ENGINE_ID, author_label.to_vec()));
 
 	let proposal = match proposer.propose(inherent_data, inherent_digest, build_time, None).await {
 		Ok(p) => p,
@@ -742,7 +759,7 @@ where
 		metadata: MiningMetadata {
 			best_hash,
 			pre_hash: proposal.block.header().hash(),
-			rewards_preimage,
+			author_label,
 			difficulty,
 		},
 		proposal,

@@ -457,7 +457,6 @@ fn high_security_tip_is_not_reminted_to_the_block_author() {
 		let tip = max_preserve_tip(&pair, &account, &call);
 		let xt = signed_call(&pair, account.clone(), call, 0, tip);
 		let fee_ceiling = inclusion_fee(&xt);
-		let miner = miner_account();
 
 		let _ = Executive::apply_extrinsic(xt);
 
@@ -474,17 +473,18 @@ fn high_security_tip_is_not_reminted_to_the_block_author() {
 
 		if collected > 0 {
 			// Under v1 the fees do not reach an account: they become the value
-			// of the block's coinbase note, and the event names the author the
-			// note was minted for. A test block carries no coinbase inherent,
-			// so the pool refuses the credit and the event is the rejection;
-			// either way the amount is the one under test.
+			// of the block's coinbase note. A test block carries no coinbase
+			// inherent, so the pool refuses the credit and the event is the
+			// rejection; either way the amount is the one under test. No event
+			// names the author, because an account beside every block's credit
+			// is a mining identity attached to every coinbase note.
 			let credited = System::events()
 				.into_iter()
 				.find_map(|record| match record.event {
 					RuntimeEvent::MiningRewards(
-						pallet_mining_rewards::Event::CoinbaseCredited { author, amount } |
-						pallet_mining_rewards::Event::CoinbaseRejected { author, amount },
-					) if author == miner => Some(amount),
+						pallet_mining_rewards::Event::CoinbaseCredited { amount } |
+						pallet_mining_rewards::Event::CoinbaseRejected { amount },
+					) => Some(amount),
 					_ => None,
 				})
 				.expect("collected fees must be paid into the block's coinbase");

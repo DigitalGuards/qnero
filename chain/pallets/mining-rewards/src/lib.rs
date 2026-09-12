@@ -88,12 +88,18 @@ pub mod pallet {
 	pub enum Event<T: Config> {
 		/// The block reward and the fees became the value of this block's
 		/// coinbase note. No account was credited.
+		///
+		/// The author is deliberately absent. Nothing reads it: both pallets
+		/// ask only whether a block has an author, and who the note belongs to
+		/// is inside an `inner` the chain cannot open. Publishing an account
+		/// beside every coinbase value would label each note's block with a
+		/// mining identity and hand an observer exactly the partition a
+		/// shielded coinbase exists to deny.
 		CoinbaseCredited {
-			/// The block's author, for the record. The note is the author's
-			/// only if the payload its node supplied was its own, which is
-			/// exactly as much as the chain can say.
-			author: T::AccountId,
-			/// Quantized credit (block reward + fees, aligned to the pool quantum)
+			/// Quantized credit (block reward + fees, aligned to the pool
+			/// quantum). The note can be worth more: the pool folds in the
+			/// author's share of the fees this block's settlements paid, which
+			/// never passes through this pallet.
 			amount: BalanceOf<T>,
 		},
 		/// Transaction fees were collected for later distribution
@@ -113,8 +119,6 @@ pub mod pallet {
 		/// supplied no coinbase inherent, and the inherent check refuses such a
 		/// block on import.
 		CoinbaseRejected {
-			/// The block's author.
-			author: T::AccountId,
 			/// The credit retained.
 			amount: BalanceOf<T>,
 		},
@@ -171,8 +175,12 @@ pub mod pallet {
 				.checked_div(&emission_divisor)
 				.unwrap_or_else(BalanceOf::<T>::zero);
 
-			// Extract miner ID from the pre-runtime digest
-			let miner = Self::extract_miner_from_digest();
+			// Whether this block has an author, through the one seam this
+			// pallet reads consensus through. Who it is decides nothing here:
+			// the coinbase inherent carries the payee, inside an `inner` the
+			// chain cannot open, and an account published beside every block's
+			// credit would label each coinbase note with a mining identity.
+			let has_author = Self::extract_miner_from_digest().is_some();
 
 			// Fees and the block reward are one credit. Combining before
 			// quantizing can recover a quantum that two independent floors would
@@ -202,7 +210,7 @@ pub mod pallet {
 				);
 			}
 
-			let Some(miner) = miner else {
+			if !has_author {
 				// A valid QPoW block always carries an author preimage, but extraction
 				// is fallible (malformed digest). Do not panic in a hook and do not
 				// divert miner credits to treasury: hold them for the next author.
@@ -211,10 +219,10 @@ pub mod pallet {
 					Self::deposit_event(Event::PayoutDeferred { amount: miner_gross });
 				}
 				return;
-			};
+			}
 
 			let (quantized, dust) = Self::quantize(miner_gross);
-			Self::pay_coinbase(&miner, quantized);
+			Self::pay_coinbase(quantized);
 			// Remainder stays unminted so a later block can form a full quantum.
 			Self::retain_unminted(dust);
 		}
@@ -266,11 +274,18 @@ pub mod pallet {
 		/// in `total_issuance` yet, emission that has not been created and fees
 		/// that were burned when their imbalance dropped, and the pool creates
 		/// it by standing behind a note worth exactly this much.
-		fn pay_coinbase(author: &T::AccountId, amount: BalanceOf<T>) {
-			if amount.is_zero() {
-				return;
-			}
-
+		///
+		/// A zero credit still goes to the sink. The pool holds the author's
+		/// share of the fees this block's settlements paid, and only a mint
+		/// drains it. Returning early on a zero credit would strand that share
+		/// the moment the emission rounds to zero, which is the steady state
+		/// this chain is heading for: supply approaches `MaxSupply`, settled
+		/// fees keep accruing an author share, and every one of them would be
+		/// subtracted from the pool, counted as supply, and never minted into
+		/// a note again. The sink answers with what it could not take, so a
+		/// block with nothing at all to mint costs one call that changes
+		/// nothing.
+		fn pay_coinbase(amount: BalanceOf<T>) {
 			debug_assert!(
 				(amount % Self::leaf_quantum()).is_zero(),
 				"a coinbase credit must be pool-quantum aligned"
@@ -278,19 +293,20 @@ pub mod pallet {
 
 			match T::CoinbaseSink::deposit_coinbase(amount) {
 				Ok(()) => {
-					Self::deposit_event(Event::CoinbaseCredited { author: author.clone(), amount });
+					Self::deposit_event(Event::CoinbaseCredited { amount });
+				},
+				Err(returned) if returned.is_zero() => {
+					// Nothing was handed over and nothing came back: a block
+					// with no emission and no pending fee mints no note.
 				},
 				Err(returned) => {
 					log::warn!(
 						target: "mining-rewards",
-						"the shielded pool refused a coinbase credit of {:?} for author {:?}, retaining for retry",
-						returned, author
+						"the shielded pool refused a coinbase credit of {:?}, retaining for retry",
+						returned
 					);
 					Self::retain_unminted(returned);
-					Self::deposit_event(Event::CoinbaseRejected {
-						author: author.clone(),
-						amount: returned,
-					});
+					Self::deposit_event(Event::CoinbaseRejected { amount: returned });
 				},
 			}
 		}

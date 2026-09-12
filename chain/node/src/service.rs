@@ -608,6 +608,7 @@ fn spawn_authority_tasks(
 	// own import refuses, which is why `--rewards-miner-key` is required of an
 	// authority.
 	let coinbase_client = client.clone();
+	let label_key = miner_key.clone();
 	let inherent_data_providers = Box::new(move |parent, _| {
 		let client = coinbase_client.clone();
 		let miner_key = miner_key.clone();
@@ -632,15 +633,27 @@ fn spawn_authority_tasks(
 			>,
 		>;
 
-	// Start the mining worker (block building task)
-	// Convert AccountId32 to [u8; 32] for the mining worker (rewards preimage)
-	let rewards_preimage: [u8; 32] = rewards_address.into();
+	// Start the mining worker (block building task).
+	//
+	// The author label is this block's, not this operator's. `--rewards-inner-hash`
+	// is the fallback for a node with no miner key, which cannot author a
+	// valid block anyway: a block it built would carry no coinbase inherent
+	// and its own import would refuse it. With a miner key the label is
+	// `H(cvk, parent)`, so the 32 bytes in the header change every block and
+	// nothing groups a miner's blocks, or the coinbase notes in them, for an
+	// observer. See `sc_consensus_qpow::AuthorLabel`.
+	let fallback_label: [u8; 32] = rewards_address.into();
+	let author_label: sc_consensus_qpow::AuthorLabel =
+		Arc::new(move |parent: sp_core::H256| match label_key.as_ref() {
+			Some(key) => key.author_label(parent.as_ref()).to_bytes(),
+			None => fallback_label,
+		});
 	let (worker_handle, worker_task) = sc_consensus_qpow::start_mining_worker(
 		Box::new(pow_block_import),
 		client.clone(),
 		proposer,
 		sync_service.clone(),
-		rewards_preimage,
+		author_label,
 		inherent_data_providers,
 		tx_stream_for_worker,
 		Duration::from_secs(10),
