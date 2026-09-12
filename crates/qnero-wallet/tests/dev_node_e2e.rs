@@ -31,6 +31,10 @@ use qnero_wallet::wallet::{EntryRhoCheck, MerkleSource, Wallet, NUM_LEAF_PROOFS}
 /// `runtime/tests/call_filter.rs` is what fails if either moves.
 const BALANCES_PALLET_INDEX: u8 = 2;
 const TRANSFER_ALLOW_DEATH_CALL_INDEX: u8 = 0;
+const REVERSIBLE_PALLET_INDEX: u8 = 11;
+const SET_HIGH_SECURITY_CALL_INDEX: u8 = 0;
+const VESTING_PALLET_INDEX: u8 = 22;
+const CLAIM_CALL_INDEX: u8 = 0;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("qnero-e2e-{}", std::process::id()));
@@ -342,19 +346,24 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
     call.push(0x00); // MultiAddress::Id
     call.extend_from_slice(&bob_account);
     call.extend_from_slice(&codec::Compact(1_000_000_000_000u128).encode());
-    let context = qnero_wallet::extrinsic::SigningContext {
-        spec_version: chain.runtime_version().expect("a version").0,
-        transaction_version: chain.runtime_version().expect("a version").1,
-        genesis_hash: chain.genesis_hash().expect("a genesis hash"),
-        nonce: chain.account_nonce(&alice.account_id()).expect("a nonce"),
-        tip: 0,
+    let sign = |call: &[u8], nonce: u32| {
+        let context = qnero_wallet::extrinsic::SigningContext {
+            spec_version: chain.runtime_version().expect("a version").0,
+            transaction_version: chain.runtime_version().expect("a version").1,
+            genesis_hash: chain.genesis_hash().expect("a genesis hash"),
+            nonce,
+            tip: 0,
+        };
+        qnero_wallet::extrinsic::encode_signed(&metadata, &alice, call, &context)
+            .expect("the call encodes")
     };
-    let transfer = qnero_wallet::extrinsic::encode_signed(&metadata, &alice, &call, &context)
-        .expect("the transfer encodes");
+    let nonce = chain.account_nonce(&alice.account_id()).expect("a nonce");
+    let transfer = sign(&call, nonce);
 
     // `Ok(Err(DispatchError::Module { index: 0, error: [5, 0, 0, 0] }))`:
     // frame_system is pallet 0 and `CallFiltered` is its sixth error.
     const CALL_FILTERED: &str = "0x0001030005000000";
+    let mut skipped_dry_run = false;
     match rpc.call_as::<String>(
         "system_dryRun",
         serde_json::json!([qnero_wallet::rpc::hex_0x(&transfer)]),
@@ -371,6 +380,7 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
             // the filter refuses at dispatch, so the extrinsic is admitted and
             // included and the transfer does not happen.
             println!("system_dryRun unavailable ({error}); submitting instead");
+            skipped_dry_run = true;
             let before = free_balance(&rpc, &bob_account);
             chain
                 .submit_extrinsic(&transfer)
@@ -386,6 +396,58 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
             );
         }
     }
+
+    if skipped_dry_run {
+        return;
+    }
+
+    // Enrolling in high security is refused too. The call moves nothing, and
+    // it is one way: an account that took it would be held to a whitelist
+    // whose every value-moving call this chain refuses, with no call that
+    // undoes the enrolment.
+    let mut enrol = vec![REVERSIBLE_PALLET_INDEX, SET_HIGH_SECURITY_CALL_INDEX];
+    enrol.push(0x00); // BlockNumberOrTimestamp::BlockNumber
+    enrol.extend_from_slice(&10u32.encode());
+    enrol.extend_from_slice(&bob_account);
+    let dry_run = rpc
+        .call_as::<String>(
+            "system_dryRun",
+            serde_json::json!([qnero_wallet::rpc::hex_0x(&sign(&enrol, nonce))]),
+        )
+        .expect("the node dry-runs");
+    println!("system_dryRun of set_high_security: {dry_run}");
+    assert_eq!(
+        dry_run, CALL_FILTERED,
+        "enrolling in high security must be refused with CallFiltered"
+    );
+
+    // A vesting claim is not refused. It is the genesis distribution channel:
+    // the pot cannot sign, no schedule can be created under v1, and a claim
+    // pays a beneficiary fixed at genesis. What comes back is the vesting
+    // pallet's own answer about this particular schedule, which is the proof
+    // that the filter was not what stopped it.
+    let mut claim = vec![VESTING_PALLET_INDEX, CLAIM_CALL_INDEX];
+    claim.extend_from_slice(&0u64.encode());
+    let dry_run = rpc
+        .call_as::<String>(
+            "system_dryRun",
+            serde_json::json!([qnero_wallet::rpc::hex_0x(&sign(&claim, nonce))]),
+        )
+        .expect("the node dry-runs");
+    println!("system_dryRun of a vesting claim: {dry_run}");
+    assert_ne!(
+        dry_run, CALL_FILTERED,
+        "a genesis vesting allocation must stay claimable, or it is stranded \
+         in a keyless pot forever"
+    );
+    assert!(
+        // `0x00 01 03 16 ....`: Ok, then Err, then `DispatchError::Module`
+        // with index 22, which is pallet-vesting. The dev chain's schedules
+        // are all inside their 90-day cliff, so what comes back is the
+        // pallet's own answer rather than the dispatcher's.
+        dry_run.starts_with("0x00010316") || dry_run == "0x0000",
+        "the claim must reach pallet-vesting, whatever that pallet then says: {dry_run}"
+    );
 }
 
 /// One account's free balance, straight out of `System::Account`.
