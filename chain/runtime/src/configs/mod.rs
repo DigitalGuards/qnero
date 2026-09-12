@@ -57,7 +57,7 @@ use smallvec::smallvec;
 use qp_scheduler::BlockNumberOrTimestamp;
 use sp_runtime::{
 	traits::{BlakeTwo256, One},
-	AccountId32, MultiAddress, Perbill, Permill,
+	MultiAddress, Perbill, Permill,
 };
 use sp_version::RuntimeVersion;
 
@@ -65,7 +65,7 @@ use sp_version::RuntimeVersion;
 use super::{
 	scale_fee, AccountId, AssetId, Balance, Balances, Block, BlockNumber, Hash, Nonce,
 	OriginCaller, PalletInfo, Preimage, Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason,
-	RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler, System, Timestamp, Vesting, Wormhole,
+	RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler, Shielded, System, Timestamp, Vesting,
 	ZkTree, DAYS, EXISTENTIAL_DEPOSIT, FEE_SCALE_DEN, FEE_SCALE_NUM, MAX_SUPPLY, MILLIS_PER_DAY,
 	TARGET_BLOCK_TIME_MS, UNIT, VERSION,
 };
@@ -98,11 +98,157 @@ parameter_types! {
 	pub const SS58Prefix: u8 = 189;
 }
 
+/// The one place this runtime reads the block author from consensus.
+///
+/// `pallet-mining-rewards` and `pallet-shielded` both need to know whether a
+/// block has an author and who it is, and both read it through
+/// `frame_support::traits::FindAuthor` rather than through the proof of work.
+/// This implementation is the whole of the coupling: QPoW puts the miner's
+/// 32-byte inner hash in a `PreRuntime` digest item, and the account is the
+/// wormhole address derived from it, which is the derivation
+/// `--rewards-inner-hash` names on the command line.
+///
+/// Swapping the engine, which `docs/DESIGN.md` section 10 keeps open for
+/// RandomX so Monero rigs can mine Qnero, changes the consensus client and this
+/// impl. No pallet, no storage item and no block shape moves with it.
+/// `docs/OPS-DEV.md` carries the seam.
+pub struct QpowAuthor;
+
+impl frame_support::traits::FindAuthor<AccountId> for QpowAuthor {
+	fn find_author<'a, I>(digests: I) -> Option<AccountId>
+	where
+		I: 'a + IntoIterator<Item = (sp_runtime::ConsensusEngineId, &'a [u8])>,
+	{
+		for (engine, data) in digests {
+			if engine != sp_consensus_qpow::POW_ENGINE_ID {
+				continue;
+			}
+			// Exactly 32 bytes. A malformed item is not an author, and both
+			// callers treat "no author" as a block that pays nobody rather
+			// than as an error.
+			let preimage: [u8; 32] = data.try_into().ok()?;
+			return qp_wormhole::derive_wormhole_address(preimage).ok().map(AccountId::new);
+		}
+		None
+	}
+}
+
+/// A transfer-proof recorder that records nothing and says so successfully.
+///
+/// `pallet-vesting` treats a dropped credit as fatal and rolls the payout back:
+/// a keyless beneficiary's only spend path used to be the wormhole leaf the
+/// recorder wrote, so a payout without one was value frozen forever. v1 removed
+/// the exit, so there is no leaf to write and nothing for its absence to mean.
+/// The `()` implementation reports `false`, which the pallet reads as the old
+/// failure and which would make every vesting payout fail closed, so the
+/// runtime says what is true here instead: nothing was recorded, and nothing
+/// needed to be.
+///
+/// The tree holds note commitments and nothing else under v1, which is what
+/// makes "every unit of value that enters circulation is a shielded note" a
+/// property of the tree rather than a claim about it.
+pub struct NoTransferProofNeeded;
+
+impl qp_wormhole::TransferProofRecorder<AccountId, AssetId, Balance> for NoTransferProofNeeded {
+	fn record_transfer_proof(
+		_asset_id: Option<AssetId>,
+		_from: AccountId,
+		_to: AccountId,
+		_amount: Balance,
+	) -> bool {
+		true
+	}
+}
+
+/// Qnero v1: no call may move transparent value from one account to another.
+///
+/// `docs/DESIGN.md` section 7 is the allowlist and the argument. The shape of
+/// the check is the one `transaction_extensions::count_transfers` already uses,
+/// including the recursion through the two wrappers, because a filter that
+/// stops `Balances::transfer_allow_death` and lets
+/// `Utility::batch_all([transfer_allow_death])` through is decoration.
+///
+/// Three things it deliberately does not do:
+///
+/// - It does not stop `Shielded::shield`, which is the only door into the pool. A shield burns the
+///   caller's own balance, so it moves value out of the transparent layer rather than between
+///   accounts, and blocking it would lock every genesis balance out of the chain's own pool with no
+///   way in.
+/// - It does not stop a fee. `ChargeTransactionPayment` is a transaction extension and never
+///   reaches a `Contains` check, which is what lets a filtered runtime still charge for the calls
+///   it allows.
+/// - It does not reach a privileged dispatch. Root, the scheduler and an enacted referendum all
+///   dispatch with `dispatch_bypass_filter`, by design in `frame_system`. A tech referendum can
+///   still move transparent value, and that is a governance decision rather than an oversight: the
+///   calls exist, the collective can enact them, and the filter is what keeps them out of ordinary
+///   use.
+pub struct QneroCallFilter;
+
+impl frame_support::traits::Contains<RuntimeCall> for QneroCallFilter {
+	fn contains(call: &RuntimeCall) -> bool {
+		!moves_transparent_value(call)
+	}
+}
+
+/// Whether a call moves transparent value between accounts.
+///
+/// Enumerated rather than derived: a new pallet with a transfer call is not
+/// caught by anything here, and `a_new_balance_moving_call_is_matched_here`
+/// in `tests/call_filter.rs` is the reminder.
+fn moves_transparent_value(call: &RuntimeCall) -> bool {
+	match call {
+		// The transparent transfers themselves. `burn` is deliberately absent:
+		// it destroys the caller's own balance and moves nothing to anyone,
+		// which is the same direction `shield` goes.
+		RuntimeCall::Balances(pallet_balances::Call::transfer_allow_death { .. }) |
+		RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive { .. }) |
+		RuntimeCall::Balances(pallet_balances::Call::transfer_all { .. }) => true,
+
+		// Reversible transfers are transfers with a delay. `cancel` seizes a
+		// pending hold to the guardian, `recover_funds` sweeps an account to
+		// one, and the other three schedule or execute a transfer.
+		RuntimeCall::ReversibleTransfers(
+			pallet_reversible_transfers::Call::schedule_transfer { .. } |
+			pallet_reversible_transfers::Call::schedule_transfer_with_delay { .. } |
+			pallet_reversible_transfers::Call::execute_transfer { .. } |
+			pallet_reversible_transfers::Call::cancel { .. } |
+			pallet_reversible_transfers::Call::recover_funds { .. },
+		) => true,
+
+		// Vesting pays out of the pot into a beneficiary's account, and
+		// `create_schedule` funds the pot from the caller's. Both are
+		// transparent transfers; `count_transfers` leaves them out because the
+		// pallet records its own proofs, which is a different question.
+		RuntimeCall::Vesting(
+			pallet_vesting::Call::claim { .. } |
+			pallet_vesting::Call::create_schedule { .. } |
+			pallet_vesting::Call::end_schedule { .. } |
+			pallet_vesting::Call::retarget_schedule { .. },
+		) => true,
+
+		// The wrappers. Both carry the inner call in the submitted extrinsic,
+		// so the recursion is over data that is right here.
+		RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) =>
+			calls.iter().any(moves_transparent_value),
+		// `execute` is the one that dispatches, and the executor resubmits the
+		// stored call there, verified byte-equal, so the inner call is in the
+		// extrinsic. `propose` carries its call as opaque bytes and dispatches
+		// nothing, so there is nothing to decode and nothing to stop.
+		RuntimeCall::Multisig(pallet_multisig::Call::execute { call, .. }) =>
+			moves_transparent_value(call),
+
+		_ => false,
+	}
+}
+
 /// The default types are being injected by [`derive_impl`](`frame_support::derive_impl`) from
 /// [`SoloChainDefaultConfig`](`struct@frame_system::config_preludes::SolochainDefaultConfig`),
 /// but overridden as needed.
 #[derive_impl(frame_system::config_preludes::SolochainDefaultConfig)]
 impl frame_system::Config for Runtime {
+	/// v1 mandatory privacy: no signed call moves transparent value between
+	/// accounts. See [`QneroCallFilter`].
+	type BaseCallFilter = QneroCallFilter;
 	/// The block type for the runtime.
 	type Block = Block;
 	/// Block & extrinsics weights: base values and limits.
@@ -145,12 +291,18 @@ parameter_types! {
 
 impl pallet_mining_rewards::Config for Runtime {
 	type Currency = Balances;
-	type AssetId = AssetId;
-	type ProofRecorder = Wormhole;
+	/// The block reward becomes the value of the block's coinbase note. No
+	/// account is credited: under v1 mandatory privacy there is no transparent
+	/// payee, and the note's recipient is inside an `inner` the chain cannot
+	/// open.
+	type CoinbaseSink = Shielded;
+	/// Emission measures supply across both books. Nearly every planck ends up
+	/// in the pool, where `Balances::total_issuance()` does not count it.
+	type ShieldedSupply = pallet_shielded::ShieldedSupply<Runtime>;
+	type FindAuthor = QpowAuthor;
 	type WeightInfo = pallet_mining_rewards::weights::SubstrateWeight<Runtime>;
 	type MaxSupply = ConstU128<{ MAX_SUPPLY }>;
 	type EmissionDivisor = ConstU128<50_000_000>;
-	type MintingAccount = MintingAccount;
 	type Unit = MiningUnit;
 }
 
@@ -584,7 +736,11 @@ impl pallet_reversible_transfers::Config for Runtime {
 	type MaxHighSecurityTxsPerWindow = MaxHighSecurityTxsPerWindow;
 	type HighSecurityTxWindowBlocks = HighSecurityTxWindowBlocks;
 	type VolumeFee = HighSecurityVolumeFee;
-	type ProofRecorder = Wormhole;
+	// Nothing to record. Every call this pallet can schedule or execute moves
+	// transparent value between accounts, and the call filter refuses all of
+	// them under v1; the exit path those leaves existed for is gone with
+	// `pallet-wormhole`.
+	type ProofRecorder = ();
 }
 
 parameter_types! {
@@ -597,19 +753,17 @@ impl pallet_treasury::Config for Runtime {
 
 parameter_types! {
 	pub const VestingPalletId: PalletId = PalletId(*b"qvesting");
-	/// Vesting payouts are rounded down to multiples of the wormhole leaf quantum
-	/// (`SCALE_DOWN_FACTOR`): a sub-quantum transfer would be committed as a
-	/// zero-value leaf, stranding funds paid to keyless beneficiaries.
-	pub const VestingPayoutQuantum: Balance = pallet_wormhole::SCALE_DOWN_FACTOR;
+	/// Vesting payouts are rounded down to multiples of the tree's leaf quantum:
+	/// a sub-quantum transfer would be committed as a zero-value leaf,
+	/// stranding funds paid to keyless beneficiaries.
+	pub const VestingPayoutQuantum: Balance = pallet_zk_tree::tree::AMOUNT_SCALE_DOWN_FACTOR;
 	pub const VestingMinClaimInterval: u64 = MILLIS_PER_DAY;
 }
 
-/// The quantum above is anchored to the wormhole pallet's constant, but the value that
-/// actually decides whether a leaf is non-zero is the ZK tree's. They are the same
-/// number today; if they ever diverge, sub-quantum payouts would round to zero-value
-/// leaves and strand funds on keyless beneficiaries.
+/// The value that decides whether a leaf is non-zero is the ZK tree's quantum,
+/// which is the pool's: `pallet-shielded` asserts the two are one number.
 const _: () = assert!(
-	pallet_wormhole::SCALE_DOWN_FACTOR == pallet_zk_tree::tree::AMOUNT_SCALE_DOWN_FACTOR,
+	VestingPayoutQuantum::get() == pallet_zk_tree::tree::AMOUNT_SCALE_DOWN_FACTOR,
 	"vesting payout quantum must match the ZK tree's leaf amount scale factor"
 );
 
@@ -663,10 +817,12 @@ impl pallet_vesting::Config for Runtime {
 	type AdminOrigin = EitherOfDiverse<EnsureRoot<AccountId>, EnsureTreasury>;
 	type TreasuryAccount = TreasuryAccountOption;
 	type AssetId = AssetId;
-	// The pallet records every transfer itself so Root calls enacted by the scheduler
-	// (invisible to the event-scanning extension) still create ZK-tree leaves; the
-	// extension skips pot-touching events to avoid double-recording signed paths.
-	type ProofRecorder = Wormhole;
+	// Nothing to record: a vesting payout is a transparent transfer, the call
+	// filter refuses `claim` and `create_schedule` under v1, and there is no
+	// exit path a leaf could feed. The pallet rolls a payout back when the
+	// recorder reports a dropped credit, so this one reports success; see
+	// [`NoTransferProofNeeded`].
+	type ProofRecorder = NoTransferProofNeeded;
 	type PayoutQuantum = VestingPayoutQuantum;
 	type MinClaimInterval = VestingMinClaimInterval;
 	type WeightInfo = pallet_vesting::weights::SubstrateWeight<Runtime>;
@@ -801,36 +957,6 @@ impl TryFrom<RuntimeCall> for pallet_balances::Call<Runtime> {
 	}
 }
 
-parameter_types! {
-	/// Volume fee rate in basis points (4 bps = 0.04%).
-	/// Settlement ceil-rounds once per accepted private segment, then sums those
-	/// fees across a public batch. Small segments therefore pay at least one
-	/// quantum (0.01 QTC); larger segments pay the headline rate. There is no
-	/// separate on-chain minimum exit amount.
-	pub const VolumeFeeRateBps: u32 = 4;
-	/// Proportion of volume fees to burn (50% burned, 50% to miner)
-	pub const VolumeFeesBurnRate: Permill = Permill::from_percent(50);
-	/// Half of the burn bucket on public-batch exits goes to the aggregator instead.
-	pub const VolumeFeesAggregatorRate: Permill = Permill::from_percent(50);
-}
-
-impl pallet_wormhole::Config for Runtime {
-	type NativeBalance = Balance;
-	type Currency = Balances;
-	type AssetId = AssetId;
-	type AssetBalance = Balance;
-	type TransferCount = u64;
-	/// Use the same MintingAccount as mining-rewards for consistency.
-	/// Both pallets mint native tokens and should use the same sentinel "from" address.
-	type MintingAccount = MintingAccount;
-	type VolumeFeeRateBps = VolumeFeeRateBps;
-	type VolumeFeesBurnRate = VolumeFeesBurnRate;
-	type VolumeFeesAggregatorRate = VolumeFeesAggregatorRate;
-	type WormholeAccountId = AccountId32;
-	type WeightInfo = pallet_wormhole::weights::SubstrateWeight<Runtime>;
-	type ZkTree = ZkTree;
-}
-
 impl pallet_zk_tree::Config for Runtime {
 	type AssetId = AssetId;
 	type Balance = Balance;
@@ -904,8 +1030,8 @@ parameter_types! {
 	/// term, and the slot behind it is still charged the flat minimum, because
 	/// the walk and the weight it costs a block do not depend on its bytes.
 	pub const ShieldedCiphertextBytesPerFeeQuantum: u32 = 512;
-	/// Half of a settled fee is burned, half is minted to the block author. The
-	/// same split `pallet-wormhole` applies to its volume fee.
+	/// Half of a settled fee is burned, half becomes part of the block's
+	/// coinbase note. The same split the wormhole applied to its volume fee.
 	pub const ShieldedFeeBurnRate: Permill = Permill::from_percent(50);
 	/// Size cap on one note ciphertext: 2048 bytes.
 	///
@@ -939,10 +1065,7 @@ impl pallet_shielded::Config for Runtime {
 	/// Poseidon2 output over a 6-felt preimage led by the `CM` domain tag, so
 	/// passing one off as the other is a preimage attack on Poseidon2.
 	type ZkTree = ZkTree;
-	/// The block author's fee share is minted to a QPoW-derived account with no
-	/// signing key, so it needs the wormhole leaf that is its only spend path.
-	type ProofRecorder = Wormhole;
-	type MintingAccount = MintingAccount;
+	type FindAuthor = QpowAuthor;
 	type BlockHashWindow = ShieldedBlockHashWindow;
 	type MinLeafFee = ShieldedMinLeafFee;
 	type CiphertextBytesPerFeeQuantum = ShieldedCiphertextBytesPerFeeQuantum;

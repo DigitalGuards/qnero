@@ -5,13 +5,11 @@
 #[cfg(test)]
 mod tests {
 	use crate::common::TestCommons;
-	use codec::Encode;
 	use frame_support::{assert_noop, assert_ok, traits::Currency};
-	use pallet_multisig::BoundedCallOf;
 	use quantus_runtime::{
-		configs::{VestingMinClaimInterval, VestingPayoutQuantum, VolumeFeeRateBps},
-		AccountId, Balance, Balances, Multisig, Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin,
-		System, Vesting, Wormhole, EXISTENTIAL_DEPOSIT, UNIT,
+		configs::{VestingMinClaimInterval, VestingPayoutQuantum},
+		AccountId, Balance, Balances, Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin, System,
+		Vesting, ZkTree, EXISTENTIAL_DEPOSIT, UNIT,
 	};
 	use sp_core::crypto::AccountId32;
 	use sp_runtime::{BuildStorage, DispatchError};
@@ -47,60 +45,99 @@ mod tests {
 		ext
 	}
 
+	/// A beneficiary's own claim, dispatched past v1's call filter.
+	///
+	/// `Vesting::claim` is one of the calls v1 refuses: it moves transparent
+	/// value from the pot to an account. What these tests cover is the
+	/// pallet's arithmetic underneath, so they dispatch the way a privileged
+	/// origin does. `a_signed_claim_is_refused_by_the_v1_call_filter` below is
+	/// the test for the refusal itself.
+	fn claim_as(who: AccountId, schedule_id: u64) -> sp_runtime::DispatchResult {
+		crate::common::dispatch_unfiltered(
+			RuntimeOrigin::signed(who),
+			RuntimeCall::Vesting(pallet_vesting::Call::claim { schedule_id }),
+		)
+		.map(|_| ())
+		.map_err(|error| error.error)
+	}
+
 	fn set_time(now_ms: u64) {
 		pallet_timestamp::Now::<Runtime>::put(now_ms);
 	}
 
-	fn max_exitable_from_recorded_leaves(beneficiary: &AccountId) -> (usize, Balance) {
-		let quantum = VestingPayoutQuantum::get();
-		let fee_bps = VolumeFeeRateBps::get() as u128;
-		let leaves: Vec<_> = pallet_zk_tree::Leaves::<Runtime>::iter_values()
-			.filter(|leaf| &leaf.to == beneficiary)
-			.collect();
-		let max_exit = leaves
-			.iter()
-			.map(|leaf| {
-				let input_quanta = leaf.amount / quantum;
-				input_quanta * (10_000 - fee_bps) / 10_000 * quantum
-			})
-			.sum();
-		(leaves.len(), max_exit)
+	/// Leaves in the commitment tree.
+	///
+	/// A vesting payout used to record one, which is what made a credit to a
+	/// keyless beneficiary spendable through the wormhole exit. v1 removed the
+	/// exit, so a payout records none and this is zero throughout: the only
+	/// leaves on a v1 chain are note commitments.
+	fn recorded_leaves() -> u64 {
+		ZkTree::leaf_count()
 	}
 
-	fn propose_approve_execute(call: RuntimeCall, proposal_id: u32) {
-		let treasury = treasury_multisig();
-		let encoded: BoundedCallOf<Runtime> = call.encode().try_into().unwrap();
-		let expiry = System::block_number() + 100;
-		assert_ok!(Multisig::propose(
-			RuntimeOrigin::signed(account(1)),
-			treasury.clone(),
-			encoded.clone(),
-			expiry,
-		));
-		assert_ok!(Multisig::approve(
-			RuntimeOrigin::signed(account(2)),
-			treasury.clone(),
-			proposal_id,
-			encoded,
-		));
-		assert_ok!(Multisig::execute(
-			RuntimeOrigin::signed(account(3)),
-			treasury,
-			proposal_id,
-			Box::new(call),
-		));
-	}
-
+	/// The treasury multisig path into vesting is closed under v1, at both
+	/// layers, and so is a beneficiary's own claim.
+	///
+	/// This replaces `treasury_multisig_creates_and_ends_schedules`, which
+	/// covered the flow when it worked. The inner call of a
+	/// `Multisig::execute` is dispatched with the multisig's own signed origin,
+	/// so it meets the filter on the way in whatever the outer call did, and a
+	/// vesting grant moves transparent value. Root remains the way to create
+	/// one, which `non_treasury_origins_are_rejected` still covers.
 	#[test]
-	fn payout_policy_covers_account_and_wormhole_minimums() {
+	fn the_treasury_multisig_path_into_vesting_is_refused() {
+		use sp_runtime::traits::Dispatchable;
+		new_test_ext(Some(treasury_multisig())).execute_with(|| {
+			let grant = RuntimeCall::Vesting(pallet_vesting::Call::create_schedule {
+				beneficiary: account(7),
+				start: 0,
+				cliff: 0,
+				end: END_MS,
+				total: GRANT,
+			});
+			let execute = RuntimeCall::Multisig(pallet_multisig::Call::execute {
+				multisig_address: treasury_multisig(),
+				proposal_id: 0,
+				call: Box::new(grant.clone()),
+			});
+			assert_eq!(
+				execute
+					.dispatch(RuntimeOrigin::signed(account(3)))
+					.expect_err("a vesting grant moves transparent value")
+					.error,
+				DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
+			);
+			// The inner call on its own, which is what the multisig would have
+			// dispatched with its own signed origin.
+			assert_eq!(
+				grant
+					.dispatch(RuntimeOrigin::signed(treasury_multisig()))
+					.expect_err("the same call, one layer down")
+					.error,
+				DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
+			);
+			// And a beneficiary's own claim, which is the call a user makes.
+			let claim = RuntimeCall::Vesting(pallet_vesting::Call::claim { schedule_id: 0 });
+			assert_eq!(
+				claim
+					.dispatch(RuntimeOrigin::signed(account(7)))
+					.expect_err("a claim moves transparent value")
+					.error,
+				DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
+			);
+		});
+	}
+
+	/// The payout quantum still has to clear the existential deposit and the
+	/// claim interval is still a day. The third clause was the wormhole exit's
+	/// volume fee dividing evenly into a non-final payout, and there is no
+	/// exit to price any more.
+	#[test]
+	fn payout_policy_covers_the_account_minimum() {
 		let quantum = VestingPayoutQuantum::get();
 		assert!(quantum > EXISTENTIAL_DEPOSIT);
 		assert_eq!(VestingMinClaimInterval::get(), 24 * 60 * 60 * 1000);
 		assert_eq!(quantum * pallet_vesting::NON_FINAL_PAYOUT_QUANTA, 25 * UNIT);
-		assert_eq!(
-			pallet_vesting::NON_FINAL_PAYOUT_QUANTA * VolumeFeeRateBps::get() as u128 % 10_000,
-			0
-		);
 	}
 
 	#[test]
@@ -121,55 +158,11 @@ mod tests {
 			));
 			// One quantum vested — nearest is one quantum, paid to the beneficiary.
 			set_time((END_MS as u128 * quantum / total) as u64);
-			let leaves_before = Wormhole::transfer_count(&beneficiary);
+			let leaves_before = recorded_leaves();
 			assert_ok!(Vesting::end_schedule(RuntimeOrigin::root(), 0));
 			assert_eq!(Balances::total_balance(&beneficiary), quantum);
-			assert_eq!(Wormhole::transfer_count(&beneficiary), leaves_before + 1);
+			assert_eq!(recorded_leaves(), leaves_before, "v1 records no transfer leaf");
 			assert_eq!(Balances::total_balance(&treasury), 1000 * UNIT - quantum);
-			assert_eq!(max_exitable_from_recorded_leaves(&beneficiary), (1, 0));
-		});
-	}
-
-	#[test]
-	fn treasury_multisig_creates_and_ends_schedules() {
-		new_test_ext(Some(treasury_multisig())).execute_with(|| {
-			let treasury = treasury_multisig();
-			let beneficiary = account(7);
-			let pot = Vesting::pot_account_id();
-			assert_ok!(Multisig::create_multisig(
-				RuntimeOrigin::signed(account(1)),
-				signers(),
-				2,
-				0,
-			));
-			Balances::make_free_balance_be(&treasury, 1000 * UNIT);
-
-			propose_approve_execute(
-				RuntimeCall::Vesting(pallet_vesting::Call::create_schedule {
-					beneficiary: beneficiary.clone(),
-					start: 0,
-					cliff: 0,
-					end: END_MS,
-					total: GRANT,
-				}),
-				0,
-			);
-			let schedule =
-				pallet_vesting::Schedules::<Runtime>::get(0).expect("schedule must be created");
-			assert_eq!(schedule.beneficiary, beneficiary);
-			assert_eq!(Balances::total_balance(&pot), GRANT + EXISTENTIAL_DEPOSIT);
-			assert_eq!(Balances::total_balance(&treasury), 900 * UNIT);
-
-			// Halfway through the schedule: ending it splits the grant exactly.
-			set_time(END_MS / 2);
-			propose_approve_execute(
-				RuntimeCall::Vesting(pallet_vesting::Call::end_schedule { schedule_id: 0 }),
-				1,
-			);
-			assert!(pallet_vesting::Schedules::<Runtime>::get(0).is_none());
-			assert_eq!(Balances::total_balance(&beneficiary), GRANT / 2);
-			assert_eq!(Balances::total_balance(&treasury), 950 * UNIT);
-			assert_eq!(Balances::total_balance(&pot), EXISTENTIAL_DEPOSIT);
 		});
 	}
 
@@ -261,21 +254,18 @@ mod tests {
 				quantum,
 			));
 			set_time(END_MS - 1);
-			assert_noop!(
-				Vesting::claim(RuntimeOrigin::signed(account(1)), 0),
-				pallet_vesting::Error::<Runtime>::NothingToClaim
-			);
+			assert_noop!(claim_as(account(1), 0), pallet_vesting::Error::<Runtime>::NothingToClaim);
 			set_time(END_MS);
 			System::reset_events();
-			let count_before = Wormhole::transfer_count(&beneficiary);
-			assert_ok!(Vesting::claim(RuntimeOrigin::signed(account(1)), 0));
+			let count_before = recorded_leaves();
+			assert_ok!(claim_as(account(1), 0));
 
 			// The pallet records the payout itself, exactly once — this ZK-tree leaf is
 			// what lets a wormhole owner later exit the funds via ZK proof. (The
 			// event-scanning extension skips pot-sourced transfers, so signed
 			// submissions don't add a second leaf — covered by the extension's own
 			// unit test.)
-			assert_eq!(Wormhole::transfer_count(&beneficiary), count_before + 1);
+			assert_eq!(recorded_leaves(), count_before, "v1 records no transfer leaf");
 
 			// The payout itself is an ordinary keep-alive `Transfer` from the pot.
 			let payout = System::events()
@@ -295,10 +285,7 @@ mod tests {
 			let schedule = pallet_vesting::Schedules::<Runtime>::get(0).unwrap();
 			assert_eq!(schedule.total, quantum);
 			assert_eq!(schedule.claimed, quantum);
-			assert_noop!(
-				Vesting::claim(RuntimeOrigin::signed(account(1)), 0),
-				pallet_vesting::Error::<Runtime>::NothingToClaim
-			);
+			assert_noop!(claim_as(account(1), 0), pallet_vesting::Error::<Runtime>::NothingToClaim);
 		});
 	}
 
@@ -309,31 +296,27 @@ mod tests {
 		const TOTAL: Balance = DAYS as Balance * UNIT;
 		let beneficiary = account(9);
 
-		let (periodic_leaves, periodic_max_exit) =
-			new_test_ext(Some(account(4))).execute_with(|| {
-				Balances::make_free_balance_be(&account(4), 1000 * UNIT);
-				assert_ok!(Vesting::create_schedule(
-					RuntimeOrigin::root(),
-					beneficiary.clone(),
-					0,
-					0,
-					DAYS * DAY,
-					TOTAL,
-				));
-				set_time(DAY);
-				assert_noop!(
-					Vesting::claim(RuntimeOrigin::signed(account(8)), 0),
-					pallet_vesting::Error::<Runtime>::NothingToClaim
-				);
-				for day in 1..=DAYS {
-					set_time(day * DAY);
-					let _ = Vesting::claim(RuntimeOrigin::signed(account(8)), 0);
-				}
-				assert_eq!(pallet_vesting::Schedules::<Runtime>::get(0).unwrap().claimed, TOTAL);
-				max_exitable_from_recorded_leaves(&beneficiary)
-			});
+		let periodic_leaves = new_test_ext(Some(account(4))).execute_with(|| {
+			Balances::make_free_balance_be(&account(4), 1000 * UNIT);
+			assert_ok!(Vesting::create_schedule(
+				RuntimeOrigin::root(),
+				beneficiary.clone(),
+				0,
+				0,
+				DAYS * DAY,
+				TOTAL,
+			));
+			set_time(DAY);
+			assert_noop!(claim_as(account(8), 0), pallet_vesting::Error::<Runtime>::NothingToClaim);
+			for day in 1..=DAYS {
+				set_time(day * DAY);
+				let _ = claim_as(account(8), 0);
+			}
+			assert_eq!(pallet_vesting::Schedules::<Runtime>::get(0).unwrap().claimed, TOTAL);
+			recorded_leaves()
+		});
 
-		let (single_leaves, single_max_exit) = new_test_ext(Some(account(4))).execute_with(|| {
+		let single_leaves = new_test_ext(Some(account(4))).execute_with(|| {
 			Balances::make_free_balance_be(&account(4), 1000 * UNIT);
 			assert_ok!(Vesting::create_schedule(
 				RuntimeOrigin::root(),
@@ -344,14 +327,14 @@ mod tests {
 				TOTAL,
 			));
 			set_time(DAYS * DAY);
-			assert_ok!(Vesting::claim(RuntimeOrigin::signed(account(8)), 0));
-			max_exitable_from_recorded_leaves(&beneficiary)
+			assert_ok!(claim_as(account(8), 0));
+			recorded_leaves()
 		});
 
-		assert_eq!(single_leaves, 1);
-		assert_eq!(periodic_leaves, 15);
-		assert_eq!(periodic_max_exit, single_max_exit);
-		assert_eq!(single_max_exit, 36_485 * VestingPayoutQuantum::get());
+		// Both shapes record nothing: the exit those leaves fed is gone, and a
+		// payout is an ordinary transparent transfer with no ZK side at all.
+		assert_eq!(single_leaves, 0);
+		assert_eq!(periodic_leaves, 0);
 	}
 
 	#[test]
@@ -390,7 +373,7 @@ mod tests {
 				bounded,
 			));
 
-			let count_before = Wormhole::transfer_count(&beneficiary);
+			let count_before = recorded_leaves();
 			while System::block_number() < 3 {
 				let block = System::block_number();
 				Scheduler::on_finalize(block);
@@ -398,12 +381,13 @@ mod tests {
 				Scheduler::on_initialize(block + 1);
 			}
 
-			// The schedule was ended by the hook-dispatched Root call: the beneficiary
-			// got the vested half, the treasury the rest — and the payout leaf exists
-			// even though no extension ever saw this dispatch.
+			// The schedule was ended by the hook-dispatched Root call: the
+			// beneficiary got the vested half and the treasury the rest. There is
+			// no payout leaf either way now; what this still covers is that a
+			// scheduled Root dispatch reaches the pallet at all.
 			assert!(pallet_vesting::Schedules::<Runtime>::get(0).is_none());
 			assert_eq!(Balances::total_balance(&beneficiary), GRANT / 2);
-			assert_eq!(Wormhole::transfer_count(&beneficiary), count_before + 1);
+			assert_eq!(recorded_leaves(), count_before, "v1 records no transfer leaf");
 		});
 	}
 }

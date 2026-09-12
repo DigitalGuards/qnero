@@ -69,24 +69,27 @@ impl_opaque_keys! {
 
 // Runtime versioning: https://docs.substrate.io/main-docs/build/upgrade#runtime-versioning
 //
-// Do not increment `spec_version` (or `runtime/Cargo.toml`) in feature PRs.
-// The Quantus - Release Proposal workflow does that when `is_runtime_upgrade`
-// is set, and ships the matching node binary + wasm together. Native execution
-// substitutes for on-chain Wasm only when spec_name, spec_version, and
-// authoring_version all match, so leaving this number alone on main does not
-// activate a new verifier on a live chain. See docs/RUNTIME_UPDATE.md.
+// Qnero is its own chain, and M6 is where it says so. The fork carried the
+// upstream identity `quantus-runtime` at `spec_version` 152 while already
+// storing a `pallet-zk-tree` leaf no upstream node can read: leaves are raw
+// note commitments here and typed wormhole preimages there. A node that
+// matched on that name and version would have substituted native execution for
+// a wasm runtime with different state rules. The name is the chain's, the
+// version restarts at 100, and both move together from here.
 //
 // Bump `transaction_version` only when the signed extrinsic encoding changes
-// (TxExtension set or payload layout) — not for verifier-rule changes.
+// (TxExtension set or payload layout), not for verifier-rule changes. M6
+// dropped `WormholeProofRecorderExtension` from `TxExtension`, which is such a
+// change, and the wallet's own list of known extensions moved with it.
 #[sp_version::runtime_version]
 pub const VERSION: RuntimeVersion = RuntimeVersion {
-	spec_name: alloc::borrow::Cow::Borrowed("quantus-runtime"),
-	impl_name: alloc::borrow::Cow::Borrowed("quantus-runtime"),
+	spec_name: alloc::borrow::Cow::Borrowed("qnero"),
+	impl_name: alloc::borrow::Cow::Borrowed("qnero-node"),
 	authoring_version: 1,
-	spec_version: 152,
+	spec_version: 100,
 	impl_version: 1,
 	apis: apis::RUNTIME_API_VERSIONS,
-	transaction_version: 6,
+	transaction_version: 7,
 	system_version: 1,
 };
 
@@ -178,11 +181,13 @@ pub type TxExtension = (
 	frame_system::CheckNonce<Runtime>,
 	frame_system::CheckWeight<Runtime>,
 	transaction_extensions::ReversibleTransactionExtension<Runtime>,
-	// Must run before `ChargeTransactionPayment`: post-dispatch hooks execute
-	// left-to-right, and payment finalizes the fee from `PostDispatchInfo` at its
-	// turn — the wormhole recorder's refund of statically over-charged per-transfer
-	// weight only reaches the payer's fee if it lands first.
-	transaction_extensions::WormholeProofRecorderExtension<Runtime>,
+	// `WormholeProofRecorderExtension` was here at M5 and is gone at M6. It
+	// scanned a signed call's balance events and wrote a wormhole transfer leaf
+	// for each one, which is what made a transparent credit to a keyless
+	// account spendable. There are no transparent transfers to scan any more:
+	// the call filter refuses every one of them, and the block reward and the
+	// author's fee share are notes. Removing it changes the signed extrinsic
+	// encoding, which is what `transaction_version` 7 is.
 	// The high-security zero-tip policy is NOT enforced here: it lives in
 	// `transaction_extensions::HighSecurityFungibleAdapter` (the configured
 	// `OnChargeTransaction`), which every fee path of this extension goes
@@ -206,8 +211,6 @@ pub type SignedPayload = generic::SignedPayload<RuntimeCall, TxExtension>;
 
 /// All storage migrations to run on runtime upgrade.
 pub type Migrations = (
-	// v1 -> v2: delete the removed wormhole soundness counters.
-	pallet_wormhole::migrations::MigrateV1ToV2<Runtime>,
 	// v0 -> v1: no-op version bump (TreasuryPortion is no longer written).
 	pallet_treasury::migrations::MigrateV0ToV1<Runtime>,
 	// v1 -> v2: kill leftover TreasuryPortion; treasury is not paid from emission.
@@ -301,8 +304,10 @@ mod runtime {
 	#[runtime::pallet_index(19)]
 	pub type Multisig = pallet_multisig;
 
-	#[runtime::pallet_index(20)]
-	pub type Wormhole = pallet_wormhole;
+	// Index 20 was `pallet_wormhole` (removed at M6 with the transparent exit
+	// path). Kept vacant so downstream pallet indices stay stable. `qp-wormhole`,
+	// the primitives crate, stays: the QPoW author derivation lives there and the
+	// runtime's one author seam calls it.
 
 	#[runtime::pallet_index(21)]
 	pub type ZkTree = pallet_zk_tree;
@@ -315,12 +320,20 @@ mod runtime {
 	#[runtime::pallet_index(23)]
 	pub type Origins = pallet_custom_origins;
 
-	// The Qnero shielded pool. It appends to the same `ZkTree` instance the
-	// wormhole uses, because the leaf circuit anchors at `zk_tree_root` and the
-	// header carries exactly one of those. Leaves are appended during extrinsic
-	// execution, so this pallet has no `on_finalize` and its position relative
-	// to `ZkTree` in the fold order does not matter; `ZkTree` still has to stay
-	// declared after every pallet that inserts from a hook.
+	// The Qnero shielded pool, and at M6 the only place value is created. It
+	// appends to the `ZkTree` instance the whole chain shares, because the leaf
+	// circuit anchors at `zk_tree_root` and the header carries exactly one of
+	// those.
+	//
+	// It appends from two places and neither is one of its own hooks. Ordinary
+	// settlements and the `shield` entry append during extrinsic execution. The
+	// coinbase note is appended inside `CoinbaseSink::deposit_coinbase`, which
+	// `pallet-mining-rewards` calls from its `on_finalize` at index 6, so the
+	// append happens well before `ZkTree` folds the block's leaves at index 21.
+	// That ordering is the reason the coinbase is paid through the sink rather
+	// than from an `on_finalize` here: this pallet is declared after `ZkTree`,
+	// hooks run in pallet-index order, and a leaf appended after the fold would
+	// miss the root this block's header carries.
 	#[runtime::pallet_index(24)]
 	pub type Shielded = pallet_shielded;
 }

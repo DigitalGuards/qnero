@@ -40,7 +40,6 @@ pallet-treasury.workspace = true
 pallet-utility.workspace = true
 pallet-vesting.workspace = true
 pallet-shielded.workspace = true
-pallet-wormhole.workspace = true
 pallet-zk-tree.workspace = true
 primitive-types.workspace = true
 qp-dilithium-crypto.workspace = true
@@ -104,7 +103,6 @@ std = [
 	"pallet-utility/std",
 	"pallet-vesting/std",
 	"pallet-shielded/std",
-	"pallet-wormhole/std",
 	"pallet-zk-tree/std",
 	"primitive-types/std",
 	"qp-dilithium-crypto/full_crypto",
@@ -150,7 +148,6 @@ runtime-benchmarks = [
 	"pallet-utility/runtime-benchmarks",
 	"pallet-vesting/runtime-benchmarks",
 	"pallet-shielded/runtime-benchmarks",
-	"pallet-wormhole/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 ]
 
@@ -169,7 +166,6 @@ try-runtime = [
 	"pallet-treasury/try-runtime",
 	"pallet-vesting/try-runtime",
 	"pallet-shielded/try-runtime",
-	"pallet-wormhole/try-runtime",
 	"sp-runtime/try-runtime",
 ]
 

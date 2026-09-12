@@ -8,7 +8,6 @@
 use crate::common::TestCommons;
 use codec::Encode;
 use frame_support::{
-	assert_ok,
 	dispatch::GetDispatchInfo,
 	pallet_prelude::{InvalidTransaction, TransactionValidityError},
 	traits::{Currency, Hooks},
@@ -297,35 +296,48 @@ fn high_security_batch_all_padded_dest_is_rejected_before_fees() {
 	});
 }
 
+/// A zero-tip `schedule_transfer` from a high-security account clears the tip
+/// policy, is admitted, and is then refused at dispatch by v1's call filter.
+///
+/// The tip policy is what this file is about and it is unchanged: the
+/// extrinsic passes validation, the inclusion fee is charged, and no tip is
+/// taken. What changed is the end of the pipeline, where a call that moves
+/// transparent value is refused, so nothing is scheduled and only the fee
+/// leaves the account.
 #[test]
-fn high_security_signed_schedule_transfer_zero_tip_is_included() {
+fn high_security_signed_schedule_transfer_zero_tip_is_charged_and_refused() {
 	let pair = pair();
 	let account = pair.public().into_account();
 	test_ext(&account).execute_with(|| {
-		let amount = 10 * UNIT;
 		let xt = signed_call(&pair, account.clone(), schedule_small_transfer(), 0, 0);
 		let fee = inclusion_fee(&xt);
 		let before = Balances::free_balance(&account);
 
-		assert_ok!(Executive::apply_extrinsic(xt).expect("zero-tip schedule_transfer is valid"));
-		assert_eq!(paid_tip(&account), Some(0));
 		assert_eq!(
-			pallet_reversible_transfers::PendingTransfersBySender::<Runtime>::get(&account).len(),
-			1,
-			"the delayed transfer must have been scheduled"
+			Executive::apply_extrinsic(xt)
+				.expect("zero-tip schedule_transfer is valid")
+				.expect_err("v1 refuses a scheduled transfer"),
+			sp_runtime::DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
+		);
+		assert_eq!(paid_tip(&account), Some(0));
+		assert!(
+			pallet_reversible_transfers::PendingTransfersBySender::<Runtime>::get(&account)
+				.is_empty(),
+			"nothing may be scheduled"
 		);
 		let lost = before - Balances::free_balance(&account);
-		assert_eq!(
-			lost,
-			amount + paid_fee_or_zero(&account),
-			"zero-tip schedule_transfer may only lock the amount and pay the inclusion fee"
-		);
-		assert!(lost - amount <= fee);
+		assert_eq!(lost, paid_fee_or_zero(&account), "only the inclusion fee leaves");
+		assert!(lost <= fee);
 	});
 }
 
+/// An ordinary account may still tip, and its transfer is still refused.
+///
+/// The tip is the subject: a non-high-security signer keeps the tip channel,
+/// pays it, and the fee reflects it. The transfer underneath moves no value
+/// under v1, which is what the last assertion is for.
 #[test]
-fn normal_account_signed_transfer_with_tip_is_included() {
+fn normal_account_signed_transfer_with_tip_pays_the_tip_and_moves_nothing() {
 	let pair = pair();
 	let account = pair.public().into_account();
 	funded_ext(&account, false).execute_with(|| {
@@ -340,13 +352,18 @@ fn normal_account_signed_transfer_with_tip_is_included() {
 		let xt = signed_call(&pair, account.clone(), call, 0, tip);
 		let before = Balances::free_balance(&account);
 
-		assert_ok!(Executive::apply_extrinsic(xt).expect("tipped transfer is valid"));
+		assert_eq!(
+			Executive::apply_extrinsic(xt)
+				.expect("tipped transfer is valid")
+				.expect_err("v1 refuses a transparent transfer"),
+			sp_runtime::DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
+		);
 		assert_eq!(paid_tip(&account), Some(tip));
-		assert_eq!(Balances::free_balance(&dest), dest_before + value);
+		assert_eq!(Balances::free_balance(&dest), dest_before, "no value moved");
 		assert_eq!(
 			before - Balances::free_balance(&account),
-			value + paid_fee_or_zero(&account),
-			"normal account pays the transfer, inclusion fee, and the signed tip"
+			paid_fee_or_zero(&account),
+			"a normal account pays the inclusion fee and the signed tip, and nothing else"
 		);
 		assert!(paid_fee_or_zero(&account) >= tip);
 	});
@@ -456,26 +473,29 @@ fn high_security_tip_is_not_reminted_to_the_block_author() {
 		MiningRewards::on_finalize(System::block_number());
 
 		if collected > 0 {
-			// First MinerRewarded is the fee remint (`mint_reward(miner, tx_fees)`);
-			// block emission is a later event and is allowed.
-			let fee_remint = System::events()
+			// Under v1 the fees do not reach an account: they become the value
+			// of the block's coinbase note, and the event names the author the
+			// note was minted for. A test block carries no coinbase inherent,
+			// so the pool refuses the credit and the event is the rejection;
+			// either way the amount is the one under test.
+			let credited = System::events()
 				.into_iter()
 				.find_map(|record| match record.event {
-					RuntimeEvent::MiningRewards(pallet_mining_rewards::Event::MinerRewarded {
-						miner: who,
-						reward,
-					}) if who == miner => Some(reward),
+					RuntimeEvent::MiningRewards(
+						pallet_mining_rewards::Event::CoinbaseCredited { author, amount } |
+						pallet_mining_rewards::Event::CoinbaseRejected { author, amount },
+					) if author == miner => Some(amount),
 					_ => None,
 				})
-				.expect("collected fees must be reminted to the author");
+				.expect("collected fees must be paid into the block's coinbase");
 			assert_eq!(
-				fee_remint, collected,
-				"author remint must equal CollectedFees, not a high-security tip"
+				credited, collected,
+				"the coinbase credit must equal CollectedFees, not a high-security tip"
 			);
 			assert!(
-				fee_remint <= fee_ceiling,
-				"block author remint must not include a high-security tip: \
-				 reminted {fee_remint}, allowed {fee_ceiling}"
+				credited <= fee_ceiling,
+				"a coinbase credit must not include a high-security tip: \
+				 credited {credited}, allowed {fee_ceiling}"
 			);
 		}
 

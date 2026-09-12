@@ -2,23 +2,13 @@
 //! transaction pipeline (`Executive::apply_extrinsic` with all `TxExtension`s).
 
 use crate::common::TestCommons;
-use codec::Encode;
-use frame_support::{
-	assert_ok,
-	dispatch::{GetDispatchInfo, Pays, PostDispatchInfo},
-	traits::Currency,
-	weights::Weight,
-};
+use frame_support::traits::Currency;
 use qp_dilithium_crypto::Dilithium65Pair;
 use quantus_runtime::{
-	transaction_extensions::WormholeProofRecorderExtension, Balances, BalancesCall, Executive,
-	Runtime, RuntimeCall, RuntimeEvent, System, UncheckedExtrinsic, UNIT,
+	Balances, BalancesCall, Executive, Runtime, RuntimeCall, System, UncheckedExtrinsic, UNIT,
 };
 use sp_core::Pair;
-use sp_runtime::{
-	traits::{IdentifyAccount, TransactionExtension},
-	AccountId32, MultiAddress,
-};
+use sp_runtime::{traits::IdentifyAccount, AccountId32, MultiAddress};
 
 fn test_ext(account: &AccountId32) -> sp_io::TestExternalities {
 	use quantus_runtime::BuildStorage;
@@ -46,8 +36,16 @@ fn signed_transfer(
 	TestCommons::signed_extrinsic(pair, sender, call, nonce, 0)
 }
 
+/// An ML-DSA-65 signature carries an extrinsic through the whole pipeline, and
+/// v1's call filter refuses the call at the end of it.
+///
+/// Both halves matter. The signature, the nonce, the era, the fee and every
+/// transaction extension are checked and pass, which is what this test was
+/// written for; the dispatch is then refused with `CallFiltered`, because a
+/// transparent transfer is what v1 removed. The extrinsic is admitted and
+/// included either way, and no value moves.
 #[test]
-fn test_ml_dsa_65_extrinsic_accepted_by_runtime() {
+fn an_ml_dsa_65_signed_transfer_passes_validation_and_is_refused_at_dispatch() {
 	let pair = Dilithium65Pair::from_seed_slice(&[42u8; 32]).expect("valid seed");
 	let account = pair.public().into_account();
 	let mut ext = test_ext(&account);
@@ -58,91 +56,11 @@ fn test_ml_dsa_65_extrinsic_accepted_by_runtime() {
 
 		let outcome = Executive::apply_extrinsic(xt)
 			.expect("ML-DSA-65 signed extrinsic should pass validation");
-		assert_ok!(outcome);
-		assert_eq!(Balances::free_balance(&dest), 10 * UNIT);
-	});
-}
-
-/// Full-pipeline fee assertion for the wormhole per-transfer refund.
-///
-/// A failed transfer is statically charged one proof-insert reservation by
-/// `WormholeProofRecorderExtension::weight`, records nothing, and returns the
-/// whole reservation in `post_dispatch_details`. That refund must reach the
-/// *payer's fee*, not only block capacity — which requires the wormhole
-/// extension to sit before `ChargeTransactionPayment` in `TxExtension`, since
-/// post-dispatch hooks run left-to-right and payment finalizes the fee from
-/// whatever `PostDispatchInfo` says at its turn.
-#[test]
-fn wormhole_overcharge_is_refunded_from_the_transaction_fee() {
-	let pair = Dilithium65Pair::from_seed_slice(&[42u8; 32]).expect("valid seed");
-	let account = pair.public().into_account();
-	let mut ext = test_ext(&account);
-
-	ext.execute_with(|| {
-		let dest = AccountId32::new([9u8; 32]);
-		// More than the sender holds: the dispatch fails, so no transfer event
-		// is emitted and no proof is recorded, yet `count_transfers` statically
-		// reserved one per-transfer proof insert.
-		let value = 5000 * UNIT;
-		let xt = signed_transfer(&pair, account.clone(), dest.clone(), value, 0);
-		let info = xt.get_dispatch_info();
-		let len = xt.encode().len() as u32;
-
-		let balance_before = Balances::free_balance(&account);
-		let outcome = Executive::apply_extrinsic(xt).expect("extrinsic must be valid");
-		assert!(outcome.is_err(), "the transfer itself must fail");
-		assert_eq!(Balances::free_balance(&dest), 0);
-
-		let fee_paid = System::events()
-			.into_iter()
-			.find_map(|record| match record.event {
-				RuntimeEvent::TransactionPayment(
-					pallet_transaction_payment::Event::TransactionFeePaid { who, actual_fee, tip },
-				) if who == account => {
-					assert_eq!(tip, 0);
-					Some(actual_fee)
-				},
-				_ => None,
-			})
-			.expect("a fee must have been charged");
-
-		// The failed call refunds nothing itself (its error carries no
-		// `actual_weight`), so the refunds in the pipeline are the wormhole
-		// extension returning its unused per-transfer reservation and the
-		// reversible extension returning the quota ring read/write it reserves
-		// for high-security signers (this sender is not high-security).
-		let call: RuntimeCall =
-			BalancesCall::transfer_keep_alive { dest: MultiAddress::Id(dest), value }.into();
-		let wormhole_reservation = TransactionExtension::<RuntimeCall>::weight(
-			&WormholeProofRecorderExtension::<Runtime>::new(),
-			&call,
-		);
-		assert_ne!(wormhole_reservation, Weight::zero());
-		let non_hs_quota_refund =
-			<Runtime as frame_system::Config>::DbWeight::get().reads_writes(3, 1);
-
-		let expected_fee = pallet_transaction_payment::Pallet::<Runtime>::compute_actual_fee(
-			len,
-			&info,
-			&PostDispatchInfo {
-				actual_weight: Some(
-					info.total_weight()
-						.saturating_sub(wormhole_reservation)
-						.saturating_sub(non_hs_quota_refund),
-				),
-				pays_fee: Pays::Yes,
-			},
-			0,
-		);
 		assert_eq!(
-			fee_paid, expected_fee,
-			"the unused wormhole reservation must be refunded from the fee"
+			outcome.expect_err("v1 refuses a transparent transfer"),
+			sp_runtime::DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
 		);
-		assert_eq!(
-			balance_before - Balances::free_balance(&account),
-			fee_paid,
-			"the payer must lose exactly the corrected fee"
-		);
+		assert_eq!(Balances::free_balance(&dest), 0, "no value moved");
 	});
 }
 

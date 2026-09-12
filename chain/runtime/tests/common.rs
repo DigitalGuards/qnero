@@ -2,13 +2,28 @@ use codec::Encode;
 use frame_support::traits::{Currency, OnFinalize, OnInitialize};
 use qp_dilithium_crypto::Dilithium65Pair;
 use quantus_runtime::{
-	configs::TreasuryPalletId,
-	transaction_extensions::{ReversibleTransactionExtension, WormholeProofRecorderExtension},
-	Balances, Runtime, RuntimeCall, Signature, SignedPayload, System, TxExtension,
-	UncheckedExtrinsic, UNIT, VERSION,
+	configs::TreasuryPalletId, transaction_extensions::ReversibleTransactionExtension, Balances,
+	Runtime, RuntimeCall, Signature, SignedPayload, System, TxExtension, UncheckedExtrinsic, UNIT,
+	VERSION,
 };
 use sp_core::{crypto::AccountId32, Pair};
 use sp_runtime::{generic::Era, traits::AccountIdConversion, BuildStorage, MultiAddress};
+
+/// Dispatch a signed call past v1's call filter.
+///
+/// These tests cover pallet behaviour: holds, guardians, quotas, vesting
+/// arithmetic. v1's `BaseCallFilter` refuses every call that moves transparent
+/// value at the runtime's door, which `runtime/tests/call_filter.rs` is the
+/// test for, and which would otherwise delete that coverage rather than move
+/// it. Bypassing the filter here exercises the pallet exactly as a privileged
+/// dispatch does, which is the one origin that can still reach these calls.
+pub fn dispatch_unfiltered(
+	origin: quantus_runtime::RuntimeOrigin,
+	call: RuntimeCall,
+) -> sp_runtime::DispatchResultWithInfo<frame_support::dispatch::PostDispatchInfo> {
+	use frame_support::traits::UnfilteredDispatchable;
+	call.dispatch_bypass_filter(origin)
+}
 
 pub struct TestCommons;
 
@@ -111,7 +126,6 @@ impl TestCommons {
 			frame_system::CheckNonce::<Runtime>::from(nonce),
 			frame_system::CheckWeight::<Runtime>::new(),
 			ReversibleTransactionExtension::<Runtime>::new(),
-			WormholeProofRecorderExtension::<Runtime>::new(),
 			pallet_transaction_payment::ChargeTransactionPayment::<Runtime>::from(tip),
 			frame_metadata_hash_extension::CheckMetadataHash::<Runtime>::new(false),
 			frame_system::WeightReclaim::<Runtime>::new(),
@@ -126,7 +140,6 @@ impl TestCommons {
 				VERSION.transaction_version,
 				genesis_hash,
 				genesis_hash,
-				(),
 				(),
 				(),
 				(),
