@@ -2052,17 +2052,20 @@ fn a_real_public_batch_verifies_through_the_embedded_verifier() {
 	let path = std::env::var("QNERO_PUBLIC_BATCH_PROOF").unwrap_or_else(|_| {
 		format!("{}/../../../target/qnero-public-batch-53.bin", env!("CARGO_MANIFEST_DIR"))
 	});
-	let proof = match std::fs::read(&path) {
-		Ok(bytes) => bytes,
-		Err(error) => {
-			eprintln!("no public-batch proof at {path}: {error}");
-			eprintln!(
-				"produce one with QNERO_DEV_NODE=... cargo test --release -p qnero-wallet \
-				 --features parallel --test public_batch_bench -- --ignored --nocapture"
-			);
-			return;
-		},
-	};
+	// A missing artifact fails the test. This test is `#[ignore]`d
+	// and only runs when someone asked for it by name, and it is the only
+	// check that a proof produced at these dimensions is one the runtime's
+	// embedded verifier accepts. Returning early printed `ok` on any tree
+	// where the file is absent, which is every fresh clone and everything
+	// after a `cargo clean`, since the artifact lives under `target/`.
+	let proof = std::fs::read(&path).unwrap_or_else(|error| {
+		panic!(
+			"no public-batch proof at {path}: {error}\nProduce one with:\n  \
+			 QNERO_DEV_NODE=http://127.0.0.1:9944 RAYON_NUM_THREADS=4 nice -n 19 cargo test \
+			 -j 2 --release -p qnero-wallet --features parallel --test public_batch_bench -- \
+			 --ignored --nocapture\nor point QNERO_PUBLIC_BATCH_PROOF at one."
+		)
+	});
 
 	new_test_ext().execute_with(|| {
 		assert!(

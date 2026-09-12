@@ -30,6 +30,7 @@ fn runtime() -> ChainMetadata {
             .iter()
             .map(|name| name.to_string())
             .collect(),
+        storage: Vec::new(),
     }
 }
 

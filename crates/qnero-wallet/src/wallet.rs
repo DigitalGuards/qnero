@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use qnero_circuit::chain::ct_digest;
+use qnero_circuit::merkle::MerklePath;
 use qnero_circuit::witness::{InputNote, OutputNote, SpendWitness};
 use qnero_notes::{encrypt_note, entry_rho, try_receive, Address, Digest, Note, NoteCiphertext};
 use qnero_notes::{IncomingViewingKey, SpendingKey};
@@ -24,12 +25,62 @@ use crate::store::{NoteOrigin, PendingKind, PendingNote, RejectedNote, StoredNot
 use crate::POOL_QUANTUM;
 
 /// Leaf slots in a private batch. Not a metadata value and not discoverable
-/// over RPC: `chain/pallets/shielded/build.rs` reads it from
-/// `qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS`, so the wallet reads it
-/// from the same constant. A wallet built at a different `N` produces a proof
-/// whose public-input length the chain's embedded verifier refuses, after the
-/// full proving cost has been paid.
-pub const NUM_LEAF_PROOFS: usize = qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS;
+/// over RPC.
+///
+/// `chain/pallets/shielded/build.rs` resolves it as
+/// `QNERO_NUM_LEAF_PROOFS`, falling back to
+/// `qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS`, so the wallet resolves it
+/// the same way: one environment produces one `N` on both sides. Reading only
+/// the default would leave a wallet at six against a runtime someone built at
+/// eight, and the chain's embedded verifier would refuse the proof's
+/// public-input length after the full proving cost had been paid, with no
+/// local check to catch it first.
+pub const NUM_LEAF_PROOFS: usize = match option_env!("QNERO_NUM_LEAF_PROOFS") {
+    Some(text) => parse_leaf_proofs(text),
+    None => qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS,
+};
+
+/// `str::parse` is not const, and this has to be one so the constant stays a
+/// constant.
+const fn parse_leaf_proofs(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    assert!(
+        !bytes.is_empty(),
+        "QNERO_NUM_LEAF_PROOFS is set to an empty string"
+    );
+    let mut value = 0usize;
+    let mut index = 0;
+    while index < bytes.len() {
+        let digit = bytes[index];
+        assert!(
+            digit >= b'0' && digit <= b'9',
+            "QNERO_NUM_LEAF_PROOFS must be a decimal number"
+        );
+        value = value * 10 + (digit - b'0') as usize;
+        index += 1;
+    }
+    assert!(value > 0, "QNERO_NUM_LEAF_PROOFS must be at least one");
+    value
+}
+
+/// Where an input note's Merkle path comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MerkleSource {
+    /// Rebuild the tree locally from `ZkTree::Leaves` at the anchor block.
+    ///
+    /// The default, and the private one. `Chain::leaves` already reads the
+    /// whole leaf range during a scan, and that read says nothing about which
+    /// leaves matter to the reader.
+    #[default]
+    Local,
+    /// Ask the node for `zkTree_getMerkleProof(leaf_index)`, one call per
+    /// input.
+    ///
+    /// Cheaper, and it tells the node exactly which leaves this wallet is
+    /// about to spend, seconds before the settlement that publishes their
+    /// nullifiers arrives on the same connection.
+    Rpc,
+}
 
 /// How long a submission is waited on before the wallet gives up.
 ///
@@ -84,9 +135,25 @@ impl Wallet {
     ///
     /// Every read is pinned to one block hash, so a leaf appended mid-scan
     /// cannot be counted and then read as absent.
-    pub fn sync(&mut self, chain: &Chain) -> Result<SyncReport> {
+    ///
+    /// The metadata is taken because the storage layout every key here is
+    /// built from is checked against the runtime's own declaration first. On
+    /// the read path a drifted key is silent: it reads as an empty map, and an
+    /// empty map is a zero balance or a settled note reported unspent.
+    pub fn sync(&mut self, chain: &Chain, metadata: &ChainMetadata) -> Result<SyncReport> {
+        metadata.ensure_known_storage()?;
         let head = chain.head()?;
         let leaf_count = chain.leaf_count_at(&head.hash)?;
+        // The settled nullifier set, read whole and pinned to the same block.
+        //
+        // Spent status used to be a question asked of the node about this
+        // wallet's own nullifiers, one key at a time. `UsedNullifiers` is
+        // `Blake2_128Concat`, so those keys carried the raw nullifiers in the
+        // clear, and a node that logged them learned the set of values this
+        // wallet would publish when it spent, before any of them existed on
+        // chain. Reading the public map whole and deciding locally asks the
+        // same question and names nothing.
+        self.store.used_nullifiers = chain.used_nullifiers_at(&head.hash)?;
         let start = self.store.next_leaf;
         let mut report = SyncReport {
             head_block: head.number,
@@ -141,7 +208,7 @@ impl Wallet {
                     report.rejected += 1;
                     continue;
                 }
-                if chain.nullifiers_used(&[nullifier.to_bytes()], &head.hash)?[0] {
+                if self.store.nullifier_settled(&nullifier_hex) {
                     self.store.rejected.push(RejectedNote {
                         leaf_index: record.index,
                         commitment: commitment_hex,
@@ -182,29 +249,20 @@ impl Wallet {
             }
         }
 
-        // Spent status. Only the nullifier key can ask this question, and it
-        // is asked of every unspent note on every sync: a note this wallet
-        // holds may have been spent by another copy of the same seed.
-        let unspent: Vec<(String, [u8; 32])> = self
+        // Spent status, decided against the local copy of the settled set.
+        // Only the nullifier key can compute these values at all, and a note
+        // this wallet holds may have been spent by another copy of the same
+        // seed, so the question is asked of every unspent note on every sync.
+        // It is asked locally: see the note above the set's refresh.
+        let newly_spent: Vec<String> = self
             .store
             .unspent()
-            .map(|note| -> Result<(String, [u8; 32])> {
-                Ok((
-                    note.nullifier.clone(),
-                    crate::store::parse_digest(&note.nullifier, "nullifier")?.to_bytes(),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let raw: Vec<[u8; 32]> = unspent.iter().map(|(_, bytes)| *bytes).collect();
-        for (used, (hex, _)) in chain
-            .nullifiers_used(&raw, &head.hash)?
-            .iter()
-            .zip(&unspent)
-        {
-            if *used {
-                self.store.mark_spent(hex, head.number);
-                report.newly_spent += 1;
-            }
+            .filter(|note| self.store.used_nullifiers.contains(&note.nullifier))
+            .map(|note| note.nullifier.clone())
+            .collect();
+        for nullifier in &newly_spent {
+            self.store.mark_spent(nullifier, head.number);
+            report.newly_spent += 1;
         }
 
         self.store.next_leaf = leaf_count;
@@ -283,19 +341,60 @@ impl Wallet {
         let included_at = wait_for_inclusion(chain, &hex_0x(&encoded), head.number)?;
         let inclusion = started.elapsed();
 
+        // An extrinsic in a block is not a dispatch that succeeded. A shield
+        // whose signer cannot pay, or whose value is not a whole multiple of
+        // `POOL_QUANTUM`, is included and then fails, appends no leaf and
+        // creates no note. Reporting that as a success leaves a pending entry
+        // in the store forever and an exit code of zero, and it is also what
+        // would swallow a `POOL_QUANTUM` drift, which `crate::POOL_QUANTUM`
+        // argues is loud precisely because `ValueNotQuantized` would surface.
         let included_hash = chain.block_hash(included_at)?;
-        let actual_entry = chain.entry_count_at(&included_hash)?;
-        let rho_matches = entry_rho(included_at, entry_index) == rho;
+        let parent_hash = chain.block_hash(included_at.saturating_sub(1))?;
+        let commitment = note.commitment();
+        let leaves_before = chain.leaf_count_at(&parent_hash)?;
+        let leaves_after = chain.leaf_count_at(&included_hash)?;
+        let appended = chain.leaf_hashes(leaves_before..leaves_after, &included_hash)?;
+        let Some(offset) = appended.iter().position(|leaf| *leaf == commitment) else {
+            self.store
+                .pending
+                .retain(|pending| pending.commitment != commitment.to_hex());
+            self.save()?;
+            bail!(
+                "the shield was included in block {included_at} and its dispatch failed: no leaf \
+                 in that block carries the commitment {}, so no note was created. The usual \
+                 causes are a dev account that cannot pay {} planck and a value that is not a \
+                 whole multiple of POOL_QUANTUM. The pending entry has been dropped.",
+                commitment.to_hex(),
+                planck
+            );
+        };
+        let leaf_index = leaves_before + offset as u64;
+
+        // Both halves of the entry rule, against what the chain actually
+        // assigned. Comparing `entry_rho(included_at, entry_index)` with the
+        // `rho` built from that same `entry_index` only ever tested the block
+        // half; the counter could have moved between the read and inclusion
+        // and the check would still have said it matched.
+        let entry_before = chain.entry_count_at(&parent_hash)?;
+        let entry_after = chain.entry_count_at(&included_hash)?;
+        let entry_check = classify_entry_rho(
+            predicted_block,
+            entry_index,
+            included_at,
+            entry_before,
+            entry_after,
+        );
 
         Ok(ShieldReport {
             quanta,
-            commitment: note.commitment().to_hex(),
+            commitment: commitment.to_hex(),
+            leaf_index,
             included_at,
             inclusion,
             predicted_block,
             predicted_entry_index: entry_index,
-            entry_count_after: actual_entry,
-            entry_rho_matches: rho_matches,
+            entry_count_after: entry_after,
+            entry_check,
         })
     }
 
@@ -375,9 +474,18 @@ impl Wallet {
         amount: u64,
         requested_fee: Option<u64>,
         memo: &str,
+        merkle: MerkleSource,
     ) -> Result<SendReport> {
-        let prepared =
-            self.prepare_spend(chain, metadata, prover, to, amount, requested_fee, memo)?;
+        let prepared = self.prepare_spend(
+            chain,
+            metadata,
+            prover,
+            to,
+            amount,
+            requested_fee,
+            memo,
+            merkle,
+        )?;
         self.submit_spend(chain, metadata, prepared)
     }
 
@@ -397,7 +505,9 @@ impl Wallet {
         amount: u64,
         requested_fee: Option<u64>,
         memo: &str,
+        merkle: MerkleSource,
     ) -> Result<PreparedSpend> {
+        metadata.ensure_known_storage()?;
         let fee = self.resolve_fee(metadata, to, memo, requested_fee)?;
         let probe_payment = probe_ciphertext_len(&to.ek, memo.as_bytes())?;
         let probe_change = probe_ciphertext_len(&self.ivk().encapsulation_key(), b"")?;
@@ -412,38 +522,34 @@ impl Wallet {
         let input_total: u64 = selected.iter().map(|note| note.value).sum();
         let change = input_total - target;
 
-        // The anchor. `zkTree_getMerkleProof` and `chain_getHeader` are read
-        // at one hash, because the tree root moves every block and the header
-        // the proof binds to must be the one whose root the path reaches.
+        // The anchor. Every read of it is pinned to one hash, because the tree
+        // root moves every block and the header a proof binds to must be the
+        // one whose root the input paths reach.
+        //
+        // The anchor is always the current head, and that is a privacy policy
+        // as much as a correctness one. The anchor block is a public input of
+        // the settlement, so an observer reads the gap between anchor and
+        // inclusion. Every wallet anchoring at the head makes that gap the
+        // same short interval for everyone; an anchor at head minus k, or one
+        // cached and reused across two spends to save a `chain_getHeader`, is
+        // a distinguisher inside the 256-block window and marks both spends as
+        // one wallet's. So the anchor is always the head, and it is taken
+        // fresh for every submission. The head is taken after the circuits are
+        // built for the same reason, since the anchor-to-inclusion gap
+        // otherwise publishes this machine's circuit build time.
         let head = chain.head()?;
         let (header, anchor_hash) = chain.anchor_header(head.number)?;
 
         let pk = self.key.pk();
         let derived = self.key.derived();
-        let mut paths = Vec::new();
-        for note in &selected {
-            let stored = note.note(pk)?;
-            let path = chain
-                .merkle_path(note.leaf_index, stored.commitment(), &anchor_hash)?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "leaf {} is not folded into the tree at block {} yet. A note cannot be \
-                         minted and spent in the same block; wait one block and retry.",
-                        note.leaf_index,
-                        head.number
-                    )
-                })?;
-            if path.root != header.zk_tree_root {
-                bail!(
-                    "the Merkle proof for leaf {} reaches root {} where header {} carries {}",
-                    note.leaf_index,
-                    path.root.to_hex(),
-                    head.number,
-                    header.zk_tree_root.to_hex()
-                );
+        let mut paths = match merkle {
+            MerkleSource::Local => {
+                self.local_paths(chain, &selected, &header, &anchor_hash, head.number)?
             }
-            paths.push((stored, path.path));
-        }
+            MerkleSource::Rpc => {
+                self.rpc_paths(chain, &selected, &header, &anchor_hash, head.number)?
+            }
+        };
 
         let depth = paths[0].1.depth();
         let mut rng = rand::rng();
@@ -562,6 +668,121 @@ impl Wallet {
             anchor_block: head.number,
             proving,
         })
+    }
+
+    /// Input paths, rebuilt locally from the whole leaf range at the anchor.
+    ///
+    /// The private route, and the default. `zkTree_getMerkleProof` is asked
+    /// only about leaves a wallet is about to spend, so every such call names
+    /// one of this wallet's own leaves to the node, and the settlement that
+    /// publishes the matching nullifier arrives on the same connection seconds
+    /// later. That join is the sender side of the pool deanonymized against
+    /// whoever runs the RPC. Reading the whole leaf range says nothing about
+    /// which leaf matters, and it is the read a scan already performs.
+    ///
+    /// `CommitmentTree` mirrors `pallet-zk-tree` exactly: the same 4-ary node
+    /// rule, the same sorted children, the same all-zero padding for an absent
+    /// child. The root it reaches is compared against the header's before any
+    /// proving, which is the same check the RPC route makes and it covers the
+    /// rebuild as well.
+    fn local_paths(
+        &self,
+        chain: &Chain,
+        selected: &[StoredNote],
+        header: &qnero_circuit::header::HeaderInputs,
+        anchor_hash: &[u8; 32],
+        anchor_block: u32,
+    ) -> Result<Vec<(Note, MerklePath)>> {
+        let tree = chain.rebuild_tree(anchor_hash)?;
+        for note in selected {
+            if note.leaf_index >= tree.leaf_count() {
+                bail!(
+                    "leaf {} is not folded into the tree at block {anchor_block} yet. A note \
+                     cannot be minted and spent in the same block; wait one block and retry.",
+                    note.leaf_index
+                );
+            }
+        }
+        if tree.root() != header.zk_tree_root {
+            bail!(
+                "the tree this wallet rebuilt from {} leaves at depth {} roots at {} where \
+                 header {anchor_block} carries {}. Proving against it would be refused. \
+                 `--merkle-rpc` asks the node for the paths, at the cost of telling it which \
+                 leaves are yours.",
+                tree.leaf_count(),
+                tree.depth(),
+                tree.root().to_hex(),
+                header.zk_tree_root.to_hex()
+            );
+        }
+        let pk = self.key.pk();
+        let mut paths = Vec::with_capacity(selected.len());
+        for note in selected {
+            let stored = note.note(pk)?;
+            let on_chain = tree
+                .leaf(note.leaf_index)
+                .ok_or_else(|| anyhow!("leaf {} is out of range", note.leaf_index))?;
+            if on_chain != stored.commitment() {
+                bail!(
+                    "leaf {} holds {} on chain and this wallet holds a note committing to {}",
+                    note.leaf_index,
+                    on_chain.to_hex(),
+                    stored.commitment().to_hex()
+                );
+            }
+            let path = tree.path(note.leaf_index)?;
+            let reached = path.root(stored.commitment())?;
+            if reached != header.zk_tree_root {
+                bail!(
+                    "the path rebuilt for leaf {} reaches {} where header {anchor_block} carries \
+                     {}",
+                    note.leaf_index,
+                    reached.to_hex(),
+                    header.zk_tree_root.to_hex()
+                );
+            }
+            paths.push((stored, path));
+        }
+        Ok(paths)
+    }
+
+    /// Input paths from `zkTree_getMerkleProof`, one call per input.
+    ///
+    /// Behind `--merkle-rpc`, and it tells the node which leaves this wallet
+    /// is spending. See [`Wallet::local_paths`].
+    fn rpc_paths(
+        &self,
+        chain: &Chain,
+        selected: &[StoredNote],
+        header: &qnero_circuit::header::HeaderInputs,
+        anchor_hash: &[u8; 32],
+        anchor_block: u32,
+    ) -> Result<Vec<(Note, MerklePath)>> {
+        let pk = self.key.pk();
+        let mut paths = Vec::with_capacity(selected.len());
+        for note in selected {
+            let stored = note.note(pk)?;
+            let path = chain
+                .merkle_path(note.leaf_index, stored.commitment(), anchor_hash)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "leaf {} is not folded into the tree at block {anchor_block} yet. A note \
+                         cannot be minted and spent in the same block; wait one block and retry.",
+                        note.leaf_index
+                    )
+                })?;
+            if path.root != header.zk_tree_root {
+                bail!(
+                    "the Merkle proof for leaf {} reaches root {} where header {anchor_block} \
+                     carries {}",
+                    note.leaf_index,
+                    path.root.to_hex(),
+                    header.zk_tree_root.to_hex()
+                );
+            }
+            paths.push((stored, path.path));
+        }
+        Ok(paths)
     }
 
     /// Submit a prepared spend and wait for it to settle.
@@ -739,12 +960,78 @@ pub struct SyncReport {
 pub struct ShieldReport {
     pub quanta: u64,
     pub commitment: String,
+    /// The leaf the note actually landed at. Its existence is the proof the
+    /// dispatch succeeded.
+    pub leaf_index: u64,
     pub included_at: u32,
     pub inclusion: Duration,
     pub predicted_block: u32,
     pub predicted_entry_index: u64,
     pub entry_count_after: u64,
-    pub entry_rho_matches: bool,
+    pub entry_check: EntryRhoCheck,
+}
+
+/// What became of the entry-`rho` prediction a shield made.
+///
+/// The rule is `rho = H(RHO_ENTRY, block_number, entry_index)`
+/// (`docs/CIRCUIT.md` section 9.8) and neither half is knowable before
+/// submission: the block is the producer's choice and `EntryCount` moves with
+/// every other shield. Both halves are checked afterwards against what the
+/// chain assigned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryRhoCheck {
+    /// Both halves confirmed. The block is the predicted one, the counter had
+    /// not moved, and exactly one entry settled in that block, so the index
+    /// the chain assigned is the predicted one.
+    Confirmed,
+    /// The prediction missed, and the note's `rho` does not follow the rule
+    /// for the identifier the chain assigned it.
+    Missed { reason: String },
+    /// More than one shield settled in the inclusion block, so which index
+    /// went to this note is not decidable from storage alone: only the
+    /// `Shielded` event carries it, and decoding that needs the runtime's full
+    /// type registry.
+    Unproven { entries_in_block: u64 },
+}
+
+/// Classify a shield's entry-`rho` prediction against the chain.
+///
+/// Apart from the RPC so the rule can be exercised, which is what the
+/// half-checked version could not be.
+pub fn classify_entry_rho(
+    predicted_block: u32,
+    predicted_entry_index: u64,
+    included_at: u32,
+    entry_count_before: u64,
+    entry_count_after: u64,
+) -> EntryRhoCheck {
+    if included_at != predicted_block {
+        return EntryRhoCheck::Missed {
+            reason: format!(
+                "the shield was predicted to land in block {predicted_block} and landed in \
+                 block {included_at}"
+            ),
+        };
+    }
+    if entry_count_before != predicted_entry_index {
+        return EntryRhoCheck::Missed {
+            reason: format!(
+                "the entry counter stood at {predicted_entry_index} when the note was built and \
+                 at {entry_count_before} when the block opened, so the chain assigned this note \
+                 a different entry index"
+            ),
+        };
+    }
+    let entries_in_block = entry_count_after.saturating_sub(entry_count_before);
+    match entries_in_block {
+        0 => EntryRhoCheck::Missed {
+            reason: "the inclusion block settled no shield entry at all".into(),
+        },
+        1 => EntryRhoCheck::Confirmed,
+        entries => EntryRhoCheck::Unproven {
+            entries_in_block: entries,
+        },
+    }
 }
 
 #[derive(Debug)]
@@ -758,4 +1045,78 @@ pub struct SendReport {
     pub proof_bytes: usize,
     pub proving: Duration,
     pub inclusion: Duration,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The check this replaces compared `entry_rho(included_at, entry_index)`
+    /// against a `rho` built from that same `entry_index`, which reduces to
+    /// comparing the two block numbers. The counter half was fetched and
+    /// thrown away, so a counter that moved between the read and inclusion was
+    /// reported as a match, and two wallets shielding into one block both
+    /// recorded the same `rho` for notes the chain gave different entry
+    /// indices.
+    #[test]
+    fn the_entry_rule_is_checked_on_both_halves() {
+        // The block matched, the counter had not moved, one entry settled.
+        assert_eq!(
+            classify_entry_rho(11, 7, 11, 7, 8),
+            EntryRhoCheck::Confirmed
+        );
+
+        // The block missed. The counter agreeing does not save it.
+        let missed = classify_entry_rho(11, 7, 12, 7, 8);
+        assert!(matches!(missed, EntryRhoCheck::Missed { .. }));
+
+        // The block matched and the counter moved under it. This is the case
+        // the old check reported as a match.
+        let missed = classify_entry_rho(11, 7, 11, 9, 10);
+        match missed {
+            EntryRhoCheck::Missed { reason } => {
+                assert!(reason.contains("entry counter"), "{reason}");
+            }
+            other => panic!("a moved counter must be a miss, got {other:?}"),
+        }
+
+        // Two shields in one block: the counter started where the prediction
+        // said, so one of the two notes holds the predicted index and storage
+        // alone cannot say which.
+        assert_eq!(
+            classify_entry_rho(11, 7, 11, 7, 9),
+            EntryRhoCheck::Unproven {
+                entries_in_block: 2
+            }
+        );
+
+        // A block that settled no entry at all cannot have settled this one.
+        assert!(matches!(
+            classify_entry_rho(11, 7, 11, 7, 7),
+            EntryRhoCheck::Missed { .. }
+        ));
+    }
+
+    /// `N` is resolved from the environment the way the pallet's build script
+    /// resolves it. A wallet at a different `N` from its runtime pays the full
+    /// proving cost and has its public-input length refused.
+    #[test]
+    fn the_leaf_slot_count_parses_the_way_the_build_script_reads_it() {
+        assert_eq!(parse_leaf_proofs("6"), 6);
+        assert_eq!(parse_leaf_proofs("53"), 53);
+        assert_eq!(parse_leaf_proofs("1"), 1);
+        if option_env!("QNERO_NUM_LEAF_PROOFS").is_none() {
+            assert_eq!(
+                NUM_LEAF_PROOFS,
+                qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS
+            );
+        }
+    }
+
+    /// The private route is the default one. A default that asked the node for
+    /// proofs would name every leaf this wallet spends.
+    #[test]
+    fn paths_are_rebuilt_locally_unless_asked_otherwise() {
+        assert_eq!(MerkleSource::default(), MerkleSource::Local);
+    }
 }

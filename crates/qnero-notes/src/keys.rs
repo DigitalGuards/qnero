@@ -23,6 +23,19 @@ impl SpendingKey {
         Self(bytes)
     }
 
+    /// Take a seed out of a caller-owned buffer, wiping that buffer.
+    ///
+    /// [`SpendingKey`] is `ZeroizeOnDrop`, so the copy this type holds is
+    /// wiped when it drops. A caller that decoded the seed into an ordinary
+    /// array still holds a second copy whose storage is released with the seed
+    /// still in it, where a core dump, a swap page or a later stack frame can
+    /// reach it. This is the constructor that leaves nothing behind.
+    pub fn take_from(bytes: &mut [u8; 32]) -> Self {
+        let key = Self(*bytes);
+        bytes.zeroize();
+        key
+    }
+
     pub fn random<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut b = [0u8; 32];
         rng.fill_bytes(&mut b);
@@ -136,5 +149,24 @@ impl FullViewingKey {
 
     pub fn address(&self) -> Address {
         self.ivk.address()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of `take_from`: the caller's buffer is wiped, so the
+    /// only copy of the seed left is the one `ZeroizeOnDrop` covers.
+    #[test]
+    fn take_from_wipes_the_buffer_it_took() {
+        let mut buffer = [7u8; 32];
+        let key = SpendingKey::take_from(&mut buffer);
+        assert_eq!(buffer, [0u8; 32]);
+        assert_eq!(key.expose_bytes(), &[7u8; 32]);
+        assert_eq!(
+            key.address().encode(),
+            SpendingKey::from_bytes([7u8; 32]).address().encode()
+        );
     }
 }

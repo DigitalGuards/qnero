@@ -19,6 +19,8 @@ pub mod wallet;
 /// `pallet_shielded::POOL_QUANTUM`, a constant of the pallet crate with no
 /// `#[pallet::constant]` declaration, so it has no metadata surface for a
 /// wallet to read and this copy is the one value here that could drift from
-/// the chain. A mismatch is loud: `shield` refuses a value that is not a whole
-/// multiple with `ValueNotQuantized`. See `docs/WALLET.md`.
+/// the chain. A mismatch surfaces: the runtime refuses a value that is not a
+/// whole multiple with `ValueNotQuantized`, and `shield` confirms a leaf was
+/// actually appended before it reports success, so a refused dispatch comes
+/// back as an error. See `docs/WALLET.md`.
 pub const POOL_QUANTUM: u128 = 10_000_000_000;

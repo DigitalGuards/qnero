@@ -24,7 +24,7 @@ use qnero_wallet::dev_account::TransparentKey;
 use qnero_wallet::keys::create_seed;
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::RpcClient;
-use qnero_wallet::wallet::{Wallet, NUM_LEAF_PROOFS};
+use qnero_wallet::wallet::{EntryRhoCheck, MerkleSource, Wallet, NUM_LEAF_PROOFS};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("qnero-e2e-{}", std::process::id()));
@@ -55,6 +55,9 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
     metadata
         .ensure_known_signed_extensions()
         .expect("the runtime's extensions are the ones this wallet lays out");
+    metadata
+        .ensure_known_storage()
+        .expect("the runtime's storage layout is the one this wallet hashes");
 
     let alice_seed = scratch("alice.seed");
     let bob_seed = scratch("bob.seed");
@@ -67,8 +70,8 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
 
     // Both wallets start from the tree as it stands, so the scan cost does not
     // grow with how long the node has been up before the test.
-    alice.sync(&chain).expect("A syncs");
-    bob.sync(&chain).expect("B syncs");
+    alice.sync(&chain, &metadata).expect("A syncs");
+    bob.sync(&chain, &metadata).expect("B syncs");
     assert_eq!(alice.store.unspent_total(), 0);
     assert_eq!(bob.store.unspent_total(), 0);
 
@@ -77,10 +80,19 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
         .shield(&chain, &metadata, &dev, 1_000, "first shield")
         .expect("the shield settles");
     println!(
-        "shield of 1000 quanta included at block {} ({:.2?})",
-        shielded.included_at, shielded.inclusion
+        "shield of 1000 quanta included at block {} ({:.2?}), leaf {}",
+        shielded.included_at, shielded.inclusion, shielded.leaf_index
     );
-    alice.sync(&chain).expect("A syncs the shield");
+    // The leaf index is the dispatch confirmation: an included extrinsic
+    // whose dispatch failed appends no leaf. And on an otherwise idle dev
+    // chain this is the only shield in its block, so both halves of the entry
+    // rule are decidable.
+    assert_eq!(
+        shielded.entry_check,
+        EntryRhoCheck::Confirmed,
+        "the entry rho prediction should hold for the only shield in a block"
+    );
+    alice.sync(&chain, &metadata).expect("A syncs the shield");
     assert_eq!(alice.store.unspent_total(), 1_000);
     assert_eq!(alice.store.notes.len(), 1);
     assert_eq!(alice.store.notes[0].memo, "first shield");
@@ -106,6 +118,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
             300,
             Some(fee),
             memo,
+            MerkleSource::Local,
         )
         .expect("the payment settles");
     println!(
@@ -114,12 +127,12 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
     );
     assert_eq!(payment.change, 1_000 - 300 - fee);
 
-    bob.sync(&chain).expect("B syncs");
+    bob.sync(&chain, &metadata).expect("B syncs");
     assert_eq!(bob.store.unspent_total(), 300);
     assert_eq!(bob.store.notes.len(), 1);
     assert_eq!(bob.store.notes[0].memo, memo);
 
-    alice.sync(&chain).expect("A syncs");
+    alice.sync(&chain, &metadata).expect("A syncs");
     assert_eq!(alice.store.unspent_total(), payment.change);
     assert_eq!(
         alice.store.notes.iter().filter(|note| note.spent).count(),
@@ -142,6 +155,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
             100,
             Some(back_fee),
             back_memo,
+            MerkleSource::Local,
         )
         .expect("the payment back settles");
     println!(
@@ -149,9 +163,9 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
         back.proving, back.included_at
     );
 
-    bob.sync(&chain).expect("B syncs");
+    bob.sync(&chain, &metadata).expect("B syncs");
     assert_eq!(bob.store.unspent_total(), 300 - 100 - back_fee);
-    alice.sync(&chain).expect("A syncs");
+    alice.sync(&chain, &metadata).expect("A syncs");
     assert_eq!(alice.store.unspent_total(), payment.change + 100);
     assert!(alice
         .store

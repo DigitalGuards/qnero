@@ -14,7 +14,19 @@ pub fn slot_fee_floor(metadata: &ChainMetadata, ct_1_len: usize, ct_2_len: usize
     let bytes = ct_1_len as u64 + ct_2_len as u64;
     metadata
         .min_leaf_fee
-        .saturating_add(bytes.div_ceil(u64::from(metadata.ciphertext_bytes_per_fee_quantum)))
+        .saturating_add(bytes.div_ceil(bytes_per_fee_quantum(metadata)))
+}
+
+/// The divisor, clamped the way the pallet clamps it.
+///
+/// `pallet_shielded::bytes_per_fee_quantum` is
+/// `u64::from(T::CiphertextBytesPerFeeQuantum::get().max(1))`, and the clamp is
+/// what keeps a misconfigured runtime from dividing by zero on a live block.
+/// The value reaches the wallet from `state_getMetadata` on whatever endpoint
+/// `--node` names, so a node that declares it as zero would panic the wallet
+/// inside the fee arithmetic, before any error path runs.
+fn bytes_per_fee_quantum(metadata: &ChainMetadata) -> u64 {
+    u64::from(metadata.ciphertext_bytes_per_fee_quantum.max(1))
 }
 
 /// The whole-submission floor, over every real slot a submission carries.
@@ -32,9 +44,7 @@ pub fn submission_fee_floor(metadata: &ChainMetadata, real_slots: u64, carried_b
     metadata
         .min_leaf_fee
         .saturating_mul(real_slots)
-        .saturating_add(
-            carried_bytes.div_ceil(u64::from(metadata.ciphertext_bytes_per_fee_quantum)),
-        )
+        .saturating_add(carried_bytes.div_ceil(bytes_per_fee_quantum(metadata)))
 }
 
 /// A ciphertext that exceeds `MaxCiphertextBytes` fails the extrinsic's SCALE
@@ -70,6 +80,7 @@ mod tests {
             ciphertext_bytes_per_fee_quantum: 512,
             max_ciphertext_bytes: 2048,
             signed_extensions: Vec::new(),
+            storage: Vec::new(),
         }
     }
 
@@ -98,6 +109,17 @@ mod tests {
         let metadata = runtime();
         let slot = slot_fee_floor(&metadata, 1731, 1731);
         assert_eq!(submission_fee_floor(&metadata, 1, 3462), slot);
+    }
+
+    /// A node is free to answer whatever it likes for a constant, and a zero
+    /// divisor would panic inside the fee arithmetic before any error path
+    /// runs. The pallet clamps for the same reason.
+    #[test]
+    fn a_zero_divisor_does_not_panic_the_fee_arithmetic() {
+        let mut metadata = runtime();
+        metadata.ciphertext_bytes_per_fee_quantum = 0;
+        assert_eq!(slot_fee_floor(&metadata, 1731, 1731), 1 + 3462);
+        assert_eq!(submission_fee_floor(&metadata, 1, 3462), 1 + 3462);
     }
 
     #[test]

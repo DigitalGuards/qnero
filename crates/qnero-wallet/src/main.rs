@@ -12,7 +12,7 @@ use qnero_wallet::keys::{create_seed, default_seed_path, store_path_for};
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{RpcClient, DEFAULT_NODE_URL};
 use qnero_wallet::store::PendingKind;
-use qnero_wallet::wallet::{Wallet, NUM_LEAF_PROOFS};
+use qnero_wallet::wallet::{EntryRhoCheck, MerkleSource, Wallet, NUM_LEAF_PROOFS};
 use qnero_wallet::POOL_QUANTUM;
 
 /// Amounts are in pool quanta. One quantum is 10^10 planck, 0.01 QTC.
@@ -30,7 +30,13 @@ KEY HANDLING IS DEV GRADE. The seed is 32 bytes of hex in a file with mode
 0600, with no passphrase, no key derivation and no encryption at rest, and the
 note store beside it holds every note's rho and r in the clear. Anyone who can
 read those two files can spend every note this wallet holds and can link every
-spend it has made. Use it on a dev chain and nowhere else."
+spend it has made. Use it on a dev chain and nowhere else.
+
+WHAT THE NODE LEARNS. A scan reads the whole leaf range and the whole settled
+nullifier set, and a spend rebuilds the commitment tree locally, so no request
+this wallet makes names a note as its own. Passing --merkle-rpc gives that up:
+it asks the node for a proof of each leaf being spent, seconds before the
+settlement that publishes the matching nullifiers."
 )]
 struct Cli {
     /// JSON-RPC endpoint of the node.
@@ -86,6 +92,11 @@ enum Command {
         /// Skip the sync that normally runs first.
         #[arg(long)]
         no_sync: bool,
+        /// Ask the node for each input's Merkle proof. The default rebuilds
+        /// the tree locally; this flag tells the node which leaves are yours,
+        /// seconds before the settlement that publishes their nullifiers.
+        #[arg(long)]
+        merkle_rpc: bool,
     },
     /// Chain head, last synced block and tree leaf count.
     Status,
@@ -138,8 +149,9 @@ fn main() -> Result<()> {
         Command::Sync => {
             let rpc = RpcClient::new(&cli.node);
             let chain = Chain::new(&rpc);
+            let metadata = ChainMetadata::fetch(&rpc)?;
             let mut wallet = Wallet::open(&seed_path)?;
-            let report = wallet.sync(&chain)?;
+            let report = wallet.sync(&chain, &metadata)?;
             println!(
                 "scanned leaves {}..{} at block {}",
                 report.scanned_from, report.scanned_to, report.head_block
@@ -218,19 +230,27 @@ fn main() -> Result<()> {
             );
             let report = wallet.shield(&chain, &metadata, &from, amount, &memo)?;
             println!("commitment  {}", report.commitment);
+            println!("leaf        {}", report.leaf_index);
             println!(
                 "included    block {} after {:.2?}",
                 report.included_at, report.inclusion
             );
-            if !report.entry_rho_matches {
-                println!(
-                    "note        the entry rho was derived for block {} and entry index {}, and \
-                     the shield landed in block {}. The note is this wallet's own and is \
-                     spendable; the rule in docs/CIRCUIT.md 9.8 is what missed.",
-                    report.predicted_block, report.predicted_entry_index, report.included_at
-                );
+            match &report.entry_check {
+                EntryRhoCheck::Confirmed => {}
+                EntryRhoCheck::Missed { reason } => println!(
+                    "note        the entry rho prediction missed: {reason}. The note is this \
+                     wallet's own and is spendable; the rule in docs/CIRCUIT.md 9.8 is what \
+                     missed, and a recipient checking it strictly would refuse the note."
+                ),
+                EntryRhoCheck::Unproven { entries_in_block } => println!(
+                    "note        {entries_in_block} shield entries settled in block {}, so which \
+                     entry index the chain assigned this note is not decidable from storage \
+                     alone. Only the Shielded event carries it. The note is spendable either \
+                     way.",
+                    report.included_at
+                ),
             }
-            let sync = wallet.sync(&chain)?;
+            let sync = wallet.sync(&chain, &metadata)?;
             println!(
                 "synced      {} new note(s), unspent total {} quanta",
                 sync.received,
@@ -243,6 +263,7 @@ fn main() -> Result<()> {
             fee,
             memo,
             no_sync,
+            merkle_rpc,
         } => {
             let rpc = RpcClient::new(&cli.node);
             let chain = Chain::new(&rpc);
@@ -251,8 +272,17 @@ fn main() -> Result<()> {
                 Address::decode(&to).context("the recipient address does not decode")?;
             let mut wallet = Wallet::open(&seed_path)?;
             if !no_sync {
-                wallet.sync(&chain)?;
+                wallet.sync(&chain, &metadata)?;
             }
+            let merkle = if merkle_rpc {
+                println!(
+                    "merkle      zkTree_getMerkleProof (this names the leaves being spent to the \
+                     node)"
+                );
+                MerkleSource::Rpc
+            } else {
+                MerkleSource::Local
+            };
 
             // The fee floor and the note selection are settled before any
             // circuit is built: both refuse spends that seconds of circuit
@@ -279,6 +309,7 @@ fn main() -> Result<()> {
                 amount,
                 Some(resolved_fee),
                 &memo,
+                merkle,
             )?;
             println!("anchor      block {}", report.anchor_block);
             println!(
@@ -292,7 +323,7 @@ fn main() -> Result<()> {
                 "inclusion   block {} after {:.2?}",
                 report.included_at, report.inclusion
             );
-            let sync = wallet.sync(&chain)?;
+            let sync = wallet.sync(&chain, &metadata)?;
             println!(
                 "synced      {} new note(s), unspent total {} quanta",
                 sync.received,

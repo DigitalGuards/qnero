@@ -1,10 +1,12 @@
 //! Reads of chain state: headers, the commitment tree, ciphertexts,
 //! nullifiers.
 
+use std::collections::BTreeSet;
+
 use anyhow::{anyhow, bail, Context, Result};
 use codec::Decode;
 use qnero_circuit::header::{HeaderInputs, DIGEST_LOGS_SIZE};
-use qnero_circuit::merkle::{MerklePath, SIBLINGS_PER_LEVEL};
+use qnero_circuit::merkle::{CommitmentTree, MerklePath, SIBLINGS_PER_LEVEL};
 use qnero_notes::Digest;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -187,6 +189,137 @@ impl<'a> Chain<'a> {
         }
     }
 
+    /// The tree depth as of one block.
+    ///
+    /// The pallet folds a block's leaves in `on_finalize` and grows the tree
+    /// there, so the depth read at a block hash is the depth its root was
+    /// computed at. A local rebuild at any other depth reaches a different
+    /// root.
+    pub fn tree_depth_at(&self, at: &[u8; 32]) -> Result<u8> {
+        let key = storage_prefix(ZK_TREE_PALLET, "Depth");
+        match self.rpc.storage(&key, Some(&hex_0x(at)))? {
+            Some(bytes) => Ok(u8::decode(&mut &bytes[..]).context("ZkTree::Depth is not a u8")?),
+            None => Ok(0),
+        }
+    }
+
+    /// Every leaf hash in `range`, at one block, in index order.
+    ///
+    /// A missing entry is the pallet's `empty_hash()`, which is what
+    /// `tree::get_leaf_hash` substitutes, so a local rebuild pads the same way
+    /// the chain does.
+    pub fn leaf_hashes(&self, range: std::ops::Range<u64>, at: &[u8; 32]) -> Result<Vec<Digest>> {
+        let at = hex_0x(at);
+        let mut out = Vec::with_capacity((range.end.saturating_sub(range.start)) as usize);
+        for chunk_start in range.clone().step_by(LEAF_HASH_BATCH) {
+            let chunk_end = (chunk_start + LEAF_HASH_BATCH as u64).min(range.end);
+            let keys: Vec<Vec<u8>> = (chunk_start..chunk_end)
+                .map(|index| identity_map_key(ZK_TREE_PALLET, "Leaves", index))
+                .collect();
+            for (offset, value) in self.rpc.storage_batch(&keys, &at)?.into_iter().enumerate() {
+                let index = chunk_start + offset as u64;
+                let digest = match value {
+                    Some(bytes) => {
+                        let bytes: [u8; 32] = bytes
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| anyhow!("ZkTree::Leaves({index}) is not 32 bytes"))?;
+                        Digest::from_bytes(&bytes).map_err(|_| {
+                            anyhow!(
+                                "ZkTree::Leaves({index}) is {} and is not a canonical digest, so \
+                                 this wallet cannot rebuild the tree over it. Pass \
+                                 `--merkle-rpc` to ask the node for the path.",
+                                hex::encode(bytes)
+                            )
+                        })?
+                    }
+                    None => qnero_circuit::merkle::empty_digest(),
+                };
+                out.push(digest);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Rebuild the chain's commitment tree at one block, from its leaves.
+    ///
+    /// `pallet-zk-tree` folds a block's leaves in `on_finalize`, so at a block
+    /// hash every leaf `< LeafCount` is in the root and `Depth` is the depth
+    /// that root was computed at. `CommitmentTree` mirrors the pallet's node
+    /// rule exactly, so the root this reaches equals the header's
+    /// `zkTreeRoot`, and the caller checks that before it proves anything.
+    ///
+    /// This is the route a wallet takes for its own input paths. The proof
+    /// RPC is asked only about leaves a wallet is spending, so every call
+    /// names one of the caller's own leaves to the node moments before the
+    /// settlement publishes the matching nullifier. Reading the whole leaf
+    /// range is the read a scan already makes and it distinguishes nothing.
+    pub fn rebuild_tree(&self, at: &[u8; 32]) -> Result<LocalTree> {
+        let leaf_count = self.leaf_count_at(at)?;
+        let depth = usize::from(self.tree_depth_at(at)?);
+        let leaves = self.leaf_hashes(0..leaf_count, at)?;
+        let tree = CommitmentTree::new(&leaves, depth).with_context(|| {
+            format!(
+                "failed to rebuild the commitment tree over {leaf_count} leaves at depth {depth}"
+            )
+        })?;
+        Ok(LocalTree { leaves, tree })
+    }
+
+    /// The whole settled nullifier set at one block, in hex.
+    ///
+    /// Paged over the map's keys. `UsedNullifiers` is `Blake2_128Concat`, so
+    /// the raw 32-byte nullifier is the tail of every key the node returns and
+    /// no value fetch is needed.
+    ///
+    /// This replaces asking the node about one specific nullifier. That
+    /// question hands the raw value over in the clear, and a node that logs it
+    /// learns, per client, the set of nullifiers a wallet will publish when it
+    /// spends: weeks later a settlement publishes one of them and the spend is
+    /// attributed with certainty. Reading the public map whole says nothing
+    /// about which entries matter.
+    pub fn used_nullifiers_at(&self, at: &[u8; 32]) -> Result<BTreeSet<String>> {
+        let prefix = storage_prefix(SHIELDED_PALLET, "UsedNullifiers");
+        let at = hex_0x(at);
+        let prefix_hex = hex_0x(&prefix);
+        let mut out = BTreeSet::new();
+        let mut start: Option<String> = None;
+        loop {
+            let params = match &start {
+                Some(cursor) => json!([prefix_hex, KEY_PAGE, cursor, at]),
+                None => json!([prefix_hex, KEY_PAGE, Value::Null, at]),
+            };
+            let keys: Vec<String> = self.rpc.call_as("state_getKeysPaged", params)?;
+            if keys.is_empty() {
+                break;
+            }
+            let last = keys[keys.len() - 1].clone();
+            for key in &keys {
+                let bytes = decode_hex(key)?;
+                // `twox_128(pallet) ++ twox_128(item) ++ blake2_128(k) ++ k`.
+                let Some(raw) = bytes.get(prefix.len() + 16..) else {
+                    bail!("a UsedNullifiers key is {} bytes, too short", bytes.len());
+                };
+                if raw.len() != 32 {
+                    bail!(
+                        "a UsedNullifiers key carries a {}-byte nullifier, expected 32",
+                        raw.len()
+                    );
+                }
+                out.insert(hex::encode(raw));
+            }
+            if keys.len() < KEY_PAGE {
+                break;
+            }
+            // The guard against a node that answers the same page forever.
+            if start.as_deref() == Some(last.as_str()) {
+                bail!("state_getKeysPaged stopped advancing at {last}");
+            }
+            start = Some(last);
+        }
+        Ok(out)
+    }
+
     /// The commitment and ciphertext of every leaf in `range`, at one block.
     ///
     /// Both maps are `Identity`-hashed on the leaf index, so paging is by
@@ -240,7 +373,13 @@ impl<'a> Chain<'a> {
         Ok(out)
     }
 
-    /// Whether each nullifier has been settled, at one block.
+    /// Whether each nullifier has been settled, at one block, by asking the
+    /// node about those exact nullifiers.
+    ///
+    /// This names the values it asks about to whoever runs the node, so it is
+    /// for nullifiers that are already public: the post-inclusion confirmation
+    /// of a settlement this wallet has just broadcast. Everything else reads
+    /// the set through [`Chain::used_nullifiers_at`] and decides locally.
     pub fn nullifiers_used(&self, nullifiers: &[[u8; 32]], at: &[u8; 32]) -> Result<Vec<bool>> {
         let at = hex_0x(at);
         let mut used = Vec::with_capacity(nullifiers.len());
@@ -377,8 +516,53 @@ impl<'a> Chain<'a> {
     }
 }
 
+/// The chain's commitment tree, rebuilt in memory at one block.
+#[derive(Debug)]
+pub struct LocalTree {
+    leaves: Vec<Digest>,
+    tree: CommitmentTree,
+}
+
+impl LocalTree {
+    /// The root this rebuild reaches. Compare it against the anchor header's
+    /// `zkTreeRoot` before proving.
+    pub fn root(&self) -> Digest {
+        self.tree.root()
+    }
+
+    pub fn leaf_count(&self) -> u64 {
+        self.leaves.len() as u64
+    }
+
+    pub fn depth(&self) -> usize {
+        self.tree.depth()
+    }
+
+    /// The leaf hash at an index, as the chain holds it.
+    pub fn leaf(&self, index: u64) -> Option<Digest> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| self.leaves.get(index))
+            .copied()
+    }
+
+    /// The circuit-shaped path to one leaf.
+    pub fn path(&self, index: u64) -> Result<MerklePath> {
+        let index = usize::try_from(index)
+            .map_err(|_| anyhow!("leaf index {index} does not fit in memory"))?;
+        self.tree.path(index)
+    }
+}
+
 /// Leaves read per `state_queryStorageAt` call.
 const LEAF_BATCH: usize = 64;
+
+/// Leaf hashes read per `state_queryStorageAt` call. One key per leaf, where a
+/// scan reads three, so the page is wider.
+const LEAF_HASH_BATCH: usize = 256;
+
+/// Keys read per `state_getKeysPaged` call.
+const KEY_PAGE: usize = 1000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TreeState {

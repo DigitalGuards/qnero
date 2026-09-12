@@ -38,6 +38,36 @@ development workstation.
 
 M6 owes real key storage. Until then, use this on a dev chain and nowhere else.
 
+## What the node learns
+
+A shielded wallet leaks through what it *asks* as much as through what it
+publishes, and the node it asks is a third party for anyone who does not run
+their own. Two rules hold here, and both are properties of the request stream
+alone. No assertion over an answer can see either one:
+
+- **A sync never names a nullifier.** Spent status is decided against a local
+  copy of `UsedNullifiers`, paged whole through `state_getKeysPaged`. Probing
+  the map with this wallet's own nullifiers would hand them over in the clear,
+  because the hasher is `Blake2_128Concat` and the raw key travels in the
+  request. A node that logged those would hold, per client, the set of values
+  this wallet will publish when it spends, and could attribute any later
+  settlement that published one of them with certainty, before the wallet had
+  spent anything at all.
+- **A spend never names a leaf.** Merkle paths are rebuilt locally from
+  `ZkTree::Leaves` at the anchor block. `zkTree_getMerkleProof` is only ever
+  asked about a leaf the caller is spending, so every such call identifies one
+  of the caller's own leaves, and the settlement publishing the matching
+  nullifiers arrives on the same connection seconds later. `--merkle-rpc` opts
+  back into that, and its help text says what it gives up.
+
+Both replacements read public data whole: the whole leaf range, the whole
+settled set. That costs `O(leaf_count)` reads per spend where the proof RPC
+costs one, and it distinguishes nothing.
+
+What is still visible to the node: this wallet's IP, that it is a Qnero wallet,
+when it syncs, and the extrinsics it submits. Traffic analysis over submission
+timing is not addressed here and is not addressable inside the wallet.
+
 The transparent ML-DSA-87 key and the shielded spending key are separate
 secrets and neither derives from the other. A transparent key that could derive
 the spending key would make every shield linkable to its notes by anyone
@@ -58,7 +88,13 @@ qnero-wallet [--node URL] [--file SEED] <command>
 ```
 
 `--node` defaults to `http://127.0.0.1:9944`. `--file` defaults to
-`qnero-wallet.seed` in the working directory.
+`$XDG_DATA_HOME/qnero/qnero-wallet.seed`, or
+`~/.local/share/qnero/qnero-wallet.seed` when `XDG_DATA_HOME` is unset. It is
+never relative: the documented way to run this binary is from a checkout, and
+a default that resolved in the working directory would drop an unencrypted
+spending key and a store full of note secrets into whatever repository the
+user happened to be standing in, one `git add -A` from a public history. The
+repository also gitignores `*.seed` and `*.store.json` for the same reason.
 
 ### `keygen`
 
@@ -84,12 +120,29 @@ One thing here is a prediction. The entry rule is
 9.8), and neither half is knowable before submission: the block a signed
 extrinsic lands in is the block producer's choice and `EntryCount` moves with
 every other shield. So the wallet predicts `(head + 1, EntryCount)`, submits,
-and checks afterwards, printing a note when the prediction missed. A miss
-strands nothing. The chain does not evaluate the rule, `inner` is opaque to it,
-and the note is this wallet's own: its commitment opens whatever `rho` went
-into it. What a miss costs is the rule's uniqueness argument for that one note,
-and a recipient that checked the rule strictly would refuse it. This is an open
-issue, listed below.
+and checks **both halves** afterwards against what the chain assigned:
+
+- the block half, `included_at == head + 1`;
+- the index half, `EntryCount` at the parent of the inclusion block equals the
+  value the note was built from;
+- and how many entries settled in the inclusion block. Exactly one means the
+  index the chain assigned is the predicted one. More than one means the
+  prediction is not decidable from storage alone, because only the `Shielded`
+  event carries an entry index and decoding it needs the runtime's full type
+  registry; that case is reported as unproven.
+
+A miss strands nothing. The chain does not evaluate the rule, `inner` is opaque
+to it, and the note is this wallet's own: its commitment opens whatever `rho`
+went into it. What a miss costs is the rule's uniqueness argument for that one
+note, and a recipient that checked the rule strictly would refuse it. This is
+an open issue, listed below.
+
+The dispatch is then confirmed. An extrinsic in a block is not a dispatch that
+succeeded: a shield the runtime refused, because the dev account cannot pay or
+the value is not a whole multiple of `POOL_QUANTUM`, is included and appends no
+leaf. So after inclusion the wallet reads the leaves the block appended and
+looks for its own commitment among them, prints the leaf index it landed at,
+and turns an absent one into an error that drops the pending entry.
 
 ### `sync`
 
@@ -117,8 +170,15 @@ be spent. The recipient is the last line. A refused note is recorded in the
 store's `rejected` list with its reason, so a wallet can say why a payment
 someone claims to have sent is missing from its balance.
 
-Finally every unspent note's nullifier is probed against `UsedNullifiers` and
-the matches are marked spent. Only the nullifier key can ask that question.
+Finally the settled nullifier set is read whole, pinned to the same block, and
+every unspent note whose nullifier is in it is marked spent. Only the nullifier
+key can compute those values at all, and the question is asked locally: see
+"What the node learns" above.
+
+Every storage key a sync builds is checked against the runtime's own metadata
+first (`ensure_known_storage`). On the read path a drifted name or hasher is
+silent, because a key that is not there reads as an empty map, and an empty map
+is a zero balance or a settled note reported unspent.
 
 ### `balance`
 
@@ -126,7 +186,7 @@ Unspent total, pending total, and the note list with leaf indices, block
 numbers, spent state and memos. Pending and refused entries are listed under
 it.
 
-### `send --to <qn1...> --amount N [--fee F] [--memo TEXT] [--no-sync]`
+### `send --to <qn1...> --amount N [--fee F] [--memo TEXT] [--no-sync] [--merkle-rpc]`
 
 Syncs, then spends up to two notes into a payment and a change note.
 
@@ -148,20 +208,41 @@ refusal costs nothing:
    is not reachable in one spend and the wallet says so, naming what is
    reachable. A witness built anyway carries a balance equation that cannot
    hold.
-3. **Anchor.** The current head. `chain_getHeader` and `zkTree_getMerkleProof`
-   are read at that one hash, because the tree root moves every block and the
-   header a proof binds to must be the one whose root the path reaches. The
-   wallet recomputes the header hash from the six fields plus the re-encoded
-   digest logs and compares it against `chain_getBlockHash`. That check is the
-   cheap way to catch a wrong digest re-encoding, which otherwise costs a proof
-   and comes back as `BlockHashMismatch`.
-4. **Paths.** `zkTree_getMerkleProof` returns siblings in child-index order
-   with no position; `MerklePath::from_unsorted` converts them into the sorted
-   form plus the 2-bit position hint the circuit consumes. The wallet then
-   recomputes the root from the converted path and compares it against both the
-   proof's root and the header's `zkTreeRoot`. A leaf appended in the current
-   block is not folded into the tree yet and the RPC returns `null`; that is
-   reported as "wait one block", separately from a node that is unwell.
+3. **Anchor.** Always the current head, and every read of the anchor is pinned
+   to that one hash, because the tree root moves every block and the header a
+   proof binds to must be the one whose root the input paths reach. The wallet
+   recomputes the header hash from the six fields plus the re-encoded digest
+   logs and compares it against `chain_getBlockHash`. That check is the cheap
+   way to catch a wrong digest re-encoding, which otherwise costs a proof and
+   comes back as `BlockHashMismatch`.
+
+   Head-anchoring is also a privacy policy, and it is written down here because
+   nothing else would stop a later change from breaking it. The anchor block is
+   a public input of the settlement, so an observer reads the gap between
+   anchor and inclusion. Everyone anchoring at the head makes that gap the same
+   short interval for everyone. An anchor at head minus `k`, or one cached and
+   reused across two spends to save a `chain_getHeader`, is a distinguisher
+   inside the 256-block window and marks both spends as one wallet's. So the
+   anchor is never behind the head and never reused. The head is taken after
+   the circuits are built for the same reason: the anchor-to-inclusion gap
+   otherwise publishes this machine's circuit build time.
+4. **Paths.** Rebuilt locally. The wallet reads `ZkTree::Leaves`,
+   `ZkTree::LeafCount` and `ZkTree::Depth` at the anchor block and rebuilds the
+   tree with `qnero_circuit::merkle::CommitmentTree`, which mirrors
+   `pallet-zk-tree` exactly: the same 4-ary node rule, the same sorted
+   children, the same all-zero padding for an absent child. The rebuilt root is
+   compared against the header's `zkTreeRoot`, each input's leaf against the
+   note's commitment, and each path's recomputed root against the header again,
+   all before any proving. A leaf the anchor block has not folded yet is
+   reported as "wait one block": a note cannot be minted and spent in the same
+   block.
+
+   `--merkle-rpc` asks the node. `zkTree_getMerkleProof` returns siblings in
+   child-index order with no position and
+   `MerklePath::from_unsorted` converts them into the sorted form plus the
+   2-bit position hint the circuit consumes, with the same root checks. It is
+   one call per input against `O(leaf_count)` reads, and it tells the node
+   which leaves are yours.
 5. **Witness.** One real input per selected note, and
    `InputNote::dummy_random` for the empty slot. Never `InputNote::dummy`: a
    repeated `(rho, r)` publishes a nullifier the chain has already settled and
@@ -199,12 +280,20 @@ depth and root, and the wallet's own last synced block.
 ## Store format
 
 One JSON file beside the seed: `<seed path>.store.json`, mode 0600, written
-through a temporary file and renamed, so an interrupted write cannot truncate
-the only copy of a note's `r`.
+through a uniquely named temporary file opened with `create_new` and renamed,
+with the containing directory synced afterwards. An interrupted write cannot
+truncate the only copy of a note's `r`, a pre-existing temporary file cannot
+receive the secrets at a looser mode, and a crash after the rename cannot lose
+the directory entry.
+
+It is refused on load if anyone but its owner can read or write it, by the same
+check the seed beside it gets. `save` writes 0600, and nothing re-establishes
+that for a file restored from a tarball without `--preserve-permissions` or
+copied between machines under a permissive umask.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "address": "qn1...",
   "last_synced_block": 1062,
   "next_leaf": 1069,
@@ -243,7 +332,8 @@ the only copy of a note's `r`.
       "value": 5,
       "reason": "its nullifier duplicates a note this wallet already holds"
     }
-  ]
+  ],
+  "used_nullifiers": ["<64 hex chars>", "..."]
 }
 ```
 
@@ -266,6 +356,20 @@ Field notes:
   hand; it carries the block it was submitted at and the extrinsic it was
   submitted as, which is enough to tell the two apart.
 - `rejected` holds decryptable outputs that were refused, with the reason.
+- `used_nullifiers` is a local copy of the chain's `UsedNullifiers` map as of
+  `last_synced_block`, paged whole on every sync. It is public data, and it is
+  here so that spent status is decided locally: see "What the node learns".
+  Deleting it costs nothing; the next sync repages it.
+- `version` is 2. A version-1 store, written before `used_nullifiers` existed,
+  is refused. Deleting it and re-syncing recovers every unspent note, which is
+  the same recovery the paragraph below describes.
+
+Note secrets never reach a `Debug` format. `StoredNote`, `PendingNote`,
+`WalletStore` and `PreparedSpend` all hand-write `Debug` and print
+`[REDACTED]` for `rho`, `r` and the memo, the way every other type in this
+workspace that touches note material does. A derive would put every note's
+secrets into the first log line anyone adds, and `rho` and `r` beside a
+published nullifier are the whole link from a settled spend to its note.
 
 Deleting the store and re-syncing recovers every unspent note, because every
 note's plaintext is on chain in its ciphertext. What it does not recover is
@@ -276,7 +380,7 @@ true and is why it is not in the balance.
 ## Tests
 
 ```
-# unit tests, no chain, fast
+# unit tests plus the fake-node tests, no chain, fast
 nice -n 19 cargo test -j 2 --release -p qnero-wallet
 
 # the whole flow against a running dev node
@@ -292,6 +396,18 @@ QNERO_DEV_NODE=http://127.0.0.1:9944 RAYON_NUM_THREADS=4 nice -n 19 \
 
 `dev_node_e2e` skips itself, loudly, when `QNERO_DEV_NODE` is unset, so the
 workspace gate does not need a chain.
+
+Two of the default tests run the wallet against a scriptable JSON-RPC node in
+`tests/support/mod.rs` that records every request body:
+
+- `tests/node_learns_nothing.rs` asserts a sync never names one of this
+  wallet's nullifiers and that a rebuilt tree asks nothing about a leaf. Those
+  are properties of the request stream alone: the probing version and the
+  paging version reach identical balances, so no assertion over a balance can
+  see the difference.
+- `tests/shield_dispatch.rs` asserts that a shield whose extrinsic was
+  included and whose dispatch failed is an error, and leaves no pending note
+  behind in memory or on disk.
 
 ## Provenance
 
@@ -318,9 +434,11 @@ are cited at each site.
 1. **Key storage is dev grade.** Above. M6.
 2. **The entry `rho` for a shield is predicted.** A wallet cannot know the
    block its signed extrinsic lands in, and `EntryCount` moves with every
-   other shield. The prediction is checked afterwards and a miss is printed.
-   Closing it properly needs either a chain-side rule that does not depend on
-   the inclusion block, or a shield that carries `inner` derived at settlement
+   other shield. Both halves are checked afterwards and a miss is printed, and
+   a block that settled more than one entry is reported as unproven, because
+   the index the chain assigned is only in the `Shielded` event. Closing it
+   properly needs either a chain-side rule that does not depend on the
+   inclusion block, or a shield that carries `inner` derived at settlement
    time, and both are M6 decisions.
 3. **A received note's `rho` is not checked against the entry rule.** The rule
    hashes `(block_number, entry_index)` and only the `Shielded` event publishes
@@ -330,21 +448,34 @@ are cited at each site.
    recipient, a duplicated nullifier, does not depend on it.
 4. **`POOL_QUANTUM` is the one chain value with no metadata surface.** It is a
    constant of the pallet crate with no `#[pallet::constant]` declaration, so
-   the wallet carries a copy. A mismatch is loud: `shield` refuses a value that
-   is not a whole multiple with `ValueNotQuantized`.
-5. **`N` is not discoverable over RPC either.** The wallet reads
-   `qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS`, which is the same constant
-   `chain/pallets/shielded/build.rs` reads. A wallet built at a different `N`
-   produces a proof whose public-input length the chain's embedded verifier
-   refuses, after the full proving cost has been paid. The wallet does not
-   compare its leaf verifier bytes against `pallet_shielded::LEAF_VERIFIER_ARTIFACT`,
-   which exists for exactly that check and is not reachable over RPC.
+   the wallet carries a copy. A mismatch surfaces as a `shield` whose dispatch
+   failed, because the runtime refuses a value that is not a whole multiple
+   with `ValueNotQuantized` and the wallet now confirms that a leaf was
+   actually appended. It surfaces as "the dispatch failed and no note was
+   created". Surfacing the error's own name would need the runtime's full type
+   registry to decode a failed dispatch's `DispatchError`.
+5. **`N` is not discoverable over RPC either.** The wallet resolves it as
+   `QNERO_NUM_LEAF_PROOFS` falling back to
+   `qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS`, which is exactly how
+   `chain/pallets/shielded/build.rs` resolves it, so one environment produces
+   one `N` on both sides. Building the runtime and the wallet in *different*
+   environments still diverges silently: the proof's public-input length is
+   refused by the chain's embedded verifier after the full proving cost has
+   been paid. The wallet does not compare its leaf verifier bytes against
+   `pallet_shielded::LEAF_VERIFIER_ARTIFACT`, which exists for exactly that
+   check and is not reachable over RPC.
 6. **One transfer per submission.** A private batch has six slots and the
    wallet fills one. Filling more needs a queue and a policy for what to batch
    with what, and the anonymity argument for batching is the whole point of the
    shape, so it is a design decision, and the loop is the smallest part of it.
-7. **No local tree rebuild.** The chain exposes `zkTree_getMerkleProof` and the
-   wallet uses it, checking the converted path's root against the header before
-   proving. `qnero_circuit::merkle::CommitmentTree` mirrors the pallet exactly
-   and would rebuild the tree from `ZkTree::Leaves` if the RPC were ever
-   disabled; nothing wires it up today.
+7. **A local rebuild costs `O(leaf_count)` reads per spend.** Merkle paths are
+   rebuilt locally because asking the node for a proof names the leaf being
+   spent, and that is the sender side of the pool deanonymized against whoever
+   runs the RPC. The price is reading the whole leaf range at the anchor block
+   on every spend where the proof RPC is one call. On a long-lived chain that
+   wants an incremental local tree kept across syncs, which is bookkeeping this
+   wallet does not have. `--merkle-rpc` trades the privacy back for the speed,
+   and says so.
+8. **Traffic analysis is not addressed.** No request names a note, but the node
+   still sees an IP, a sync pattern and submission timing. Nothing inside a
+   wallet fixes that.

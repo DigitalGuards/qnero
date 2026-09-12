@@ -5,3 +5,11 @@
 /hegemon/
 target/
 CLAUDE.md
+
+# Wallet material. `qnero-wallet keygen` writes an unencrypted spending key and
+# a note store holding every note's rho and r; the default path is under the
+# user's data directory, and these patterns cover a `--file` pointed here.
+*.seed
+*.seed.store.json
+*.store.json
+*.store.json.tmp*

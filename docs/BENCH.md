@@ -203,24 +203,38 @@ against a `--dev --tmp` node that was producing about one block a second.
 ### What a wallet pays per transaction
 
 `qnero-wallet send`, at the chain's `N = 6`, one real transfer and five padding
-slots, measured over the two payments of the end-to-end run in
-`docs/OPS-DEV.md`:
+slots. Every figure below is the range over the **two payments** of the
+end-to-end run in `docs/OPS-DEV.md`, and a two-sample range is exactly what it
+looks like: a wider sample would widen it, and the block time the node happens
+to be running at moves the inclusion term on its own.
 
-| | `--features parallel`, `RAYON_NUM_THREADS=4` |
+| | `--features parallel`, `RAYON_NUM_THREADS=4` (2 samples) |
 |---|---:|
-| leaf + private batch circuit build, once per process | 2.4 s |
-| private batch prove | 3.3 to 3.5 s |
+| leaf + private batch circuit build, once per process | 2.37 to 2.38 s |
+| private batch prove | 3.44 to 3.58 s |
 | private batch proof | 150908 bytes |
-| submit to inclusion | 0.5 to 1.6 s |
-| whole `send` command, wall clock | 6.4 s |
+| submit to inclusion | 1.04 s |
+| whole `send` command, wall clock | 7.06 to 7.22 s |
+
+An earlier revision of this table published 6.4 s of wall clock, a 0.5 to 1.6 s
+inclusion range and a 3.3 to 3.5 s proving range, none of which the transcript
+it cited supported. The numbers above are the transcript's own, and the
+inclusion term is the one to distrust: it is the wait for a block, so it is a
+property of the chain.
 
 The proof is 150908 bytes at `N = 6`, where M3 measured 157476 at `N = 7`: a
 recursive proof's size moves a little with the number of inner verifications
 and mostly with the FRI config.
 
-Proving is 3.4 s where M3 measured 6.4 s for `N = 7`. That is the halving M4
-bought when it chose six slots: seven recursive verifiers are 24324 gates and
-do not fit `degree_bits = 15` once blinding adds its rows, six do.
+Proving is about 3.5 s where M3 measured 6.4 s for `N = 7`. That is the halving
+M4 bought when it chose six slots: seven recursive verifiers are 24324 gates
+and do not fit `degree_bits = 15` once blinding adds its rows, six do.
+
+The local Merkle rebuild a spend now does, in place of asking the node for a
+proof of each input leaf, is invisible at this resolution: at the dev chain's
+tree size it is one `state_queryStorageAt` of at most 256 keys plus a Poseidon2
+fold of the whole tree. It is `O(leaf_count)` and it will show on a long chain;
+`docs/WALLET.md` open issue 7 records that.
 
 ### The public batch at the chain default
 
@@ -240,7 +254,7 @@ and `a_real_public_batch_verifies_through_the_embedded_verifier` in
 | public inputs | 6947 felts |
 | native verify, warm | 5.6 ms |
 | native verify, first in the process | 156 ms |
-| `validate_public_batch` in the pallet, native | **6.04 ms** |
+| `validate_public_batch` in the pallet, native | **6.04 ms** (5.86 ms on a re-run) |
 | `submit_public_batch` extrinsic | 241027 bytes |
 | peak RSS of the whole measurement process | 9.50 GiB |
 

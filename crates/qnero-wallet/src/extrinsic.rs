@@ -201,6 +201,7 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            storage: Vec::new(),
         }
     }
 

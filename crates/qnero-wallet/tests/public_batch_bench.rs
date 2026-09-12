@@ -39,7 +39,7 @@ use qnero_wallet::extrinsic::encode_submit_public_batch;
 use qnero_wallet::keys::create_seed;
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{hex_0x, RpcClient};
-use qnero_wallet::wallet::{Wallet, NUM_LEAF_PROOFS};
+use qnero_wallet::wallet::{MerkleSource, Wallet, NUM_LEAF_PROOFS};
 
 /// The chain default: `chain/pallets/shielded/build.rs` reads it from the same
 /// constant.
@@ -100,17 +100,28 @@ fn public_batch_cost_at_the_chain_default() {
     let _ = fs::remove_file(qnero_wallet::keys::store_path_for(&seed));
     create_seed(&seed).expect("a fresh seed");
     let mut wallet = Wallet::open(&seed).expect("the wallet opens");
-    wallet.sync(&chain).expect("the wallet syncs");
+    wallet.sync(&chain, &metadata).expect("the wallet syncs");
     let dev = TransparentKey::dev("alice").expect("the dev chain endows alice");
     wallet
         .shield(&chain, &metadata, &dev, 1_000, "public batch bench")
         .expect("the shield settles");
-    wallet.sync(&chain).expect("the wallet syncs the shield");
+    wallet
+        .sync(&chain, &metadata)
+        .expect("the wallet syncs the shield");
     assert_eq!(wallet.store.unspent_total(), 1_000);
 
     let recipient = wallet.address();
     let prepared = wallet
-        .prepare_spend(&chain, &metadata, &prover, &recipient, 100, None, "inner")
+        .prepare_spend(
+            &chain,
+            &metadata,
+            &prover,
+            &recipient,
+            100,
+            None,
+            "inner",
+            MerkleSource::Local,
+        )
         .expect("the inner private batch proves");
     println!(
         "inner private batch prove    {:.2?} ({} bytes, anchored at block {})",
