@@ -663,6 +663,10 @@ pub mod pallet {
 				T::CiphertextBytesPerFeeQuantum::get() > 0,
 				"CiphertextBytesPerFeeQuantum is the divisor of the per-byte fee floor and cannot be zero"
 			);
+			assert!(
+				T::MinLeafFee::get() > 0,
+				"MinLeafFee is the only price of a carried slot; zero reopens the free-carry denial of service"
+			);
 		}
 	}
 
@@ -1345,10 +1349,15 @@ pub mod pallet {
 			// per-slot floors, because `sum(ceil(b_i / q))` is at least
 			// `ceil(sum(b_i) / q)` and each slot already paid its own flat
 			// minimum. An aggregator griefed between submission and inclusion
-			// has two remedies: pay the floor, which its settling fees may
-			// already cover, or recompose a fresh public batch without the
-			// conflicted inners, which costs one public-batch proof. What it
-			// may not do is hand a block 317 slots of walk and weight for the
+			// cannot raise a fee after proving (every fee is a public input
+			// fixed by the leaf circuit), so its remedy is to recompose a
+			// fresh public batch without the conflicted inners, which costs
+			// one public-batch proof. The floor prices the declared weight
+			// and the settlement walk a carried slot costs at pre_dispatch
+			// and dispatch; it cannot price the admission walk of a blob
+			// that never reaches dispatch, which is the pool-level open
+			// issue recorded in docs/CIRCUIT.md 9.10. What a submission may
+			// not do is hand a block 317 slots of walk and weight for the
 			// price of one, which is what emptying the outputs alone bought.
 			let carried_bytes = Self::carried_bytes(outputs);
 			let payload_quanta = carried_bytes.div_ceil(Self::bytes_per_fee_quantum());

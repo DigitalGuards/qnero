@@ -534,8 +534,9 @@ committed, each recompiling the same three crates (`pallet-shielded`,
 `quantus-runtime`, `quantus-node`). The circuit artifact set regenerated in 28.8
 seconds on the first of them, which is the release profile's own `OUT_DIR`
 regenerating: this pass touched neither `QNERO_NUM_*` nor `build.rs`, so the
-dimensions are the ones every earlier build used. The binary of the committed tree is 80,465,200 bytes at
-`chain/target/release/quantus-node`, and the figures below are that binary's.
+dimensions are the ones every earlier build used. The binary of the committed
+tree is 80,465,200 bytes at `chain/target/release/quantus-node`, and the
+figures below are that binary's.
 Both builds serve a byte-identical `state_getMetadata` blob, which is what a
 comment-only difference should produce.
 

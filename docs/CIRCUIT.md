@@ -1315,20 +1315,27 @@ purpose or by an anchor going stale, so the rule allows both shapes at a skipped
 position: it may carry its real ciphertexts, which stay bound to its `ct_digest`
 and count toward the carried bytes, or it may be a pair of zero-length
 ciphertexts, which binds nothing and adds nothing to the byte term (section
-9.3). The aggregator has two remedies and both are priced. It can pay the floor,
-which costs `MinLeafFee` per griefed slot on top of what its own slots already
-owe: a full public batch of six-slot inners that loses one inner settles 312
-slots whose own minimums cover 312 of the 318 the floor asks, so six quanta
-close the gap and the settling fees usually carry it already. Or it can
+9.3). Whether the submission still settles is then decided by the floor: a
+full public batch of six-slot inners that loses one inner settles 312 slots
+whose own minimums cover 312 of the 318 the floor asks, so it passes only if
+its settling fees carry six quanta of slack above their own floors. Fees are
+public inputs fixed by the leaf circuit at proving time, so an aggregator
+cannot raise one after a grief; when the slack is not there its remedy is to
 recompose a fresh public batch without the conflicted inners, which costs one
-public-batch proof. So one griefed segment is never fatal, which is the property
-the skip rule exists for.
+public-batch proof. A griefed segment is therefore never fatal to the notes
+it carries, only to the batch that carried it, which is the property the skip
+rule exists for.
+
+What the per-slot term prices is the declared block weight and the settlement
+walk a carried slot costs at `pre_dispatch` and dispatch. It cannot price the
+pool-admission walk of a blob that never reaches dispatch, because
+`plan_settlement` runs there over public inputs no verifier has touched; that
+unpaid admission work is the pool-level open issue in section 9.10.
 
 The far end of that scale is refused unless it is paid for, and that is the
 intended outcome. A submission that settles one slot beside 317 skipped ones
 owes 318 minimums where its one settling slot covers one, so the griefed
-aggregator pays 3.17 QTC at the runtime's parameters or recomposes the batch for
-the cost of one proof. The alternative is a block handing out 318 slots of
+aggregator recomposes the batch for the cost of one proof. The alternative is a block handing out 318 slots of
 admission walk and declared weight for one quantum, which is the cheapest denial
 of service the settlement path has and which no aggregator needs.
 
