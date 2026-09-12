@@ -18,6 +18,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use codec::Encode;
 use qnero_prover::WalletProver;
 use qnero_wallet::chain::Chain;
 use qnero_wallet::dev_account::TransparentKey;
@@ -25,6 +26,11 @@ use qnero_wallet::keys::create_seed;
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::RpcClient;
 use qnero_wallet::wallet::{EntryRhoCheck, MerkleSource, Wallet, NUM_LEAF_PROOFS};
+
+/// `pallet-balances` and its first call. Stable indices in this runtime, and
+/// `runtime/tests/call_filter.rs` is what fails if either moves.
+const BALANCES_PALLET_INDEX: u8 = 2;
+const TRANSFER_ALLOW_DEATH_CALL_INDEX: u8 = 0;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("qnero-e2e-{}", std::process::id()));
@@ -177,4 +183,201 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
     // note this wallet cannot spend.
     assert!(alice.store.rejected.is_empty());
     assert!(bob.store.rejected.is_empty());
+}
+
+/// The v1 end state, against a running chain: the block author is paid in
+/// notes, those notes spend like any other, and a transparent transfer is
+/// refused by the call filter.
+///
+/// Needs a node started with this wallet's miner key, so the seed comes from
+/// the environment rather than being made here:
+///
+/// ```text
+/// qnero-wallet --file /tmp/qnero-m6/miner.seed keygen
+/// QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6/miner.seed miner-address) \
+///   nice -n 19 ./chain/target/release/quantus-node --dev --tmp
+/// QNERO_DEV_NODE=http://127.0.0.1:9944 \
+///   QNERO_MINER_SEED=/tmp/qnero-m6/miner.seed RAYON_NUM_THREADS=4 nice -n 19 \
+///   cargo test -j 2 --release -p qnero-wallet --features parallel \
+///   --test dev_node_e2e -- --nocapture
+/// ```
+#[test]
+fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
+    let Ok(node) = std::env::var("QNERO_DEV_NODE") else {
+        eprintln!("QNERO_DEV_NODE is not set; skipping the dev-chain end-to-end test");
+        return;
+    };
+    let Ok(miner_seed) = std::env::var("QNERO_MINER_SEED") else {
+        eprintln!("QNERO_MINER_SEED is not set; skipping the coinbase end-to-end test");
+        return;
+    };
+
+    let rpc = RpcClient::new(&node);
+    let chain = Chain::new(&rpc);
+    let metadata = ChainMetadata::fetch(&rpc).expect("the node answers state_getMetadata");
+    let mut miner =
+        Wallet::open(std::path::Path::new(&miner_seed)).expect("the miner wallet opens");
+    println!("miner address {}", miner.address().encode());
+
+    // The coinbase notes of every block this node has authored so far.
+    let report = miner.sync(&chain, &metadata).expect("the miner syncs");
+    println!(
+        "sync: {} leaves, {} coinbase leaves, {} of them this wallet's, {} quanta",
+        report.leaves_scanned,
+        report.coinbase_leaves,
+        report.coinbase_received,
+        miner.store.unspent_total()
+    );
+    assert!(
+        report.coinbase_received > 0,
+        "the node must be mining for this wallet"
+    );
+    assert_eq!(
+        report.coinbase_received, report.coinbase_leaves,
+        "every block on a one-miner dev chain is this wallet's"
+    );
+    let coinbase_value = miner
+        .store
+        .notes
+        .iter()
+        .map(|note| note.value)
+        .next()
+        .expect("a coinbase note");
+    for note in &miner.store.notes {
+        assert_eq!(
+            note.origin,
+            qnero_wallet::store::NoteOrigin::Coinbase,
+            "the only notes a miner holds before it spends are its coinbases"
+        );
+        assert_eq!(
+            note.value, coinbase_value,
+            "the emission is flat over a few blocks"
+        );
+    }
+
+    // A payment out of a mined note, to a wallet that has never been paid.
+    let recipient_seed = scratch("m6-recipient.seed");
+    create_seed(&recipient_seed).expect("a fresh seed");
+    let mut recipient = Wallet::open(&recipient_seed).expect("wallet B opens");
+    let recipient_address = recipient.address();
+    let prover = WalletProver::new(NUM_LEAF_PROOFS).expect("the circuits build");
+
+    let memo = "mined and spent";
+    let fee = miner
+        .preflight(&metadata, &recipient_address, 5, None, memo)
+        .expect("the spend is fundable");
+    let payment = miner
+        .send(
+            &chain,
+            &metadata,
+            &prover,
+            &recipient_address,
+            5,
+            Some(fee),
+            memo,
+            MerkleSource::Local,
+        )
+        .expect("the payment settles");
+    println!(
+        "5 quanta to B at fee {fee}: included at block {}, change {}",
+        payment.included_at, payment.change
+    );
+
+    recipient.sync(&chain, &metadata).expect("B syncs");
+    assert_eq!(recipient.store.unspent_total(), 5);
+    assert_eq!(recipient.store.notes.len(), 1);
+    assert_eq!(recipient.store.notes[0].memo, memo);
+
+    // The author's share of that fee is in the coinbase note of the block that
+    // settled it, and in no other.
+    miner
+        .sync(&chain, &metadata)
+        .expect("the miner syncs the settlement");
+    let author_share = fee - fee.div_ceil(2);
+    let settling = miner
+        .store
+        .notes
+        .iter()
+        .find(|note| {
+            note.origin == qnero_wallet::store::NoteOrigin::Coinbase
+                && note.block_number == Some(payment.included_at)
+        })
+        .expect("the settling block minted a coinbase note");
+    println!(
+        "coinbase of block {}: {} quanta against {} elsewhere, author share {}",
+        payment.included_at, settling.value, coinbase_value, author_share
+    );
+    assert_eq!(
+        settling.value,
+        coinbase_value + author_share,
+        "the settling block's coinbase carries the author's share of the fee"
+    );
+
+    // A transparent transfer between two dev accounts, signed properly and
+    // refused by the runtime's call filter.
+    let alice = TransparentKey::dev("alice").expect("the dev chain endows alice");
+    let bob_account = TransparentKey::dev("bob")
+        .expect("a dev account")
+        .account_id();
+    let mut call = vec![BALANCES_PALLET_INDEX, TRANSFER_ALLOW_DEATH_CALL_INDEX];
+    call.push(0x00); // MultiAddress::Id
+    call.extend_from_slice(&bob_account);
+    call.extend_from_slice(&codec::Compact(1_000_000_000_000u128).encode());
+    let context = qnero_wallet::extrinsic::SigningContext {
+        spec_version: chain.runtime_version().expect("a version").0,
+        transaction_version: chain.runtime_version().expect("a version").1,
+        genesis_hash: chain.genesis_hash().expect("a genesis hash"),
+        nonce: chain.account_nonce(&alice.account_id()).expect("a nonce"),
+        tip: 0,
+    };
+    let transfer = qnero_wallet::extrinsic::encode_signed(&metadata, &alice, &call, &context)
+        .expect("the transfer encodes");
+
+    // `Ok(Err(DispatchError::Module { index: 0, error: [5, 0, 0, 0] }))`:
+    // frame_system is pallet 0 and `CallFiltered` is its sixth error.
+    const CALL_FILTERED: &str = "0x0001030005000000";
+    match rpc.call_as::<String>(
+        "system_dryRun",
+        serde_json::json!([qnero_wallet::rpc::hex_0x(&transfer)]),
+    ) {
+        Ok(dry_run) => {
+            println!("system_dryRun of a transparent transfer: {dry_run}");
+            assert_eq!(
+                dry_run, CALL_FILTERED,
+                "a transparent transfer must be refused with CallFiltered"
+            );
+        }
+        Err(error) => {
+            // The node is serving safe RPC methods only. Submit it instead:
+            // the filter refuses at dispatch, so the extrinsic is admitted and
+            // included and the transfer does not happen.
+            println!("system_dryRun unavailable ({error}); submitting instead");
+            let before = free_balance(&rpc, &bob_account);
+            chain
+                .submit_extrinsic(&transfer)
+                .expect("the pool admits it");
+            let head = chain.head().expect("a head").number;
+            while chain.head().expect("a head").number < head + 3 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            assert_eq!(
+                free_balance(&rpc, &bob_account),
+                before,
+                "a transparent transfer must move nothing"
+            );
+        }
+    }
+}
+
+/// One account's free balance, straight out of `System::Account`.
+fn free_balance(rpc: &RpcClient, account: &[u8; 32]) -> u128 {
+    use codec::Decode;
+    let key = qnero_wallet::scale::blake2_128_concat_map_key("System", "Account", account);
+    let Some(bytes) = rpc.storage(&key, None).expect("the node answers") else {
+        return 0;
+    };
+    // `AccountInfo`: nonce (u32), consumers, providers, sufficients (u32 each),
+    // then `AccountData` whose first field is the free balance.
+    let mut cursor = &bytes[16..];
+    u128::decode(&mut cursor).expect("a balance")
 }

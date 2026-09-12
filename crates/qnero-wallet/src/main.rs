@@ -77,6 +77,14 @@ enum Command {
     Keygen,
     /// Print this wallet's address.
     Address,
+    /// Print the miner key a block author's node is configured with.
+    ///
+    /// The node derives every coinbase note it mints from this, and this
+    /// wallet is what finds them. It carries the coinbase viewing key, so it
+    /// is secret-bearing: whoever holds it can pick this wallet's coinbase
+    /// notes out of the tree. It cannot spend them and it says nothing about
+    /// any other note.
+    MinerAddress,
     /// Move transparent value from a dev account into a fresh note.
     Shield {
         /// A dev chain's endowed accounts: alice, bob or charlie.
@@ -301,6 +309,19 @@ fn main() -> Result<()> {
         Command::Address => {
             let wallet = Wallet::open(&seed_path)?;
             println!("{}", wallet.address().encode());
+        }
+        Command::MinerAddress => {
+            let wallet = Wallet::open(&seed_path)?;
+            // The key alone on stdout, so `QNERO_MINER_KEY=$(qnero-wallet
+            // miner-address)` is the whole of the configuration. Everything
+            // else goes to stderr.
+            eprintln!("address     {}", wallet.address().encode());
+            eprintln!(
+                "miner key   secret: it is the coinbase view of this wallet, so keep it off \
+                 command lines and out of shared logs"
+            );
+            eprintln!("node        --rewards-miner-key <below>, or QNERO_MINER_KEY");
+            println!("{}", wallet.miner_key().encode());
         }
         Command::Status => {
             let rpc = RpcClient::new(&cli.node);

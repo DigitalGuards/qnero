@@ -341,28 +341,36 @@ impl<'a> Chain<'a> {
 
     /// The commitment and ciphertext of every leaf in `range`, at one block.
     ///
-    /// Both maps are `Identity`-hashed on the leaf index, so paging is by
-    /// index alone and `state_getKeysPaged` is unnecessary. An absent
-    /// ciphertext is
-    /// normal: the shielded pool shares one tree with wormhole transfers and
-    /// with the mining-reward leaf every block appends, and none of those
-    /// carry one.
+    /// Every map is `Identity`-hashed on the leaf index, so paging is by index
+    /// alone and `state_getKeysPaged` is unnecessary.
+    ///
+    /// Four keys per leaf. `CoinbaseValues` is the fourth and it is what makes
+    /// a coinbase note readable: its value is public, because the chain hashes
+    /// it into the commitment over an `inner` it cannot open, and the
+    /// ciphertext beside it carries `(rho, r)` and a value of zero. Presence in
+    /// that map is also what tells a coinbase leaf from a settled output.
+    ///
+    /// An absent ciphertext is normal on a chain with history from before v1:
+    /// wormhole transfer leaves and the transparent mining-reward leaves carry
+    /// none. Nothing appends those any more.
     pub fn leaves(&self, range: std::ops::Range<u64>, at: &[u8; 32]) -> Result<Vec<LeafRecord>> {
         let at = hex_0x(at);
         let mut out = Vec::new();
         for chunk_start in range.clone().step_by(LEAF_BATCH) {
             let chunk_end = (chunk_start + LEAF_BATCH as u64).min(range.end);
-            let mut keys = Vec::with_capacity(((chunk_end - chunk_start) * 3) as usize);
+            let mut keys = Vec::with_capacity(((chunk_end - chunk_start) * 4) as usize);
             for index in chunk_start..chunk_end {
                 keys.push(identity_map_key(ZK_TREE_PALLET, "Leaves", index));
                 keys.push(identity_map_key(SHIELDED_PALLET, "Ciphertexts", index));
                 keys.push(identity_map_key(SHIELDED_PALLET, "LeafBlocks", index));
+                keys.push(identity_map_key(SHIELDED_PALLET, "CoinbaseValues", index));
             }
             let values = self.rpc.storage_batch(&keys, &at)?;
             for (offset, index) in (chunk_start..chunk_end).enumerate() {
-                let commitment = values[offset * 3].clone();
-                let ciphertext = values[offset * 3 + 1].clone();
-                let block = values[offset * 3 + 2].clone();
+                let commitment = values[offset * 4].clone();
+                let ciphertext = values[offset * 4 + 1].clone();
+                let block = values[offset * 4 + 2].clone();
+                let coinbase_value = values[offset * 4 + 3].clone();
                 out.push(LeafRecord {
                     index,
                     commitment: commitment
@@ -383,6 +391,13 @@ impl<'a> Chain<'a> {
                         .map(|bytes| {
                             u32::decode(&mut &bytes[..]).with_context(|| {
                                 format!("Shielded::LeafBlocks({index}) is not a u32")
+                            })
+                        })
+                        .transpose()?,
+                    coinbase_value: coinbase_value
+                        .map(|bytes| {
+                            u64::decode(&mut &bytes[..]).with_context(|| {
+                                format!("Shielded::CoinbaseValues({index}) is not a u64")
                             })
                         })
                         .transpose()?,
@@ -597,4 +612,7 @@ pub struct LeafRecord {
     pub commitment: Option<[u8; 32]>,
     pub ciphertext: Option<Vec<u8>>,
     pub block_number: Option<u32>,
+    /// The public value of a coinbase note, in pool quanta. `Some` for exactly
+    /// the leaves a block's coinbase minted.
+    pub coinbase_value: Option<u64>,
 }

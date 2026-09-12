@@ -8,7 +8,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use qnero_circuit::chain::ct_digest;
 use qnero_circuit::merkle::MerklePath;
 use qnero_circuit::witness::{InputNote, OutputNote, SpendWitness};
-use qnero_notes::{encrypt_note, entry_rho, try_receive, Address, Digest, Note, NoteCiphertext};
+use qnero_notes::{
+    encrypt_note, entry_rho, try_receive, try_receive_coinbase, Address, Digest, MinerKey, Note,
+    NoteCiphertext, ReceivedNote,
+};
 use qnero_notes::{IncomingViewingKey, SpendingKey};
 use qnero_prover::WalletProver;
 use rand::{Rng, TryRngCore};
@@ -185,6 +188,13 @@ impl Wallet {
 
     pub fn ivk(&self) -> IncomingViewingKey {
         self.key.incoming_viewing_key()
+    }
+
+    /// What a block author's node is configured with: this wallet's `pk` and
+    /// its coinbase viewing key, and nothing that can spend. See
+    /// `qnero_note_core::miner` for what holding it lets someone do.
+    pub fn miner_key(&self) -> MinerKey {
+        self.key.miner_key()
     }
 
     pub fn save(&self) -> Result<()> {
@@ -378,23 +388,53 @@ impl Wallet {
             // for every leaf; asking per received note was one round trip each
             // for a field that is only a label.
             let entry_count = chain.entry_count_at(&head.hash)?;
+            let miner_key = self.key.miner_key();
             for record in chain.leaves(start..leaf_count, &head.hash)? {
                 report.leaves_scanned += 1;
-                let (Some(commitment), Some(ciphertext)) = (record.commitment, record.ciphertext)
-                else {
-                    // A wormhole transfer leaf or a mining-reward leaf. The
-                    // shielded pool shares one tree with both, so most leaf
-                    // indices carry no ciphertext at all.
+                let Some(commitment) = record.commitment else {
+                    // A gap in the leaf map, which the tree never leaves: this
+                    // is a node answering about a block it does not have.
                     continue;
                 };
                 let Ok(commitment) = Digest::from_bytes(&commitment) else {
                     continue;
                 };
-                let Ok(parsed) = NoteCiphertext::from_bytes(&ciphertext) else {
-                    continue;
-                };
-                let Ok(received) = try_receive(&ivk, &parsed, &commitment) else {
-                    continue;
+
+                let received = if let Some(value) = record.coinbase_value {
+                    // A block's coinbase note. Its value is public and the
+                    // chain hashed it into the commitment, so the amount comes
+                    // from the chain; the rest of the note is derived from
+                    // this wallet's own miner key, or read out of a payload
+                    // when the author encrypted one.
+                    report.coinbase_leaves += 1;
+                    let Some(block) = record.block_number else {
+                        continue;
+                    };
+                    match receive_coinbase(
+                        &miner_key,
+                        &ivk,
+                        block,
+                        value,
+                        &commitment,
+                        record.ciphertext.as_deref(),
+                    ) {
+                        Some(received) => received,
+                        None => continue,
+                    }
+                } else {
+                    let Some(ciphertext) = record.ciphertext else {
+                        // A leaf from before v1: a wormhole transfer or a
+                        // transparent mining reward. Neither carries a
+                        // ciphertext and nothing appends either any more.
+                        continue;
+                    };
+                    let Ok(parsed) = NoteCiphertext::from_bytes(&ciphertext) else {
+                        continue;
+                    };
+                    let Ok(received) = try_receive(&ivk, &parsed, &commitment) else {
+                        continue;
+                    };
+                    received
                 };
 
                 let commitment_hex = commitment.to_hex();
@@ -449,13 +489,26 @@ impl Wallet {
                     continue;
                 }
 
-                let origin = match record.block_number {
-                    Some(block) if entry_rho_matches(block, &received.note.rho, entry_count) => {
-                        NoteOrigin::Shield
+                let origin = if record.coinbase_value.is_some() {
+                    // The coinbase rule is its own, and it is checked above:
+                    // this note's commitment is the one the miner key and the
+                    // chain's value produce. `entry_rho_matches` would walk the
+                    // shield counter for a `rho` that never came from it.
+                    NoteOrigin::Coinbase
+                } else {
+                    match record.block_number {
+                        Some(block)
+                            if entry_rho_matches(block, &received.note.rho, entry_count) =>
+                        {
+                            NoteOrigin::Shield
+                        }
+                        _ => NoteOrigin::Spend,
                     }
-                    _ => NoteOrigin::Spend,
                 };
                 report.received += 1;
+                if origin == NoteOrigin::Coinbase {
+                    report.coinbase_received += 1;
+                }
                 report.received_value += received.note.value;
                 if rewind.is_some() && reconciles {
                     // A note first recorded by this very scan is on the chain
@@ -1514,6 +1567,42 @@ pub fn output_ct_digest(output: &ShieldedOutput) -> Result<Digest> {
         .map_err(|_| anyhow!("ct_digest is not a canonical digest"))
 }
 
+/// One coinbase leaf, decided against this wallet.
+///
+/// Two ways in, and the order matters. The derived path is what a Qnero node
+/// publishes: a block author's node cannot encrypt to an ML-KEM key, so it
+/// derives the note from the miner key the operator configured it with and
+/// publishes only `inner`. `qnero_note_core::coinbase_r` carries why. The
+/// encrypted path is for a coinbase paid to an address whose coinbase viewing
+/// key the author does not hold, which nothing in this wallet produces today
+/// and the pallet still accepts.
+///
+/// Both end at the same check: rebuild the note against the value the chain
+/// published and compare the commitment to the leaf. Nothing a block author
+/// writes is trusted, the amount inside an encrypted payload included, which
+/// is the one field of a coinbase note the chain has already decided.
+fn receive_coinbase(
+    miner_key: &MinerKey,
+    ivk: &IncomingViewingKey,
+    block: u32,
+    value: u64,
+    commitment: &Digest,
+    ciphertext: Option<&[u8]>,
+) -> Option<ReceivedNote> {
+    if let Ok(note) = miner_key.coinbase_note(block, value) {
+        let derived = note.commitment();
+        if &derived == commitment {
+            return Some(ReceivedNote {
+                note,
+                memo: Vec::new(),
+                commitment: derived,
+            });
+        }
+    }
+    let parsed = NoteCiphertext::from_bytes(ciphertext?).ok()?;
+    try_receive_coinbase(ivk, &parsed, value, commitment).ok()
+}
+
 /// Whether a note's `rho` is the one the entry rule produces for the block its
 /// leaf landed in.
 ///
@@ -1597,6 +1686,12 @@ pub struct SyncReport {
     pub scanned_from: u64,
     pub scanned_to: u64,
     pub leaves_scanned: u64,
+    /// Coinbase leaves seen, whoever they belong to. Every block mints one, so
+    /// this counts the blocks the scanned range covers, and what it counts
+    /// beyond `coinbase_received` is how many of them were somebody else's.
+    pub coinbase_leaves: u64,
+    /// Coinbase notes this wallet found: the blocks its own miner key authored.
+    pub coinbase_received: u64,
     pub received: u64,
     pub received_value: u64,
     pub rejected: u64,

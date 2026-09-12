@@ -27,6 +27,9 @@ use crate::keys::{refuse_if_readable_beyond_owner, sync_parent_dir};
 
 /// Bumped when the on-disk shape changes.
 ///
+/// Version 6 added `NoteOrigin::Coinbase`, which an older build's `serde`
+/// refuses outright rather than misreading, so the version moved with it.
+///
 /// Version 2 added `used_nullifiers`, the local copy of the chain's settled
 /// set. Version 3 added `checkpoints`, the block hashes a sync finished at,
 /// which is how a fork is detected. Version 4 added `on_chain`, which is what
@@ -43,7 +46,7 @@ use crate::keys::{refuse_if_readable_beyond_owner, sync_parent_dir};
 /// node it runs against. A version-1 store is refused;
 /// deleting it and re-syncing recovers every unspent note, because every
 /// note's plaintext is on chain inside its ciphertext.
-pub const STORE_VERSION: u32 = 5;
+pub const STORE_VERSION: u32 = 6;
 
 /// The oldest store shape this wallet still upgrades. Anything older is
 /// refused.
@@ -167,9 +170,8 @@ impl core::fmt::Debug for WalletStore {
     }
 }
 
-/// Where a note came from. Recorded because a shield's `rho` follows the entry
-/// rule and a spend output's follows the in-circuit rule, and the two are
-/// checked differently.
+/// Where a note came from. Recorded because each origin has its own `rho` rule
+/// and the three are checked differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoteOrigin {
@@ -178,6 +180,11 @@ pub enum NoteOrigin {
     /// An output of a spend, with `rho` derived in circuit from the two
     /// nullifiers its leaf published.
     Spend,
+    /// A block's coinbase note, with `rho = H(RHO_COINBASE, block_number)` and
+    /// a public value the chain published beside the leaf. Spendable like any
+    /// other note; the origin is recorded because its value did not come out of
+    /// its own ciphertext.
+    Coinbase,
 }
 
 /// A note secret, held as hex and wiped when the last copy drops.
@@ -596,6 +603,13 @@ impl WalletStore {
             // The first sync that commits records the genesis of the node it
             // runs against, which is the only chain such a store could have
             // come from that this wallet can still name.
+            //
+            // Version 5 to 6 adds `NoteOrigin::Coinbase`. Nothing in a
+            // version-5 file can be one: the chain had no coinbase notes to
+            // find, so every note in it keeps the origin it was written with.
+            // The bump exists for the other direction, because a version-5
+            // build meeting `"origin": "coinbase"` fails its deserialization
+            // with no note of which field went wrong.
             //
             // What no upgrade recovers is a note an older build refused as a
             // duplicate nullifier. That build wrote a `rejected` entry and

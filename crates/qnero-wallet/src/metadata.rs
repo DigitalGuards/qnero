@@ -43,6 +43,7 @@ pub const SYSTEM_PALLET: &str = "System";
 pub const REQUIRED_STORAGE: &[(&str, &str, Option<&str>)] = &[
     (SHIELDED_PALLET, "Ciphertexts", Some("Identity")),
     (SHIELDED_PALLET, "LeafBlocks", Some("Identity")),
+    (SHIELDED_PALLET, "CoinbaseValues", Some("Identity")),
     (SHIELDED_PALLET, "UsedNullifiers", Some("Blake2_128Concat")),
     (SHIELDED_PALLET, "EntryCount", None),
     (ZK_TREE_PALLET, "Leaves", Some("Identity")),
@@ -65,7 +66,6 @@ pub const KNOWN_SIGNED_EXTENSIONS: &[&str] = &[
     "CheckNonce",
     "CheckWeight",
     "ReversibleTransactionExtension",
-    "WormholeProofRecorderExtension",
     "ChargeTransactionPayment",
     "CheckMetadataHash",
     "WeightReclaim",
