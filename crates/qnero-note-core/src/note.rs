@@ -201,10 +201,16 @@ pub fn entry_rho(block_number: u32, entry_index: u64) -> Digest {
 /// The node computes this before it proposes, which is the reason the rule is
 /// the block number and not the pool's entry counter: `inner = H(NOTE, pk,
 /// rho, r)` is built while the block is being proposed, and how many shields
-/// that block will carry is not known then. `r` is drawn fresh per block from
-/// the operating system, so two proposals at one height, which is what a
-/// re-proposed block or a fork looks like, produce different notes and only
-/// the canonical one is ever in a tree.
+/// that block will carry is not known then.
+///
+/// There is no randomness in this, and none in [`coinbase_r`] either. Two
+/// proposals at one height on one chain, which is what a re-proposed block or
+/// an orphan looks like, carry the same `inner`; only the canonical one is
+/// ever in a tree, and the header's author label is already the same in both,
+/// so the note adds no linkage the block did not already carry. What the
+/// derivation does keep apart is two chains: [`coinbase_r`] hashes the
+/// genesis, so one miner key used on a testnet and on mainnet mints unrelated
+/// notes at equal heights.
 ///
 /// **The chain cannot check this**, for the reason [`entry_rho`] gives:
 /// `inner` is opaque. What the chain owes is the identifier, and it owes
@@ -217,7 +223,7 @@ pub fn coinbase_rho(block_number: u32) -> Digest {
 /// `r` of the coinbase note a block mints to its author.
 ///
 /// ```text
-/// r = H(R_COINBASE, cvk, block_number)
+/// r = H(R_COINBASE, cvk, H(genesis_hash), block_number)
 /// ```
 ///
 /// Every other note reaches its recipient as an ML-KEM ciphertext carrying
@@ -240,10 +246,26 @@ pub fn coinbase_rho(block_number: u32) -> Digest {
 /// - It is only for a note the author pays to itself. Paying a coinbase to an address whose `cvk`
 ///   the node does not hold needs the encrypted payload, which the pallet still accepts and the
 ///   wallet still reads.
-pub fn coinbase_r(cvk: &Digest, block_number: u32) -> Digest {
+///
+/// The chain's genesis is in the preimage because the derivation has no
+/// randomness in it. Without that binding, one miner key configured on a
+/// testnet and on mainnet, or on a chain relaunched from a fresh genesis,
+/// mints byte-identical `inner` values at equal heights on both, and anyone
+/// who can point at that operator's coinbase notes on the chain that matters
+/// less points at them on the other by comparing 32 bytes. Both the node and
+/// the wallet already hold the genesis hash, so the binding costs a scan
+/// nothing.
+pub fn coinbase_r(cvk: &Digest, genesis_hash: &[u8], block_number: u32) -> Digest {
+    // The genesis is arbitrary bytes from outside the field, so it is hashed
+    // to canonical limbs before it joins a felt preimage.
+    let chain = Digest::hash_bytes(&[b"qnero/coinbase-chain".as_slice(), genesis_hash]);
     Digest::hash_felts(
         domain::R_COINBASE,
-        &[cvk.felts(), &[Felt::new(block_number as u64)]],
+        &[
+            cvk.felts(),
+            chain.felts(),
+            &[Felt::new(block_number as u64)],
+        ],
     )
 }
 
@@ -271,8 +293,48 @@ mod tests {
     fn a_coinbase_rho_and_its_r_are_never_one_value() {
         let cvk = Digest::hash_bytes(&[b"cvk"]);
         for block in [0u32, 1, 4096, u32::MAX] {
-            assert_ne!(coinbase_rho(block), coinbase_r(&cvk, block));
+            assert_ne!(coinbase_rho(block), coinbase_r(&cvk, &[7u8; 32], block));
         }
+    }
+
+    /// One miner key on two chains mints unrelated notes at equal heights.
+    ///
+    /// The derivation has no randomness in it, so without the genesis in the
+    /// preimage the same key would publish byte-identical `inner` values at
+    /// equal heights on a testnet and on mainnet, and matching 32 bytes would
+    /// carry an identification from the chain that matters less to the one
+    /// that matters. This is the regression test for that.
+    #[test]
+    fn one_miner_key_on_two_chains_mints_unrelated_notes() {
+        let cvk = Digest::hash_bytes(&[b"one operator"]);
+        let pk = Digest::hash_bytes(&[b"pk"]);
+        let mainnet = [1u8; 32];
+        let testnet = [2u8; 32];
+        for block in [0u32, 1, 4096, u32::MAX] {
+            assert_ne!(
+                coinbase_r(&cvk, &mainnet, block),
+                coinbase_r(&cvk, &testnet, block),
+                "block {block}: two chains must not share a coinbase `r`"
+            );
+            assert_ne!(
+                note_inner(
+                    &pk,
+                    &coinbase_rho(block),
+                    &coinbase_r(&cvk, &mainnet, block)
+                ),
+                note_inner(
+                    &pk,
+                    &coinbase_rho(block),
+                    &coinbase_r(&cvk, &testnet, block)
+                ),
+                "block {block}: two chains must not share a coinbase `inner`"
+            );
+        }
+        assert_eq!(
+            coinbase_r(&cvk, &mainnet, 9),
+            coinbase_r(&cvk, &mainnet, 9),
+            "one chain, one height, one note: the wallet finds it by recomputing it"
+        );
     }
 
     /// `r` is what an observer holding the miner's address still does not
@@ -281,9 +343,10 @@ mod tests {
     fn a_coinbase_r_follows_the_key_and_the_block() {
         let mine = Digest::hash_bytes(&[b"mine"]);
         let theirs = Digest::hash_bytes(&[b"theirs"]);
-        assert_ne!(coinbase_r(&mine, 7), coinbase_r(&theirs, 7));
-        assert_ne!(coinbase_r(&mine, 7), coinbase_r(&mine, 8));
-        assert_eq!(coinbase_r(&mine, 7), coinbase_r(&mine, 7));
+        let chain = [3u8; 32];
+        assert_ne!(coinbase_r(&mine, &chain, 7), coinbase_r(&theirs, &chain, 7));
+        assert_ne!(coinbase_r(&mine, &chain, 7), coinbase_r(&mine, &chain, 8));
+        assert_eq!(coinbase_r(&mine, &chain, 7), coinbase_r(&mine, &chain, 7));
     }
 
     /// One coinbase per block, so the block number alone has to separate them.

@@ -261,7 +261,9 @@ a `CoinbaseValues` entry is one of those. Such a leaf is read differently, and
 not from its ciphertext: usually it has none. The value comes from the chain,
 which published it because it hashed it into the commitment, and the rest of
 the note is rebuilt from this wallet's own miner key,
-`rho = H(RHO_COINBASE, block)` and `r = H(R_COINBASE, cvk, block)`. If the
+`rho = H(RHO_COINBASE, block)` and `r = H(R_COINBASE, cvk, H(genesis), block)`,
+the genesis being the one the store is already bound to, so a miner key used on
+two chains finds only the notes of the chain it is syncing. If the
 rebuilt commitment is the leaf, the note is this wallet's and it is stored as
 spendable with origin `coinbase`. If it is not, and the leaf does carry a
 ciphertext, the wallet decrypts that instead and rebuilds the note against the

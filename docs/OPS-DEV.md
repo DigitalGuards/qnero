@@ -141,6 +141,11 @@ Two properties of that string:
   environment variable to a command line, which every process listing on the machine can read.
 - **It is not an address.** Its human-readable part is `qnm` rather than `qn`, so pasting one where
   the other belongs fails on the checksum rather than halfway through a decode.
+- **One key is safe on more than one chain.** A coinbase note is derived rather than drawn at
+  random, so the genesis hash is in the preimage of its `r`. The same `qnm1...` on a testnet and on
+  mainnet mints unrelated notes at equal heights, and nobody carries an identification from one
+  chain to the other by comparing note commitments. A chain relaunched from a fresh genesis counts
+  as another chain here, which is what makes a repeated `--dev --tmp` run safe as well.
 
 `--rewards-inner-hash` stays, and stays required of an authority, but it is no
 longer a payout address: under v1 no account is paid. It is the fallback author

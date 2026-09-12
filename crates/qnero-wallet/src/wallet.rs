@@ -253,7 +253,8 @@ impl Wallet {
         // statement about the chain this node serves. Checked here and
         // recorded at the end, in the save that commits this sync: see
         // `Wallet::open_on_chain`.
-        let genesis = hex::encode(chain.genesis_hash()?);
+        let genesis_hash = chain.genesis_hash()?;
+        let genesis = hex::encode(genesis_hash);
         self.store
             .ensure_genesis(&genesis)
             .with_context(|| format!("{}", self.store_path.display()))?;
@@ -413,6 +414,7 @@ impl Wallet {
                     match receive_coinbase(
                         &miner_key,
                         &ivk,
+                        &genesis_hash,
                         block,
                         value,
                         &commitment,
@@ -1581,15 +1583,20 @@ pub fn output_ct_digest(output: &ShieldedOutput) -> Result<Digest> {
 /// published and compare the commitment to the leaf. Nothing a block author
 /// writes is trusted, the amount inside an encrypted payload included, which
 /// is the one field of a coinbase note the chain has already decided.
+///
+/// The derived path takes the genesis because the derivation is deterministic
+/// and is bound to one chain; the store is bound to the same genesis, and the
+/// sync checked that before it read a leaf.
 fn receive_coinbase(
     miner_key: &MinerKey,
     ivk: &IncomingViewingKey,
+    genesis_hash: &[u8],
     block: u32,
     value: u64,
     commitment: &Digest,
     ciphertext: Option<&[u8]>,
 ) -> Option<ReceivedNote> {
-    if let Ok(note) = miner_key.coinbase_note(block, value) {
+    if let Ok(note) = miner_key.coinbase_note(genesis_hash, block, value) {
         let derived = note.commitment();
         if &derived == commitment {
             return Some(ReceivedNote {

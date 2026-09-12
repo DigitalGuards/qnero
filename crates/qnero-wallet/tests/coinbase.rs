@@ -52,6 +52,13 @@ fn node_with(state: NodeState) -> FakeNode {
     FakeNode::start(state)
 }
 
+/// The genesis of the chain the fake node serves. A derived coinbase note is
+/// bound to it, so every note a test builds has to name the same chain the
+/// wallet will sync against.
+fn genesis() -> [u8; 32] {
+    support::block_hash(0)
+}
+
 /// The path every Qnero node takes: the node publishes `inner` alone, the
 /// chain publishes the value, and the wallet rebuilds the note from its own
 /// miner key.
@@ -64,8 +71,8 @@ fn a_mined_block_becomes_a_spendable_note() {
     let miner_key = wallet.miner_key();
 
     // Two blocks this wallet authored, at two heights, worth different amounts.
-    let first = miner_key.coinbase_note(7, 42).expect("a note");
-    let second = miner_key.coinbase_note(8, 41).expect("a note");
+    let first = miner_key.coinbase_note(&genesis(), 7, 42).expect("a note");
+    let second = miner_key.coinbase_note(&genesis(), 8, 41).expect("a note");
 
     let mut state = NodeState {
         head_number: 9,
@@ -153,7 +160,7 @@ fn a_value_that_does_not_open_the_commitment_is_not_received() {
     let miner_key = wallet.miner_key();
 
     // The commitment of a 42-quantum note, published beside a claim of 1000.
-    let note = miner_key.coinbase_note(7, 42).expect("a note");
+    let note = miner_key.coinbase_note(&genesis(), 7, 42).expect("a note");
     let mut state = NodeState {
         head_number: 8,
         ..Default::default()
@@ -200,7 +207,10 @@ fn another_miners_coinbase_is_not_this_wallets_note() {
         &mut state,
         0,
         4,
-        theirs.coinbase_note(4, 10).expect("a note").commitment(),
+        theirs
+            .coinbase_note(&genesis(), 4, 10)
+            .expect("a note")
+            .commitment(),
         10,
         None,
     );
@@ -209,7 +219,7 @@ fn another_miners_coinbase_is_not_this_wallets_note() {
         1,
         5,
         same_address
-            .coinbase_note(5, 10)
+            .coinbase_note(&genesis(), 5, 10)
             .expect("a note")
             .commitment(),
         10,
@@ -229,6 +239,48 @@ fn another_miners_coinbase_is_not_this_wallets_note() {
     assert_eq!(wallet.store.unspent_total(), 0);
 }
 
+/// The same miner key, mining another chain. A coinbase note is derived with
+/// no randomness in it, so the genesis is what keeps one operator's notes on
+/// two chains apart; without it, the notes would be byte identical at equal
+/// heights and equality alone would carry an identification from one chain to
+/// the other.
+#[test]
+fn a_coinbase_from_another_chain_is_not_this_wallets_note() {
+    let dir = support::scratch_dir("coinbase-other-chain");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    let miner_key = wallet.miner_key();
+
+    // This wallet's own miner key at height 7, mined on a chain whose genesis
+    // is not the one this node serves.
+    let elsewhere = miner_key.coinbase_note(&[0xAB; 32], 7, 42).expect("a note");
+    // And the same key at the same height here, which must still be found.
+    let here = miner_key.coinbase_note(&genesis(), 8, 5).expect("a note");
+
+    let mut state = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_coinbase(&mut state, 0, 7, elsewhere.commitment(), 42, None);
+    put_coinbase(&mut state, 1, 8, here.commitment(), 5, None);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
+    let node = node_with(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the sync runs");
+
+    assert_eq!(report.coinbase_leaves, 2);
+    assert_eq!(
+        report.coinbase_received, 1,
+        "only the note minted on this chain is this wallet's"
+    );
+    assert_eq!(wallet.store.unspent_total(), 5);
+}
+
 /// The miner key is what an operator pastes into a node, and the two sides of
 /// that paste have to agree on every byte.
 #[test]
@@ -246,10 +298,13 @@ fn the_miner_key_round_trips_to_the_note_a_node_would_build() {
         "the key names this wallet's address"
     );
     assert_eq!(
-        decoded.coinbase_note(11, 5).expect("a note").commitment(),
+        decoded
+            .coinbase_note(&genesis(), 11, 5)
+            .expect("a note")
+            .commitment(),
         wallet
             .miner_key()
-            .coinbase_note(11, 5)
+            .coinbase_note(&genesis(), 11, 5)
             .expect("a note")
             .commitment()
     );

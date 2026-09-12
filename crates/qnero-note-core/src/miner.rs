@@ -131,19 +131,28 @@ impl MinerKey {
         Digest::hash_bytes(&[b"qnero/author-label", &self.cvk.to_bytes(), parent_hash])
     }
 
-    /// The coinbase note this key mints at `block_number`, worth `value` pool
-    /// quanta.
+    /// The coinbase note this key mints at `block_number` on the chain whose
+    /// genesis is `genesis_hash`, worth `value` pool quanta.
     ///
     /// One function, called by three places that must agree: the node building
     /// the inherent payload, the wallet scanning for its own coinbase notes,
     /// and the tests that pin both. The chain is the fourth party and it sees
     /// only the commitment.
-    pub fn coinbase_note(&self, block_number: u32, value: u64) -> Result<crate::Note, NoteError> {
+    ///
+    /// The genesis is a parameter because the derivation is deterministic and
+    /// one operator can run one key on more than one chain;
+    /// [`crate::coinbase_r`] carries what the binding is for.
+    pub fn coinbase_note(
+        &self,
+        genesis_hash: &[u8],
+        block_number: u32,
+        value: u64,
+    ) -> Result<crate::Note, NoteError> {
         crate::Note::new(
             self.pk,
             value,
             crate::coinbase_rho(block_number),
-            crate::coinbase_r(&self.cvk, block_number),
+            crate::coinbase_r(&self.cvk, genesis_hash, block_number),
         )
     }
 }
@@ -206,16 +215,28 @@ mod tests {
     /// The note the node builds and the note the wallet looks for are one
     /// function, and its value is the only thing the chain decides.
     #[test]
-    fn a_coinbase_note_is_fixed_by_the_key_the_block_and_the_value() {
+    fn a_coinbase_note_is_fixed_by_the_key_the_chain_the_block_and_the_value() {
         let key = key();
-        let note = key.coinbase_note(9, 11).unwrap();
+        let chain = [9u8; 32];
+        let note = key.coinbase_note(&chain, 9, 11).unwrap();
         assert_eq!(note.rho, crate::coinbase_rho(9));
-        assert_eq!(note.r, crate::coinbase_r(&key.cvk, 9));
-        assert_eq!(note.inner(), key.coinbase_note(9, 42).unwrap().inner());
+        assert_eq!(note.r, crate::coinbase_r(&key.cvk, &chain, 9));
+        assert_eq!(
+            note.inner(),
+            key.coinbase_note(&chain, 9, 42).unwrap().inner()
+        );
         assert_ne!(
             note.commitment(),
-            key.coinbase_note(9, 42).unwrap().commitment()
+            key.coinbase_note(&chain, 9, 42).unwrap().commitment()
         );
-        assert_ne!(note.inner(), key.coinbase_note(10, 11).unwrap().inner());
+        assert_ne!(
+            note.inner(),
+            key.coinbase_note(&chain, 10, 11).unwrap().inner()
+        );
+        assert_ne!(
+            note.inner(),
+            key.coinbase_note(&[8u8; 32], 9, 11).unwrap().inner(),
+            "the same key at the same height on another chain is another note"
+        );
     }
 }

@@ -18,7 +18,7 @@
 //!
 //! ```text
 //! rho   = H(RHO_COINBASE, block_number)
-//! r     = H(R_COINBASE, cvk, block_number)
+//! r     = H(R_COINBASE, cvk, H(genesis_hash), block_number)
 //! inner = H(NOTE, pk, rho, r)
 //! ```
 //!
@@ -33,6 +33,11 @@
 //! can share a nullifier seed. The node knows the height it is proposing at,
 //! which the pool's entry counter would not give it: that depends on how many
 //! shields the block ends up carrying.
+//!
+//! The chain's genesis is in `r` because the rest of the derivation is
+//! deterministic. One miner key configured on a testnet and on mainnet would
+//! otherwise publish the same `inner` at equal heights on both, and matching
+//! 32 bytes would carry an identification from one chain to the other.
 
 use std::sync::Arc;
 
@@ -86,7 +91,10 @@ impl CoinbaseInherentDataProvider {
 			.try_into()
 			.map_err(|_| "block number does not fit the coinbase rho rule".to_string())?;
 		let block_number = parent_number.saturating_add(1);
-		Ok(Self { payload: Some(build_payload(miner_key, block_number)) })
+		// The genesis of the chain this node serves, which the wallet reads
+		// from the same node and binds its store to.
+		let genesis = client.info().genesis_hash;
+		Ok(Self { payload: Some(build_payload(miner_key, genesis.as_ref(), block_number)) })
 	}
 }
 
@@ -97,9 +105,13 @@ impl CoinbaseInherentDataProvider {
 /// commitment; `inner` commits to everything else. The ciphertext field is
 /// empty, which is what a derived coinbase is: there is nothing to send when
 /// the recipient can recompute the note from its own key and the block number.
-pub fn build_payload(miner_key: &MinerKey, block_number: u32) -> CoinbaseInherentData {
+pub fn build_payload(
+	miner_key: &MinerKey,
+	genesis_hash: &[u8],
+	block_number: u32,
+) -> CoinbaseInherentData {
 	let rho = qnero_note_core::coinbase_rho(block_number);
-	let r = qnero_note_core::coinbase_r(&miner_key.cvk, block_number);
+	let r = qnero_note_core::coinbase_r(&miner_key.cvk, genesis_hash, block_number);
 	CoinbaseInherentData {
 		inner: note_inner(&miner_key.pk, &rho, &r).to_bytes(),
 		ciphertext: Vec::new(),
@@ -136,6 +148,10 @@ mod tests {
 	use super::*;
 	use qnero_note_core::Digest;
 
+	/// Any 32 bytes: the derivation hashes the genesis, so nothing here needs
+	/// a real one.
+	const GENESIS: [u8; 32] = [4u8; 32];
+
 	fn miner_key(seed: &str) -> MinerKey {
 		MinerKey::new(
 			Digest::hash_bytes(&[b"pk", seed.as_bytes()]),
@@ -149,9 +165,9 @@ mod tests {
 	#[test]
 	fn a_coinbase_payload_opens_the_commitment_the_chain_computes() {
 		let key = miner_key("mine");
-		let payload = build_payload(&key, 42);
+		let payload = build_payload(&key, &GENESIS, 42);
 
-		let note = key.coinbase_note(42, 11).expect("a note");
+		let note = key.coinbase_note(&GENESIS, 42, 11).expect("a note");
 		assert_eq!(note.inner().to_bytes(), payload.inner);
 		assert_eq!(
 			note.commitment().to_bytes(),
@@ -161,14 +177,28 @@ mod tests {
 		assert!(payload.ciphertext.is_empty(), "a derived coinbase carries no ciphertext");
 	}
 
-	/// Two blocks are two notes, and one block is always the same note: the
-	/// derivation has no randomness in it, which is what lets a wallet find the
-	/// note without being told anything.
+	/// Two blocks are two notes, and one block on one chain is always the same
+	/// note: the derivation has no randomness in it, which is what lets a
+	/// wallet find the note without being told anything.
 	#[test]
 	fn every_block_gets_its_own_note() {
 		let key = miner_key("mine");
-		assert_ne!(build_payload(&key, 1).inner, build_payload(&key, 2).inner);
-		assert_eq!(build_payload(&key, 1).inner, build_payload(&key, 1).inner);
+		assert_ne!(build_payload(&key, &GENESIS, 1).inner, build_payload(&key, &GENESIS, 2).inner);
+		assert_eq!(build_payload(&key, &GENESIS, 1).inner, build_payload(&key, &GENESIS, 1).inner);
+	}
+
+	/// The determinism stops at the chain boundary. An operator that runs one
+	/// miner key on a testnet and on mainnet publishes unrelated notes at
+	/// equal heights, so nobody carries an identification across by comparing
+	/// 32 bytes.
+	#[test]
+	fn two_chains_never_share_a_note() {
+		let key = miner_key("mine");
+		let other_chain = [9u8; 32];
+		assert_ne!(
+			build_payload(&key, &GENESIS, 7).inner,
+			build_payload(&key, &other_chain, 7).inner
+		);
 	}
 
 	/// Holding the address is not holding the coinbase view. Two miners with
@@ -179,6 +209,9 @@ mod tests {
 		let mine = miner_key("mine");
 		let same_pk_other_cvk =
 			MinerKey::new(mine.pk, qnero_note_core::Digest::hash_bytes(&[b"someone else"]));
-		assert_ne!(build_payload(&mine, 5).inner, build_payload(&same_pk_other_cvk, 5).inner);
+		assert_ne!(
+			build_payload(&mine, &GENESIS, 5).inner,
+			build_payload(&same_pk_other_cvk, &GENESIS, 5).inner
+		);
 	}
 }

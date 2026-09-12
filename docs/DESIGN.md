@@ -113,8 +113,8 @@ and a coinbase at M6, needs a tag of its own at `0x716e_0009` or above. M4 took
 `RHO_ENTRY = 0x716e_0009` for the shield. M6 took two more, both for the
 coinbase, because its `rho` and its `r` are derived from public data and a
 configured key rather than drawn at random: `RHO_COINBASE = 0x716e_000a` over
-the block number, and `R_COINBASE = 0x716e_000b` over the coinbase viewing key
-and the block number. Section 7.1 is why they are derived, and
+the block number, and `R_COINBASE = 0x716e_000b` over the coinbase viewing key,
+the chain's genesis and the block number. Section 7.1 is why they are derived, and
 `qnero_note_core::coinbase_r` is the rule.
 
 Address size is dominated by the ML-KEM encapsulation key: 1184 bytes at
@@ -299,7 +299,7 @@ credit to a sink, and the sink is the shielded pool.
 block author's node           inherent                 pallet-shielded
 ---------------------         --------                 ---------------
 rho   = H(RHO_COINBASE, n)    coinbase(inner, ct)      on_finalize of block n:
-r     = H(R_COINBASE, cvk, n)                            total = emission + tx fees
+r     = H(R_COINBASE, cvk, genesis, n)                   total = emission + tx fees
 inner = H(NOTE, pk, rho, r)                                    + author fee share
                                                          cm    = H(CM, inner, total)
                                                          append cm, store (block,
@@ -339,9 +339,11 @@ Five rules the pallet holds:
    to it. `pallet-mining-rewards` adds `PoolValue + PendingCoinbaseFee` to the issuance it reads.
    Without that term the emission schedule would see supply fall as the pool filled and mint faster
    forever, and `MAX_SUPPLY` would mean nothing.
-5. **The note is derived rather than encrypted.** `r = H(R_COINBASE, cvk, block_number)`, where `cvk` is a
-   coinbase viewing key the operator configures its node with, beside `pk`, as one bech32m miner
-   key. The node cannot encrypt to an ML-KEM key: the chain's own post-quantum Noise transport pins
+5. **The note is derived rather than encrypted.** `r = H(R_COINBASE, cvk, genesis_hash,
+   block_number)`, where `cvk` is a coinbase viewing key the operator configures its node with,
+   beside `pk`, as one bech32m miner key. The genesis is in the preimage because the derivation has
+   no randomness in it: without it, one miner key run on a testnet and on mainnet would mint byte
+   identical notes at equal heights on both. The node cannot encrypt to an ML-KEM key: the chain's own post-quantum Noise transport pins
    a semver-incompatible `ml-kem` and a binary cannot hold both. The note stays private against
    anyone holding only the miner's address, `cvk` is a viewing-tier secret for coinbase notes alone,
    and a coinbase paid to an address whose `cvk` the author does not hold still needs an encrypted

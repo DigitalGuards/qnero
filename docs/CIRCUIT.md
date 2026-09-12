@@ -1686,7 +1686,7 @@ coinbase leaves one miner produced.
 
 ```text
 rho   = H(RHO_COINBASE, block_number)              0x716e_000a
-r     = H(R_COINBASE, cvk, block_number)           0x716e_000b
+r     = H(R_COINBASE, cvk, H(genesis_hash), block_number)   0x716e_000b
 inner = H(NOTE, pk, rho, r)
 cm    = H(CM, inner, value)
 ```
@@ -1713,6 +1713,21 @@ address, because recovering `pk` from `inner` needs `r`, which needs `cvk`.
 What it costs: `cvk` is a viewing-tier secret for coinbase notes. Whoever holds
 it, with the address, can pick that miner's coinbase notes out of the tree. It
 cannot spend them, which needs `ask`, and it says nothing about any other note.
+
+What it costs, second: there is no randomness in the derivation, so one key at
+one height on one chain is always one note. Two proposals at a single height,
+which is what a re-proposed block or an orphan looks like, carry the same
+`inner`; only the canonical one is ever in a tree, and the header's author
+label `H(cvk, parent_hash)` is already identical for two candidates on one
+parent, so the note adds no linkage the block did not already carry. Monero
+draws a per-block random `r` and does not have even that. What determinism must
+not do is cross a chain boundary, which is why the genesis is in the preimage:
+one miner key configured on a testnet and on mainnet, or on a chain relaunched
+from a fresh genesis, would otherwise publish identical `inner` values at equal
+heights on both, and anyone who could name that operator's coinbase notes on
+the chain that matters less would name them on the other by comparing 32 bytes.
+Both the node and the wallet already hold the genesis hash, so the binding
+costs a scan nothing.
 
 What it does not cover: a coinbase paid to an address whose `cvk` the author
 does not hold. The wallet reads an encrypted payload
