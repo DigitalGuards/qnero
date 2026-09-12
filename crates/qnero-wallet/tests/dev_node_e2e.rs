@@ -435,19 +435,35 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
         )
         .expect("the node dry-runs");
     println!("system_dryRun of a vesting claim: {dry_run}");
-    assert_ne!(
-        dry_run, CALL_FILTERED,
-        "a genesis vesting allocation must stay claimable, or it is stranded \
-         in a keyless pot forever"
-    );
-    assert!(
-        // `0x00 01 03 16 ....`: Ok, then Err, then `DispatchError::Module`
-        // with index 22, which is pallet-vesting. The dev chain's schedules
-        // are all inside their 90-day cliff, so what comes back is the
-        // pallet's own answer rather than the dispatcher's.
-        dry_run.starts_with("0x00010316") || dry_run == "0x0000",
-        "the claim must reach pallet-vesting, whatever that pallet then says: {dry_run}"
-    );
+    // Decoded and pinned against the pallet index this test built the call
+    // with. "anything but CallFiltered" would pass on a decode failure too,
+    // which is exactly what a drifted `VESTING_PALLET_INDEX` or a moved call
+    // index produces, and the test would go on reporting that the genesis
+    // allocation is claimable while proving nothing.
+    //
+    // `system_dryRun` returns `Result<Result<(), DispatchError>, _>` in SCALE:
+    // `00` for the outer Ok, then `00` for a successful dispatch or `01 03`
+    // for `Err(DispatchError::Module)` followed by the module's own index and
+    // its four-byte error. The dev chain's schedules are all inside their
+    // 90-day cliff, so what comes back is pallet-vesting's own answer, which
+    // is the proof that the filter was not what stopped it.
+    let decoded = hex::decode(dry_run.trim_start_matches("0x")).expect("the node returns hex");
+    match decoded.as_slice() {
+        [0x00, 0x00] => println!("the claim dispatched: this signer has a claimable schedule"),
+        [0x00, 0x01, 0x03, index, error @ ..] if error.len() >= 4 => {
+            assert_eq!(
+                *index, VESTING_PALLET_INDEX,
+                "the claim came back from module {index} and this test built it for \
+                 pallet {VESTING_PALLET_INDEX}: either the index drifted or the call \
+                 never reached pallet-vesting ({dry_run})"
+            );
+            println!("pallet-vesting answered with error {}", error[0]);
+        }
+        _ => panic!(
+            "a genesis vesting allocation must stay claimable, and this is neither a \
+             dispatch nor a pallet-vesting error: {dry_run}"
+        ),
+    }
 }
 
 /// One account's free balance, straight out of `System::Account`.

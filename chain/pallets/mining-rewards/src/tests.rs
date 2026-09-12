@@ -369,7 +369,7 @@ fn oversized_preimage_data_ignored() {
 }
 
 #[test]
-fn fees_and_rewards_are_credited_under_the_authors_derived_address() {
+fn the_authors_derived_address_is_paid_nothing_and_named_nowhere() {
 	new_test_ext().execute_with(|| {
 		let test_preimage = [42u8; 32];
 		let miner_wormhole_address = sp_core::crypto::AccountId32::from(

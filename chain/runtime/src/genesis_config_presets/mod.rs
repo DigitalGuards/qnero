@@ -808,7 +808,23 @@ mod tests {
 	/// The two keyless accounts a preset can name are the vesting pot and the
 	/// treasury. The pot is allowed to hold exactly the schedule table plus its
 	/// own existential deposit, and nothing else, because `claim` is the one
-	/// call that moves it.
+	/// call that moves it. The treasury is a multisig, so its signers reach it
+	/// through `Multisig::execute`, whose inner call meets the filter like any
+	/// other and may be a `shield`.
+	///
+	/// Every preset is checked, and each one's endowed set is compared against
+	/// the tables that preset builds it from: the well-known signers for `dev`
+	/// and `heisenberg`, the treasury signers plus the faucet for `planck`, the
+	/// seeded treasurers and collective for `mainnet`, and the pot everywhere.
+	/// A non-zero check is what this used to do, and it would have passed the
+	/// bug it exists to catch, since the keyless wormhole address was endowed
+	/// with plenty.
+	///
+	/// What it cannot check is whether a key exists behind an address a human
+	/// supplied: `mainnet`'s grant rows are external SS58 strings and the
+	/// runtime has no way to tell a live address from a typo. The guard is
+	/// that the endowment list is closed and every row on it has to be
+	/// attributed here before it ships.
 	#[test]
 	fn every_genesis_planck_is_reachable_under_the_call_filter() {
 		use crate::configs::QneroCallFilter;
@@ -832,6 +848,36 @@ mod tests {
 		);
 
 		let pot = pallet_vesting::Pallet::<crate::Runtime>::pot_account_id();
+
+		// Every preset's endowed set, compared against the tables that preset
+		// builds it from. `amount > 0` is not the property: the address that
+		// shipped the bug was endowed with plenty and could sign for none of
+		// it. What makes an endowment reachable is that it came off a list of
+		// signers or collective members a human holds keys for, so the list is
+		// what this compares against, and a preset that grows a row has to say
+		// here which list the row came from.
+		let declared_endowed = |id: &PresetId| -> Vec<AccountId> {
+			let mut accounts = match id.as_ref() {
+				sp_genesis_builder::DEV_RUNTIME_PRESET | HEISENBERG_RUNTIME_PRESET =>
+					dilithium_default_accounts(),
+				PLANCK_RUNTIME_PRESET => {
+					let mut planck = planck_treasury_signers();
+					planck.push(planck_faucet_account());
+					planck
+				},
+				MAINNET_RUNTIME_PRESET =>
+					mainnet_vesting::seed_balances().into_iter().map(|(who, _)| who).collect(),
+				other => panic!(
+					"preset {other:?} has no declared account table here; add one before \
+					 shipping it, or the endowment check below is only a non-zero test"
+				),
+			};
+			accounts.push(pot.clone());
+			accounts.sort();
+			accounts.dedup();
+			accounts
+		};
+
 		for id in preset_names() {
 			let raw = get_preset(&id).expect("listed preset must resolve");
 			let (json, _) = prepare_genesis_build_input(raw).expect("well-formed");
@@ -851,6 +897,17 @@ mod tests {
 				}
 				assert!(*amount > 0, "preset {id:?}: {who:?} is endowed with nothing");
 			}
+
+			let mut endowed: Vec<AccountId> =
+				config.balances.balances.iter().map(|(who, _)| who.clone()).collect();
+			endowed.sort();
+			endowed.dedup();
+			assert_eq!(
+				endowed,
+				declared_endowed(&id),
+				"preset {id:?}: an endowed account is not on any list this preset declares, \
+				 so nothing here says a key exists for it"
+			);
 
 			for (who, _, _, _, _) in &config.vesting.schedules {
 				assert_ne!(*who, pot, "preset {id:?}: the pot cannot vest to itself");
