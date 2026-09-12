@@ -222,6 +222,15 @@ it cited supported. The numbers above are the transcript's own, and the
 inclusion term is the one to distrust: it is the wait for a block, so it is a
 property of the chain.
 
+The M5 review fix pass re-ran the same two payments on the same workstation,
+after memo padding took each output ciphertext from 1731 and 1743 bytes to a
+uniform 1987. Circuit build 2.42 and 2.45 s, proving 3.58 and 3.61 s, proof
+150908 bytes unchanged, submit to inclusion 0.54 and 1.54 s, wall clock 6.74
+and 7.81 s. The padding costs one quantum of fee per spend at the runtime's
+`CiphertextBytesPerFeeQuantum` of 512: the floor moved from 8 quanta to 9. It
+buys a chain that publishes no memo length and no marker for which output is
+the sender's change; `docs/WALLET.md` has the argument.
+
 The proof is 150908 bytes at `N = 6`, where M3 measured 157476 at `N = 7`: a
 recursive proof's size moves a little with the number of inner verifications
 and mostly with the FRI config.

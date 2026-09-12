@@ -177,7 +177,8 @@ fn public_batch_cost_at_the_chain_default() {
     // The submission. One real slot in one real inner, so `outputs` carries
     // exactly one `ShieldedOutput`: every real leaf slot of every settleable
     // segment, and a padding segment settles nothing at all.
-    let encoded = encode_submit_public_batch(&metadata, &bytes, &prepared.outputs);
+    let encoded = encode_submit_public_batch(&metadata, &bytes, &prepared.outputs)
+        .expect("the runtime's extrinsic format version takes a bare preamble");
     println!("extrinsic                    {} bytes", encoded.len());
     let started = Instant::now();
     let head_before = chain.head().expect("a head").number;

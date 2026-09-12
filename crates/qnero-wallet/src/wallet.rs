@@ -10,7 +10,7 @@ use qnero_circuit::witness::{InputNote, OutputNote, SpendWitness};
 use qnero_notes::{encrypt_note, entry_rho, try_receive, Address, Digest, Note, NoteCiphertext};
 use qnero_notes::{IncomingViewingKey, SpendingKey};
 use qnero_prover::WalletProver;
-use rand::TryRngCore;
+use rand::{Rng, TryRngCore};
 
 use crate::chain::Chain;
 use crate::extrinsic::{
@@ -18,6 +18,7 @@ use crate::extrinsic::{
 };
 use crate::fee::{ensure_ciphertext_fits, slot_fee_floor, submission_fee_floor};
 use crate::keys::store_path_for;
+use crate::memo::{pad_memo, unpad_memo};
 use crate::metadata::ChainMetadata;
 use crate::rpc::hex_0x;
 use crate::select::select_notes;
@@ -165,6 +166,11 @@ impl Wallet {
         if leaf_count > start {
             let ivk = self.ivk();
             let nk = self.key.nk();
+            // Read once, outside the loop. The entry counter is chain wide and
+            // the whole scan is pinned to one block, so it is the same value
+            // for every leaf; asking per received note was one round trip each
+            // for a field that is only a label.
+            let entry_count = chain.entry_count_at(&head.hash)?;
             for record in chain.leaves(start..leaf_count, &head.hash)? {
                 report.leaves_scanned += 1;
                 let (Some(commitment), Some(ciphertext)) = (record.commitment, record.ciphertext)
@@ -186,6 +192,17 @@ impl Wallet {
 
                 let commitment_hex = commitment.to_hex();
                 if self.store.has_commitment(&commitment_hex) {
+                    // Already held, and possibly not where it was. A rescan
+                    // reaches this line when the head regressed and the leaf
+                    // range was walked again, which is what an orphaned block
+                    // and a re-included extrinsic look like from here. See
+                    // `WalletStore::relocate_note`.
+                    if self
+                        .store
+                        .relocate_note(&commitment_hex, record.index, record.block_number)
+                    {
+                        report.relocated += 1;
+                    }
                     continue;
                 }
                 let nullifier = received.note.nullifier(&nk);
@@ -221,9 +238,7 @@ impl Wallet {
                 }
 
                 let origin = match record.block_number {
-                    Some(block)
-                        if entry_rho_matches(block, &received.note.rho, chain, &head.hash)? =>
-                    {
+                    Some(block) if entry_rho_matches(block, &received.note.rho, entry_count) => {
                         NoteOrigin::Shield
                     }
                     _ => NoteOrigin::Spend,
@@ -238,7 +253,7 @@ impl Wallet {
                     nullifier: nullifier_hex,
                     rho: received.note.rho.to_hex(),
                     r: received.note.r.to_hex(),
-                    memo: String::from_utf8_lossy(&received.memo).into_owned(),
+                    memo: String::from_utf8_lossy(unpad_memo(&received.memo)).into_owned(),
                     origin,
                     spent: false,
                     spent_seen_at_block: None,
@@ -280,6 +295,20 @@ impl Wallet {
         quanta: u64,
         memo: &str,
     ) -> Result<ShieldReport> {
+        // The same guard `sync` and `prepare_spend` run, and for the same
+        // reason: every key below is built from a compiled-in name and a
+        // compiled-in hasher, and the node validates none of them. `shield`
+        // reads `Shielded::EntryCount` and then `ZkTree::LeafCount` and
+        // `ZkTree::Leaves` to confirm its own leaf, and `Chain::leaf_hashes`
+        // reads an absent key as an empty leaf by design. Under a drifted
+        // layout the confirmation therefore finds no leaf carrying the
+        // commitment and reports a shield that actually settled as a dispatch
+        // that failed, dropping the pending entry that holds the note's `r` on
+        // the way out. The note stays recoverable, since its plaintext is in
+        // the ciphertext the chain stored, but the operator is told the value
+        // was burned for nothing and sent to look at the dev account instead
+        // of at the runtime.
+        metadata.ensure_known_storage()?;
         if quanta == 0 {
             bail!("a shield of zero moves nothing and the chain refuses it");
         }
@@ -300,7 +329,11 @@ impl Wallet {
         let ciphertext = encrypt_note(
             &self.ivk().encapsulation_key(),
             &note,
-            memo.as_bytes(),
+            // Padded, like every other memo this wallet writes: a note
+            // ciphertext is a fixed size plus its memo and the chain publishes
+            // the bytes in full, so an unpadded memo publishes its own length.
+            // See `crate::memo`.
+            &pad_memo(memo)?,
             &random_bytes()?,
         )?
         .to_bytes();
@@ -425,8 +458,8 @@ impl Wallet {
     ///
     /// The ciphertext sizes decide the floor and the fee is a public input
     /// fixed at proving time, so both are settled before a witness exists. A
-    /// `NoteCiphertext` is a fixed size plus its memo and the note's value
-    /// does not move it, so measuring a probe pair is exact.
+    /// `NoteCiphertext` is a fixed size plus its padded memo and the note's
+    /// value does not move it, so measuring a probe pair is exact.
     fn resolve_fee(
         &self,
         metadata: &ChainMetadata,
@@ -434,8 +467,7 @@ impl Wallet {
         memo: &str,
         requested_fee: Option<u64>,
     ) -> Result<u64> {
-        let probe_payment = probe_ciphertext_len(&to.ek, memo.as_bytes())?;
-        let probe_change = probe_ciphertext_len(&self.ivk().encapsulation_key(), b"")?;
+        let (probe_payment, probe_change) = self.probe_lengths(to, memo)?;
         ensure_ciphertext_fits(metadata, probe_payment, "payment")?;
         ensure_ciphertext_fits(metadata, probe_change, "change")?;
         let floor = slot_fee_floor(metadata, probe_payment, probe_change);
@@ -457,6 +489,28 @@ impl Wallet {
             ),
             Some(fee) => Ok(fee),
         }
+    }
+
+    /// The exact byte length of each output ciphertext this spend will carry.
+    ///
+    /// One number twice. Both memos are padded to `memo::MEMO_BYTES` and an
+    /// ML-KEM ciphertext is fixed size, so the payment and the change come out
+    /// identical whatever the memo says and whoever the recipient is. That
+    /// equality is the property, and it is asserted here: two different
+    /// lengths published side by side name which of the pair is the sender's
+    /// change and how long the payment's memo was.
+    fn probe_lengths(&self, to: &Address, memo: &str) -> Result<(usize, usize)> {
+        let payment = probe_ciphertext_len(&to.ek, &pad_memo(memo)?)?;
+        let change = probe_ciphertext_len(&self.ivk().encapsulation_key(), &pad_memo("")?)?;
+        if payment != change {
+            bail!(
+                "the payment ciphertext measures {payment} bytes and the change {change}. Every \
+                 memo is padded to the same size precisely so these two agree, and a pair of \
+                 different lengths publishes which output is the change and how long the \
+                 payment's memo was."
+            );
+        }
+        Ok((payment, change))
     }
 
     /// Spend up to two notes into a payment and a change note.
@@ -509,8 +563,7 @@ impl Wallet {
     ) -> Result<PreparedSpend> {
         metadata.ensure_known_storage()?;
         let fee = self.resolve_fee(metadata, to, memo, requested_fee)?;
-        let probe_payment = probe_ciphertext_len(&to.ek, memo.as_bytes())?;
-        let probe_change = probe_ciphertext_len(&self.ivk().encapsulation_key(), b"")?;
+        let (probe_payment, probe_change) = self.probe_lengths(to, memo)?;
 
         let target = amount
             .checked_add(fee)
@@ -528,15 +581,23 @@ impl Wallet {
         //
         // The anchor is always the current head, and that is a privacy policy
         // as much as a correctness one. The anchor block is a public input of
-        // the settlement, so an observer reads the gap between anchor and
-        // inclusion. Every wallet anchoring at the head makes that gap the
-        // same short interval for everyone; an anchor at head minus k, or one
-        // cached and reused across two spends to save a `chain_getHeader`, is
-        // a distinguisher inside the 256-block window and marks both spends as
-        // one wallet's. So the anchor is always the head, and it is taken
-        // fresh for every submission. The head is taken after the circuits are
-        // built for the same reason, since the anchor-to-inclusion gap
-        // otherwise publishes this machine's circuit build time.
+        // the settlement, so every chain reader sees the gap between anchor
+        // and inclusion. An anchor at head minus k, or one cached and reused
+        // across two spends to save a `chain_getHeader`, is a distinguisher
+        // inside the 256-block window and marks both spends as one wallet's.
+        // So the anchor is always the head, and it is taken fresh for every
+        // submission. It is taken here, with the circuits already built, so
+        // that circuit build time stays out of the gap.
+        //
+        // What that does not buy is a uniform gap. Everything after this line
+        // is inside it: the tree rebuild, which is O(leaf_count) reads and a
+        // Poseidon2 fold, two ML-KEM encapsulations, and the proof. A
+        // `--merkle-rpc` spend skips the rebuild and lands measurably sooner
+        // than a default one; a slow machine or a long chain lands later. So
+        // the gap is a per-wallet class marker, published to every chain
+        // reader. Making it a constant means holding the submission until the
+        // anchor plus a fixed number of blocks, which is latency M5 does not
+        // spend. `docs/WALLET.md` records it as an open issue.
         let head = chain.head()?;
         let (header, anchor_hash) = chain.anchor_header(head.number)?;
 
@@ -577,10 +638,24 @@ impl Wallet {
             other => bail!("selected {other} notes for a circuit with two input slots"),
         };
 
-        let outputs = [
-            OutputNote::new(to.pk, amount, random_digest(b"qnero-wallet/out-payment")?),
-            OutputNote::new(pk, change, random_digest(b"qnero-wallet/out-change")?),
-        ];
+        // Which slot carries the payment is drawn per spend. With the payment
+        // fixed at slot 0 the chain publishes, for every settlement, which of
+        // the two new leaves is the sender's change: `ct_1` belongs to
+        // `cm_out_1` and `SlotSettled` names both leaf indices, so the pool's
+        // outputs split publicly into "went to a counterparty" and "came back
+        // to the sender" with no key material at all. The circuit derives each
+        // output's `rho` from its own slot index (`SpendWitness::output_rho`),
+        // so either assignment proves and settles unchanged.
+        let payment_slot = choose_payment_slot(&mut rng);
+        let change_slot = 1 - payment_slot;
+        let payment_out =
+            OutputNote::new(to.pk, amount, random_digest(b"qnero-wallet/out-payment")?);
+        let change_out = OutputNote::new(pk, change, random_digest(b"qnero-wallet/out-change")?);
+        let outputs = if payment_slot == 0 {
+            [payment_out, change_out]
+        } else {
+            [change_out, payment_out]
+        };
         // `ct_digest` binds ciphertexts that carry a `rho` the witness derives
         // from its own nullifiers, so the witness is built first with a
         // placeholder and the digest written once the outputs exist. Nothing
@@ -595,14 +670,14 @@ impl Wallet {
         };
         witness.validate()?;
 
-        let payment_note = witness.output_note(0)?;
-        let change_note = witness.output_note(1)?;
-        let ct_1 =
-            encrypt_note(&to.ek, &payment_note, memo.as_bytes(), &random_bytes()?)?.to_bytes();
-        let ct_2 = encrypt_note(
+        let payment_note = witness.output_note(payment_slot)?;
+        let change_note = witness.output_note(change_slot)?;
+        let payment_ct =
+            encrypt_note(&to.ek, &payment_note, &pad_memo(memo)?, &random_bytes()?)?.to_bytes();
+        let change_ct = encrypt_note(
             &self.ivk().encapsulation_key(),
             &change_note,
-            b"",
+            &pad_memo("")?,
             // Fresh per output, and nothing enforces it inside `encrypt_note`:
             // two outputs sharing `kem_randomness` are encrypted under one
             // ChaCha20-Poly1305 key and nonce, which leaks the XOR of the two
@@ -610,6 +685,13 @@ impl Wallet {
             &random_bytes()?,
         )?
         .to_bytes();
+        // `ct_1` belongs to `cm_out_1`, so the ciphertexts go out in slot
+        // order and the payment's position rides with its note.
+        let (ct_1, ct_2) = if payment_slot == 0 {
+            (payment_ct, change_ct)
+        } else {
+            (change_ct, payment_ct)
+        };
         if ct_1.len() != probe_payment || ct_2.len() != probe_change {
             bail!(
                 "the ciphertexts came out at {} and {} bytes where the fee was computed for {} \
@@ -792,7 +874,7 @@ impl Wallet {
         metadata: &ChainMetadata,
         prepared: PreparedSpend,
     ) -> Result<SendReport> {
-        let encoded = encode_submit_private_batch(metadata, &prepared.proof, &prepared.outputs);
+        let encoded = encode_submit_private_batch(metadata, &prepared.proof, &prepared.outputs)?;
         let encoded_hex = hex_0x(&encoded);
 
         // Written before the submission: the store is the only copy of the
@@ -840,7 +922,7 @@ impl Wallet {
 }
 
 /// A proved spend, before anything is submitted or recorded.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PreparedSpend {
     /// The private-batch proof, in plonky2's canonical encoding.
     pub proof: Vec<u8>,
@@ -856,6 +938,41 @@ pub struct PreparedSpend {
     pub change: u64,
     pub anchor_block: u32,
     pub proving: Duration,
+}
+
+/// Redacted by hand, like every other type here that touches note material.
+///
+/// A derive prints `nullifiers`, `spent_nullifiers` and `input_leaves` in
+/// full, and a `PreparedSpend` exists exactly during the window when none of
+/// those is published yet. The first `dbg!` or `anyhow` context anyone wraps
+/// around `submit_spend` while chasing an inclusion timeout would put the set
+/// of nullifiers this wallet is about to publish, beside the leaf indices it
+/// owns, into a log file created at the shell's umask. Those are the two
+/// values the rest of this wallet takes care never to hand its own node.
+impl core::fmt::Debug for PreparedSpend {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedSpend")
+            .field("proof", &self.proof.len())
+            .field("outputs", &self.outputs.len())
+            .field("nullifiers", &crate::store::REDACTED)
+            .field("change_note", &self.change_note)
+            .field("spent_nullifiers", &crate::store::REDACTED)
+            .field("input_leaves", &crate::store::REDACTED)
+            .field("amount", &self.amount)
+            .field("fee", &self.fee)
+            .field("change", &self.change)
+            .field("anchor_block", &self.anchor_block)
+            .field("proving", &self.proving)
+            .finish()
+    }
+}
+
+/// Which of the leaf's two output slots carries the payment.
+///
+/// Drawn per spend, so the chain does not publish which of a settlement's two
+/// new leaves is the sender's change. See the call site.
+fn choose_payment_slot<R: Rng + ?Sized>(rng: &mut R) -> usize {
+    usize::from(rng.random_bool(0.5))
 }
 
 /// The `ct_digest` of one settlement slot, over the bytes the extrinsic
@@ -879,9 +996,12 @@ pub fn output_ct_digest(output: &ShieldedOutput) -> Result<Digest> {
 /// and monotone, a dev chain's is small, and a miss is not an error. A `false`
 /// means the note came from a spend, whose `rho` the circuit derived from two
 /// nullifiers, or from a shielder that ignored the rule.
-fn entry_rho_matches(block: u32, rho: &Digest, chain: &Chain, at: &[u8; 32]) -> Result<bool> {
-    let entries = chain.entry_count_at(at)?;
-    Ok((0..entries).any(|index| entry_rho(block, index) == *rho))
+///
+/// The count is a parameter, because it is the same for every leaf of one
+/// scan: the scan is pinned to a single block hash, so a per-note read was a
+/// round trip whose answer could never move.
+fn entry_rho_matches(block: u32, rho: &Digest, entries: u64) -> bool {
+    (0..entries).any(|index| entry_rho(block, index) == *rho)
 }
 
 /// Poll blocks for the exact extrinsic that was submitted.
@@ -954,6 +1074,8 @@ pub struct SyncReport {
     pub received_value: u64,
     pub rejected: u64,
     pub newly_spent: u64,
+    /// Notes already held that the chain now carries at a different leaf.
+    pub relocated: u64,
 }
 
 #[derive(Debug)]
@@ -1118,5 +1240,73 @@ mod tests {
     #[test]
     fn paths_are_rebuilt_locally_unless_asked_otherwise() {
         assert_eq!(MerkleSource::default(), MerkleSource::Local);
+    }
+
+    /// The regression: the payment was always output slot 0 and the change
+    /// always slot 1. `ct_1` belongs to `cm_out_1` and `SlotSettled` publishes
+    /// both leaf indices, so a fixed assignment tells every chain reader which
+    /// of a settlement's two new leaves came back to the sender, with no key
+    /// material at all.
+    #[test]
+    fn the_payment_takes_either_output_slot() {
+        let mut rng = rand::rng();
+        let mut seen = [0usize; 2];
+        for _ in 0..256 {
+            let slot = choose_payment_slot(&mut rng);
+            assert!(slot < 2, "a leaf has two output slots, got {slot}");
+            seen[slot] += 1;
+        }
+        assert!(
+            seen[0] > 0 && seen[1] > 0,
+            "the payment never moved off one slot: {seen:?}"
+        );
+    }
+
+    /// The regression: `PreparedSpend` derived `Debug`, while
+    /// `docs/WALLET.md` said it hand-wrote a redacting one. A
+    /// `PreparedSpend` exists exactly while its nullifiers are still
+    /// unpublished, so the first `dbg!` or `anyhow` context anyone added while
+    /// chasing an inclusion timeout would write them, and the leaf indices
+    /// this wallet owns, into a log file at the shell's umask.
+    #[test]
+    fn a_prepared_spend_prints_no_nullifier_and_no_leaf_index() {
+        let first = Digest::hash_bytes(&[b"nullifier one"]).to_bytes();
+        let second = Digest::hash_bytes(&[b"nullifier two"]).to_bytes();
+        let spent = Digest::hash_bytes(&[b"a note this wallet spent"]).to_hex();
+        let prepared = PreparedSpend {
+            proof: vec![0u8; 150_908],
+            outputs: vec![ShieldedOutput {
+                ct_1: vec![1u8; 8],
+                ct_2: vec![2u8; 8],
+            }],
+            nullifiers: [first, second],
+            change_note: PendingNote {
+                kind: PendingKind::Change,
+                commitment: "aa".repeat(32),
+                value: 699,
+                rho: Digest::hash_bytes(&[b"change rho"]).to_hex(),
+                r: Digest::hash_bytes(&[b"change r"]).to_hex(),
+                memo: String::new(),
+                submitted_at_block: 11,
+                extrinsic: String::new(),
+            },
+            spent_nullifiers: vec![spent.clone()],
+            input_leaves: vec![1_068, 1_069],
+            amount: 300,
+            fee: 9,
+            change: 699,
+            anchor_block: 11,
+            proving: Duration::from_secs(4),
+        };
+
+        let printed = format!("{prepared:?}");
+        assert!(!printed.contains(&hex::encode(first)), "{printed}");
+        assert!(!printed.contains(&hex::encode(second)), "{printed}");
+        assert!(!printed.contains(&spent), "{printed}");
+        assert!(!printed.contains("1068"), "a leaf index leaked: {printed}");
+        assert!(!printed.contains(&prepared.change_note.r), "{printed}");
+        assert!(printed.contains(crate::store::REDACTED), "{printed}");
+        // The lengths stay, because they are what a log line is for.
+        assert!(printed.contains("150908"), "{printed}");
     }
 }

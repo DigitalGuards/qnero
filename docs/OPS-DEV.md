@@ -865,3 +865,230 @@ Two payments, so every range below is a two-sample range.
 The circuit build is paid once per process and a longer-lived wallet would pay
 it once per run. `docs/BENCH.md` carries these beside the public batch at
 `n = 53`, which this milestone measured for the first time.
+
+## The M5 review fix pass, 2026-09-12
+
+Thirteen review findings, two of them about what the chain publishes rather
+than what the wallet asks its node. The fix pass re-ran the whole end-to-end
+flow against a fresh `--dev --tmp` node, because two of the changes move
+numbers that the M5 run above recorded: every memo is now padded to 256 bytes,
+so each output ciphertext is a uniform 1987 bytes and the submission floor is
+9 quanta where it was 8.
+
+### What changed
+
+- **Memo padding.** A `NoteCiphertext` is 1731 bytes plus its memo, and the
+  chain publishes those bytes in full. An unpadded pair therefore published the
+  payment memo's exact byte count as `len(ct_1) - len(ct_2)`, and made the
+  change note, whose memo is empty, always the shorter of the two.
+- **The payment's output slot is drawn per spend.** `ct_1` belongs to
+  `cm_out_1` and `SlotSettled` names both leaf indices, so a payment fixed at
+  slot 0 told every chain reader which of a settlement's two new leaves came
+  back to the sender.
+- **Memos are escaped before they reach a terminal.** A memo is remote input
+  and `balance` printed it byte for byte.
+- **`shield` runs `ensure_known_storage` first**, the check `sync` and
+  `prepare_spend` already ran. Without it a drifted `ZkTree::Leaves` turned a
+  shield that settled into a reported dispatch failure and dropped the pending
+  record of the note's `r`.
+- **A note that moved leaf is repaired**, so an orphaned block and a
+  re-included extrinsic cannot leave a stale leaf index that makes a balance
+  unspendable.
+- **The runtime's extrinsic format version is read** and checked against the
+  two compiled-in preamble bytes.
+- Plus: `PreparedSpend` hand-writes a redacting `Debug`, the store's JSON text
+  is read and written inside `Zeroizing`, the entry counter is read once per
+  sync instead of once per received note, and two stale claims in the prose
+  were corrected.
+
+### The run
+
+```text
+=== 1. a fresh dev node ===
+
+$ nice -n 19 ./chain/target/release/quantus-node --dev --tmp   (backgrounded, pidfile)
+$ ss -ltn | grep 9944
+LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*
+LISTEN 0      1024            [::1]:9944          [::]:*
+
+=== 2. two wallets ===
+
+$ qnero-wallet --file a.seed keygen
+seed    a.seed
+store   a.seed.store.json
+address qn1qxjjyfnf59hfkc0nvk6wa...amq4hdr4l
+$ qnero-wallet --file b.seed keygen
+seed    b.seed
+store   b.seed.store.json
+address qn1q...
+
+$ qnero-wallet status
+node              http://127.0.0.1:9944
+runtime           spec 152, transaction 6
+chain head        21 (3fff5b5b63b08e44802c652e98cc06ec8a7e8f902b1bb12aa00ab8c5b83dd065)
+tree leaves       26
+tree depth        3
+tree root         75990b78259a9838c626e449211220f35d1a73b541dc9ca002317f26b1460a0f
+last synced block (no wallet at /home/<user>/.local/share/qnero/qnero-wallet.seed)
+
+=== 3. shield 1000 quanta from the dev account alice into A ===
+
+$ /usr/bin/time qnero-wallet --file a.seed shield --from-dev-account alice --amount 1000 --memo 'first shield'
+shielding 1000 quanta (10000000000000 planck) from alice
+commitment  934a9a35feec79df35b115a3d555304c7ac70c6d643199b3f2707f453a937350
+leaf        34
+included    block 30 after 2.51s
+synced      1 new note(s), unspent total 1000 quanta
+wall 2.54 s, peak RSS 5312 KB
+
+$ qnero-wallet --file a.seed balance
+unspent        1000 quanta
+pending        0 quanta
+synced through block 31
+
+      leaf        quanta    block    state  memo
+        34          1000       30  unspent  first shield
+
+=== 4. a fee below the floor, and a memo over the pad ===
+
+$ qnero-wallet --file a.seed send --to <B> --amount 300 --fee 1 --memo 'payment to B'
+Error: a fee of 1 quanta is below this submission's floor of 9. The pallet asks MinLeafFee (1) plus one quantum per started 512 bytes of ciphertext, and the two outputs here are 3974 bytes. The fee is a public input of the proof, so it cannot be raised afterwards: the settlement would be refused with PayloadUnderpaid.
+
+$ qnero-wallet --file a.seed send --to <B> --amount 10 --memo "$(python3 -c 'print("m"*257, end="")')"
+Error: the memo is 257 bytes and every memo is padded to 256. A longer one would make this note's ciphertext a different length from every other note's, which is the leak the padding closes.
+
+=== 5. A sends 300 quanta to B at the floor ===
+
+$ /usr/bin/time qnero-wallet --file a.seed send --to <B> --amount 300 --memo 'payment to B'
+fee         9 quanta
+circuits    built in 2.45s (6 leaf slots per batch)
+anchor      block 41
+inputs      leaves [34] for 300 quanta plus 9 fee
+change      691 quanta
+proof       150908 bytes
+proving     3.61s
+inclusion   block 45 after 1.54s
+synced      1 new note(s), unspent total 691 quanta
+wall 7.81 s, peak RSS 1108432 KB
+
+=== 6. B sees the note; A sees the input spent and its change ===
+
+$ qnero-wallet --file b.seed sync
+scanned leaves 0..59 at block 50
+received 1 note(s) worth 300 quanta
+newly spent 0
+unspent total 300 quanta
+
+$ qnero-wallet --file b.seed balance
+unspent        300 quanta
+pending        0 quanta
+synced through block 50
+
+      leaf        quanta    block    state  memo
+        50           300       45  unspent  payment to B
+
+$ qnero-wallet --file a.seed balance
+unspent        691 quanta
+pending        0 quanta
+synced through block 50
+
+      leaf        quanta    block    state  memo
+        34          1000       30    spent  first shield
+        51           691       45  unspent
+
+=== 7. B spends the note it received, back to A ===
+
+$ /usr/bin/time qnero-wallet --file b.seed send --to <A> --amount 100 --memo 'back to A'
+fee         9 quanta
+circuits    built in 2.42s (6 leaf slots per batch)
+anchor      block 59
+inputs      leaves [50] for 100 quanta plus 9 fee
+change      191 quanta
+proof       150908 bytes
+proving     3.58s
+inclusion   block 65 after 535.45ms
+synced      1 new note(s), unspent total 191 quanta
+wall 6.74 s, peak RSS 1108440 KB
+
+$ qnero-wallet --file a.seed sync
+scanned leaves 59..77 at block 65
+received 1 note(s) worth 100 quanta
+newly spent 0
+unspent total 791 quanta
+
+$ qnero-wallet --file a.seed balance
+      leaf        quanta    block    state  memo
+        34          1000       30    spent  first shield
+        51           691       45  unspent
+        74           100       65  unspent  back to A
+
+$ qnero-wallet --file b.seed balance
+      leaf        quanta    block    state  memo
+        50           300       45    spent  payment to B
+        73           191       65  unspent
+
+=== 8. what the chain published ===
+
+$ state_getStorage Shielded::Ciphertexts(i) for the four settled output leaves
+leaf 50: ciphertext 1987 bytes
+leaf 51: ciphertext 1987 bytes
+leaf 73: ciphertext 1987 bytes
+leaf 74: ciphertext 1987 bytes
+
+The payment carried a 12-byte memo and the change carried none, and the two
+are the same length on chain. The payment took leaf 50 in the first spend and
+leaf 74 in the second, so the slot draw moved between them: in the first the
+change is the higher leaf and in the second it is the lower one.
+
+=== 9. a hostile memo cannot drive the terminal ===
+
+$ qnero-wallet --file b.seed send --to <A> --amount 10 --memo $'\r\x1b[2K        99      999999       1  unspent  forged'
+fee         9 quanta
+proving     3.59s
+inclusion   block 98 after 536.13ms
+
+$ qnero-wallet --file a.seed sync && qnero-wallet --file a.seed balance | cat -v
+      leaf        quanta    block    state  memo
+        34          1000       30    spent  first shield
+        51           691       45  unspent
+        74           100       65  unspent  back to A
+       109            10       98  unspent  \u{0d}\u{1b}[2K        99      999999       1  unspent  forged
+
+Piped through `cat -v`, so a surviving ESC would read as `^[`. The escape
+sequence the sender chose is inert text on one row.
+
+=== 10. the same flow as an integration test, then stop the node ===
+
+$ QNERO_DEV_NODE=http://127.0.0.1:9944 RAYON_NUM_THREADS=4 nice -n 19 cargo test \
+    -j 2 --release -p qnero-wallet --features parallel --test dev_node_e2e -- --nocapture
+shield of 1000 quanta included at block 106 (1.51s), leaf 120
+300 quanta to B: proved in 3.57s, 150908 proof bytes, included at block 113
+100 quanta back to A: proved in 3.40s, included at block 117
+test a_shield_a_payment_and_a_payment_back_settle_end_to_end ... ok
+test result: ok. 1 passed; 0 failed
+
+$ kill $(cat node.pid), then wait for 9944 to close
+9944 has no listener
+```
+
+### Gates
+
+```
+# in the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   all suites ok, 0 failed (the dev-node e2e skips itself without QNERO_DEV_NODE,
+   the public-batch measurement stays ignored)
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+```
+
+### What the fix pass cost
+
+One quantum of fee per spend. The floor is
+`MinLeafFee(1) + ceil(3974 / 512) = 9` where it was
+`MinLeafFee(1) + ceil(3474 / 512) = 8`, because padding both memos to 256 bytes
+takes the pair from 3474 bytes to 3974. Nothing else moved: the proof is the
+same 150908 bytes, proving is the same 3.6 s, and the padded plaintext is
+stripped back on receive.

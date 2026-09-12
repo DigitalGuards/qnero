@@ -5,6 +5,7 @@ pub mod dev_account;
 pub mod extrinsic;
 pub mod fee;
 pub mod keys;
+pub mod memo;
 pub mod metadata;
 pub mod rpc;
 pub mod scale;

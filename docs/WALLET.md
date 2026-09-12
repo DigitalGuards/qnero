@@ -68,6 +68,44 @@ What is still visible to the node: this wallet's IP, that it is a Qnero wallet,
 when it syncs, and the extrinsics it submits. Traffic analysis over submission
 timing is not addressed here and is not addressable inside the wallet.
 
+## What every chain reader learns
+
+A wider audience than the section above, and a different one. The rules above
+are about the request stream, which only the node sees. What follows is
+published on chain, where anyone with an RPC connection and no key material at
+all reads it.
+
+- **Every note ciphertext this wallet writes is one length.** A
+  `NoteCiphertext` is a fixed 1731 bytes plus its memo, byte for byte, and the
+  chain publishes those bytes in full: in `Shielded::Ciphertexts`, and in the
+  `SlotSettled` event beside both leaf indices. So an unpadded memo publishes
+  its own exact byte count, `len(ct_1) - len(ct_2)` correlates any two payments
+  carrying the same memo string, and a spend's change note, whose memo is
+  always empty, is always the shorter of the published pair. Every memo is
+  therefore padded to `memo::MEMO_BYTES`, 256 bytes, which fits inside the
+  budget `MaxCiphertextBytes` leaves over a memoless ciphertext. Zcash's
+  512-byte memo field is the precedent; the size differs because this
+  ciphertext's fixed part is larger. A memo over the pad is refused, at the top
+  of the command.
+- **Which output is the change is drawn per spend.** `ct_1` belongs to
+  `cm_out_1` and `SlotSettled` names both leaf indices, so a payment fixed at
+  output slot 0 splits the pool's outputs publicly into "went to a
+  counterparty" and "came back to the sender". The wallet draws the payment's
+  slot per spend instead. The circuit derives each output's `rho` from its own
+  slot index (`SpendWitness::output_rho`), so either assignment proves and
+  settles unchanged.
+- **The gap between a spend's anchor block and its inclusion block is not
+  uniform, and that is open.** Both are public inputs of the settlement. The
+  anchor is always the head, which keeps a wallet from marking two of its own
+  spends with a shared offset, but everything after the anchor is taken sits
+  inside the gap: the local tree rebuild, which is `O(leaf_count)` reads and a
+  Poseidon2 fold, two ML-KEM encapsulations, and the proof. A `--merkle-rpc`
+  spend skips the rebuild and lands measurably sooner than a default one on the
+  same chain; a slow machine or a long chain lands later. So the gap is a
+  per-wallet class marker on every settlement. Making it a constant means
+  holding the submission until the anchor plus a fixed number of blocks, which
+  is latency M5 does not spend. Listed under open issues.
+
 The transparent ML-DSA-87 key and the shielded spending key are separate
 secrets and neither derives from the other. A transparent key that could derive
 the spending key would make every shield linkable to its notes by anyone
@@ -112,7 +150,12 @@ QR code or a copy-paste string.
 Signs and submits `shield(value, inner, ciphertext)` from a dev account. The
 wallet draws the note's randomness, derives `rho` by the entry rule, computes
 `inner = H(NOTE, pk, rho, r)`, encrypts the note to its own encapsulation key
-and submits. The note is written to the store as *pending* **before** the
+with the memo padded to one size, and submits. The runtime's storage layout is
+checked against what the wallet hashes before any of this, the same check
+`sync` and `send` run: this command reads `Shielded::EntryCount` and then
+`ZkTree::LeafCount` and `ZkTree::Leaves` to confirm its own leaf, and an absent
+key reads as an empty map, which would turn a shield that settled into a
+reported dispatch failure. The note is written to the store as *pending* **before** the
 extrinsic is sent, because the store is the only copy of its `r`.
 
 One thing here is a prediction. The entry rule is
@@ -157,8 +200,21 @@ Most leaves carry no ciphertext at all and that is normal: the shielded pool
 shares one commitment tree with wormhole transfers and with the mining-reward
 leaf every block appends.
 
+A leaf whose commitment this wallet already holds is not skipped: its recorded
+leaf index and block are compared against where the chain now carries it and
+repaired when they differ. Every read is pinned to `chain_getHeader`, which is
+the best block, and a best block can still be orphaned, so a leaf index is
+provisional when a scan first records it. When the block a note settled in is orphaned the extrinsic is
+still in the pool, is re-included, and appends the identical commitment at
+whatever index the replacement block has room for. A stale index makes the note
+unspendable: the path rebuild refuses a leaf whose commitment is not the note's,
+and `--merkle-rpc` refuses it the same way, while the balance goes on reporting
+it as spendable.
+
 Every ciphertext that decrypts goes through `qnero_notes::try_receive`, which
 also checks the plaintext opens the commitment the chain published beside it.
+The memo it returns has its padding stripped, trailing zeros only, so a memo
+from a wallet that does not pad passes through unchanged.
 Then two refusals, both from `docs/CIRCUIT.md` section 9.8:
 
 - a note whose nullifier duplicates one this wallet already holds, and
@@ -186,6 +242,18 @@ Unspent total, pending total, and the note list with leaf indices, block
 numbers, spent state and memos. Pending and refused entries are listed under
 it.
 
+A memo is remote input. Anyone holding this wallet's address can send it a note
+and choose the memo's bytes, and printed byte for byte that is an escape
+sequence injection into the operator's terminal: `\r\x1b[2K` erases the row
+just written and lets the sender redraw the table with leaf indices, values and
+spent flags of their choosing, and OSC 52 writes the sender's own address into
+the clipboard the operator then pastes into `send --to`. So every control
+character and every bidirectional formatting character is escaped as
+`\u{..}` on the way to the terminal, and the rendering is truncated, so one
+note is always one row. The store keeps the raw bytes: serde_json escapes
+control characters on the way to the file, and a wallet that rewrote what it
+received could not show an operator what was actually sent.
+
 ### `send --to <qn1...> --amount N [--fee F] [--memo TEXT] [--no-sync] [--merkle-rpc]`
 
 Syncs, then spends up to two notes into a payment and a change note.
@@ -194,11 +262,13 @@ Order of operations, and every step before the proof exists is there so that a
 refusal costs nothing:
 
 1. **Fee floor.** Measured from the ciphertexts the submission will actually
-   carry. A `NoteCiphertext` is 1731 bytes plus its memo and a note's value
-   does not move that, so a probe encryption gives the exact size. The floor is
+   carry. A `NoteCiphertext` is 1731 bytes plus its padded memo and a note's
+   value does not move that, so a probe encryption gives the exact size: 1987
+   bytes for both outputs, and the two are asserted equal, since a difference
+   is the leak the padding closes. The floor is
    `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)`, and for the
    single real slot a wallet submits it equals the whole-submission floor. At
-   the current runtime that is 8 quanta for two ordinary outputs. `--fee`
+   the current runtime that is 9 quanta for two outputs. `--fee`
    defaults to it and a lower one is refused with the arithmetic spelled out:
    the fee is a public input of the proof, fixed at proving time, so it cannot
    be raised afterwards and the chain would refuse the settlement with
@@ -250,7 +320,9 @@ refusal costs nothing:
    note it holds.
 6. **Outputs and `ct_digest`.** An output's `rho` is derived in circuit from
    both nullifiers the leaf publishes, so the witness is built first and the
-   output plaintexts come out of it (`SpendWitness::output_note`). Each is
+   output plaintexts come out of it (`SpendWitness::output_note`). Which slot
+   carries the payment is drawn per spend, and both memos are padded to one
+   size; see "What every chain reader learns". Each is
    encrypted with its own fresh KEM randomness. Reusing it across two outputs
    encrypts both under one ChaCha20-Poly1305 key and nonce, which leaks the XOR
    of the plaintexts and the authentication key, and nothing inside
@@ -259,7 +331,8 @@ refusal costs nothing:
    same function `pallet-shielded` recomputes it with.
 7. **Prove, self-verify, submit.** The private batch is proved, verified
    locally against the wallet's own batch verifier data, and submitted as a
-   bare unsigned extrinsic. The change note is written to the store as pending
+   bare unsigned extrinsic, whose preamble byte is checked against the
+   extrinsic format version the runtime declares in its own metadata. The change note is written to the store as pending
    before the submission.
 8. **Confirm.** The wallet polls blocks for the exact bytes it submitted, then
    checks both nullifiers are in `UsedNullifiers` at the inclusion block. An
@@ -348,8 +421,9 @@ Field notes:
   block its leaf landed in, and `spend` otherwise. It is a label. Nothing in
   the spend path reads it.
 - `spent_seen_at_block` is when this wallet first saw the nullifier settled,
-  which is not the block that settled it: spent status is learned by probing
-  `UsedNullifiers`, and that map carries no height.
+  which is not the block that settled it. Spent status is decided locally
+  against the paged copy of `UsedNullifiers`, and that map carries no height at
+  all, so the best a wallet can record is the head its sync was pinned to.
 - `pending` holds notes this wallet created and has not yet seen on chain. A
   pending entry is dropped when a sync records the note at its commitment. One
   left behind by a submission that never settled stays until it is deleted by
@@ -366,10 +440,21 @@ Field notes:
 
 Note secrets never reach a `Debug` format. `StoredNote`, `PendingNote`,
 `WalletStore` and `PreparedSpend` all hand-write `Debug` and print
-`[REDACTED]` for `rho`, `r` and the memo, the way every other type in this
-workspace that touches note material does. A derive would put every note's
-secrets into the first log line anyone adds, and `rho` and `r` beside a
-published nullifier are the whole link from a settled spend to its note.
+`[REDACTED]`, the way every other type in this workspace that touches note
+material does: `rho`, `r` and the memo for the three store types, and for
+`PreparedSpend` the nullifiers it is about to publish, the nullifiers of the
+notes it spends and the leaf indices it holds. A derive would put all of that
+into the first log line anyone adds while chasing an inclusion timeout, and
+`rho` and `r` beside a published nullifier are the whole link from a settled
+spend to its note. `store.rs::debug_output_carries_no_note_secrets` and
+`wallet.rs::a_prepared_spend_prints_no_nullifier_and_no_leaf_index` are the
+gates behind that.
+
+The store's own JSON text is read and written inside `Zeroizing`, so the two
+buffers the wallet owns are wiped on the way out, with no copy of a note's
+`rho` or `r` left in freed memory; the seed one file over gets the same
+treatment for the same reason. serde_json's internal buffers are not wiped, so a core dump or a swap
+page can still reach a copy the wallet does not own.
 
 Deleting the store and re-syncing recovers every unspent note, because every
 note's plaintext is on chain in its ciphertext. What it does not recover is
@@ -407,7 +492,12 @@ Two of the default tests run the wallet against a scriptable JSON-RPC node in
   see the difference.
 - `tests/shield_dispatch.rs` asserts that a shield whose extrinsic was
   included and whose dispatch failed is an error, and leaves no pending note
-  behind in memory or on disk.
+  behind in memory or on disk, and that a runtime whose storage layout is not
+  the one the wallet hashes stops a shield before it is signed.
+- `tests/sync_reorg.rs` asserts that a note re-included at a different leaf
+  after its block was orphaned is moved in the store to the leaf it now
+  occupies. A skipped one keeps a stale leaf index, reads as spendable, and
+  fails every spend on the path rebuild.
 
 ## Provenance
 
@@ -444,8 +534,11 @@ are cited at each site.
    hashes `(block_number, entry_index)` and only the `Shielded` event publishes
    `entry_index`, which needs the runtime's full type registry to decode. The
    wallet walks the entry counter instead, which is exact on a dev chain and
-   O(entries) on a long-lived one. The refusal that actually protects the
-   recipient, a duplicated nullifier, does not depend on it.
+   O(entries) per received note on a long-lived one. The counter itself is read
+   once per sync, since the whole scan is pinned to one block and the value
+   cannot move under it. What the walk buys is the `origin` label, and nothing
+   in the spend path reads it; the refusal that actually protects the
+   recipient, a duplicated nullifier, does not depend on it either.
 4. **`POOL_QUANTUM` is the one chain value with no metadata surface.** It is a
    constant of the pallet crate with no `#[pallet::constant]` declaration, so
    the wallet carries a copy. A mismatch surfaces as a `shield` whose dispatch
@@ -479,3 +572,17 @@ are cited at each site.
 8. **Traffic analysis is not addressed.** No request names a note, but the node
    still sees an IP, a sync pattern and submission timing. Nothing inside a
    wallet fixes that.
+9. **The anchor-to-inclusion gap is a per-wallet class marker.** Both blocks are
+   public inputs of the settlement, so every chain reader sees the gap, and
+   everything between the anchor and the submission is inside it: the local
+   tree rebuild, the encryptions and the proof. A `--merkle-rpc` spend, a slow
+   machine and a long chain each land at a measurably different gap. Making it
+   uniform means holding the submission until the anchor plus a fixed number of
+   blocks, which is latency M5 does not spend. See "What every chain reader
+   learns".
+10. **A memo is capped at 256 bytes.** Every memo is padded to one size so the
+    published ciphertext lengths say nothing, and the pad has to fit inside
+    what `MaxCiphertextBytes` leaves over a memoless ciphertext. A longer memo
+    is refused, so nothing goes out at a length of its own. Raising the cap is a
+    one-constant change as long as the runtime's bound allows it, and every
+    wallet on the chain has to agree on the size or the padding buys nothing.

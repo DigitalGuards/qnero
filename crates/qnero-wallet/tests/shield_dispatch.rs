@@ -68,3 +68,57 @@ fn a_shield_whose_dispatch_failed_is_an_error_and_leaves_no_pending_note() {
     );
     assert_eq!(reloaded.pending_total(), 0);
 }
+
+/// A drifted storage layout must stop a shield before it is signed.
+///
+/// The regression: `shield` was the one command that read hand-built storage
+/// keys without first checking the runtime's declaration, and `main` runs it
+/// before any sync, so nothing else checked either. `ZkTree::Leaves` renamed or
+/// moved makes the post-inclusion confirmation read an empty map, so no leaf in
+/// the block carries the commitment, and the wallet reports "the dispatch
+/// failed ... no note was created" for a shield that actually settled and
+/// burned the value, dropping the pending entry holding that note's `r` as it
+/// goes.
+#[test]
+fn a_shield_is_refused_when_the_runtime_storage_is_not_the_one_the_wallet_hashes() {
+    let dir = support::scratch_dir("shield-drift");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+
+    let state = NodeState {
+        head_number: 10,
+        include_submissions: true,
+        ..Default::default()
+    };
+    let node = FakeNode::start(state);
+
+    let mut drifted = test_metadata();
+    for item in drifted.storage.iter_mut() {
+        if item.pallet == "ZkTree" && item.name == "Leaves" {
+            item.name = "LeafHashes".into();
+        }
+    }
+
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let dev = TransparentKey::dev("alice").expect("a dev account");
+    let error = wallet
+        .shield(&chain, &drifted, &dev, 1_000, "drift")
+        .expect_err("a layout the wallet does not hash is refused");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("declares no `Leaves`"),
+        "the error must name the drifted item: {message}"
+    );
+
+    // Nothing was signed, nothing was sent, and no pending entry exists to be
+    // dropped by a false failure report later.
+    let state = node.state();
+    assert_eq!(state.calls("author_submitExtrinsic"), 0);
+    assert!(wallet.store.pending.is_empty());
+    let reloaded = WalletStore::load_or_new(&store_path_for(&seed), &wallet.store.address)
+        .expect("the store reloads");
+    assert!(reloaded.pending.is_empty());
+}

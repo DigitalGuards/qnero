@@ -9,6 +9,7 @@ use qnero_prover::WalletProver;
 use qnero_wallet::chain::Chain;
 use qnero_wallet::dev_account::TransparentKey;
 use qnero_wallet::keys::{create_seed, default_seed_path, store_path_for};
+use qnero_wallet::memo::{render_memo, MEMO_BYTES};
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{RpcClient, DEFAULT_NODE_URL};
 use qnero_wallet::store::PendingKind;
@@ -36,7 +37,13 @@ WHAT THE NODE LEARNS. A scan reads the whole leaf range and the whole settled
 nullifier set, and a spend rebuilds the commitment tree locally, so no request
 this wallet makes names a note as its own. Passing --merkle-rpc gives that up:
 it asks the node for a proof of each leaf being spent, seconds before the
-settlement that publishes the matching nullifiers."
+settlement that publishes the matching nullifiers.
+
+WHAT EVERY CHAIN READER LEARNS. Memos are padded to one size and the payment
+takes either output slot at random, so a settlement's two ciphertexts do not
+say which output is the sender's change or how long a memo was. The gap
+between a spend's anchor block and its inclusion block is still visible and
+still tracks this machine's speed; see docs/WALLET.md."
 )]
 struct Cli {
     /// JSON-RPC endpoint of the node.
@@ -66,7 +73,8 @@ enum Command {
         /// Pool quanta to move into the pool.
         #[arg(long)]
         amount: u64,
-        /// Memo carried in the note's ciphertext.
+        /// Memo carried in the note's ciphertext. Padded to a fixed size, so
+        /// at most 256 bytes.
         #[arg(long, default_value = "")]
         memo: String,
     },
@@ -86,7 +94,8 @@ enum Command {
         /// value below it is refused: the fee is a public input of the proof.
         #[arg(long)]
         fee: Option<u64>,
-        /// Memo carried in the payment's ciphertext.
+        /// Memo carried in the payment's ciphertext. Padded to a fixed size,
+        /// so at most 256 bytes.
         #[arg(long, default_value = "")]
         memo: String,
         /// Skip the sync that normally runs first.
@@ -100,6 +109,22 @@ enum Command {
     },
     /// Chain head, last synced block and tree leaf count.
     Status,
+}
+
+/// Refuse a memo the padding cannot take, at the top of a command.
+///
+/// `memo::pad_memo` refuses it too, but only once a ciphertext is being built,
+/// which for `send` is after a sync and a circuit build.
+fn ensure_memo_fits(memo: &str) -> Result<()> {
+    if memo.len() > MEMO_BYTES {
+        anyhow::bail!(
+            "the memo is {} bytes and every memo is padded to {MEMO_BYTES}. A longer one would \
+             make this note's ciphertext a different length from every other note's, which is \
+             the leak the padding closes.",
+            memo.len()
+        );
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -167,6 +192,12 @@ fn main() -> Result<()> {
                     wallet.store_path.display()
                 );
             }
+            if report.relocated > 0 {
+                println!(
+                    "moved {} note(s) to the leaf the chain now carries them at",
+                    report.relocated
+                );
+            }
             println!("newly spent {}", report.newly_spent);
             println!("unspent total {} quanta", wallet.store.unspent_total());
         }
@@ -194,7 +225,11 @@ fn main() -> Result<()> {
                             .map(|b| b.to_string())
                             .unwrap_or_else(|| "-".into()),
                         if note.spent { "spent" } else { "unspent" },
-                        note.memo
+                        // A memo is remote input: anyone holding this address
+                        // can send a note and choose its bytes. Printed raw it
+                        // is an escape sequence injection into this terminal.
+                        // See `qnero_wallet::memo::render_memo`.
+                        render_memo(&note.memo)
                     );
                 }
             }
@@ -223,6 +258,9 @@ fn main() -> Result<()> {
             let chain = Chain::new(&rpc);
             let metadata = ChainMetadata::fetch(&rpc)?;
             let from = TransparentKey::dev(&from_dev_account)?;
+            // Refused here as well as inside the encryption, so an oversized
+            // memo costs no signature and no round trip.
+            ensure_memo_fits(&memo)?;
             let mut wallet = Wallet::open(&seed_path)?;
             println!(
                 "shielding {amount} quanta ({} planck) from {from_dev_account}",
@@ -270,6 +308,8 @@ fn main() -> Result<()> {
             let metadata = ChainMetadata::fetch(&rpc)?;
             let recipient =
                 Address::decode(&to).context("the recipient address does not decode")?;
+            // Refused before the sync and long before the prover is built.
+            ensure_memo_fits(&memo)?;
             let mut wallet = Wallet::open(&seed_path)?;
             if !no_sync {
                 wallet.sync(&chain, &metadata)?;

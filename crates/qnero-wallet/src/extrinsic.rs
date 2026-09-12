@@ -20,9 +20,14 @@ use crate::scale::{compact_len, encode_bytes};
 
 /// `sp_runtime`'s bare preamble. Versions 4 and 5 both decode; 4 is the one
 /// every runtime in this lineage accepts.
-const BARE_PREAMBLE: u8 = 0x04;
+///
+/// Checked against the runtime's own declared format version before anything
+/// goes out: see [`ChainMetadata::ensure_bare_preamble_decodes`].
+pub(crate) const BARE_PREAMBLE: u8 = 0x04;
 /// A signed preamble is legacy-only: version 4 with the signed type bits.
-const SIGNED_PREAMBLE: u8 = 0x84;
+///
+/// See [`ChainMetadata::ensure_signed_preamble_decodes`].
+pub(crate) const SIGNED_PREAMBLE: u8 = 0x84;
 /// `MultiAddress::Id`, the variant carrying a raw `AccountId32`.
 const MULTI_ADDRESS_ID: u8 = 0x00;
 /// `DilithiumSignatureScheme::Dilithium87`.
@@ -46,13 +51,13 @@ pub fn encode_submit_private_batch(
     metadata: &ChainMetadata,
     proof: &[u8],
     outputs: &[ShieldedOutput],
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let mut call = vec![
         metadata.shielded_pallet_index,
         metadata.submit_private_batch,
     ];
     encode_batch_args(&mut call, proof, outputs);
-    wrap_bare(&call)
+    wrap_bare(metadata, &call)
 }
 
 /// `submit_public_batch(proof, outputs)`. A wallet never sends one; an
@@ -61,10 +66,10 @@ pub fn encode_submit_public_batch(
     metadata: &ChainMetadata,
     proof: &[u8],
     outputs: &[ShieldedOutput],
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let mut call = vec![metadata.shielded_pallet_index, metadata.submit_public_batch];
     encode_batch_args(&mut call, proof, outputs);
-    wrap_bare(&call)
+    wrap_bare(metadata, &call)
 }
 
 fn encode_batch_args(call: &mut Vec<u8>, proof: &[u8], outputs: &[ShieldedOutput]) {
@@ -79,13 +84,14 @@ fn encode_batch_args(call: &mut Vec<u8>, proof: &[u8], outputs: &[ShieldedOutput
     }
 }
 
-fn wrap_bare(call: &[u8]) -> Vec<u8> {
+fn wrap_bare(metadata: &ChainMetadata, call: &[u8]) -> Result<Vec<u8>> {
+    metadata.ensure_bare_preamble_decodes()?;
     let mut body = Vec::with_capacity(call.len() + 1);
     body.push(BARE_PREAMBLE);
     body.extend_from_slice(call);
     let mut out = compact_len(body.len());
     out.extend_from_slice(&body);
-    out
+    Ok(out)
 }
 
 /// The `shield(value, inner, ciphertext)` call body, without a preamble.
@@ -152,6 +158,7 @@ pub fn encode_signed(
     context: &SigningContext,
 ) -> Result<Vec<u8>> {
     metadata.ensure_known_signed_extensions()?;
+    metadata.ensure_signed_preamble_decodes()?;
 
     let extensions = encode_extensions(context);
     let mut payload = Vec::with_capacity(call.len() + extensions.len() + 72);
@@ -201,6 +208,7 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            extrinsic_version: crate::metadata::LEGACY_EXTRINSIC_FORMAT_VERSION,
             storage: Vec::new(),
         }
     }
@@ -213,7 +221,8 @@ mod tests {
             ct_1: vec![0xaa, 0xbb],
             ct_2: vec![0xcc],
         }];
-        let encoded = encode_submit_private_batch(&runtime(), &[0x01, 0x02], &outputs);
+        let encoded =
+            encode_submit_private_batch(&runtime(), &[0x01, 0x02], &outputs).expect("it encodes");
         // compact(12) = 0x30, then the body.
         assert_eq!(
             encoded,
@@ -283,5 +292,52 @@ mod tests {
             tip: 0,
         };
         assert!(encode_signed(&metadata, &key, &call, &context).is_err());
+    }
+
+    /// The two preamble bytes are compiled in and the runtime publishes the
+    /// format version they have to match. A runtime that drops the legacy
+    /// signed variant declares version 5 with the twelve extension identifiers
+    /// unchanged, so the extension check passes and the signature dies inside
+    /// the node's `Preamble::decode` with `Invalid transaction version`.
+    #[test]
+    fn a_format_version_the_preambles_do_not_decode_at_is_refused() {
+        let key = TransparentKey::dev("alice").unwrap();
+        let context = SigningContext {
+            spec_version: 152,
+            transaction_version: 6,
+            genesis_hash: [0x11; 32],
+            nonce: 0,
+            tip: 0,
+        };
+        let outputs = vec![ShieldedOutput {
+            ct_1: vec![0xaa],
+            ct_2: vec![0xbb],
+        }];
+
+        // Version 5: a bare settlement still decodes, a signed `shield` does
+        // not.
+        let mut five = runtime();
+        five.extrinsic_version = 5;
+        let call = encode_shield_call(&five, 10_000_000_000, &[0u8; 32], b"ct");
+        assert!(encode_submit_private_batch(&five, b"proof", &outputs).is_ok());
+        let refused = encode_signed(&five, &key, &call, &context)
+            .expect_err("a signed preamble decodes at version 4 alone");
+        let message = refused.to_string();
+        assert!(message.contains("format version 5"), "{message}");
+        assert!(message.contains("0x84"), "{message}");
+
+        // Version 6: neither preamble decodes.
+        let mut six = runtime();
+        six.extrinsic_version = 6;
+        let refused = encode_submit_private_batch(&six, b"proof", &outputs)
+            .expect_err("a bare preamble decodes for versions 4 to 5");
+        let message = refused.to_string();
+        assert!(message.contains("format version 6"), "{message}");
+        assert!(message.contains("0x04"), "{message}");
+        assert!(encode_signed(&six, &key, &call, &context).is_err());
+
+        // Version 4 is what this lineage declares, and both go out.
+        assert!(encode_submit_private_batch(&runtime(), b"proof", &outputs).is_ok());
+        assert!(encode_signed(&runtime(), &key, &call, &context).is_ok());
     }
 }

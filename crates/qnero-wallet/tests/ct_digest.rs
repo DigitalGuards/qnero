@@ -30,6 +30,7 @@ fn runtime() -> ChainMetadata {
             .iter()
             .map(|name| name.to_string())
             .collect(),
+        extrinsic_version: 4,
         storage: Vec::new(),
     }
 }
@@ -66,7 +67,8 @@ fn the_digest_a_witness_carries_is_the_one_the_pallet_recomputes() {
     };
     let carried = output_ct_digest(&output).expect("a canonical digest");
 
-    let encoded = encode_submit_private_batch(&runtime(), b"proof bytes", &[output]);
+    let encoded = encode_submit_private_batch(&runtime(), b"proof bytes", &[output])
+        .expect("the runtime's extrinsic format version takes a bare preamble");
     let decoded = decode_outputs(&encoded);
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].0, ct_1);

@@ -80,6 +80,7 @@ mod tests {
             ciphertext_bytes_per_fee_quantum: 512,
             max_ciphertext_bytes: 2048,
             signed_extensions: Vec::new(),
+            extrinsic_version: 4,
             storage: Vec::new(),
         }
     }

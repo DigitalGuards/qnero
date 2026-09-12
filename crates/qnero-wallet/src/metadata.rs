@@ -71,6 +71,14 @@ pub const KNOWN_SIGNED_EXTENSIONS: &[&str] = &[
     "WeightReclaim",
 ];
 
+/// `sp_runtime`'s legacy extrinsic format version, the only one whose
+/// preamble carries a signature. Its `Preamble::decode` accepts the signed
+/// type bits at this version and no other.
+pub const LEGACY_EXTRINSIC_FORMAT_VERSION: u8 = 4;
+/// `sp_runtime`'s current extrinsic format version. A bare preamble decodes
+/// anywhere in `LEGACY..=CURRENT`.
+pub const EXTRINSIC_FORMAT_VERSION: u8 = 5;
+
 /// What the wallet needs from the runtime, resolved once per command.
 #[derive(Debug, Clone)]
 pub struct ChainMetadata {
@@ -88,6 +96,21 @@ pub struct ChainMetadata {
     /// decode, after the proof that committed to those bytes exists.
     pub max_ciphertext_bytes: u32,
     pub signed_extensions: Vec<String>,
+    /// The extrinsic format version the runtime declares.
+    ///
+    /// The two preamble bytes this wallet writes are compiled in
+    /// (`crate::extrinsic::BARE_PREAMBLE` and `SIGNED_PREAMBLE`) and the node
+    /// never tells it whether they are the right ones. `sp_runtime` 45 accepts
+    /// a bare preamble at format version 4 or 5 and a signed one at 4 alone
+    /// (`Preamble::decode`, `generic/unchecked_extrinsic.rs`), and metadata
+    /// v14 and v15 publish the runtime's own version byte, so the deciding
+    /// value is already in the blob the wallet parses. A future `sp_runtime`
+    /// that drops the legacy signed variant publishes 5 here while the twelve
+    /// extension identifiers stay exactly as they are, so
+    /// `ensure_known_signed_extensions` would still pass and every signed
+    /// `shield` would die inside the node's decode with nothing said about
+    /// why.
+    pub extrinsic_version: u8,
     /// Every storage item the runtime declares, flattened to what the wallet
     /// needs: the pallet's storage prefix, the item's name and its hasher.
     pub storage: Vec<StorageItem>,
@@ -117,7 +140,7 @@ impl ChainMetadata {
     pub fn parse(blob: &[u8]) -> Result<Self> {
         let prefixed = RuntimeMetadataPrefixed::decode(&mut &blob[..])
             .context("the node returned metadata this wallet cannot decode")?;
-        let (pallets, extrinsic, types) = match prefixed.1 {
+        let (pallets, (extrinsic_version, extrinsic), types) = match prefixed.1 {
             RuntimeMetadata::V14(md) => (
                 md.pallets
                     .into_iter()
@@ -129,11 +152,14 @@ impl ChainMetadata {
                         constants: p.constants.into_iter().map(|c| (c.name, c.value)).collect(),
                     })
                     .collect::<Vec<_>>(),
-                md.extrinsic
-                    .signed_extensions
-                    .iter()
-                    .map(|e| e.identifier.clone())
-                    .collect::<Vec<_>>(),
+                (
+                    md.extrinsic.version,
+                    md.extrinsic
+                        .signed_extensions
+                        .iter()
+                        .map(|e| e.identifier.clone())
+                        .collect::<Vec<_>>(),
+                ),
                 md.types,
             ),
             RuntimeMetadata::V15(md) => (
@@ -147,11 +173,14 @@ impl ChainMetadata {
                         constants: p.constants.into_iter().map(|c| (c.name, c.value)).collect(),
                     })
                     .collect::<Vec<_>>(),
-                md.extrinsic
-                    .signed_extensions
-                    .iter()
-                    .map(|e| e.identifier.clone())
-                    .collect::<Vec<_>>(),
+                (
+                    md.extrinsic.version,
+                    md.extrinsic
+                        .signed_extensions
+                        .iter()
+                        .map(|e| e.identifier.clone())
+                        .collect::<Vec<_>>(),
+                ),
                 md.types,
             ),
             _ => bail!("this wallet reads metadata v14 and v15; the node answered another version"),
@@ -176,6 +205,7 @@ impl ChainMetadata {
                 .decode_u32("CiphertextBytesPerFeeQuantum")?,
             max_ciphertext_bytes: shielded.decode_u32("MaxCiphertextBytes")?,
             signed_extensions: extrinsic,
+            extrinsic_version,
             storage: pallets
                 .iter()
                 .flat_map(|pallet| pallet.storage.iter().cloned())
@@ -199,6 +229,53 @@ impl ChainMetadata {
                  Update `KNOWN_SIGNED_EXTENSIONS` and the explicit encoding beside it.",
                 found,
                 KNOWN_SIGNED_EXTENSIONS
+            );
+        }
+        Ok(())
+    }
+
+    /// The format version a bare preamble decodes at.
+    ///
+    /// `sp_runtime` 45 reads `0b00` in the type bits as bare for any version
+    /// in `4..=5`, so a settlement encoded at 4 is still admitted by a runtime
+    /// that declares 5. Anything outside that range is refused here rather
+    /// than by the node, which answers a bad preamble with `Invalid
+    /// transaction version` and nothing else.
+    pub fn ensure_bare_preamble_decodes(&self) -> Result<()> {
+        if !(LEGACY_EXTRINSIC_FORMAT_VERSION..=EXTRINSIC_FORMAT_VERSION)
+            .contains(&self.extrinsic_version)
+        {
+            bail!(
+                "this runtime declares extrinsic format version {} and this wallet writes the \
+                 bare preamble {:#04x}, which `sp_runtime` decodes only for versions \
+                 {LEGACY_EXTRINSIC_FORMAT_VERSION} to {EXTRINSIC_FORMAT_VERSION}. The node would \
+                 answer `Invalid transaction version` and say nothing further.",
+                self.extrinsic_version,
+                crate::extrinsic::BARE_PREAMBLE
+            );
+        }
+        Ok(())
+    }
+
+    /// The format version a signed preamble decodes at.
+    ///
+    /// Narrower than the bare one, and deliberately: `Preamble::decode`
+    /// accepts the signed type bits at
+    /// `LEGACY_EXTRINSIC_FORMAT_VERSION` alone, because version 5 replaced the
+    /// signed transaction with the general one. A runtime that drops the
+    /// legacy variant publishes 5 here with the twelve extension identifiers
+    /// unchanged, so `ensure_known_signed_extensions` passes and only this
+    /// check stands between a `shield` and an opaque rejection.
+    pub fn ensure_signed_preamble_decodes(&self) -> Result<()> {
+        if self.extrinsic_version != LEGACY_EXTRINSIC_FORMAT_VERSION {
+            bail!(
+                "this runtime declares extrinsic format version {} and this wallet signs with \
+                 the legacy preamble {:#04x}, which `sp_runtime` decodes only at version \
+                 {LEGACY_EXTRINSIC_FORMAT_VERSION}. Version {EXTRINSIC_FORMAT_VERSION} replaced \
+                 the signed transaction with the general one, whose origin authorization is a \
+                 transaction extension and which this wallet does not encode.",
+                self.extrinsic_version,
+                crate::extrinsic::SIGNED_PREAMBLE
             );
         }
         Ok(())
@@ -466,5 +543,19 @@ mod tests {
         let md = ChainMetadata::parse(&fixture()).expect("the fixture parses");
         md.ensure_known_signed_extensions()
             .expect("the M4 runtime's extension list is the one the wallet lays out");
+    }
+
+    /// The deciding value for both compiled-in preamble bytes, read out of the
+    /// blob the wallet already parses. The M4 runtime publishes 4, which is
+    /// what the signed `shield` needs and what the bare settlement is written
+    /// at.
+    #[test]
+    fn the_runtime_declares_the_extrinsic_format_version_the_preambles_decode_at() {
+        let md = ChainMetadata::parse(&fixture()).expect("the fixture parses");
+        assert_eq!(md.extrinsic_version, LEGACY_EXTRINSIC_FORMAT_VERSION);
+        md.ensure_bare_preamble_decodes()
+            .expect("a bare settlement decodes at the declared version");
+        md.ensure_signed_preamble_decodes()
+            .expect("a signed shield decodes at the declared version");
     }
 }

@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{bail, Context, Result};
 use qnero_notes::{Digest, Note};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::keys::{refuse_if_readable_beyond_owner, sync_parent_dir};
 
@@ -108,9 +109,12 @@ pub struct StoredNote {
     pub memo: String,
     pub origin: NoteOrigin,
     pub spent: bool,
-    /// The block at which this wallet first saw the nullifier settled. Not the
-    /// block that settled it: a wallet learns of a spend by probing
-    /// `UsedNullifiers`, which carries no height.
+    /// The block at which this wallet first saw the nullifier settled.
+    ///
+    /// Not the block that settled it. Spent status is decided locally against
+    /// the paged copy of `UsedNullifiers`, and that map carries no height at
+    /// all, so the best a wallet can record is the head its sync was pinned
+    /// to.
     pub spent_seen_at_block: Option<u32>,
 }
 
@@ -232,8 +236,15 @@ impl WalletStore {
         // `--preserve-permissions` or an `scp` under a permissive umask lands
         // it at 0644 where `save` would never put it.
         refuse_if_readable_beyond_owner(path)?;
-        let text = fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+        // Wiped on the way out. The buffer holds every note's `rho` and `r`,
+        // which beside a published nullifier are the link from a settled spend
+        // to its note, its value and its recipient; the seed one file over is
+        // handled inside `Zeroizing` for the same reason. A core dump or a
+        // swap page reaches a freed heap buffer just as well as a live one.
+        let text = Zeroizing::new(
+            fs::read_to_string(path)
+                .with_context(|| format!("failed to read {}", path.display()))?,
+        );
         let store: Self = serde_json::from_str(&text)
             .with_context(|| format!("{} is not a wallet store", path.display()))?;
         if store.version != STORE_VERSION {
@@ -280,7 +291,10 @@ impl WalletStore {
             .mode(0o600)
             .open(&temp)
             .with_context(|| format!("failed to create {}", temp.display()))?;
-        let encoded = serde_json::to_string_pretty(self)?;
+        // Wiped on the way out, for the reason `load_or_new` gives. Every
+        // command writes the store more than once: a `send` writes the pending
+        // change note, again after settlement, and again after its sync.
+        let encoded = Zeroizing::new(serde_json::to_string_pretty(self)?);
         file.write_all(encoded.as_bytes())?;
         file.write_all(b"\n")?;
         file.sync_all()?;
@@ -317,6 +331,44 @@ impl WalletStore {
 
     pub fn has_commitment(&self, commitment: &str) -> bool {
         self.notes.iter().any(|note| note.commitment == commitment)
+    }
+
+    /// Move a note this wallet already holds to the leaf it now occupies.
+    ///
+    /// A leaf index is provisional when a scan first records it. Every read a
+    /// sync makes is pinned to `chain_getHeader`, which on a proof-of-work
+    /// chain is the best block, and a best block can still be orphaned. When
+    /// the block a note
+    /// settled in is orphaned, the extrinsic is still in the pool and is
+    /// re-included, and it appends the identical commitment (the same `pk`,
+    /// `rho` and `r` open the same `inner`) at whatever index the replacement
+    /// block has room for.
+    ///
+    /// The rescan sees that commitment again and must not skip it: a stored
+    /// index that points at somebody else's leaf makes the note unspendable,
+    /// because `local_paths` refuses a leaf whose commitment is not the note's
+    /// and `--merkle-rpc` refuses the same way. The balance would read as
+    /// spendable and every spend would fail until the JSON was edited by hand.
+    ///
+    /// Returns whether anything moved.
+    pub fn relocate_note(
+        &mut self,
+        commitment: &str,
+        leaf_index: u64,
+        block_number: Option<u32>,
+    ) -> bool {
+        let mut moved = false;
+        for note in self.notes.iter_mut() {
+            if note.commitment != commitment {
+                continue;
+            }
+            if note.leaf_index != leaf_index || note.block_number != block_number {
+                note.leaf_index = leaf_index;
+                note.block_number = block_number;
+                moved = true;
+            }
+        }
+        moved
     }
 
     /// Whether the chain had settled this nullifier as of the last sync.
@@ -484,6 +536,35 @@ mod tests {
         assert!(!printed.contains(&store.notes[0].rho));
         assert!(!printed.contains(&store.pending[0].r));
         assert!(printed.contains("notes: 1"));
+    }
+
+    /// The regression: a rescan skipped any commitment the store already held,
+    /// so a note whose block was orphaned and whose extrinsic was re-included
+    /// at a different leaf kept the old index forever. `select_notes` picked
+    /// it, the path rebuild refused the leaf as somebody else's, and the
+    /// balance was unspendable until the JSON was edited by hand.
+    #[test]
+    fn a_note_that_moved_leaf_is_repaired_rather_than_skipped() {
+        let mut store = WalletStore::new("qn1example".into());
+        store.notes.push(sample_note(1_000, "one"));
+        let commitment = store.notes[0].commitment.clone();
+        let original = store.notes[0].leaf_index;
+
+        assert!(store.has_commitment(&commitment));
+        assert!(
+            !store.relocate_note(&commitment, original, Some(3)),
+            "a note at the index it was recorded at does not move"
+        );
+
+        assert!(store.relocate_note(&commitment, original + 1, Some(4)));
+        assert_eq!(store.notes[0].leaf_index, original + 1);
+        assert_eq!(store.notes[0].block_number, Some(4));
+        // The value, the secrets and the spent flag are untouched: only where
+        // the note sits changed.
+        assert_eq!(store.unspent_total(), 1_000);
+        assert!(!store.notes[0].spent);
+
+        assert!(!store.relocate_note(&"ff".repeat(32), 9, Some(9)));
     }
 
     #[test]

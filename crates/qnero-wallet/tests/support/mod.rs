@@ -281,6 +281,7 @@ pub fn test_metadata() -> ChainMetadata {
             .iter()
             .map(|name| name.to_string())
             .collect(),
+        extrinsic_version: 4,
         storage: REQUIRED_STORAGE
             .iter()
             .map(|(pallet, name, hasher)| StorageItem {
