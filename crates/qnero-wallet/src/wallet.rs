@@ -125,7 +125,7 @@ impl Wallet {
         })
     }
 
-    /// Open a wallet and bind its store to the chain this node serves.
+    /// Open a wallet and check its store against the chain this node serves.
     ///
     /// A store is bound to a seed by its address and to a chain by its
     /// genesis, and it needs both. Leaf indices, block numbers, checkpoint
@@ -135,6 +135,16 @@ impl Wallet {
     /// count, so the scan range is empty and the wallet keeps reporting a
     /// balance nothing backs while every checkpoint names a block that does
     /// not exist.
+    ///
+    /// Opening checks the binding and never writes it. The binding is recorded
+    /// by the save that commits a successful sync, shield or send, and that
+    /// ordering is the whole of it: a store with no genesis yet is bound by
+    /// whichever node it is first pointed at, so recording it here bound a
+    /// fresh store to a node whose very next gate refused it. A wallet opened
+    /// against a node that turns out to be behind, or serving a chain whose
+    /// storage layout has drifted, would have been left naming that chain
+    /// permanently, and every later sync against the right node would then
+    /// refuse with a mismatch the operator never chose.
     ///
     /// `new_chain_store` is the escape. It archives the store beside itself
     /// rather than deleting it, because the note secrets in it are the only
@@ -149,21 +159,21 @@ impl Wallet {
         let mut wallet = Self::open(seed_path)?;
         let genesis = hex::encode(chain.genesis_hash()?);
         if new_chain_store && wallet.store.is_other_chain(&genesis) {
+            // The rename is the only thing this writes. The fresh store takes
+            // its genesis from the first operation that commits, like any
+            // other fresh store.
             let archived = archive_store(&wallet.store_path)?;
             wallet.store = WalletStore::new(wallet.key.address().encode());
-            wallet.store.bind_genesis(&genesis)?;
-            wallet.save()?;
             return Ok((wallet, ChainBinding::Archived(archived)));
         }
-        let binding = if wallet
+        wallet
             .store
-            .bind_genesis(&genesis)
-            .with_context(|| format!("{}", wallet.store_path.display()))?
-        {
-            wallet.save()?;
-            ChainBinding::Recorded
-        } else {
+            .ensure_genesis(&genesis)
+            .with_context(|| format!("{}", wallet.store_path.display()))?;
+        let binding = if wallet.store.genesis_hash.is_some() {
             ChainBinding::Bound
+        } else {
+            ChainBinding::Unrecorded
         };
         Ok((wallet, binding))
     }
@@ -190,45 +200,90 @@ impl Wallet {
     /// the read path a drifted key is silent: it reads as an empty map, and an
     /// empty map is a zero balance or a settled note reported unspent.
     pub fn sync(&mut self, chain: &Chain, metadata: &ChainMetadata) -> Result<SyncReport> {
+        self.sync_with(chain, metadata, SyncOptions::default())
+    }
+
+    /// The same scan, with the operator's overrides.
+    ///
+    /// The only override is [`SyncOptions::rescan`], which drops the watermark
+    /// and walks the whole tree again while keeping every note. The node gates
+    /// below run first and refuse first: a rescan changes which leaves are
+    /// read and changes nothing about whether this node's answers are worth
+    /// reading at all.
+    pub fn sync_with(
+        &mut self,
+        chain: &Chain,
+        metadata: &ChainMetadata,
+        options: SyncOptions,
+    ) -> Result<SyncReport> {
         metadata.ensure_known_storage()?;
         // The chain this store belongs to, before anything in it is read as a
-        // statement about the chain this node serves. See
-        // `WalletStore::bind_genesis` and `Wallet::open_on_chain`.
-        let recorded_genesis = self
-            .store
-            .bind_genesis(&hex::encode(chain.genesis_hash()?))
+        // statement about the chain this node serves. Checked here and
+        // recorded at the end, in the save that commits this sync: see
+        // `Wallet::open_on_chain`.
+        let genesis = hex::encode(chain.genesis_hash()?);
+        self.store
+            .ensure_genesis(&genesis)
             .with_context(|| format!("{}", self.store_path.display()))?;
 
         let head = chain.head()?;
-        // The freshness gate, and it comes before every read and every write.
+        // The node gates, and they come before every other read and every
+        // write.
         //
         // Everything this sync derives is derived from what one node answers
         // at one block: which leaves exist, which nullifiers are settled,
-        // which checkpoint hashes still stand. A node behind this wallet's own
-        // watermark answers all three with less than the wallet already knows,
-        // and each answer is then read as a change rather than as a gap. The
-        // settled set is the expensive one: `reconcile_spent` derives spent in
-        // both directions, so a lagging node un-spends every note whose
-        // settlement it has not seen and the next `send` selects an input the
-        // chain has already consumed. The checkpoint walk is the other: every
-        // checkpoint above the node's head answers with no block at all, which
-        // reads as a fork and rewinds the watermark.
+        // which checkpoint hashes still stand. A node behind this wallet
+        // answers all three with less than the wallet already knows, and each
+        // answer is then read as a change when it is only a gap. The settled
+        // set is the expensive one: `reconcile_spent` derives spent in both
+        // directions, so a lagging node un-spends every note whose settlement
+        // it has not seen and the next `send` selects an input the chain has
+        // already consumed.
         //
-        // A node behind the wallet is an ordinary operational state: a second
-        // node, a node resyncing, a load balancer answering from a lagging
-        // replica. So it is refused by name and nothing is written.
-        if head.number < self.store.last_synced_block {
+        // Nothing is mutated until both gates have passed, so a refusal leaves
+        // the store exactly as it found it, in memory and on disk.
+        let stance = self.read_node_stance(chain, &head)?;
+        let leaf_count = chain.leaf_count_at(&head.hash)?;
+        // The leaf watermark, which is the gate the block heights and the
+        // checkpoint hashes between them cannot see.
+        //
+        // A node can be on this wallet's chain, at a head above every
+        // checkpoint, and still carry fewer leaves than the wallet has already
+        // scanned: `ZkTree::LeafCount` at its head is a statement about the
+        // state it has executed, and a node that answers a head it has not
+        // finished executing answers a short tree. The scan range
+        // `start..leaf_count` is then empty, so the whole scan is skipped, and
+        // `mark_vanished` with it, while `self.store.next_leaf = leaf_count`
+        // at the end walks the watermark backwards and leaves the store
+        // claiming to have scanned less than it has.
+        //
+        // A fork does not reach here. The rewind above takes the watermark
+        // back to a checkpoint whose hash still stands on this node's own
+        // branch, so that block is the same block on both branches and its
+        // tree held at least that many leaves there too; a tree only grows
+        // along one chain, so the node's head carries at least the watermark.
+        // A count below it is lag, and lag is refused. The watermark never
+        // regresses outside the fork path.
+        let watermark = if options.rescan {
+            0
+        } else {
+            stance.watermark(self.store.next_leaf)
+        };
+        if leaf_count < watermark {
             bail!(
-                "this node's head is block {} and this wallet has synced through block {}. A \
-                 node behind the wallet answers every question with less than the wallet \
-                 already knows: notes it has not seen settled would come back into the balance, \
-                 and every checkpoint above its head would read as a fork. Nothing has been \
-                 changed. Point --node at a node that has caught up, or wait for this one to.",
-                head.number,
-                self.store.last_synced_block
+                "this node's tree holds {leaf_count} leaves at its head, block {}, and this \
+                 wallet's scan would start at leaf {watermark}. A tree only grows along one \
+                 chain, so a node whose tree is shorter than that watermark is behind this \
+                 wallet and the leaves it is missing are ones it has not executed yet. Scanning \
+                 against it would walk the watermark backwards and skip the check that marks \
+                 the notes the chain no longer carries. Nothing has been changed. Point --node \
+                 at a node that has caught up, or wait for this one to.",
+                head.number
             );
         }
-        let leaf_count = chain.leaf_count_at(&head.hash)?;
+
+        // Both gates have passed. From here the store is written.
+        let rewind = self.apply_stance(stance, options);
         // The settled nullifier set, read whole and pinned to the same block.
         //
         // Spent status used to be a question asked of the node about this
@@ -239,9 +294,6 @@ impl Wallet {
         // chain. Reading the public map whole and deciding locally asks the
         // same question and names nothing.
         self.store.used_nullifiers = chain.used_nullifiers_at(&head.hash)?;
-        // Before the watermark is read: a fork moves leaves, and the ones it
-        // moves are normally below the watermark.
-        let rewind = self.rewind_past_fork(chain, &head)?;
         let start = self.store.next_leaf;
         let mut report = SyncReport {
             head_block: head.number,
@@ -249,8 +301,7 @@ impl Wallet {
             scanned_to: leaf_count,
             rewound_from: rewind.as_ref().map(|rewind| rewind.from),
             rewound_to: rewind.as_ref().map(|rewind| rewind.to),
-            forked_at_block: rewind.as_ref().map(|rewind| rewind.at_block),
-            recorded_genesis,
+            forked_at_block: rewind.as_ref().and_then(|rewind| rewind.forked_at),
             ..Default::default()
         };
 
@@ -418,89 +469,186 @@ impl Wallet {
         self.store.last_synced_block = head.number;
         self.store
             .record_checkpoint(head.number, hex::encode(head.hash), leaf_count);
+        // The binding, written by the save that commits this sync and by no
+        // earlier one. A store with no genesis yet takes the chain of the
+        // first node whose answers it actually kept, so a refusal above never
+        // leaves a fresh store naming a chain it never read a leaf from.
+        report.recorded_genesis = self.store.bind_genesis(&genesis)?;
         self.save()?;
         Ok(report)
     }
 
-    /// Rewind the scan watermark past a fork, before the range is computed.
+    /// Where this node stands against the store, decided before anything is
+    /// written.
     ///
-    /// The regression this closes: a rescan repaired a note's leaf index only
-    /// when the scan happened to walk that leaf again, and the scan starts at
-    /// the watermark. A reorg happens because the replacement branch is
-    /// heavier, so it normally carries at least as many leaves as the branch
-    /// it replaced and a re-included commitment lands at or below where it
-    /// was, which is below the watermark and is never re-read. The store kept
-    /// a leaf index that now holds somebody else's commitment: `balance` went
-    /// on reporting the note spendable, and every spend that selected it
-    /// failed on the path rebuild until the JSON was edited by hand.
+    /// One walk, one rule, and it answers both questions the sync has to ask
+    /// of a node: is this node on the wallet's chain, and has it reached
+    /// everything the wallet has already read. Both are questions about
+    /// checkpoint hashes, and asking them separately is what made them
+    /// contradict each other. The height comparison that used to stand in for
+    /// the second one could not see a reorg onto a heavier shorter branch, and
+    /// the fork walk read every checkpoint above a lagging node's head as a
+    /// branch that was gone.
     ///
-    /// So the fork is detected directly, through the block hashes. Each
-    /// checkpoint is a block a sync finished at and the watermark it left;
-    /// `chain_getBlockHash` at that height either still answers with the same
-    /// hash, in which case every leaf below that watermark was folded at or
-    /// before a block that is still canonical and cannot have moved, or it
-    /// does not, in which case that checkpoint belongs to a branch that is
-    /// gone. The walk stops at the first surviving checkpoint, so the usual
-    /// cost is one call.
+    /// The walk goes newest first:
+    ///
+    /// - A checkpoint above the node's head is skipped. On its own it says
+    ///   nothing: the node may be behind, or that checkpoint may belong to a
+    ///   branch this node replaced with a heavier shorter one. Which of those
+    ///   it is, is decided by the first checkpoint the node can actually
+    ///   answer for.
+    /// - The first checkpoint at or below the head whose hash still stands
+    ///   means the node is on this wallet's chain up to that height. If
+    ///   anything was skipped above it, the node is behind the wallet on the
+    ///   wallet's own chain, which is refused: its `UsedNullifiers` is missing
+    ///   every settlement it has not executed, and `reconcile_spent` would
+    ///   read that as those notes coming back into the balance.
+    /// - A checkpoint at or below the head whose hash differs is a fork. The
+    ///   walk continues down to the newest checkpoint that still stands, and
+    ///   that survivor is where the watermark rewinds to. The checkpoints
+    ///   above it, the ones above the head included, belong to the branch that
+    ///   is gone. `last_synced_block` follows the survivor and is allowed to
+    ///   go down, which is what a reorg onto a heavier shorter branch is.
+    /// - No block at all at a height at or below the head is neither. A fork
+    ///   is a *different* block at that height; no block there is a node that
+    ///   is pruned or is serving a head it has not filled in behind, and
+    ///   rewinding on it rescans leaves against a tree smaller than the one
+    ///   already recorded. It is refused by name.
+    ///
+    /// The rewind exists because a rescan repairs a note's leaf index only
+    /// when the scan walks that leaf again, and the scan starts at the
+    /// watermark. A reorg happens because the replacement branch is heavier,
+    /// so it normally carries at least as many leaves as the branch it
+    /// replaced and a re-included commitment lands at or below where it was,
+    /// which is below the watermark and is never re-read. The store then kept
+    /// a leaf index that holds somebody else's commitment: `balance` went on
+    /// reporting the note spendable and every spend that selected it failed on
+    /// the path rebuild until the JSON was edited by hand.
     ///
     /// What this deliberately does not do is re-read `ZkTree::Leaves` at each
     /// held note's recorded index. That would name this wallet's own leaves to
     /// the node, which is the property `Chain::rebuild_tree` and
     /// `Chain::used_nullifiers_at` both pay for. `chain_getBlockHash` at a
-    /// height names nothing.
+    /// height names nothing, and the walk stops at the first checkpoint that
+    /// stands, so the usual cost is one call.
     ///
-    /// A fork is one thing only: the node has a block at a checkpoint's height
-    /// and it is a different block. No block at that height is not a fork, it
-    /// is a node that does not reach that height, and this refuses rather than
-    /// rewinding on it. The two used to be the same branch, which made a node
-    /// lagging behind the wallet pop every checkpoint above its head and
-    /// rewind the watermark to a height that node could still answer: the
-    /// scan then walked leaves it had already scanned, against a leaf count
-    /// smaller than the one already recorded. The freshness gate at the top of
-    /// `sync` catches the case where the head itself is behind, and this
-    /// catches what that cannot see, a node that answers a head it has no
-    /// block history for.
-    ///
-    /// Nothing is written until every checkpoint has been probed, so a refusal
-    /// leaves the checkpoint list exactly as it found it.
-    fn rewind_past_fork(&mut self, chain: &Chain, head: &ChainHead) -> Result<Option<ForkRewind>> {
-        let from = self.store.next_leaf;
-        let mut dropped = 0usize;
+    /// This reads and decides. It writes nothing, so the leaf gate in `sync`
+    /// can still refuse afterwards with the store untouched.
+    fn read_node_stance(&self, chain: &Chain, head: &ChainHead) -> Result<NodeStance> {
+        let mut above_head = 0usize;
+        let mut forked = false;
         for checkpoint in self.store.checkpoints.iter().rev() {
+            if checkpoint.block_number > head.number {
+                above_head += 1;
+                continue;
+            }
             let Some(hash) = chain.block_hash_at_height(checkpoint.block_number)? else {
                 bail!(
                     "this node has no block at height {}, which this wallet checkpointed while \
-                     syncing, and its head is block {}. A missing block at a height a node \
-                     claims to have reached is a node that is behind or pruned, and it is not a \
-                     fork: a fork is a different block at that height. Rewinding on it would \
-                     rescan leaves against a tree smaller than the one already recorded. \
-                     Nothing has been changed.",
+                     syncing, and its head is block {}. A missing block at a height below a \
+                     node's own head is a node that is pruned or has not filled in behind its \
+                     head, and it is not a fork: a fork is a different block at that height. \
+                     Rewinding on it would rescan leaves against a tree smaller than the one \
+                     already recorded. Nothing has been changed.",
                     checkpoint.block_number,
                     head.number
                 );
             };
-            if hex::encode(hash) == checkpoint.block_hash {
-                break;
+            if hex::encode(hash) != checkpoint.block_hash {
+                // A different block at a height this wallet checkpointed. That
+                // checkpoint belongs to a branch that is gone, and the walk
+                // carries on for the newest one that is not.
+                forked = true;
+                continue;
             }
-            // The node has a block at that height and it is a different one.
-            // That checkpoint belongs to a branch that is gone.
-            dropped += 1;
+            if forked {
+                return Ok(NodeStance::Forked {
+                    at_block: checkpoint.block_number,
+                    next_leaf: checkpoint.next_leaf,
+                });
+            }
+            if above_head > 0 {
+                return Err(self.behind_this_wallet(head));
+            }
+            return Ok(NodeStance::Current);
         }
-        if dropped == 0 {
-            return Ok(None);
+        if forked {
+            // Every checkpoint this node can answer for is on a branch that is
+            // gone. Rescanning the whole tree is correct and slow, and it is
+            // what a reorg deeper than the checkpoints the store keeps costs.
+            return Ok(NodeStance::Forked {
+                at_block: 0,
+                next_leaf: 0,
+            });
         }
-        self.store
-            .checkpoints
-            .truncate(self.store.checkpoints.len() - dropped);
-        let (at_block, to) = match self.store.checkpoints.last() {
-            Some(checkpoint) => (checkpoint.block_number, checkpoint.next_leaf),
-            // Every checkpoint the wallet kept is on a branch that is gone.
-            // Rescanning the whole tree is correct and slow, and it is what a
-            // reorg deeper than `MAX_CHECKPOINTS` syncs costs.
-            None => (0, 0),
-        };
-        self.store.rewind_to(at_block, to);
-        Ok(Some(ForkRewind { from, to, at_block }))
+        if above_head > 0 {
+            // Every checkpoint sits above this node's head and not one of them
+            // could be probed, so there is no evidence of a fork and the node
+            // is behind by every measure the wallet has.
+            return Err(self.behind_this_wallet(head));
+        }
+        // No checkpoints at or below the head and none above it either: a
+        // fresh store, or one whose checkpoints were dropped.
+        Ok(NodeStance::Current)
+    }
+
+    /// The refusal a lagging node gets, by name.
+    ///
+    /// A node behind the wallet is an ordinary operational state: a second
+    /// `--node`, a node resyncing, a load balancer answering from a lagging
+    /// replica. It is not new information, and every answer it gives is read
+    /// as a change when it is only a gap, so it is refused by name and
+    /// nothing is written.
+    ///
+    /// A node on a branch that diverged above its own head is indistinguishable
+    /// from this, because the checkpoints that would show the divergence are
+    /// heights it cannot answer for. That case lands here too, and `--rescan`
+    /// is the way through it.
+    fn behind_this_wallet(&self, head: &ChainHead) -> anyhow::Error {
+        anyhow!(
+            "this node's head is block {} and this wallet has synced through block {} on the \
+             chain this node is serving. This node is behind this wallet: it answers every \
+             question with less than the wallet already knows, so notes it has not seen settled \
+             would come back into the balance and the next send would select an input the chain \
+             has already consumed. Nothing has been changed. Point --node at a node that has \
+             caught up, wait for this one to, or pass --rescan to drop this wallet's watermark \
+             and walk this node's tree from leaf zero.",
+            head.number,
+            self.store.last_synced_block
+        )
+    }
+
+    /// Commit what the walk decided, and the operator's rescan on top of it.
+    ///
+    /// The first write of the sync. Both gates have already passed.
+    fn apply_stance(&mut self, stance: NodeStance, options: SyncOptions) -> Option<ScanRewind> {
+        let from = self.store.next_leaf;
+        if options.rescan {
+            // Asked for, so it is not a fork and does not report as one. Every
+            // note stays: the tree is walked again from zero and whatever the
+            // chain still carries is relocated or left held and marked off
+            // chain.
+            self.store.rewind_to(0, 0);
+            return Some(ScanRewind {
+                from,
+                to: 0,
+                forked_at: None,
+            });
+        }
+        match stance {
+            NodeStance::Current => None,
+            NodeStance::Forked {
+                at_block,
+                next_leaf,
+            } => {
+                self.store.rewind_to(at_block, next_leaf);
+                Some(ScanRewind {
+                    from,
+                    to: next_leaf,
+                    forked_at: Some(at_block),
+                })
+            }
+        }
     }
 
     /// Move transparent value into the pool as one note owned by this wallet.
@@ -580,6 +728,10 @@ impl Wallet {
         // note's `r`, and a crash between `author_submitExtrinsic` and the
         // confirmation would otherwise burn the value into a commitment
         // nothing can open.
+        // The binding, recorded by the first save that keeps anything. A
+        // shield is an explicit act against this node's chain, and the pending
+        // entry below is already a statement about it.
+        self.store.bind_genesis(&hex::encode(genesis))?;
         self.store.pending.push(PendingNote {
             kind: PendingKind::Shield,
             commitment: note.commitment().to_hex(),
@@ -1112,6 +1264,10 @@ impl Wallet {
         // Written before the submission: the store is the only copy of the
         // change note's `r`, and a crash between here and the confirmation
         // would leave a commitment in the tree that nothing can open.
+        // The binding, recorded by the first save that keeps anything.
+        // `prepare_spend` already refused a store belonging to another chain.
+        self.store
+            .bind_genesis(&hex::encode(chain.genesis_hash()?))?;
         let mut change_note = prepared.change_note.clone();
         change_note.extrinsic = encoded_hex.clone();
         self.store.pending.push(change_note);
@@ -1337,16 +1493,22 @@ pub struct SyncReport {
     pub vanished: u64,
 }
 
-/// What binding a store to a node's chain did.
+/// What checking a store against a node's chain found.
+///
+/// None of these writes anything. The genesis is recorded by the save that
+/// commits a sync, a shield or a send, so a store that names no chain yet is
+/// still naming none when a gate refuses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainBinding {
     /// The store already named this chain.
     Bound,
-    /// The store named no chain, and now names this one. Every store written
-    /// before version 5 starts here, and so does every fresh one.
-    Recorded,
+    /// The store names no chain yet, and the first operation that commits will
+    /// record this one. Every store written before version 5 starts here, and
+    /// so does every fresh one.
+    Unrecorded,
     /// The store named another chain and was archived at this path. The wallet
-    /// carries a fresh store bound to the node's chain.
+    /// carries a fresh store, which records this node's chain the first time it
+    /// commits anything.
     Archived(PathBuf),
 }
 
@@ -1356,9 +1518,11 @@ pub enum ChainBinding {
 /// only copy this wallet has of what opens its notes, and the reason it is
 /// being moved may be an operator who typed the wrong `--node`.
 ///
-/// The name carries the genesis the store was bound to, so two archives from
-/// two different chains do not collide, and a counter covers the case of two
-/// archives from the same one.
+/// The name is the store's own path with `.archived` appended, and a counter
+/// after that for the second and every later archive at the same path. It
+/// carries no genesis: which chain an archive belonged to is inside the file,
+/// as its `genesis_hash`, and putting a hash in the filename would only say
+/// again what one `grep` of the archive answers exactly.
 fn archive_store(path: &Path) -> Result<PathBuf> {
     let mut base = path.as_os_str().to_os_string();
     base.push(".archived");
@@ -1385,13 +1549,61 @@ fn archive_store(path: &Path) -> Result<PathBuf> {
     )
 }
 
-/// What a fork check found: the watermark it rewound from, the one it rewound
-/// to, and the newest still-canonical block it could anchor that on.
+/// Where this node stands against the store, as the checkpoint walk found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeStance {
+    /// On this wallet's chain and at or above every block the wallet has read.
+    /// The scan runs from the watermark the store already holds.
+    Current,
+    /// On another branch. The newest checkpoint whose hash still stands is
+    /// where the watermark and the block height both rewind to.
+    Forked { at_block: u32, next_leaf: u64 },
+}
+
+impl NodeStance {
+    /// The watermark the scan will start from, which is what the leaf gate has
+    /// to compare the node's tree against. A fork has already taken it down to
+    /// a checkpoint this node's own branch carries.
+    fn watermark(self, held: u64) -> u64 {
+        match self {
+            Self::Current => held,
+            Self::Forked { next_leaf, .. } => next_leaf,
+        }
+    }
+}
+
+/// What the operator asked this sync to do differently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SyncOptions {
+    /// Drop the scan watermark to zero and walk the whole tree again, keeping
+    /// every note.
+    ///
+    /// The recovery for a store an older build wrote. Before conflict sets,
+    /// the scan refused the second note it met that shared a nullifier with
+    /// one it already held, wrote that refusal into the file and never
+    /// revisited it: the leaf was below the watermark from then on, so no
+    /// later sync ever decrypted it again. Nothing in the store upgrade can
+    /// recover the note, because the store never held its `rho` and `r`. A
+    /// fresh walk of the tree does, since every note's plaintext is on chain
+    /// inside its ciphertext.
+    ///
+    /// Keeping the notes is the difference from deleting the store: a note
+    /// whose leaf the current chain no longer carries would otherwise lose its
+    /// secrets, and those secrets are the only handle on a settlement that can
+    /// still be re-included.
+    pub rescan: bool,
+}
+
+/// What moved the scan watermark backwards: where it was, where it went, and,
+/// when a fork is what moved it, the newest still-canonical block it anchored
+/// that on.
 #[derive(Debug, Clone, Copy)]
-struct ForkRewind {
+struct ScanRewind {
     from: u64,
     to: u64,
-    at_block: u32,
+    /// `None` when the operator asked for the rescan, so nothing reports a
+    /// fork that was not found.
+    forked_at: Option<u32>,
 }
 
 #[derive(Debug)]

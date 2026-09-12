@@ -1425,10 +1425,37 @@ it. The only note rule the chain evaluates is `cm = H(CM, inner, value)`, in
 The chain cannot check the rule, because `inner` is opaque by construction. What
 it owes is the identifier, and the pair `(block_number, entry_index)` never
 repeats. A shielder that ignores the rule can only strand its own note:
-computing anyone else's nullifier needs their `nk`. The recipient is the last
-line, and a wallet should refuse a received note whose nullifier duplicates one
-it already holds or one already settled. At M6 a coinbase note takes the same
-rule with the coinbase's own identifier.
+computing anyone else's nullifier needs their `nk`. At M6 a coinbase note takes
+the same rule with the coinbase's own identifier.
+
+**What the recipient owes.** A sender picks `rho` and `r` for the note it
+creates, so a sender that repeats a pair hands over two notes sharing one
+nullifier. At most one of them can ever settle, because the chain refuses a
+nullifier already in `UsedNullifiers`, and which one settles is the recipient's
+choice: it is whichever one the recipient spends first. So the rule is a rule
+about **counting**, and a wallet holds both notes.
+
+Two notes sharing a nullifier are a conflict set, and a wallet owes three things
+for one:
+
+- Hold every member. The note's plaintext is in the ciphertext the chain
+  published, and the member a wallet discards is the one it can never recover a
+  secret for.
+- Count the set once, at the value a spend would use, which is its largest
+  member. Summing the members reports a balance the chain will never back, and
+  that is the refusal the recipient rule is actually asking for.
+- Never put two members in one leaf. A private batch constrains its nullifiers
+  pairwise distinct (section 8), so a selection that did would fail in circuit
+  before it reached the chain.
+
+Refusing the second member on arrival satisfies none of these. It decides by
+arrival order, which the sender controls, so a sender that puts the large note
+second takes the difference away from the recipient permanently, and it decides
+it in a way no rescan undoes. A nullifier already settled on chain is the one
+refusal left, and even that one is provisional: a reorg that orphans the
+settlement makes the same output holdable, so a wallet records it with its
+reason and drops the record when a later scan holds the note.
+`docs/WALLET.md` has the wallet side.
 
 ### 9.9 One tree, two leaf kinds
 

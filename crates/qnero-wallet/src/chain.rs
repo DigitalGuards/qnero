@@ -126,13 +126,17 @@ impl<'a> Chain<'a> {
         })
     }
 
-    /// The canonical hash at a height, or `None` when the chain has no block
+    /// The canonical hash at a height, or `None` when this node has no block
     /// there.
     ///
-    /// Apart from [`Chain::block_hash`] because a height above the current
-    /// head is an ordinary answer for the fork check: after a reorg onto a
-    /// shorter branch, a checkpoint this wallet recorded can sit above the new
-    /// head, and that absence is the fork itself.
+    /// Apart from [`Chain::block_hash`] because `None` is an ordinary answer
+    /// for the checkpoint walk and not an error. What it is not is a fork. A
+    /// fork is a *different* hash at a height this wallet checkpointed; no
+    /// hash at all is a node that has not reached that height, or that is
+    /// pruned or has not filled in behind its own head. `Wallet::sync` reads
+    /// the two apart: a height above the node's head is skipped and decided by
+    /// the first checkpoint the node can answer for, and a missing block below
+    /// its own head is refused by name.
     pub fn block_hash_at_height(&self, number: u32) -> Result<Option<[u8; 32]>> {
         let hash: Option<String> = self
             .rpc

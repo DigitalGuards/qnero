@@ -222,7 +222,7 @@ leaf. So after inclusion the wallet reads the leaves the block appended and
 looks for its own commitment among them, prints the leaf index it landed at,
 and turns an absent one into an error that drops the pending entry.
 
-### `sync`
+### `sync [--rescan]`
 
 Scans from the last synced leaf to the tree's current leaf count, pinned to one
 block hash so a leaf appended mid-scan cannot be counted and then read as
@@ -235,64 +235,128 @@ Most leaves carry no ciphertext at all and that is normal: the shielded pool
 shares one commitment tree with wormhole transfers and with the mining-reward
 leaf every block appends.
 
-Before anything else, two gates on the node itself. Both exist because
-everything a sync derives is derived from what one node answers at one block,
-and a node that answers with less than the wallet already knows is not a
-correction.
+Before anything else, the node itself is checked. Everything a sync derives is
+derived from what one node answers at one block, and a node that answers with
+less than the wallet already knows is not a correction.
 
 **The chain.** The store records the genesis hash of the chain it was built
 against and the sync refuses a node that answers a different one. See "Store
 format" below, which also says what this does not catch: `--dev` is a fixed
 chain spec, so a restarted `--dev --tmp` node answers the same genesis and is
-caught by the height gate and the fork walk instead.
+caught by the checkpoint walk and the leaf gate instead.
 
-**The height.** If the node's head is below `last_synced_block` the sync
-refuses by name and writes nothing. A node behind the wallet is an ordinary
-operational state: a second `--node`, a node resyncing, a load balancer
-answering from a lagging replica. What it is not is new information. Its
-`UsedNullifiers` is missing every settlement it has not executed, and the
-spent reconciliation below derives spent status in both directions, so a
-lagging node un-spent every note whose settlement it had not reached; the next
-`send` then selected an input the chain had already consumed and paid a full
-proof to have the settlement skipped. Its block history is short too, so every
-checkpoint above its head answered with no block at all, which the fork check
-read as a branch that is gone.
+A store that names no chain **yet** takes one from the first operation that
+commits, a successful sync, shield or send, and never from opening the wallet.
+The ordering is the whole of it. Recording it at open bound a fresh store to
+whichever node it was first pointed at, including a node the very next check
+refused, so a wallet opened once against a wrong `--node` named that chain
+permanently and every later sync against the right node refused with a mismatch
+the operator never chose.
 
-Then the fork check, which is where a leaf index gets repaired. Every read is
-pinned to `chain_getHeader`, which is the best block, and a
-best block can still be orphaned, so a leaf index is provisional when a scan
-first records it. When the block a note settled in is orphaned the extrinsic is
-still in the pool, is re-included, and appends the identical commitment at
-whatever index the replacement block has room for. A stale index makes the note
-unspendable: the path rebuild refuses a leaf whose commitment is not the note's,
-and `--merkle-rpc` refuses it the same way, while the balance goes on reporting
-it as spendable.
+**The checkpoint walk**, which answers two questions at once: is this node on
+the wallet's chain, and has it reached everything the wallet has already read.
+Both are questions about checkpoint hashes. Asking them separately, one as a
+block-height comparison and one as a fork walk, is what made them contradict
+each other.
 
-The watermark alone cannot see that. It only moves forward, and a reorg happens
-because the replacement branch is heavier, so it normally carries at least as
-many leaves as the branch it replaced and the re-included commitment lands at
-or below where it was: below the watermark, and never re-read. So the store
-keeps a `checkpoints` list, one entry per sync, each the block that sync
-finished at and the watermark it left. A sync asks `chain_getBlockHash` at the
-newest checkpoint's height: the same hash means every leaf below that watermark
-was folded at or before a block that is still canonical and cannot have moved,
-and a **different** hash means that checkpoint belongs to a branch that is
-gone. The walk pops checkpoints until one survives, so the ordinary cost is one
-call, and then the watermark is rewound to the survivor's before the scan range
-is taken. Every moved leaf is inside that range, and a commitment the scan
-meets again is relocated in place.
-A fork deeper than the sixteen checkpoints the store keeps rewinds to zero and
-rescans the whole tree, which is correct and slow.
+The store keeps a `checkpoints` list, one entry per sync, each the block that
+sync finished at, its hash, and the leaf watermark it left. The walk goes
+newest first:
 
-**No block** at a checkpoint's height is not a fork and does not rewind
-anything. A fork is one thing: the node has a block at that height and it is a
-different block. No block there is a node that does not reach that height,
-pruned or serving a head it has not filled in behind, and rewinding on it
-rescans leaves against a tree smaller than the one already recorded. The two
-used to be the same branch, which is how a node behind the wallet popped every
-checkpoint above its own head. The sync refuses instead, by name, and the
-checkpoint list is written only after every checkpoint has been probed, so a
-refusal leaves it exactly as it found it.
+- A checkpoint **above the node's head** is skipped. On its own it says
+  nothing: the node may be behind, or that checkpoint may belong to a branch
+  this node has replaced with a heavier shorter one. Which it is, is decided by
+  the first checkpoint the node can answer for.
+- The first checkpoint **at or below the head whose hash still stands** means
+  the node is on this wallet's chain up to that height, so every leaf below
+  that watermark was folded at or before a block that is still canonical and
+  cannot have moved. If anything was skipped above it, the node is behind the
+  wallet on the wallet's own chain, and the sync refuses by name. Otherwise the
+  scan runs from the watermark the store already holds.
+- A checkpoint **at or below the head whose hash differs** is a fork. The walk
+  continues down to the newest checkpoint that still stands, and that survivor
+  is where the watermark rewinds to. The checkpoints above it, the ones above
+  the head included, belong to the branch that is gone, and `last_synced_block`
+  follows the survivor **downwards**. A fork deeper than the sixteen
+  checkpoints the store keeps rewinds to zero and rescans the whole tree, which
+  is correct and slow.
+- **No block at all** at a height at or below the head is neither. A fork is a
+  *different* block at that height; no block there is a node that is pruned or
+  is serving a head it has not filled in behind, and rewinding on it rescans
+  leaves against a tree smaller than the one already recorded. The sync refuses
+  by name.
+
+The walk stops at the first checkpoint that stands, so the ordinary cost is one
+`chain_getBlockHash`.
+
+`last_synced_block` going down on a fork is the point of keying this on hashes.
+The gate used to compare heights, and heaviest-chain rules do not order
+branches by length: a shorter branch can win. Against one of those the wallet
+refused every sync until the chain climbed back past a height it had recorded
+on a branch that no longer existed, and the note that moved leaf in the reorg
+stayed at its old index for the whole of that window, unspendable, with
+`balance` reporting it as spendable. A height is a statement about one branch,
+and when the branch is gone the statement goes with it.
+
+**The leaf watermark**, which is the one thing the heights and the hashes
+between them cannot see. `ZkTree::LeafCount` at the node's head is read, and a
+count below the watermark the scan is about to start from is refused. A node
+can be on this wallet's chain, at a head above every checkpoint, and still
+answer with a shorter tree: the count is a statement about the state that node
+has **executed**, and a node serving a head it has not finished executing
+answers short. The scan range `start..leaf_count` is then empty, so the whole
+scan is skipped and the vanished-note check with it, while the watermark is
+written back down to the node's count and the store is left claiming to have
+scanned less than it has. A fork cannot reach this gate, because the rewind
+above takes the watermark to a checkpoint the node's own branch carries and
+that checkpoint was written at a block whose tree was at least that large. So a
+short tree is lag, and the watermark never regresses outside the fork path.
+
+A lagging node is an ordinary operational state, so it is refused by name: a
+second `--node`, a node resyncing, a load balancer answering from a lagging
+replica. What it is not is new information. Its `UsedNullifiers` is
+missing every settlement it has not executed, and the spent reconciliation
+below derives spent status in both directions, so a lagging node un-spent every
+note whose settlement it had not reached; the next `send` then selected an
+input the chain had already consumed and paid a full proof to have the
+settlement skipped. A node on a branch that diverged **above** its own head is
+indistinguishable from a lagging one, because the checkpoints that would show
+the divergence are heights it cannot answer for, so it lands in the same
+refusal and `--rescan` is the way through.
+
+Nothing is written until both gates have passed. A refusal leaves the store
+exactly as it found it, in memory and on disk, checkpoint list and genesis
+binding included.
+
+Then the scan, which is where a leaf index gets repaired. Every read is pinned
+to `chain_getHeader`, which is the best block, and a best block can still be
+orphaned, so a leaf index is provisional when a scan first records it. When the
+block a note settled in is orphaned the extrinsic is still in the pool, is
+re-included, and appends the identical commitment at whatever index the
+replacement block has room for. A stale index makes the note unspendable: the
+path rebuild refuses a leaf whose commitment is not the note's, and
+`--merkle-rpc` refuses it the same way, while the balance goes on reporting it
+as spendable. The watermark alone cannot see that, because it only moves
+forward and a reorg happens because the replacement branch is heavier, so it
+normally carries at least as many leaves as the branch it replaced and the
+re-included commitment lands at or below where it was: below the watermark, and
+never re-read. The rewind puts every moved leaf back inside the range, and a
+commitment the scan meets again is relocated in place.
+
+**`--rescan`** drops the watermark to zero and walks the whole tree again,
+keeping every note. It is the recovery for a store an older build wrote: that
+build refused the second note it met that shared a nullifier with one it
+already held, wrote a `rejected` entry, kept no copy of the note's `rho` and
+`r`, and left the leaf below the watermark where no later sync reads it again.
+No store upgrade can bring those secrets back, because they were never in the
+file. They are on chain, inside the ciphertext beside the commitment, so a walk
+from leaf zero recovers them. Keeping the notes is the difference from deleting
+the store: a note whose leaf the current chain no longer carries would
+otherwise lose the secrets that are the only handle on a settlement that can
+still be re-included, and a rescan marks it off chain instead. The node gates
+above still run first and still refuse first, since a rescan changes which
+leaves are read and changes nothing about whether this node's answers are worth
+reading at all.
 
 This deliberately does not re-read `ZkTree::Leaves` at each held note's
 recorded index, which would be the cheaper check. That names this wallet's own
@@ -381,8 +445,8 @@ The two directions are not symmetric, and clearing carries a condition setting
 does not. A nullifier absent from a node's map has two possible causes and the
 map alone cannot tell them apart: the settlement was orphaned, which is what
 this exists for, or the node has not reached the block that settled it. The
-height gate at the top of the sync covers the first version of that, a node
-behind the wallet's own watermark. What it cannot see is a spend latched at an
+node gates at the top of the sync cover the first version of that, a node
+behind the wallet on its own chain. What it cannot see is a spend latched at an
 inclusion block *above* that watermark, which is every spend made since the
 last sync, so the flag is cleared only when `head >= spent_seen_at_block`.
 Otherwise the note stays spent and the sync says how many it held back.
@@ -612,7 +676,7 @@ copied between machines under a permissive umask.
       "commitment": "<64 hex chars>",
       "nullifier": "<64 hex chars>",
       "value": 5,
-      "reason": "its nullifier duplicates a note this wallet already holds"
+      "reason": "its nullifier is already settled on chain"
     }
   ],
   "checkpoints": [
@@ -638,9 +702,13 @@ Field notes:
   sit above the other chain's leaf count, so the scan range is empty and the
   wallet goes on reporting a balance that chain has never carried, while the
   settled set the spent flags are derived from is somebody else's. The first
-  sync against a node records that node's genesis and every command after it
-  refuses a node that answers a different one. The escape is
-  `--new-chain-store`, which **archives** the store beside itself as
+  operation that **commits** against a node records that node's genesis, a
+  successful sync, shield or send, and every command after it refuses a node
+  that answers a different one. Opening a wallet on a chain checks the binding
+  and never writes it: a store's chain is the chain whose answers it actually
+  kept, so a gate that refuses leaves a fresh store naming nothing and free to
+  take the right node's chain when the operator corrects `--node`. The escape
+  is `--new-chain-store`, which **archives** the store beside itself as
   `<store>.archived` and starts fresh: the file is the only copy of every
   note's `rho` and `r`, and the reason it looks wrong may be an operator who
   typed the wrong `--node`. `status` reports a mismatch without refusing,
@@ -652,13 +720,14 @@ Field notes:
   genesis hash as the one before it. Measured on this workstation: two
   successive `--dev --tmp` nodes both answer
   `0xf759610207b350d194f0829b5dc0e595658e960c983665236f7b7aa05d0a8645`. The
-  restarted dev node is caught by the height gate first, while its head is
-  below the wallet's watermark, and then by the fork walk, which finds a
-  different block at every checkpoint height and rewinds to zero. Both were run
-  against a live node and the transcript is in `docs/OPS-DEV.md`. What the
-  genesis binding catches is a store pointed at a genuinely different chain, a
-  testnet against a local dev chain, where the fork walk would rewind to zero
-  and rescan happily against a tree that belongs to someone else.
+  restarted dev node is caught by the checkpoint walk, which finds a different
+  block at every height the store checkpointed and rewinds to zero, and by the
+  leaf gate, which refuses a tree shorter than the watermark the wallet had
+  already reached. Both were run against a live node and the transcript is in
+  `docs/OPS-DEV.md`. What the genesis binding catches is a store pointed at a
+  genuinely different chain, a testnet against a local dev chain, where the
+  checkpoint walk would rewind to zero and rescan happily against a tree that
+  belongs to someone else.
 - `next_leaf` is one past the last leaf index scanned, and `last_synced_block`
   is the block every read of that pass was pinned to.
 - `origin` is `shield` when the note's `rho` matches the entry rule for the
@@ -694,9 +763,19 @@ Field notes:
   next sync.
 - `version` is 5. Every older shape from 2 up is upgraded in place on load. A
   version-4 store, written before `genesis_hash` existed, loads with no chain
-  recorded, and the first sync after the upgrade records the genesis of the
-  node it runs against: which chain it actually came from is not a question
-  that version ever asked, so that is the most this can recover. A version-3
+  recorded, and the first sync that commits after the upgrade records the
+  genesis of the node it runs against: which chain it actually came from is not
+  a question that version ever asked, so that is the most this can recover.
+
+  What no upgrade recovers is a note an older build refused as a duplicate
+  nullifier. Builds before the conflict-set rule refused the second note they
+  met that shared a nullifier with one already held: they wrote a `rejected`
+  entry, kept no copy of that note's `rho` and `r`, and left the leaf below the
+  watermark, where no later sync reads it again. The secrets are not in the
+  file to restore. They are on chain, inside the ciphertext beside the
+  commitment, so `sync --rescan` walks the tree from leaf zero and picks them
+  up, keeping every note already held. A fresh store against the same chain
+  recovers the same notes and loses the spent history; `--rescan` keeps it. A version-3
   store, written before `on_chain` existed, has every note read as on chain,
   which is what every note in one is, since that version had no way to mark a
   note otherwise; its checkpoints are kept, because their block hashes came
@@ -905,9 +984,18 @@ are cited at each site.
     is what it does; the recipient-side rule `docs/CIRCUIT.md` section 9.8 asks
     for is a refusal to *count* them, and that is where it lives now.
 12. **The node gates are local, and a lying node is still a lying node.** The
-    height gate compares against this wallet's own watermark and the chain gate
-    against a genesis this wallet recorded from a node. A node that answers a
+    checkpoint walk compares against hashes this wallet recorded from a node,
+    the leaf gate against a watermark it reached against a node, and the chain
+    gate against a genesis it recorded from a node. A node that answers a
     plausible head it does not have, or that forks below every checkpoint the
-    store kept, still drives a full rescan. Neither gate is a consensus check
-    and neither is meant to be: they refuse the answers that a wallet can prove
-    are not new information. Verifying the chain itself is running a node.
+    store kept, still drives a full rescan. None of the three is a consensus
+    check and none is meant to be: they refuse the answers that a wallet can
+    prove are not new information. Verifying the chain itself is running a
+    node.
+13. **A node that diverged above its own head reads as a lagging node.** The
+    checkpoints that would show the divergence are heights it cannot answer
+    for, so the walk has nothing to compare and the sync refuses as though the
+    node were simply behind. The refusal is the safe answer, since the two are
+    indistinguishable from the store alone, and `--rescan` is the way through
+    it. Telling them apart needs the wallet to keep block hashes below every
+    checkpoint, which is a header chain, which is a node.

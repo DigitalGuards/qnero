@@ -1936,3 +1936,185 @@ One `chain_getBlockHash(0)` per command, which is the genesis check, and one
 `chain_getHeader` comparison. Nothing in the proving path moved: the proof is
 the same 150908 bytes and proving is the same 3.5 s. No consensus rule, hash
 layout, nullifier rule or `rho` rule changed, so no KAT vector was regenerated.
+
+## The fifth M5 review fix pass, 2026-09-12
+
+Eight review findings against the node-gate commit: one high, two medium, five
+low. The high one and the two mediums are one fault seen from three sides. The
+sync asked the node three separate questions, a block-height comparison, a
+checkpoint-hash walk and nothing at all about the leaf count, and the three
+could contradict each other. The lows are an off-chain total that did not
+collapse conflict sets, a section of `docs/CIRCUIT.md` still prescribing the
+refusal conflict sets replaced, two doc comments that described behaviour the
+code does not have, and a store upgrade with no recovery path.
+
+### What changed
+
+- **One walk, keyed on checkpoint hashes, answers both node questions.** Is
+  this node on the wallet's chain, and has it reached everything the wallet has
+  read. The walk goes newest first. A checkpoint above the node's head is
+  skipped, because on its own it says nothing: the node may be behind, or that
+  checkpoint may belong to a branch the node has replaced. The first checkpoint
+  at or below the head decides it. Same hash and nothing skipped: the scan runs
+  from the watermark the store holds. Same hash with something skipped: the
+  node is behind the wallet on the wallet's own chain and the sync refuses.
+  Different hash: a fork, and the walk continues down to the newest checkpoint
+  that still stands, which is where the watermark and `last_synced_block` both
+  rewind to. No block at all at a height at or below the head stays what it
+  was, a refusal by name.
+- **`last_synced_block` is allowed to go down.** Heaviest-chain rules do not
+  order branches by length, so a reorg onto a heavier shorter branch leaves a
+  head below a height the wallet recorded on a branch that no longer exists.
+  The height comparison refused every sync until the chain climbed back, and
+  the note that moved leaf in that reorg sat at its old index for the whole
+  window, unspendable, with `balance` reporting it spendable. A height is a
+  statement about one branch, and when the branch is gone the statement goes
+  with it.
+- **The leaf watermark is a gate.** `ZkTree::LeafCount` at the node's head is
+  read before the scan and a count below the watermark the scan would start
+  from is refused. A node can be on this wallet's chain, at a head above every
+  checkpoint, and answer a shorter tree: the count is a statement about the
+  state it has executed. The scan range was then empty, so the scan and the
+  vanished-note check were both skipped while `next_leaf` was written back down
+  to the node's count. A fork does not reach this gate, because the rewind
+  takes the watermark to a checkpoint whose hash stands on the node's own
+  branch and a tree only grows along one chain. So a short tree is lag, and the
+  watermark never regresses outside the fork path.
+- **The genesis binding is written by the operation that commits.** Opening a
+  wallet on a chain recorded the genesis and saved it before any gate had run,
+  so a store with no chain yet was bound by whichever node it was first pointed
+  at, including one the very next check refused. A wallet opened once against a
+  wrong `--node` then named that chain permanently and every later sync against
+  the right node refused with a mismatch the operator never chose. Opening
+  checks and writes nothing; the successful sync, shield or send records it.
+- **`sync --rescan`.** Drops the watermark to zero and walks the whole tree
+  again, keeping every note. It is the recovery for a store an older build
+  wrote: that build refused the second note it met sharing a nullifier with one
+  already held, kept no copy of that note's `rho` and `r`, and left the leaf
+  below the watermark where no later sync reads it. The secrets are not in the
+  file to restore; they are on chain inside the ciphertext. Keeping the notes
+  is the difference from deleting the store, since a note the current chain no
+  longer carries would otherwise lose the secrets that are the only handle on a
+  settlement that can still be re-included.
+- **`off_chain_total` collapses conflict sets, the way `off_chain_rows`
+  already did.** The `balance` heading and the table under it disagreed on a
+  number they both compute from the same notes, and the heading counted value
+  the chain could never back even if every settlement re-landed.
+- **`docs/CIRCUIT.md` section 9.8 describes conflict sets.** It still asked a
+  wallet to refuse a received note whose nullifier duplicates one it holds,
+  which is the rule the previous pass replaced. The recipient rule is about
+  counting: hold every member, count the set once at the value a spend would
+  use, and never put two members in one leaf.
+- **Two doc comments now match the code.** `Chain::block_hash_at_height` said a
+  missing block is the fork itself. `archive_store` said the filename carries
+  the genesis the store was bound to; it carries `.archived` and a counter, and
+  the genesis is inside the file.
+
+### Tests
+
+Four new cases in `tests/sync_guards.rs`, one per finding that needed one, and
+each was re-run with its constraint removed:
+
+- A lagging node on the same chain, with a checkpoint below its head whose hash
+  still stands and a tree the same size, is refused and writes nothing. Drop
+  the count of skipped checkpoints and the sync runs, reporting `held_spent: 1`
+  against a node that has not executed the settlement.
+- A reorg onto a heavier shorter branch, a different hash at a checkpoint below
+  the head and a head below `last_synced_block`, is a fork and syncs: the
+  survivor is the newest checkpoint that stands, the moved note is relocated,
+  and `last_synced_block` follows the survivor downwards from 21 to 17. Put the
+  height comparison back and it is refused.
+- A leaf count below the watermark with every checkpoint hash standing is
+  refused and the watermark is unchanged. Remove the gate and `next_leaf` goes
+  from 6 to 4 with the scan and the vanished check both skipped.
+- A refused sync leaves a fresh store bound to no chain, and the same wallet
+  then binds to the node the operator meant. Bind at open and the store is
+  already named after the wrong node, so the second sync refuses.
+
+Plus `store.rs::the_off_chain_heading_is_the_sum_of_the_off_chain_table` for
+the low, and a rescan case covering both halves of `--rescan`: a leaf below the
+watermark recovered into a conflict set, and a note the chain no longer carries
+marked off chain while its secrets stay.
+
+### The run
+
+```text
+=== 1. a fresh dev node and a wallet that has never seen a chain ===
+
+$ nice -n 19 ./chain/target/release/quantus-node --dev --tmp   (backgrounded, pidfile)
+$ ss -ltn | grep 9944
+LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*
+LISTEN 0      1024            [::1]:9944          [::]:*
+port 9944 open after 1s
+
+$ qnero-wallet --file cli2.seed sync
+chain       this store names no chain yet. The first sync, shield or send that commits records this node's genesis.
+chain       recorded this node's genesis in the store
+scanned leaves 0..84 at block 72
+received 0 note(s) worth 0 quanta
+newly spent 0
+unspent total 0 quanta
+
+$ qnero-wallet --file cli2.seed sync
+scanned leaves 84..84 at block 72
+received 0 note(s) worth 0 quanta
+newly spent 0
+unspent total 0 quanta
+
+The binding line before the sync says what will happen and the line after says
+that it did. A sync that refuses prints the first and not the second, and the
+store on disk names no chain.
+
+=== 2. --rescan against the same node ===
+
+$ qnero-wallet --file cli.seed sync --rescan
+scanned leaves 0..58 at block 46
+received 0 note(s) worth 0 quanta
+rescanned the whole tree from leaf 0, where this wallet had reached 58. Every note already held is kept.
+newly spent 0
+unspent total 0 quanta
+
+A rescan reports itself as a rescan. It is not a fork and does not print the
+fork line, which names the block the chain forked below.
+
+=== 3. the end-to-end flow, unchanged by this pass ===
+
+shield of 1000 quanta included at block 292 (2.01s), leaf 303
+300 quanta to B: proved in 3.57s, 150908 proof bytes, included at block 297
+100 quanta back to A: proved in 3.42s, included at block 301
+
+=== 4. stop the node ===
+
+$ kill $(cat node.pid), then wait for 9944 to close
+port 9944 closed after 1s
+node stopped
+```
+
+A dev chain does not reorg, does not lag behind itself and does not serve a
+tree shorter than the state it has executed, so the four gate cases are covered
+against the scriptable node in `tests/sync_guards.rs`, each with its constraint
+removed once to show the test fails.
+
+### Gates
+
+```
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   37 suites ok, 0 failed
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+QNERO_DEV_NODE=http://127.0.0.1:9944 RAYON_NUM_THREADS=4 nice -n 19 cargo test \
+  -j 2 --release -p qnero-wallet --features parallel --test dev_node_e2e -- --nocapture
+   1 passed, 0 failed
+```
+
+### What the fix pass cost
+
+One `ZkTree::LeafCount` read that the sync already made, moved ahead of the
+scan, and the checkpoint walk still stops at the first checkpoint that stands,
+so the ordinary cost is the one `chain_getBlockHash` it always was. A lagging
+node is now refused before `UsedNullifiers` is paged, which is one fewer whole
+map read on the path that refuses. Nothing in the proving path moved: the proof
+is the same 150908 bytes and proving is the same 3.5 s. No consensus rule, hash
+layout, nullifier rule or `rho` rule changed, so no KAT vector was regenerated.

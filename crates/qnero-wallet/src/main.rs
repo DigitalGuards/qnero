@@ -13,7 +13,9 @@ use qnero_wallet::memo::{memo_budget_within, render_memo_within, terminal_column
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{RpcClient, DEFAULT_NODE_URL};
 use qnero_wallet::store::{NoteRow, PendingKind, StoredNote};
-use qnero_wallet::wallet::{ChainBinding, EntryRhoCheck, MerkleSource, Wallet, NUM_LEAF_PROOFS};
+use qnero_wallet::wallet::{
+    ChainBinding, EntryRhoCheck, MerkleSource, SyncOptions, Wallet, NUM_LEAF_PROOFS,
+};
 use qnero_wallet::POOL_QUANTUM;
 
 /// Amounts are in pool quanta. One quantum is 10^10 planck, 0.01 QTC.
@@ -89,7 +91,19 @@ enum Command {
         memo: String,
     },
     /// Scan the chain for notes and settle spent status.
-    Sync,
+    Sync {
+        /// Walk the whole tree again from leaf zero, keeping every note.
+        ///
+        /// The recovery for a store an older build wrote. Before conflict
+        /// sets, a scan refused the second note it met that shared a nullifier
+        /// with one it already held and never looked at that leaf again, so
+        /// the note's rho and r were never recorded and no store upgrade can
+        /// bring them back. A fresh walk reads them out of the ciphertext the
+        /// chain published. Every note already held is kept, which is the
+        /// difference from deleting the store.
+        #[arg(long)]
+        rescan: bool,
+    },
     /// Unspent total, pending total and the note list.
     Balance,
     /// Spend up to two notes into a payment and a change note.
@@ -137,15 +151,20 @@ fn ensure_memo_fits(memo: &str) -> Result<()> {
     Ok(())
 }
 
-/// Say what binding the store to this node's chain did, when it did anything.
+/// Say what checking the store against this node's chain found, when there is
+/// anything to say.
 ///
 /// Silent for the ordinary case, a store that already named this chain.
+/// Nothing here writes the binding: a store that names no chain yet records
+/// one when a sync, a shield or a send actually commits, and the `sync` report
+/// below says so when it happens.
 fn report_binding(binding: &ChainBinding) {
     match binding {
         ChainBinding::Bound => {}
-        ChainBinding::Recorded => {
-            println!("chain       recorded this node's genesis in the store")
-        }
+        ChainBinding::Unrecorded => println!(
+            "chain       this store names no chain yet. The first sync, shield or send that \
+             commits records this node's genesis."
+        ),
         ChainBinding::Archived(path) => println!(
             "chain       this store belonged to another chain. It is archived at {} and this \
              wallet starts fresh against this one.",
@@ -309,14 +328,17 @@ fn main() -> Result<()> {
                 println!("last synced block (no wallet at {})", seed_path.display());
             }
         }
-        Command::Sync => {
+        Command::Sync { rescan } => {
             let rpc = RpcClient::new(&cli.node);
             let chain = Chain::new(&rpc);
             let metadata = ChainMetadata::fetch(&rpc)?;
             let (mut wallet, binding) =
                 Wallet::open_on_chain(&seed_path, &chain, cli.new_chain_store)?;
             report_binding(&binding);
-            let report = wallet.sync(&chain, &metadata)?;
+            let report = wallet.sync_with(&chain, &metadata, SyncOptions { rescan })?;
+            if report.recorded_genesis {
+                println!("chain       recorded this node's genesis in the store");
+            }
             println!(
                 "scanned leaves {}..{} at block {}",
                 report.scanned_from, report.scanned_to, report.head_block
@@ -332,16 +354,21 @@ fn main() -> Result<()> {
                     wallet.store_path.display()
                 );
             }
-            if let (Some(from), Some(to), Some(block)) = (
+            match (
                 report.rewound_from,
                 report.rewound_to,
                 report.forked_at_block,
             ) {
-                println!(
+                (Some(from), Some(to), Some(block)) => println!(
                     "the chain forked below block {}: rescanned leaves from {to} where this \
                      wallet had reached {from}",
                     block + 1
-                );
+                ),
+                (Some(from), Some(_), None) => println!(
+                    "rescanned the whole tree from leaf 0, where this wallet had reached {from}. \
+                     Every note already held is kept."
+                ),
+                _ => {}
             }
             if report.relocated > 0 {
                 println!(

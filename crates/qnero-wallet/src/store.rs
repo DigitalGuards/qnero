@@ -560,9 +560,19 @@ impl WalletStore {
             // file's copy is ignored on load and the first sync repages it.
             //
             // Version 4 to 5 adds `genesis_hash`, which serde reads as `None`.
-            // The first sync records the genesis of the node it runs against,
-            // which is the only chain such a store could have come from that
-            // this wallet can still name.
+            // The first sync that commits records the genesis of the node it
+            // runs against, which is the only chain such a store could have
+            // come from that this wallet can still name.
+            //
+            // What no upgrade recovers is a note an older build refused as a
+            // duplicate nullifier. That build wrote a `rejected` entry and
+            // never kept the note's `rho` and `r`, and the leaf sits below the
+            // watermark from then on, so no later sync decrypts it again. The
+            // secrets are not in the file to restore. They are on chain,
+            // inside the ciphertext beside the commitment, so `sync --rescan`
+            // walks the tree from leaf zero and picks them up; the notes
+            // already held are kept either way. `docs/WALLET.md` says so under
+            // the store format.
             if store.version < 3 {
                 store.checkpoints.clear();
             }
@@ -775,8 +785,15 @@ impl WalletStore {
 
     /// Value the chain does not back, held for the case its settlement
     /// re-lands.
+    ///
+    /// Collapsed on the nullifier, exactly as [`WalletStore::off_chain_rows`]
+    /// is, so the heading `balance` prints is the sum of the table under it.
+    /// Summing every member instead counted a conflict set once per note: at
+    /// most one member of a set can ever settle, so a set of two off-chain
+    /// notes of 692 quanta reported 1,384 above a table showing one row of
+    /// 692, which is the same overcount `unspent_total` collapses to avoid.
     pub fn off_chain_total(&self) -> u64 {
-        self.off_chain().map(|note| note.value).sum()
+        self.off_chain_rows().iter().map(|row| row.note.value).sum()
     }
 
     /// Mark every note inside a rescanned range that the rescan did not find.
@@ -1491,6 +1508,46 @@ mod tests {
         other.commitment = "dd".repeat(32);
         assert!(store.record_rejected(other));
         assert_eq!(store.rejected.len(), 2);
+    }
+
+    /// The regression: `off_chain_total` summed every member of a conflict set
+    /// while `off_chain_rows` collapsed them, so the `balance` heading and the
+    /// table under it disagreed on a number they both compute from the same
+    /// notes.
+    ///
+    /// At most one member of a set can ever settle, so the heading counted
+    /// value the chain could never back even if every one of those settlements
+    /// re-landed. `unspent_total` collapses for exactly this reason; the
+    /// off-chain total is the same sum over the same grouping.
+    #[test]
+    fn the_off_chain_heading_is_the_sum_of_the_off_chain_table() {
+        let mut store = WalletStore::new("qn1example".into());
+        store.notes.push(sample_note(40, "small"));
+        store.notes.push(sample_note(1_000, "large"));
+        store.notes.push(sample_note(250, "apart"));
+        // The first two share a nullifier: one sender, one repeated (rho, r).
+        let shared = store.notes[1].nullifier.clone();
+        store.notes[0].nullifier = shared.as_str().into();
+        store.notes[0].leaf_index = 4;
+        store.notes[1].leaf_index = 5;
+        store.notes[2].leaf_index = 6;
+
+        // A reorg took the whole set's leaves and left the note that shares
+        // nothing where it was.
+        store.notes[0].on_chain = false;
+        store.notes[1].on_chain = false;
+
+        let rows = store.off_chain_rows();
+        assert_eq!(rows.len(), 1, "a conflict set is one row");
+        assert_eq!(rows[0].members, 2);
+        assert_eq!(rows[0].note.value, 1_000);
+        assert_eq!(
+            store.off_chain_total(),
+            rows.iter().map(|row| row.note.value).sum::<u64>(),
+            "the heading has to be the sum of the table under it"
+        );
+        assert_eq!(store.off_chain_total(), 1_000, "and not 1,040");
+        assert_eq!(store.unspent_total(), 250);
     }
 
     /// The regression: the scan refused whichever member of a conflict set it
