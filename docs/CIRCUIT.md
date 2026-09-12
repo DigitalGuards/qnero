@@ -1,5 +1,8 @@
 # Qnero v0 spend circuit (M2) and batch aggregation (M3)
 
+Sections 1 to 8 are the circuits, section 9 is the M4 settlement contract as
+built, and section 10 is the M6 coinbase record.
+
 Status: implemented and tested, 2026-09-11. Crates: `qnero-circuit`,
 `qnero-prover`, `qnero-verifier`, `qnero-aggregator`, `qnero-circuit-builder`.
 Forked from Quantus-Network/qp-zk-circuits (MIT); each crate carries a NOTICE
@@ -1633,3 +1636,144 @@ Three things about them are worth carrying into M5:
 - **Admission's unpaid verify is not metered at all.** See the open issue in
   section 9.10: weight bounds block execution, and nothing bounds what a
   transaction pool absorbs before a block.
+
+## 10. The M6 coinbase record
+
+Value enters circulation in one place under v1: the note a block mints to its
+author. This is what the chain stores, what it checks, and what it deliberately
+does not.
+
+### 10.1 The record
+
+Three storage items carry one coinbase note, and two of them are the ones every
+shielded leaf already uses.
+
+| Item | Key | Value | Written by |
+|---|---|---|---|
+| `ZkTree::Leaves` | leaf index | `cm` | the append, like every other note |
+| `Shielded::LeafBlocks` | leaf index | block number | the mint |
+| `Shielded::CoinbaseValues` | leaf index | value in pool quanta | the mint |
+| `Shielded::Ciphertexts` | leaf index | the payload, when there is one | the mint |
+
+`CoinbaseValues` is the only new one, and presence in it is what marks a leaf a
+coinbase. A wallet reads it in the same batch as the other three, so a coinbase
+costs one extra storage key per leaf on a sync and no extra round trip.
+
+Two more items are per block rather than per leaf, and neither survives its
+block: `PendingCoinbase`, the payload the inherent recorded, killed at the start
+of every block and taken by the mint; and `PendingCoinbaseFee`, the author's
+share of the fees settled so far, which the mint folds into the note's value and
+which only carries into the next block when a block mints no note at all.
+
+The event is `CoinbaseMinted { block_number, leaf_index, inner, value,
+ciphertext }`. It publishes `inner`, which the storage does not, so a wallet
+that watches events can check a note without rebuilding the commitment from the
+leaf.
+
+### 10.2 The two rules the note is built from
+
+```text
+rho   = H(RHO_COINBASE, block_number)              0x716e_000a
+r     = H(R_COINBASE, cvk, block_number)           0x716e_000b
+inner = H(NOTE, pk, rho, r)
+cm    = H(CM, inner, value)
+```
+
+`rho` is the block number because a block mints exactly one coinbase note, so
+the height names it and no two coinbase notes can share a nullifier seed. It is
+not the pool's entry counter, which is what a shield takes: the node builds
+`inner` while it is proposing, and how many shields the block will carry is not
+known then.
+
+`r` is derived from a coinbase viewing key rather than drawn at random, and that
+is the one place v1 departs from the design that preceded it. Every other note
+reaches its recipient as an ML-KEM ciphertext; a block author's node cannot
+build one, because the chain's own post-quantum Noise transport pins `ml-kem`
+0.2 through `clatter`, the wallet's note encryption uses `ml-kem` 0.3, and the
+two share a `kem` dependency that resolves to a single version. A binary cannot
+hold both. `qnero-note-core` exists for that split and its module documentation
+states it. So the operator configures its node with a miner key, `pk` and `cvk`
+in one bech32m string, and the node derives the note.
+
+What that keeps: the note is private against anyone holding the miner's
+address, because recovering `pk` from `inner` needs `r`, which needs `cvk`.
+
+What it costs: `cvk` is a viewing-tier secret for coinbase notes. Whoever holds
+it, with the address, can pick that miner's coinbase notes out of the tree. It
+cannot spend them, which needs `ask`, and it says nothing about any other note.
+
+What it does not cover: a coinbase paid to an address whose `cvk` the author
+does not hold. The inherent still accepts an encrypted payload and the wallet
+still reads one (`qnero_notes::try_receive_coinbase`), and nothing in the node
+produces one today.
+
+### 10.3 What the chain checks
+
+- `inner` is four canonical Goldilocks limbs. Checked at the inherent, because the mint runs in a
+  hook and a hook cannot refuse anything.
+- The value is a whole number of pool quanta below `2^62`. The same cap every creation path carries;
+  the no-wrap argument behind the balance equation (section 5, constraint 8) holds only while every
+  term is below it.
+- The block has an author, through the runtime's one `FindAuthor` seam.
+- The block has exactly one coinbase. A second inherent fails, and a mandatory dispatch that fails
+  takes the block.
+- A block with no coinbase inherent at all is refused on import, because the inherent is required.
+
+### 10.4 What the chain does not check
+
+The payload is the author's own. `pk` is inside an `inner` the chain cannot
+open, `cvk` is not on the chain at all, and the ciphertext, when there is one,
+is bytes the chain never parses. An author that malforms any of it strands its
+own reward and nothing else: the value is the chain's own arithmetic, so a
+malformed payload cannot mint more than the emission, and the commitment is over
+that value, so it cannot be opened at another one.
+
+There is no `ct_digest` here, unlike a settling slot. A settlement's ciphertexts
+are bound to a proof; a coinbase has no proof and no second party, so there is
+nothing for a digest to bind.
+
+### 10.5 Two books, one supply
+
+`Balances::total_issuance()` counts transparent balances. `Shielded::PoolValue`
+counts what the pool holds, and shielding burns from the shielder, so a planck
+that moves into the pool leaves issuance behind. Under v1 nearly every planck is
+in the pool.
+
+The emission schedule therefore measures both: `pallet-mining-rewards` adds
+`PoolValue + PendingCoinbaseFee` to the issuance it reads before subtracting
+from `MaxSupply`. Without that term supply appears to fall as the pool fills and
+the schedule mints faster forever.
+
+The ledger of one block, end to end:
+
+```text
+settlement       PoolValue -= fee
+                 burn share: gone, from both books
+                 author share: PendingCoinbaseFee += share
+coinbase mint    total = emission + collected tx fees + PendingCoinbaseFee
+                 PoolValue += total
+                 PendingCoinbaseFee = sub-quantum remainder, if any
+```
+
+The emission and the collected fees are value that is in neither book when the
+mint runs: emission has not been created and transaction fees were destroyed
+when their imbalance dropped. Adding them to `PoolValue` is what creates them,
+in the pool, as a note. Nothing is minted into an account anywhere in this path.
+
+### 10.6 What M6 left open
+
+- **Nothing verifies that a coinbase note is spendable by anyone.** The chain hashes an `inner` it
+  cannot open, so a node with a corrupt miner key mints notes nobody holds, block after block, and
+  the only symptom is a wallet whose balance does not grow. The node's own smoke path is the check:
+  build a payload, and have the wallet find it. `qnero-wallet sync` reporting
+  `coinbase_received` below `coinbase_leaves` on a chain you are the only miner of is the signal.
+- **A coinbase for a third party has no builder.** The encrypted payload path is implemented on both
+  sides and nothing produces one; `docs/WALLET.md` open issue 16.
+- **The author is not bound to the payload.** Any block author can put any `inner` in its own block,
+  which is correct, and nothing stops a node operator from paying its reward to an address it does
+  not control. That is a configuration error rather than an attack: it costs the operator its own
+  reward and nobody else anything.
+- **`PendingCoinbaseFee` can strand value across a chain halt.** The author's share of a settled fee
+  lives there between the settlement and the block's own `on_finalize`. A chain that stops between
+  the two leaves it in state, counted by `ShieldedSupply` and backed by nothing that will ever mint
+  it. It is at most one block's fees.

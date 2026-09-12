@@ -174,6 +174,21 @@ repository also gitignores `*.seed` and `*.store.json` for the same reason.
 Creates the seed file and prints the address. Refuses to overwrite an existing
 seed: the notes behind it would be unspendable.
 
+### `miner-address`
+
+Prints the miner key a block author's node is configured with, on stdout, with
+the wallet's address and a warning on stderr. One value, so
+`QNERO_MINER_KEY=$(qnero-wallet miner-address)` is the whole of the
+configuration, and `--rewards-miner-key` is the flag.
+
+It is **secret-bearing**, which the address is not. It carries `pk`, the public
+half of the address, and `cvk`, the coinbase viewing key every coinbase note
+this wallet is paid is derived from. Whoever holds it can pick this wallet's
+coinbase notes out of the tree. It cannot spend them, which needs `ask`, and it
+says nothing at all about a note that arrived any other way. Keep it off command
+lines, which every process listing on the machine can read, and out of shared
+logs.
+
 ### `address`
 
 Prints the `qn1...` address for the seed. It is about 2600 characters, because
@@ -226,14 +241,36 @@ and turns an absent one into an error that drops the pending entry.
 
 Scans from the last synced leaf to the tree's current leaf count, pinned to one
 block hash so a leaf appended mid-scan cannot be counted and then read as
-absent. For each leaf it reads `ZkTree::Leaves`, `Shielded::Ciphertexts` and
-`Shielded::LeafBlocks` in batches of 64 through `state_queryStorageAt`. All
-three maps are `Identity` hashed on the leaf index, so paging is by index and
-never by `state_getKeysPaged`.
+absent. For each leaf it reads `ZkTree::Leaves`, `Shielded::Ciphertexts`,
+`Shielded::LeafBlocks` and `Shielded::CoinbaseValues` in batches of 64 through
+`state_queryStorageAt`. All four maps are `Identity` hashed on the leaf index,
+so paging is by index and never by `state_getKeysPaged`.
 
-Most leaves carry no ciphertext at all and that is normal: the shielded pool
-shares one commitment tree with wormhole transfers and with the mining-reward
-leaf every block appends.
+**Coinbase leaves.** Every block mints one note to its author, and a leaf with
+a `CoinbaseValues` entry is one of those. Such a leaf is read differently, and
+not from its ciphertext: usually it has none. The value comes from the chain,
+which published it because it hashed it into the commitment, and the rest of
+the note is rebuilt from this wallet's own miner key,
+`rho = H(RHO_COINBASE, block)` and `r = H(R_COINBASE, cvk, block)`. If the
+rebuilt commitment is the leaf, the note is this wallet's and it is stored as
+spendable with origin `coinbase`. If it is not, and the leaf does carry a
+ciphertext, the wallet decrypts that instead and rebuilds the note against the
+chain's value, which is the shape a coinbase paid to an address whose coinbase
+viewing key the author does not hold takes. Either way the commitment check is
+what decides: the value inside a payload is ignored, because a coinbase note's
+amount is the one field the chain has already decided, and an author cannot
+write a number into someone's balance by publishing one. `docs/CIRCUIT.md`
+section 10 is the record and `docs/DESIGN.md` section 7.1 is why it is derived
+rather than encrypted.
+
+The scan reports both counts: `coinbase_leaves` is every coinbase leaf it
+walked, which is one per block in the range, and `coinbase_received` is how many
+of them were this wallet's.
+
+A leaf with neither a ciphertext nor a coinbase value is skipped, and on a chain
+with history from before v1 that is most of them: wormhole transfer leaves and
+the transparent mining-reward leaf every block used to append carry neither.
+Nothing appends either any more.
 
 Before anything else, the node itself is checked. Everything a sync derives is
 derived from what one node answers at one block, and a node that answers with
@@ -717,7 +754,7 @@ copied between machines under a permissive umask.
 
 ```json
 {
-  "version": 5,
+  "version": 6,
   "address": "qn1...",
   "genesis_hash": "<64 hex chars>",
   "last_synced_block": 1062,
@@ -810,9 +847,16 @@ Field notes:
   belongs to someone else.
 - `next_leaf` is one past the last leaf index scanned, and `last_synced_block`
   is the block every read of that pass was pinned to.
-- `origin` is `shield` when the note's `rho` matches the entry rule for the
-  block its leaf landed in, and `spend` otherwise. It is a label. Nothing in
-  the spend path reads it.
+- `origin` is `coinbase` for a note the chain published a value for beside its
+  leaf, `shield` when the note's `rho` matches the entry rule for the block its
+  leaf landed in, and `spend` otherwise. It is a label. Nothing in the spend
+  path reads it, and a coinbase note is spendable like any other: its nullifier
+  is the ordinary rule over the `rho` and `r` the miner key derived.
+- `version` moved to 6 for that third value. A version-5 build meeting
+  `"origin": "coinbase"` fails its deserialization with no note of which field
+  went wrong, so the bump is what turns that into a refusal that names the
+  version. Nothing in a version-5 store can be a coinbase note: the chain had
+  none to find, so an upgraded store keeps every origin it was written with.
 - `spent_seen_at_block` is when this wallet first saw the nullifier settled,
   which is not the block that settled it. Spent status is decided locally
   against the paged copy of `UsedNullifiers`, and that map carries no height at
@@ -1102,3 +1146,17 @@ are cited at each site.
     the old undifferentiated message. The mitigation until these are closed:
     use `--rescan` only against a node you trust to be current, and follow it
     with an ordinary sync against that node.
+15. **A miner key is a file-less secret.** The node takes it from a command
+    line or an environment variable and the wallet prints it on stdout;
+    nothing encrypts it, nothing rotates it, and there is no `--miner-key-file`
+    the way there is for the external miner's auth token. It is the same
+    dev-grade key handling the seed beside it gets, and it is worth less than
+    the seed: it cannot spend, and what it reveals is which coinbase notes
+    belong to this wallet.
+16. **A coinbase paid to someone else needs a tool that does not exist.** The
+    pallet accepts an encrypted payload and the wallet reads one
+    (`try_receive_coinbase`), so a miner can pay its reward to an address whose
+    coinbase viewing key it does not hold. Nothing builds that payload: the
+    node cannot link an ML-KEM implementation (`docs/OPS-DEV.md`), so the
+    builder would have to be a separate process the node calls per proposal.
+    Until then a node pays the wallet whose miner key it was given.

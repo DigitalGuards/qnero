@@ -54,13 +54,36 @@ compile against an API it was never written for. Nothing in the Qnero crates
 pulls one any more, so the pin is defensive; it is here because the symptom is
 eighteen type errors in a crate nobody in this repository calls.
 
+**M6 hit it, and it decided a design.** The coinbase note was to be encrypted
+to the miner's address with the wallet's own note encryption, which is
+`qnero-notes`, which is `ml-kem` 0.3. Adding that edge to the node resolved
+`kem` to `0.3.0` and broke `ml-kem 0.2.1` in exactly the eighteen ways above.
+There is no resolution that satisfies both: `ml-kem 0.2.3` pins
+`=0.3.0-pre.0`, `ml-kem 0.3.2` needs `^0.3`, and a pre-release does not satisfy
+a stable requirement. `clatter 2.3.0`, the newest, is still on `ml-kem 0.2.1`.
+So the block author's node does not encrypt: it is configured with a miner key
+and derives the note (`docs/DESIGN.md` section 7.1, `docs/CIRCUIT.md` section
+10.2). The node links `qnero-note-core`, which is the crate that exists so a
+binary can have Poseidon note rules without a lattice dependency, and links no
+`ml-kem` of its own at all. Check `cargo tree -i ml-kem` before adding a
+dependency to `node`, `runtime` or any pallet.
+
 ## Tests
 
 ```
 cd chain
-SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p pallet-shielded --release
-nice -n 19 cargo clippy -j 4 -p pallet-shielded --all-targets
+SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p pallet-shielded -p pallet-mining-rewards --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p quantus-runtime --release --test call_filter
+nice -n 19 cargo clippy -j 4 -p pallet-shielded -p pallet-mining-rewards --all-targets
 ```
+
+The runtime's call-filter test is named, and `cargo test -p quantus-runtime`
+without `--test call_filter` is not the gate: the `tests/mod.rs` target has not
+compiled since the M4 subtree fork, where `pallet-zk-tree` changed `Leaves` to a
+raw `Hash256` and `runtime/tests/governance/vesting.rs:58` still reads `leaf.to`
+off it. That target is a pre-existing failure, it is listed as an open issue in
+`docs/WALLET.md`, and most of what it covers is transparent transfers, which v1
+refuses.
 
 `--release` is not optional for this crate's tests: several build a real
 private-batch proof, and proving in a debug build takes minutes per proof.
@@ -88,6 +111,68 @@ QNERO_NUM_LEAF_PROOFS=2 QNERO_NUM_PRIVATE_BATCH_PROOFS=2 \
 cd chain
 nice -n 19 ./target/release/quantus-node --dev --tmp
 ```
+
+### Mining under v1: the miner key
+
+From M6 every block mints its reward as one shielded note, and that is the only
+way value enters circulation. The node needs to know which note to mint, so an
+authority is configured with a **miner key**: `pk` and a coinbase viewing key
+`cvk`, in one bech32m string, printed by the wallet.
+
+```
+# once, on the machine that holds the wallet
+qnero-wallet miner-address          # the key alone on stdout
+
+# on the node
+export QNERO_MINER_KEY=qnm1...
+nice -n 19 ./target/release/quantus-node --dev --tmp
+# or --rewards-miner-key qnm1...
+```
+
+`--dev` authors blocks, so it needs the key like any other authority. A node
+without one builds blocks that carry no coinbase inherent, and every node
+refuses those, its own import included, so the node refuses to start instead.
+
+Two properties of that string:
+
+- **It is secret-bearing, and the address is not.** `cvk` is what a coinbase note's `r` is derived
+  from, so whoever holds the miner key can pick that miner's coinbase notes out of the tree. It
+  cannot spend them and it says nothing about any other note the wallet holds. Prefer the
+  environment variable to a command line, which every process listing on the machine can read.
+- **It is not an address.** Its human-readable part is `qnm` rather than `qn`, so pasting one where
+  the other belongs fails on the checksum rather than halfway through a decode.
+
+`--rewards-inner-hash` stays, and stays required of an authority: it is the
+QPoW inner hash the block's author digest carries, which is what the runtime
+derives the author account from. The two are independent. One says who authored
+the block and the other says which note the block's reward becomes.
+
+### The block-author seam
+
+Everything in the runtime that needs to know who authored a block reads it
+through one implementation, `quantus_runtime::configs::QpowAuthor`, which
+implements `frame_support::traits::FindAuthor<AccountId>`. It takes the first
+`PreRuntime` digest item under `POW_ENGINE_ID`, requires exactly 32 bytes, and
+derives the wormhole address from it (`qp_wormhole::derive_wormhole_address`).
+
+Two pallets read it and nothing else in the runtime touches the proof of work:
+
+- `pallet-mining-rewards` asks whether the block has an author at all. A block without one retains
+  its credit for the next block rather than minting it.
+- `pallet-shielded` asks the same question at the coinbase inherent. A block with no author has
+  nobody the coinbase belongs to, and the inherent fails, which fails the block.
+
+Neither asks who, beyond the event label. The coinbase note's recipient is the
+miner key the author's own node holds, which the chain never sees.
+
+**This is the seam a later engine swap goes through.** `docs/DESIGN.md` section
+10 keeps RandomX open so Monero rigs can mine Qnero, and the evaluation is
+recorded for M7. Swapping the engine is this impl plus the consensus client:
+whatever the new engine puts in the pre-runtime digest, and whatever account it
+derives, the two pallets above are unchanged, no storage item moves, and the
+shape of a block is unchanged. Do not reach for
+`qp_wormhole::extract_author_from_digest` from a pallet again; it is called
+from exactly one place on purpose.
 
 `--tmp` keeps the chain state in a temporary directory, so a rerun starts from
 genesis. Without it, use `purge-chain --dev` between runs. The RPC endpoint is
@@ -2118,3 +2203,186 @@ node is now refused before `UsedNullifiers` is paged, which is one fewer whole
 map read on the path that refuses. Nothing in the proving path moved: the proof
 is the same 150908 bytes and proving is the same 3.5 s. No consensus rule, hash
 layout, nullifier rule or `rho` rule changed, so no KAT vector was regenerated.
+
+## The M6 run: v1 mandatory privacy, 2026-09-12
+
+Every unit of value that enters circulation is a shielded note, and no call a
+user can make moves transparent value between accounts. Development
+workstation, 20 cores, WSL2.
+
+### What changed
+
+- **The block reward is a note.** `pallet-mining-rewards` computes the emission and collects fees as
+  before and mints nothing to an account; `pallet-shielded` takes the credit through a
+  `CoinbaseSink` and turns it into the block's coinbase note, with the author's share of every fee
+  the block settled folded in. The payload comes from a required inherent the author's node
+  supplies. `docs/DESIGN.md` section 7.1 and `docs/CIRCUIT.md` section 10.
+- **The author's fee share stopped being a transparent credit**, which removed the last reason for
+  the wormhole leaf that made a keyless account's balance spendable.
+- **`BaseCallFilter` refuses every call that moves transparent value between accounts**, the
+  wrappers included. `docs/DESIGN.md` section 7.2 is the allowlist.
+- **`pallet-wormhole` left the runtime** with its transaction extension and its migration, taking
+  the transparent exit with it. The crate stays in the tree and `qp-wormhole`, the primitives crate,
+  stays in the runtime: the author derivation is there.
+- **The runtime says what it is.** `spec_name` `qnero`, `impl_name` `qnero-node`, `spec_version`
+  100, `transaction_version` 7. The node reports `Qnero Node` and the dev chain is `Qnero DevNet` at
+  id `qnero-dev`.
+- **One author seam.** `configs::QpowAuthor`, a `FindAuthor` implementation, is the only place the
+  runtime reads consensus. See "The block-author seam" above.
+- **The wallet finds the blocks it mined**, from a miner key the node is configured with, and
+  `miner-address` prints that key.
+
+### The run
+
+The miner's wallet is made first, because the node is configured with a key it
+prints.
+
+```
+$ qnero-wallet --file /tmp/qnero-m6/miner.seed keygen
+seed    /tmp/qnero-m6/miner.seed
+store   /tmp/qnero-m6/miner.seed.store.json
+address qn1qywupkzeswff4n96l3ts7e9pxg5f… (2571 characters)
+
+$ QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6/miner.seed miner-address)
+   qnm1qywupkzeswff…gemxynpz (114 characters)
+
+$ QNERO_MINER_KEY=$QNERO_MINER_KEY nice -n 19 ./target/release/quantus-node --dev --tmp
+2026-09-12 17:24:32 Qnero Node
+2026-09-12 17:24:32 📋 Chain specification: Qnero DevNet
+2026-09-12 17:24:32 💾 Database: RocksDb at /tmp/substrate…/chains/qnero-dev/db/full
+2026-09-12 17:24:32 ⛏️ Using treasury address for rewards: 6d6f646c70792f7472737279… (qzmviwoP…)
+2026-09-12 17:24:32 ⛏️ Coinbase notes are minted for pk 1dc0d85983929acc…
+```
+
+The chain says what it is:
+
+```
+$ curl … state_getRuntimeVersion
+{'specName': 'qnero', 'implName': 'qnero-node', 'specVersion': 100, 'transactionVersion': 7}
+$ curl … system_chain
+"Qnero DevNet"
+```
+
+**The miner is paid in notes.** Twenty-three blocks in, the wallet holds one
+note per block and nothing else. The tree holds nothing else either: 23 blocks,
+23 leaves.
+
+```
+$ qnero-wallet --file /tmp/qnero-m6/miner.seed sync
+scanned leaves 0..23 at block 23
+received 23 note(s) worth 945 quanta
+
+$ qnero-wallet --file /tmp/qnero-m6/miner.seed balance
+unspent        945 quanta
+synced through block 23
+
+      leaf        quanta    block    state  memo
+         0            41        1  unspent
+         1            41        2  unspent
+         …
+         8            42        9  unspent
+         …
+        22            41       23  unspent
+
+$ qnero-wallet --file /tmp/qnero-m6/miner.seed status
+runtime           spec 100, transaction 7
+chain head        23
+tree leaves       23
+tree depth        3
+```
+
+41 quanta is the emission at genesis supply, `(21_000_000 - 0) / 50_000_000`
+QTC quantized down to a whole pool quantum. The occasional 42 is the carry: a
+block's credit is not a whole number of quanta, the remainder waits in
+`PendingCoinbaseFee`, and every eighth block or so it completes one. Nothing is
+lost between the two books and nothing is created.
+
+**A mined note spends like any other, and the fee comes back in the next
+coinbase.** The end-to-end test drives this, against the same node:
+
+```
+$ QNERO_DEV_NODE=http://127.0.0.1:9944 QNERO_MINER_SEED=/tmp/qnero-m6/miner.seed \
+    RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --release -p qnero-wallet \
+    --features parallel --test dev_node_e2e -- --nocapture \
+    the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused
+
+sync: 36 leaves, 36 coinbase leaves, 36 of them this wallet's, 4975 quanta
+5 quanta to B at fee 8: included at block 124, change 29
+coinbase of block 124: 45 quanta against 41 to 42 elsewhere, author share 4
+system_dryRun of a transparent transfer: 0x0001030005000000
+test the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused ... ok
+```
+
+Four things in four lines:
+
+1. **Every block's coinbase is this wallet's**, and the scan says so in both counts.
+2. **A coinbase note spends.** 42 in, 5 to B, 8 of fee, 29 of change, and B's own sync finds its
+   note at 5 quanta with the memo the sender wrote. The fee is the submission's floor, which at two
+   ciphertexts of 1731 bytes is 8 quanta; the milestone's "fee 1" is below it and the chain refuses
+   a fee below the floor, which is the anti-spam rule M4 built.
+3. **The author's share of that fee is in the coinbase of the block that settled it**: 45 against 41
+   elsewhere, and the share of an 8-quantum fee is 8 - ceil(8/2) = 4. It is in that block's note and
+   in no other.
+4. **A transparent transfer is refused.** `0x0001030005000000` is
+   `Ok(Err(DispatchError::Module { index: 0, error: [5, 0, 0, 0] }))`: `frame_system` is pallet 0
+   and `CallFiltered` is its sixth error. The extrinsic is signed with a genuine ML-DSA key, passes
+   every transaction extension, and is refused at dispatch.
+
+The wallet's own view afterwards, with the settlement in it:
+
+```
+      leaf        quanta    block    state  memo
+         8            42        9    spent          <- the note that paid B
+       123            29      124  unspent          <- the change
+       125            45      124  unspent          <- the coinbase of the settling block
+       126            41      125  unspent
+```
+
+Leaf 124, between the change and the coinbase, is B's note. This wallet cannot
+read it, which is the point.
+
+### Gates
+
+```
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   38 suites ok, 0 failed
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+
+# the chain workspace
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
+  -p pallet-shielded -p pallet-mining-rewards -p pallet-zk-tree --release
+   74 + 30 + 35 passed, 0 failed
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p quantus-runtime --release
+   41 lib + 6 call_filter + 59 integration passed, 0 failed
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p quantus-runtime --all-targets
+   no warnings
+LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p quantus-node --all-targets
+   no warnings
+```
+
+`cargo test -p quantus-runtime` is a gate again. It had not compiled since the
+M4 subtree fork; see "Tests" above for what it covers now.
+
+### Timings
+
+Development workstation, 20 cores, WSL2, `nice -n 19`, `-j 4`.
+
+| Step | Wall | Peak RSS |
+|---|---|---|
+| `cargo build --release -p quantus-node`, cold for the runtime wasm | 10:35 | 5.4 GB |
+| the same after a runtime source change, artifacts cached | 1:05 | |
+| chain pallet tests (`pallet-shielded`, real proofs) | 25 s | |
+| runtime tests, all three targets | under 1 s | |
+| root workspace tests | 2:40 | |
+| the end-to-end, including one private-batch proof at four threads | 8.3 s | |
+
+The node was built three times over the milestone rather than once: the first
+build predated the vesting proof-recorder fix, and the second found the
+`pre_dispatch` bug through the end-to-end, which is what an end-to-end is for.
+Only the first paid the full wasm cost.
