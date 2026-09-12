@@ -274,10 +274,11 @@ is wallet-side proving time and memory for a 2-in/2-out leaf plus a
    element the chain sums in `u128` (`docs/CIRCUIT.md` 9.7), and the floor
    `MinLeafFee + ceil(ciphertext_bytes / CiphertextBytesPerFeeQuantum)` is
    itself payload dependent, so a tier would have to quantize the payload term
-   too. A submission carries a second floor of the same shape, over every byte
-   in the extrinsic, which is what prices the segments a settlement skips. Whether to quantize fees into tiers to reduce fingerprinting is
-   re-deferred to M6, where the coinbase changes what a fee has to cover
-   anyway.
+   too. A submission carries a second floor of the same shape, over every real
+   leaf slot and every ciphertext byte in the extrinsic, which is what prices
+   the segments a settlement skips. Whether to quantize fees into tiers to
+   reduce fingerprinting is re-deferred to M6, where the coinbase changes what
+   a fee has to cover anyway.
 5. Memo field size and whether it is mandatory (Zcash pads to 512 bytes).
 
 ## 10. Positioning: Qnero vs Hegemon

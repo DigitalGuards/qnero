@@ -406,3 +406,160 @@ What changed, and what a node operator sees:
   public-batch circuit constrains every non-padding inner to one block hash and
   one block number, so for a batch these circuits produce the anchor decides the
   whole submission, and a private batch has one segment anyway.
+
+## Review verification of the fourth fix pass, 2026-09-12
+
+Independent re-check of the rebuild and smoke recorded above, at
+`dce3af9`, on the same workstation.
+
+```
+cd chain
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+```
+
+`Finished release profile in 0.50s`: nothing to recompile. The binary at
+`chain/target/release/quantus-node` is the one the entry above describes,
+80,468,704 bytes, so the tree as committed and the binary already agree and no
+second build was produced.
+
+`nice -n 19 ./target/release/quantus-node --dev --tmp`, 202 seconds, 214 blocks
+imported, stopped by its pidfile. `ss -ltn` then shows no listener on 9944,
+`curl` to it returns no response, and `pgrep quantus-node` finds nothing.
+
+`state_getMetadata` (229,604 hex characters) was searched for each name the
+pass claims to have moved:
+
+- `MaxPayloadSlotRatio` and `PayloadRatioExceeded` are absent from the blob.
+- `PayloadUnderpaid` and `EmptyCiphertext` are present.
+- `MinLeafFee`, `CiphertextBytesPerFeeQuantum`, `MaxCiphertextBytes`,
+  `FeeBurnRate`, `BlockHashWindow` and `MintingAccount` are the six `Shielded`
+  constants, and `FeeBelowMinimum` and `CiphertextDigestMismatch` are still
+  there.
+- `state_getRuntimeVersion` reports `quantus-runtime` spec 152. The runtime
+  identity issue recorded in the passes above is unchanged.
+
+Gates re-run for the review, all green:
+
+```
+cd chain
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 2 -p pallet-shielded -p pallet-zk-tree --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 2 -p pallet-shielded --all-targets
+SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 2 -p quantus-runtime
+# in the repository root
+nice -n 19 cargo fmt --all -- --check
+```
+
+60 tests in `pallet-shielded` and 35 in `pallet-zk-tree`, no clippy warnings,
+the runtime compiles, and the root workspace is rustfmt clean. The chain
+workspace's rustfmt drift in `pallets/shielded/src/tests.rs` predates this pass
+and comes from the nightly-only options in its `rustfmt.toml`.
+
+## The fifth review fix pass, 2026-09-12
+
+Same workstation. The pallet changed one consensus rule, the submission fee
+floor, so the node was rebuilt and re-smoked.
+
+What changed, and what a node operator sees:
+
+- The submission floor now charges `MinLeafFee` for **every real leaf slot the
+  submission carries**, settling and skipped alike, where it previously charged
+  it for the settling slots only:
+
+  ```
+  sum(fee of settling slots)
+      >= (settling slots + skipped slots) * MinLeafFee
+         + ceil(carried bytes / CiphertextBytesPerFeeQuantum)
+  ```
+
+  The byte term is unchanged and the per-slot floor is unchanged. Refused with
+  `PayloadUnderpaid`, which is the same error at a higher threshold.
+- What it closes: a skipped position may be emptied to a zero-length ciphertext
+  pair, which removes its bytes from the byte term, and the slot behind it still
+  costs every node the admission walk, two `UsedNullifiers` probes, a position
+  in `outputs` and the weight the extrinsic declares. Under the old floor one
+  settling slot beside 317 emptied skipped ones commanded all of that for one
+  quantum, on an unsigned and fee-free extrinsic.
+- What it costs an aggregator: a submission that settles everything it carries
+  is unaffected, because each slot already pays this minimum once through the
+  per-slot floor, so every private batch and every ungriefed public batch prices
+  exactly as before. A griefed public batch of six-slot inners that loses one
+  inner owes six quanta more than its settling slots' own minimums. At the far
+  end, a batch that settles one slot beside 317 skipped ones owes 318 minimums,
+  3.18 QTC at the runtime's parameters, and the aggregator's alternative is to
+  recompose a fresh public batch without the conflicted inners for the cost of
+  one proof.
+- **No structural metadata change.** No call, storage item, constant or error
+  variant was added, removed or reordered, so the `Shielded` error indices are
+  where the fourth pass left them and a wallet built against the previous
+  metadata still decodes this runtime's refusals. What moved is the number a
+  submission has to clear. The blob did grow, from 229,604 hex characters to
+  230,554, because pallet doc strings are part of the metadata and this pass
+  rewrote several of them, `PayloadUnderpaid`, `MinLeafFee` and
+  `CiphertextBytesPerFeeQuantum` among them.
+
+Gates run for this pass, all green:
+
+```
+# in the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+cargo fmt --all -- --check
+
+cd chain
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p pallet-shielded -p pallet-zk-tree --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 -p pallet-shielded --all-targets
+SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 4 -p quantus-runtime
+```
+
+27 test binaries in the root workspace with no failure, 61 tests in
+`pallet-shielded` (one more than the fourth pass: the grief-shape test was
+rewritten around the new floor and a single-segment floor-equality test was
+added) and 35 in `pallet-zk-tree`, no clippy warnings anywhere, the runtime
+compiles, and the root workspace is rustfmt clean. The chain workspace's
+`cargo fmt --check` drift is the same six hunks it was before this pass, in
+`pallets/shielded/src/tests.rs:484` and five places in
+`pallets/shielded/src/weights.rs`, plus the runtime tree; it comes from the
+nightly-only options in that workspace's `rustfmt.toml` and this pass adds
+nothing to it, which was checked by running the same command against a stash of
+the changes.
+
+```
+cd chain
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+```
+
+Two builds, because three doc comments were tightened after the first one:
+1 minute 3 seconds, then 1 minute 5 seconds for the build of the tree as
+committed, each recompiling the same three crates (`pallet-shielded`,
+`quantus-runtime`, `quantus-node`). The circuit artifact set regenerated in 28.8
+seconds on the first of them, which is the release profile's own `OUT_DIR`
+regenerating: this pass touched neither `QNERO_NUM_*` nor `build.rs`, so the
+dimensions are the ones every earlier build used. The binary of the committed tree is 80,465,200 bytes at
+`chain/target/release/quantus-node`, and the figures below are that binary's.
+Both builds serve a byte-identical `state_getMetadata` blob, which is what a
+comment-only difference should produce.
+
+`nice -n 19 ./target/release/quantus-node --dev --tmp`, 77 seconds of uptime,
+74 blocks imported, final height 74. Stopped by its pidfile; `ss -ltn` then
+shows no listener on 9944, `curl` to it exits 7 (connection refused), and
+`pgrep quantus-node` finds nothing, so the port is closed and no process is
+left. What this run checked:
+
+- `chain_getHeader`'s `zkTreeRoot`
+  (`0x62a24fdbf914c81ebfe4749a951c50c7ff62e8fda8f9eb2d38259e533716fab9` at
+  height 74) equals the root `zkTree_getState` reports, at 79 leaves and tree
+  depth 4, all of them the wormhole's.
+- `zkTree_getMerkleProof(0)` returns a proof whose `leaf_hash` and `leaf_data`
+  are the same 32 bytes.
+- `state_getMetadata` (230,554 hex characters) carries `PayloadUnderpaid`,
+  `EmptyCiphertext`, `FeeBelowMinimum`, `CiphertextDigestMismatch` and the rest
+  of the `Shielded` error list in the order the fourth pass recorded, and the
+  six `Shielded` constants `MintingAccount`, `BlockHashWindow`, `MinLeafFee`,
+  `CiphertextBytesPerFeeQuantum`, `MaxCiphertextBytes` and `FeeBurnRate`.
+  `MaxPayloadSlotRatio` and `PayloadRatioExceeded` are still absent.
+- `state_getRuntimeVersion` reports `quantus-runtime` spec 152, transaction
+  version 6. The runtime identity issue recorded in the passes above is
+  unchanged, and this pass is the first of the five to change a consensus rule
+  behind that version number while leaving the metadata's structure alone, which
+  is the worse half of that issue: a node on the previous runtime reads the same
+  call and error indices and disagrees about which submissions are admissible.

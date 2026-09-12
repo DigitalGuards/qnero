@@ -29,13 +29,16 @@
 //!   whose block anchor no longer resolves is skipped on the same argument: it can never settle,
 //!   and one reorg between an aggregator's proving run and inclusion would otherwise destroy the
 //!   whole batch.
-//! - **Every byte a submission carries is paid for by the slots it settles.** A skipped segment
-//!   pays no fee, because it writes no permanent state, and its ciphertexts still occupy block
-//!   space and are still sponged into a `ct_digest` by every node. So the settling slots owe
-//!   `settling slots * MinLeafFee + ceil(carried bytes / CiphertextBytesPerFeeQuantum)` over the
-//!   whole submission, where the carried bytes are every ciphertext in the extrinsic, a skipped
-//!   segment's included. A griefed aggregator stays viable because a skipped position may be
-//!   emptied: a zero-length pair carries no bytes, binds nothing and prices nothing.
+//! - **Every slot and every byte a submission carries is paid for by the slots it settles.** A
+//!   skipped segment pays no fee, because it writes no permanent state, and it still costs every
+//!   node the admission walk over its slots, the weight the submission declares for them, and a
+//!   `ct_digest` sponge over whatever bytes they carry. So the settling slots owe
+//!   `(settling slots + skipped slots) * MinLeafFee + ceil(carried bytes /
+//!   CiphertextBytesPerFeeQuantum)` over the whole submission, where the carried bytes are every
+//!   ciphertext in the extrinsic, a skipped segment's included. Emptying a skipped position to a
+//!   zero-length pair removes its bytes from the payload term; the slot itself is still charged
+//!   the flat minimum, because the walk and the weight it costs are the same either way. A griefed
+//!   aggregator either pays that floor or recomposes a batch without the conflicted inners.
 //! - **`ct_digest`.** The circuit leaves it a free public input. The chain recomputes it over the
 //!   ciphertexts in the extrinsic, in output order, and rejects the slot when it differs.
 //! - **A minimum fee per real slot.** The leaf circuit's "at least one real input" constraint does
@@ -418,11 +421,15 @@ pub mod pallet {
 		/// Two floors read it, and they answer two questions. The per-slot
 		/// floor asks whether a settling slot pays for the permanent state it
 		/// writes. The submission floor in [`Pallet::plan_settlement`] asks
-		/// whether the settling fees of the whole submission cover every byte
-		/// the submission carries, the bytes of its skipped segments included.
-		/// A submission that carries only what it settles passes the second
-		/// whenever it passes the first, because `sum(ceil(b_i / q))` is at
-		/// least `ceil(sum(b_i) / q)`.
+		/// whether the settling fees of the whole submission cover every real
+		/// leaf slot it carries and every byte it carries, its skipped
+		/// segments included: a skipped slot writes nothing permanent and it
+		/// still costs every node the admission walk over it and the weight the
+		/// submission declares, so it is charged this same minimum. A
+		/// submission that settles everything it carries passes the second
+		/// whenever it passes the first, because each slot already paid this
+		/// minimum once and `sum(ceil(b_i / q))` is at least
+		/// `ceil(sum(b_i) / q)`.
 		#[pallet::constant]
 		type MinLeafFee: Get<u64>;
 
@@ -446,7 +453,8 @@ pub mod pallet {
 		/// The same divisor prices the submission as a whole. The settling fees
 		/// must cover `ceil(carried bytes / CiphertextBytesPerFeeQuantum)` over
 		/// every ciphertext in the extrinsic, so one byte costs the same
-		/// whether the slot that published it settles or is skipped.
+		/// whether the slot that published it settles or is skipped, beside
+		/// [`Config::MinLeafFee`] for every carried slot.
 		///
 		/// A wallet can compute the floor before it proves: the fee is a public
 		/// input and the ciphertext sizes are known by the time the proof is
@@ -613,14 +621,17 @@ pub mod pallet {
 		/// its recipient can never find, behind a `ct_digest` nothing
 		/// evaluated.
 		EmptyCiphertext,
-		/// The settling fees do not cover the bytes the submission carries.
+		/// The settling fees do not cover the slots and the bytes the
+		/// submission carries.
 		///
-		/// The floor is `settling slots * MinLeafFee + ceil(carried bytes /
-		/// CiphertextBytesPerFeeQuantum)`, over every ciphertext in the
-		/// extrinsic, a skipped segment's included. A skipped segment pays no
-		/// fee of its own, so this is what keeps a submitter that picks how
-		/// many of its own segments conflict from carrying payload nothing paid
-		/// for.
+		/// The floor is `(settling slots + skipped slots) * MinLeafFee +
+		/// ceil(carried bytes / CiphertextBytesPerFeeQuantum)`, over every real
+		/// leaf slot of the submission and every ciphertext in the extrinsic, a
+		/// skipped segment's included. A skipped segment pays no fee of its
+		/// own and still costs every node the admission walk over its slots and
+		/// the weight the submission declares, so this is what keeps a
+		/// submitter that picks how many of its own segments conflict from
+		/// spending a block's work and space on credit.
 		PayloadUnderpaid,
 		/// The settlement would take the tree past the depth the circuit can
 		/// prove.
@@ -924,8 +935,13 @@ pub mod pallet {
 		/// They settle nothing and pay no fee of their own, and they still hold
 		/// their positions in `outputs`. Such a position may be emptied, and
 		/// then it carries no bytes at all; one that still carries its
-		/// ciphertexts is bound by [`Pallet::bind_payload`] and priced through
-		/// [`PlannedSettlement::carried_bytes`].
+		/// ciphertexts is bound by [`Pallet::bind_payload`] and its bytes are
+		/// priced through [`PlannedSettlement::carried_bytes`].
+		///
+		/// The slot itself is priced either way. It costs every node the
+		/// admission walk and the weight the submission declares whether or not
+		/// it settles, so the submission floor charges the settling fees
+		/// [`Config::MinLeafFee`] for it, the same as for a slot that settles.
 		pub skipped_slots: u32,
 		/// Ciphertext bytes the whole submission carries: every byte of every
 		/// `ShieldedOutput`, whether the slot it belongs to settles or is
@@ -933,10 +949,12 @@ pub mod pallet {
 		///
 		/// This is what the settling fees have to cover, at
 		/// [`Config::CiphertextBytesPerFeeQuantum`] bytes per quantum, on top
-		/// of [`Config::MinLeafFee`] per settling slot. The bound reads bytes,
-		/// so it holds however a submitter splits its payload between segments
-		/// and however many slots it puts in each: both of those are the
-		/// submitter's to choose, and a byte is a byte in every shape.
+		/// of [`Config::MinLeafFee`] for every real slot the submission
+		/// carries, [`PlannedSettlement::skipped_slots`] included. The bound
+		/// reads bytes and slots, so it holds however a submitter splits its
+		/// payload between segments and however many slots it puts in each:
+		/// both of those are the submitter's to choose, and both are charged
+		/// what a settling submission is charged for them.
 		pub carried_bytes: u64,
 		/// One flag per segment of the bundle, in order: whether this
 		/// submission settles it.
@@ -1105,9 +1123,10 @@ pub mod pallet {
 		///
 		/// This is the cheap half, and it is cheap on purpose. It reads
 		/// `UsedNullifiers` twice per slot, looks up one block hash per segment,
-		/// compares integers, and hashes nothing at all. The fee floor is
-		/// evaluated here because it needs only the lengths of the submitted
-		/// ciphertexts, where the binding needs their bytes.
+		/// compares integers, and hashes nothing at all. The fee floors are
+		/// evaluated here because they need only the slot counts and the
+		/// lengths of the submitted ciphertexts, where the binding needs their
+		/// bytes.
 		///
 		/// Pool admission runs this before the ZK verify, so the free forgery
 		/// (a settled proof copied out of a finalized block with one byte of
@@ -1204,14 +1223,20 @@ pub mod pallet {
 				if skipped {
 					settles.push(false);
 					// The slots of a skipped segment still hold their positions
-					// in `outputs`, and `bind_payload` still binds them: every
-					// real slot needs an entry, so a position left unchecked is a
-					// place to carry bytes nothing commits to on an unsigned,
-					// fee-free extrinsic. No fee is evaluated for them, because a
-					// skipped segment writes no nullifier, appends no leaf and
-					// stores no ciphertext, so there is no state for a fee to
-					// price. What bounds the bytes they carry is the ratio rule
-					// below, against the slots that do settle.
+					// in `outputs`, and a position that carries bytes is still
+					// bound by `bind_payload`: every real slot needs an entry,
+					// so a position left unchecked is a place to carry bytes
+					// nothing commits to on an unsigned, fee-free extrinsic. A
+					// position emptied to a zero-length pair is the one
+					// exemption, and it has nothing there to bind.
+					//
+					// No fee of the slot's own is evaluated, because a skipped
+					// segment writes no nullifier, appends no leaf and stores no
+					// ciphertext, so there is no permanent state for a fee to
+					// price. The slot still costs every node the admission walk
+					// over it and the weight the submission declares, so the
+					// submission floor below charges it the same flat minimum a
+					// settling slot pays, beside the bytes it carries.
 					skipped_slots = u32::try_from(segment.slots.len())
 						.ok()
 						.and_then(|count| skipped_slots.checked_add(count))
@@ -1297,33 +1322,39 @@ pub mod pallet {
 			// any proof.
 			ensure!(outputs.len() == real_slots, Error::<T>::CiphertextCountMismatch);
 
-			// The submission floor. The slots that settle pay the flat minimum
-			// for themselves and one quantum per started
-			// [`Config::CiphertextBytesPerFeeQuantum`] bytes the submission
-			// carries, the bytes of its skipped segments included.
+			// The submission floor. The slots that settle pay
+			// [`Config::MinLeafFee`] for every real slot the submission
+			// carries, settling and skipped alike, plus one quantum per started
+			// [`Config::CiphertextBytesPerFeeQuantum`] bytes of payload, the
+			// bytes of its skipped segments included.
 			//
-			// A skipped segment pays no fee of its own, and its bytes sit in
-			// the block and go through a `ct_digest` sponge on every node all
-			// the same, so pricing the settling slots alone would let a
-			// submitter that picks how many of its own segments conflict set
-			// the price of the block space it fills. Bytes are what this reads,
-			// which is what makes it hold in every shape: the payload per slot
-			// and the slot count per segment are both the submitter's to
-			// choose, so a bound on slot counts bounds a number the submitter
-			// picks, where a byte is a byte wherever it is carried.
+			// It prices slots as well as bytes. Every real slot the submission
+			// carries costs every node the admission walk over it, two
+			// `UsedNullifiers` probes, a position in `outputs` and the weight
+			// the extrinsic declares for it, whether or not it settles, and an
+			// unsigned settlement pays nothing else. So a carried slot is
+			// charged the flat minimum a settling slot is charged, and a
+			// carried byte is charged what a settling byte is charged. Reading
+			// both is what makes the floor hold in every shape: the payload per
+			// slot and the slot count per segment are the submitter's to choose
+			// independently, so a rule reading one of them alone would price a
+			// number the submitter moves for free.
 			//
-			// It costs an honest submission nothing. A submission that carries
-			// only what it settles already passes this the moment it passes the
+			// It costs an honest submission nothing. A submission that settles
+			// everything it carries passes this the moment it passes the
 			// per-slot floors, because `sum(ceil(b_i / q))` is at least
-			// `ceil(sum(b_i) / q)`. An aggregator griefed between submission
-			// and inclusion keeps that property by resubmitting with the
-			// skipped segments' outputs emptied: an emptied position carries
-			// zero bytes and binds nothing, so the rest of the batch settles at
-			// its own price.
+			// `ceil(sum(b_i) / q)` and each slot already paid its own flat
+			// minimum. An aggregator griefed between submission and inclusion
+			// has two remedies: pay the floor, which its settling fees may
+			// already cover, or recompose a fresh public batch without the
+			// conflicted inners, which costs one public-batch proof. What it
+			// may not do is hand a block 317 slots of walk and weight for the
+			// price of one, which is what emptying the outputs alone bought.
 			let carried_bytes = Self::carried_bytes(outputs);
 			let payload_quanta = carried_bytes.div_ceil(Self::bytes_per_fee_quantum());
 			let submission_floor = u128::from(slots)
-				.checked_mul(u128::from(min_fee))
+				.checked_add(u128::from(skipped_slots))
+				.and_then(|carried| carried.checked_mul(u128::from(min_fee)))
 				.and_then(|flat| flat.checked_add(u128::from(payload_quanta)))
 				.ok_or(Error::<T>::ValueOutOfRange)?;
 			ensure!(fee_quanta >= submission_floor, Error::<T>::PayloadUnderpaid);
@@ -1453,8 +1484,9 @@ pub mod pallet {
 		}
 
 		/// Ciphertext bytes the whole submission carries, settling and skipped
-		/// positions alike. This is the quantity the submission fee floor
-		/// prices, and an emptied position contributes zero to it.
+		/// positions alike. This is the payload term of the submission fee
+		/// floor, beside the flat minimum every carried slot pays, and an
+		/// emptied position contributes zero to it.
 		///
 		/// Saturating: `outputs` is bounded by the block length limit long
 		/// before a `u64` of bytes is reachable.
@@ -1507,9 +1539,12 @@ pub mod pallet {
 			let mut output_index = 0usize;
 			for (segment, settles) in bundle.segments.iter().zip(plan.settles.iter()) {
 				// A segment this submission does not settle is skipped whole.
-				// Its ciphertexts still occupy their positions in `outputs` and
-				// were bound to its proof by `check_settlement`, so the index
-				// walks past them.
+				// Its slots still occupy their positions in `outputs`, so the
+				// index walks past them. A position that carries bytes was
+				// bound to the segment's own `ct_digest` by `check_settlement`;
+				// one emptied to a zero-length pair binds nothing, which is the
+				// exemption `bind_payload` states and the one shape here that
+				// was not checked against a digest.
 				if !settles {
 					output_index = output_index.saturating_add(segment.slots.len());
 					continue;

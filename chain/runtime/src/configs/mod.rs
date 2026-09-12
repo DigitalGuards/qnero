@@ -858,6 +858,13 @@ parameter_types! {
 	/// two nullifier entries and two tree slots into permanent state. Settlement
 	/// extrinsics are unsigned and fee free, so the leaf's own fee is the only
 	/// cost there is.
+	///
+	/// The submission floor charges it once per real leaf slot the submission
+	/// carries, a slot the chain skips included. A skipped slot writes no
+	/// permanent state and it still costs every node the admission walk over it
+	/// and the weight the extrinsic declares, and nothing else is charged for
+	/// that, so a submission that carries 318 slots and settles one pays 318
+	/// minimums.
 	pub const ShieldedMinLeafFee: u64 = 1;
 	/// Bytes of note ciphertext one quantum of fee buys: 512 bytes.
 	///
@@ -884,10 +891,12 @@ parameter_types! {
 	/// would drift `PoolValue` from the sum of the notes behind it. Its
 	/// ciphertexts are in the block all the same and every node sponges them
 	/// into a `ct_digest`, so the settling slots of a submission owe
-	/// `settling slots * ShieldedMinLeafFee` plus one quantum per started 512
-	/// bytes the submission carries, a skipped segment's bytes included. A
-	/// skipped position may instead be emptied, which is what a griefed
-	/// aggregator resubmits, and an emptied position carries nothing to price.
+	/// `(settling slots + skipped slots) * ShieldedMinLeafFee` plus one quantum
+	/// per started 512 bytes the submission carries, a skipped segment's bytes
+	/// included. A skipped position may instead be emptied, which is what a
+	/// griefed aggregator resubmits: that removes the position from the payload
+	/// term, and the slot behind it is still charged the flat minimum, because
+	/// the walk and the weight it costs a block do not depend on its bytes.
 	pub const ShieldedCiphertextBytesPerFeeQuantum: u32 = 512;
 	/// Half of a settled fee is burned, half is minted to the block author. The
 	/// same split `pallet-wormhole` applies to its volume fee.

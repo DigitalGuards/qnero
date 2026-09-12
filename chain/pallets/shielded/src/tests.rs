@@ -846,16 +846,19 @@ fn a_submission_with_no_live_anchor_is_refused_by_the_anchor_rule() {
 /// A skipped segment pays no fee of its own, because it writes no permanent
 /// state, and its ciphertexts still sit in the block and are still sponged into
 /// a `ct_digest` by every node that sees the submission. So the settling slots
-/// owe `settling slots * MinLeafFee + ceil(carried bytes / 512)` over the whole
-/// submission, and the carried bytes are every byte in `outputs`.
+/// owe `(settling slots + skipped slots) * MinLeafFee + ceil(carried bytes /
+/// 512)` over the whole submission, and the carried bytes are every byte in
+/// `outputs`.
 ///
-/// This is the shape a slot-count bound could not price. The submitter picks
-/// the payload per slot on each side independently, so three skipped slots
-/// padded to the ciphertext cap ride on one settling slot carrying ten bytes
-/// while the slot counts stay inside any ratio a runtime would pick: 12288
-/// bytes of never-pruned payload for two quanta. Pricing the bytes is what
-/// makes the free ride impossible to construct, because a byte costs the same
-/// wherever it is carried.
+/// This test is the payload half of that floor, and it is the half a slot count
+/// could never price on its own. The submitter picks the payload per slot on
+/// each side independently, so three skipped slots padded to the ciphertext cap
+/// ride on one settling slot carrying ten bytes while the slot counts stay
+/// inside any ratio a runtime would pick: 12288 bytes of never-pruned payload
+/// for two quanta. Pricing the bytes is what makes that free ride impossible to
+/// construct, because a byte costs the same wherever it is carried.
+/// `a_carried_slot_is_paid_for_even_when_its_outputs_are_emptied` is the other
+/// half, where the bytes are gone and the slots remain.
 #[test]
 fn a_submission_pays_for_every_byte_it_carries() {
 	new_test_ext().execute_with(|| {
@@ -885,15 +888,16 @@ fn a_submission_pays_for_every_byte_it_carries() {
 		};
 
 		// Three skipped slots at the cap: 12288 bytes beside the settling
-		// slot's ten, which is 25 started quanta, plus one flat minimum for the
-		// one slot that settles. Its own per-slot floor is two.
+		// slot's ten, which is 25 started quanta, plus a flat minimum for each
+		// of the four slots the submission carries. The settling slot's own
+		// per-slot floor is two.
 		let (bundle, outputs) = build(3, 2);
 		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadUnderpaid);
-		let (bundle, outputs) = build(3, 25);
+		let (bundle, outputs) = build(3, 28);
 		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadUnderpaid);
 
 		// Paid for, and it settles.
-		let (bundle, outputs) = build(3, 26);
+		let (bundle, outputs) = build(3, 29);
 		let plan = check(&bundle, &outputs).expect("the settling fee covers every carried byte");
 		assert_eq!(plan.slots, 1);
 		assert_eq!(plan.skipped_slots, 3);
@@ -937,19 +941,29 @@ fn a_segment_skipped_for_a_stale_anchor_is_priced_like_any_other() {
 		};
 
 		// Eight orphaned segments at the cap: 32768 bytes beside the settling
-		// slot's ten, 65 started quanta, plus the one flat minimum.
+		// slot's ten, 65 started quanta, plus a flat minimum for each of the
+		// nine slots the submission carries.
 		let (bundle, outputs) = build(2);
 		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadUnderpaid);
 		assert_noop!(Shielded::settle(bundle, outputs), Error::<Test>::PayloadUnderpaid);
 		assert_eq!(ZkTree::leaf_count(), 0);
 
-		let (bundle, outputs) = build(66);
+		let (bundle, outputs) = build(74);
 		let plan = check(&bundle, &outputs).expect("the settling fee covers the orphaned bytes");
 		assert_eq!(plan.skipped_slots, 8);
 		assert_eq!(plan.carried_bytes, 10 + 8 * 2 * cap as u64);
 
-		// Emptying them is the aggregator's move here too.
-		let (bundle, mut outputs) = build(2);
+		// Emptying them is the aggregator's move here too, and it removes the
+		// payload term alone: the nine carried slots still owe their flat
+		// minimums, which is ten quanta with the settling slot's one started
+		// byte quantum.
+		let (bundle, mut outputs) = build(9);
+		for position in outputs.iter_mut().skip(1) {
+			*position = output(b"", b"");
+		}
+		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadUnderpaid);
+
+		let (bundle, mut outputs) = build(10);
 		for position in outputs.iter_mut().skip(1) {
 			*position = output(b"", b"");
 		}
@@ -958,49 +972,132 @@ fn a_segment_skipped_for_a_stale_anchor_is_priced_like_any_other() {
 	});
 }
 
-/// The same rule with the skipped segments' bytes removed: an emptied position
-/// carries nothing, so nothing prices it and the batch settles at its own cost.
+/// A slot the submission carries is paid for whether or not it settles, and
+/// emptying its ciphertexts does not make it free.
 ///
-/// This is what a griefed aggregator resubmits, and it is why pricing the whole
-/// payload against the settling fees does not make one griefed segment fatal.
-/// The 52-of-53 shape is the worst case the skip rule exists for: fifty-two
-/// participants hand over inners that re-spend a note the fifty-third settles,
-/// which the public-batch circuit permits as long as the shared note sits
-/// anywhere but slot 0 input 0. It settles here, for the fee of the slots that
-/// actually settle.
+/// This is the slot half of the submission floor, and it is what the byte term
+/// alone could not price. Emptying a skipped position removes its bytes, and
+/// the slot behind it still costs every node the admission walk over it, two
+/// `UsedNullifiers` probes, a position in `outputs` and the weight the
+/// extrinsic declares for it, and an unsigned settlement pays nothing else for
+/// any of that. Without a per-slot term one settling slot commands the whole
+/// walk and the whole declared weight of a full public batch, 318 real slots,
+/// for one quantum.
+///
+/// That is the 52-of-53 grief shape at its limit: participants hand an
+/// aggregator inners that re-spend a note another inner settles, which the
+/// public-batch circuit permits as long as the shared note sits anywhere but
+/// slot 0 input 0. The aggregator keeps two remedies, and both are priced. Pay
+/// the floor, which its settling fees often already cover. Or recompose a fresh
+/// public batch without the conflicted inners, which costs one public-batch
+/// proof. What it may not do is hand a block 318 slots of work on credit.
+///
+/// How the skipped slots are spread over segments does not matter: nothing in
+/// the rule reads a segment count, so one real slot per skipped segment is the
+/// clearest way to write the 318 real slots a full public batch carries.
 #[test]
-fn the_grief_shape_settles_when_the_skipped_outputs_are_emptied() {
+fn a_carried_slot_is_paid_for_even_when_its_outputs_are_emptied() {
 	new_test_ext().execute_with(|| {
-		fund_pool(1_000);
+		fund_pool(10_000);
 		let block_hash = anchor(10);
 
-		let mut segments = vec![Segment {
-			block_hash,
-			block_number: 10,
-			slots: vec![slot("live", b"ct-l1", b"ct-l2", 2)],
-		}];
-		let mut outputs = vec![output(b"ct-l1", b"ct-l2")];
-		for index in 0..52 {
-			let tag = format!("spent-{index}");
-			let conflicting = slot(&tag, b"ct-s1", b"ct-s2", 9);
-			crate::UsedNullifiers::<Test>::insert(conflicting.nullifiers[0], ());
-			segments.push(Segment { block_hash, block_number: 10, slots: vec![conflicting] });
-			// The aggregator's resubmission: the position stays, the bytes go.
-			outputs.push(output(b"", b""));
-		}
-		let bundle = SettlementBundle { segments };
+		let build = |fee: u64| {
+			let mut segments = vec![Segment {
+				block_hash,
+				block_number: 10,
+				slots: vec![slot("live", b"ct-l1", b"ct-l2", fee)],
+			}];
+			let mut outputs = vec![output(b"ct-l1", b"ct-l2")];
+			for index in 0..317 {
+				let tag = format!("spent-{index}");
+				let conflicting = slot(&tag, b"ct-s1", b"ct-s2", 9);
+				crate::UsedNullifiers::<Test>::insert(conflicting.nullifiers[0], ());
+				segments.push(Segment { block_hash, block_number: 10, slots: vec![conflicting] });
+				// The aggregator's resubmission: the position stays, the bytes
+				// go.
+				outputs.push(output(b"", b""));
+			}
+			(SettlementBundle { segments }, outputs)
+		};
 
-		let plan =
-			check(&bundle, &outputs).expect("fifty-two emptied segments beside one that settles");
+		// 318 carried slots at one quantum each, plus the one started quantum
+		// the settling slot's ten bytes cost. The settling slot's own per-slot
+		// floor is two, and that is all it paid before this term existed.
+		let (bundle, outputs) = build(2);
+		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadUnderpaid);
+		assert_noop!(Shielded::settle(bundle, outputs), Error::<Test>::PayloadUnderpaid);
+		assert_eq!(ZkTree::leaf_count(), 0);
+		assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 317);
+
+		let (bundle, outputs) = build(318);
+		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadUnderpaid);
+
+		// Paid for, and the batch settles: one griefed segment is never fatal.
+		let (bundle, outputs) = build(319);
+		let plan = check(&bundle, &outputs).expect("every carried slot is paid for");
 		assert_eq!(plan.slots, 1);
-		assert_eq!(plan.skipped_slots, 52);
+		assert_eq!(plan.skipped_slots, 317);
 		// Only the settling slot's own ciphertexts are carried.
 		assert_eq!(plan.carried_bytes, 10);
-		assert_eq!(plan.fee_quanta, 2);
+		assert_eq!(plan.fee_quanta, 319);
 
 		assert_ok!(Shielded::settle(bundle, outputs));
 		assert_eq!(ZkTree::leaf_count(), 2);
-		assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 52 + 2);
+		assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 317 + 2);
+	});
+}
+
+/// A submission that settles everything it carries pays its per-slot floors and
+/// nothing more, which is every private batch and every public batch that is
+/// not being griefed.
+///
+/// The submission floor is `(settling + skipped) * MinLeafFee + ceil(sum b_i /
+/// q)` and the per-slot floors sum to `settling * MinLeafFee + sum(ceil(b_i /
+/// q))`. With nothing skipped the flat terms are equal and
+/// `sum(ceil(b_i / q))` is at least `ceil(sum(b_i) / q)`, so the submission
+/// floor can never be the binding one. Three slots carrying a real
+/// `NoteCiphertext` pair each are the case where the two rounding terms are
+/// equal as well, 21 quanta either way, so the floors coincide exactly and a
+/// submission paying the per-slot minimum to the quantum still passes.
+#[test]
+fn a_single_segment_submission_pays_only_its_per_slot_floors() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		// 1731 bytes is a `NoteCiphertext` with an empty memo at the chain's
+		// parameter set, so a slot carries 3462 bytes: seven started quanta
+		// over the flat minimum, a per-slot floor of eight.
+		let real_1 = vec![1u8; 1_731];
+		let real_2 = vec![2u8; 1_731];
+		let outputs =
+			vec![output(&real_1, &real_2), output(&real_1, &real_2), output(&real_1, &real_2)];
+
+		let exact = one_segment(
+			10,
+			vec![
+				slot("a", &real_1, &real_2, 8),
+				slot("b", &real_1, &real_2, 8),
+				slot("c", &real_1, &real_2, 8),
+			],
+		);
+		let plan = check(&exact, &outputs).expect("the per-slot floors are the whole floor");
+		assert_eq!(plan.slots, 3);
+		assert_eq!(plan.skipped_slots, 0);
+		assert_eq!(plan.fee_quanta, 24);
+		// 3 * 1 flat plus ceil(10386 / 512) = 21, which is the sum of the three
+		// per-slot floors exactly.
+		assert_eq!(plan.carried_bytes, 3 * 2 * 1_731);
+
+		// One quantum less on any slot is refused by the per-slot floor, which
+		// is the binding one here.
+		let cheap = one_segment(
+			11,
+			vec![
+				slot("a", &real_1, &real_2, 8),
+				slot("b", &real_1, &real_2, 8),
+				slot("c", &real_1, &real_2, 7),
+			],
+		);
+		assert_noop!(check(&cheap, &outputs), Error::<Test>::FeeBelowMinimum);
 	});
 }
 

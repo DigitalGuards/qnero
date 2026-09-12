@@ -890,9 +890,12 @@ needs a tagged circuit to pin.
   free. A segment whose block anchor no longer resolves is skipped on the same
   argument (9.6). A repeat inside one segment still refuses the submission, and
   a submission that settles nothing is refused. A skipped segment pays no fee,
-  so what it may carry in block space is priced by the byte rule in 9.7: the
-  slots a submission settles pay the byte floor for every byte the submission
-  carries, and a skipped position may be emptied to carry none.
+  so what it costs a block is priced by the submission floor in 9.7: the slots a
+  submission settles pay `MinLeafFee` for every real slot the submission
+  carries, skipped ones included, plus the byte floor for every byte it carries.
+  A skipped position may be emptied to carry no bytes, and the slot behind it is
+  charged all the same, because the walk and the weight it costs do not depend
+  on its payload.
 - **Whether a padding slot's nullifiers are worth their state, and whether the
   real-transfer count should be hidden at all.** These are one decision. A
   padding slot is identifiable today, because the wrapper zeroes its
@@ -1023,9 +1026,12 @@ they arrived with the proof, so binding them costs nothing legitimate.
 ciphertexts padded to `MaxCiphertextBytes` as easily as to real ones. What
 prices them is the submission floor in 9.7: the settling slots of a submission
 pay one quantum per started `CiphertextBytesPerFeeQuantum` bytes the submission
-carries, a skipped segment's bytes included. Without it, one settling segment
-beside fifty-two skipped ones carries 318 real slots and up to 1.27 MB of
-never-pruned payload for the fee of six leaf slots.
+carries, a skipped segment's bytes included, on top of `MinLeafFee` for every
+real slot it carries. Without the byte term, one settling segment beside
+fifty-two skipped ones carries up to 1.27 MB of never-pruned payload for the fee
+of six leaf slots; without the slot term, emptying those positions hands the
+same 318 real slots of admission walk and declared weight to every node for one
+quantum.
 
 **One shape at a skipped position is exempt: a pair of zero-length
 ciphertexts.** It carries no bytes, so there is nothing there to bind and
@@ -1137,8 +1143,10 @@ private batch has exactly one segment and a wallet whose proof named a block
 this chain cannot resolve is owed the reason. The ciphertexts of a skipped
 segment are still bound to its `ct_digest` (section 9.3) whenever they carry
 bytes at all; only the nullifier writes, the fee and the appends are skipped.
-What prices the payload those skipped positions carry is the byte rule in 9.7,
-and emptying them is what removes the binding and the price together.
+What prices the payload those skipped positions carry is the byte term of the
+submission floor in 9.7, and emptying them removes the binding and that term
+together. The slots themselves stay priced either way, by the per-slot term of
+the same floor.
 
 The all-zero nullifier is refused outright. It cannot reach here through the
 padding filter, and the check is what keeps that true if the filter ever moves.
@@ -1254,62 +1262,84 @@ segment writes nothing permanent and it still costs a block the bytes it
 carries, the admission walk over its slots and a `ct_digest` sponge over both
 its ciphertexts, twice for an included settlement. The per-slot floor prices the
 settling slots alone, so on its own the fraction of a submission that settles is
-the fraction of its payload that is priced, and the submitter chooses that
-fraction. The shape is reachable on chain through the circuits as built: the
-public-batch circuit's only cross-inner rule compares `nf_1` of slot 0 between
-non-padding inners, so fifty-two inners can each re-spend a note a fifty-third
-settles as long as the shared note sits anywhere but slot 0 input 0, each one is
-a genuine provable private batch, and each stays conflicting and reusable in
-every later submission for its anchor's whole window.
+the fraction of its work and its payload that is priced, and the submitter
+chooses that fraction. The shape is reachable on chain through the circuits as
+built: the public-batch circuit's only cross-inner rule compares `nf_1` of slot
+0 between non-padding inners, so fifty-two inners can each re-spend a note a
+fifty-third settles as long as the shared note sits anywhere but slot 0 input 0,
+each one is a genuine provable private batch, and each stays conflicting and
+reusable in every later submission for its anchor's whole window.
 
-**So the settling slots pay the byte floor for every byte the submission
+**So the settling slots pay for every slot and every byte the submission
 carries.** On top of the per-slot floor, over the whole submission:
 
 ```text
 sum(fee of settling slots)
-    >= settling slots * MinLeafFee
+    >= (settling slots + skipped slots) * MinLeafFee
        + ceil(carried bytes / CiphertextBytesPerFeeQuantum)
 ```
 
-where `carried bytes` is the total length of every ciphertext in `outputs`, the
-positions of skipped segments included. Refused with `PayloadUnderpaid`. There
-is no constant to tune: the two parameters are the ones the per-slot floor
-already uses, so a byte costs one five-hundred-and-twelfth of a quantum wherever
-it is carried and the rounding slack over a whole submission is under one
-quantum.
+where `skipped slots` is every real leaf slot of every skipped segment,
+whatever its outputs carry, and `carried bytes` is the total length of every
+ciphertext in `outputs`, the positions of skipped segments included. Refused
+with `PayloadUnderpaid`. There is no constant to tune: the two parameters are
+the ones the per-slot floor already uses, so a slot costs `MinLeafFee` and a
+byte costs one five-hundred-and-twelfth of a quantum wherever either is carried,
+and the rounding slack over a whole submission is under one quantum.
 
-**Why this bounds the free ride.** Every byte in the extrinsic is in the sum, so
-no byte rides unpaid, and the price is the price a settling byte pays. The
-bound it replaced counted real leaf slots and allowed four carried per settled,
-which priced the wrong thing twice over. The payload per slot is the
-submitter's to choose on each side independently, so slot counts and bytes are
-not proportional: three skipped slots padded to `MaxCiphertextBytes` beside one
-settling slot carrying ten bytes is 12288 bytes of never-pruned payload inside a
-ratio of four. The real-slot count of an inner is the submitter's to choose as
-well, up to `N` per inner, so a submitter picking which of its own inners are
-already spent moved both sides of that comparison.
-`a_submission_pays_for_every_byte_it_carries` is that shape, at the exact
-numbers.
+**Why the rule prices slots as well as bytes.** A submission's cost to a node
+has two independent terms and a submitter moves them independently. The
+bytes are the `ct_digest` sponge and the block space, and the per-slot term is
+everything a slot costs before its payload: the admission walk over it, two
+`UsedNullifiers` probes, a position in `outputs` and the reference time the
+extrinsic declares for it, all of it twice for an included settlement, all of it
+unpaid on an unsigned extrinsic. Pricing the bytes alone leaves the second term
+free, and emptying a skipped position is exactly how a submitter takes it: 317
+skipped slots beside one settling slot, every skipped position a zero-length
+pair, is 318 slots of walk and declared weight for the price of one.
+`a_carried_slot_is_paid_for_even_when_its_outputs_are_emptied` is that shape.
+Pricing the slots alone leaves the first free, because the payload per slot is
+the submitter's to choose on each side independently and slot counts and bytes
+are not proportional: three skipped slots padded to `MaxCiphertextBytes` beside
+one settling slot carrying ten bytes is 12288 bytes of never-pruned payload
+inside a slot ratio of four.
+`a_submission_pays_for_every_byte_it_carries` is that one. Both terms are in
+the floor because each closes what the other leaves open, and the earlier bound
+that counted real leaf slots and allowed four carried per settled priced neither
+correctly: the submitter picks the real-slot count of its own inners, up to `N`
+each, so it moved both sides of that comparison.
 
 **What an aggregator does on a race.** A segment can become skipped between
 submission and inclusion, by a nullifier conflict a participant creates on
 purpose or by an anchor going stale, so the rule allows both shapes at a skipped
 position: it may carry its real ciphertexts, which stay bound to its `ct_digest`
 and count toward the carried bytes, or it may be a pair of zero-length
-ciphertexts, which binds nothing and counts nothing (section 9.3). An aggregator
-that is refused with `PayloadUnderpaid` resubmits with the skipped segments'
-outputs emptied, and that always passes: with the carried bytes equal to the
-settling bytes, the per-slot floors already imply the submission floor, because
-`sum(ceil(b_i / q))` is at least `ceil(sum(b_i) / q)`. So one griefed segment is
-never fatal, which is the property the skip rule exists for, and the
-fifty-two-of-fifty-three shape settles for the fee of the slots that actually
-settle (`the_grief_shape_settles_when_the_skipped_outputs_are_emptied`). What it
-no longer buys the griefer is block space: emptied positions carry no payload.
+ciphertexts, which binds nothing and adds nothing to the byte term (section
+9.3). The aggregator has two remedies and both are priced. It can pay the floor,
+which costs `MinLeafFee` per griefed slot on top of what its own slots already
+owe: a full public batch of six-slot inners that loses one inner settles 312
+slots whose own minimums cover 312 of the 318 the floor asks, so six quanta
+close the gap and the settling fees usually carry it already. Or it can
+recompose a fresh public batch without the conflicted inners, which costs one
+public-batch proof. So one griefed segment is never fatal, which is the property
+the skip rule exists for.
 
-Charging a skipped slot its own fee stays unavailable, for the pool-accounting
-reason above. Slot-count asymmetry between segments stops mattering: nothing in
-the rule reads a slot count, so an inner holding six slots and an inner holding
-one are priced by what they carry.
+The far end of that scale is refused unless it is paid for, and that is the
+intended outcome. A submission that settles one slot beside 317 skipped ones
+owes 318 minimums where its one settling slot covers one, so the griefed
+aggregator pays 3.17 QTC at the runtime's parameters or recomposes the batch for
+the cost of one proof. The alternative is a block handing out 318 slots of
+admission walk and declared weight for one quantum, which is the cheapest denial
+of service the settlement path has and which no aggregator needs.
+
+Charging a skipped slot its own leaf fee stays unavailable, for the
+pool-accounting reason above: a fee that already left `PoolValue` when the
+segment first settled cannot be counted again. `MinLeafFee` charged to the
+settling slots is a different quantity and leaves the pool once. Slot-count
+asymmetry between segments still does not matter, because the floor counts
+slots and bytes over the whole submission and neither term reads a segment: an
+inner holding six slots and an inner holding one are each priced by what they
+carry.
 
 The sum leaves the pool, and the pool has to be holding it: a fee above
 `PoolValue` refuses the settlement with `PoolUnderflow` before anything is
@@ -1422,8 +1452,8 @@ against the embedded verifier's circuit data, the canonical-encoding round trip,
 the public-input parse) and then `plan_settlement`, the cheap half of the
 settlement check: a bounded walk over the segments against chain state, at most
 two `UsedNullifiers` reads per slot, integer comparisons, one block-hash lookup
-per segment, a sum of the `outputs` lengths for the submission floor, and no
-hashing at all. Second the ZK verify, on what survives.
+per segment, a count of the real slots and a sum of the `outputs` lengths for
+the submission floor, and no hashing at all. Second the ZK verify, on what survives.
 Third `bind_payload`, the Poseidon2 sponge over both ciphertexts of every real
 slot, which is the one term linear in the submitted bytes. `pre_dispatch` runs
 the parse, the verify and the whole settlement check again and is the
