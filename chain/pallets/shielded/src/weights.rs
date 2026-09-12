@@ -189,6 +189,44 @@ pub trait WeightInfo {
 	/// `Ciphertexts`, which is the same never-pruned map a settlement writes
 	/// to, so it carries the same proof-size term.
 	fn shield(ciphertext_bytes: u32) -> Weight;
+	/// Recording the block's coinbase payload: one bounded write and the
+	/// author lookup over the block's digest logs. No tree work and no value
+	/// moves; see `mint_coinbase` for that half.
+	fn coinbase(ciphertext_bytes: u32) -> Weight;
+	/// Minting the coinbase note in `on_finalize`: one tree append, the
+	/// ciphertext, leaf-block and value maps, and the pool update. Reserved by
+	/// this pallet's `on_initialize` at the largest ciphertext the runtime
+	/// accepts, because the payload is already in state by then and the
+	/// reservation has to be made before it is read.
+	fn mint_coinbase(ciphertext_bytes: u32) -> Weight;
+}
+
+/// Storage the coinbase mint performs beyond the tree's own: reads of
+/// `PendingCoinbase`, `PendingCoinbaseFee` and `PoolValue`; writes of
+/// `PendingCoinbase` (taken), `PendingCoinbaseFee`, `PoolValue`,
+/// `Ciphertexts`, `LeafBlocks` and `CoinbaseValues`.
+const MINT_COINBASE_DB_OPS: (u64, u64) = (3, 6);
+
+/// Weight of minting one coinbase note, shared by both `WeightInfo` impls
+/// because the work does not depend on the runtime's own storage weights
+/// beyond `DbWeight`.
+fn mint_coinbase_weight<T: frame_system::Config>(ciphertext_bytes: u32) -> Weight {
+	let ciphertext_bytes = u64::from(ciphertext_bytes);
+	let (tree_reads, tree_writes) = pallet_zk_tree::INSERT_LEAF_DB_OPS;
+	let (mint_reads, mint_writes) = MINT_COINBASE_DB_OPS;
+	let reads = tree_reads.saturating_add(mint_reads);
+	let writes = tree_writes.saturating_add(mint_writes);
+	// The tree append's own hashing, plus the one Poseidon2 evaluation that
+	// turns `(inner, value)` into the commitment.
+	let hashing = pallet_zk_tree::INSERT_LEAF_POSEIDON_EVALS
+		.saturating_add(1)
+		.saturating_mul(POSEIDON_EVAL_REF_TIME_PS);
+	<T as frame_system::Config>::DbWeight::get()
+		.reads_writes(reads, writes)
+		.saturating_add(Weight::from_parts(
+			hashing,
+			reads.saturating_mul(KEY_POV).saturating_add(ciphertext_bytes),
+		))
 }
 
 /// Weight of settling `slots` real leaf slots carrying `ciphertext_bytes` of
@@ -245,6 +283,21 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		.saturating_add(settlement_weight::<T>(slots, ciphertext_bytes))
 	}
 
+	fn coinbase(ciphertext_bytes: u32) -> Weight {
+		// One read of `PendingCoinbase`, one of the digest logs for the author
+		// lookup, one write of the payload.
+		<T as frame_system::Config>::DbWeight::get().reads_writes(2, 1).saturating_add(
+			Weight::from_parts(
+				POSEIDON_EVAL_REF_TIME_PS,
+				2u64.saturating_mul(KEY_POV).saturating_add(u64::from(ciphertext_bytes)),
+			),
+		)
+	}
+
+	fn mint_coinbase(ciphertext_bytes: u32) -> Weight {
+		mint_coinbase_weight::<T>(ciphertext_bytes)
+	}
+
 	fn shield(ciphertext_bytes: u32) -> Weight {
 		let (tree_reads, tree_writes) = pallet_zk_tree::INSERT_LEAF_DB_OPS;
 		// Reads: the signer's account, `EntryCount`, `PoolValue`, plus the
@@ -299,6 +352,14 @@ impl WeightInfo for () {
 	}
 
 	fn shield(ciphertext_bytes: u32) -> Weight {
+		Weight::from_parts(SLOT_REF_TIME_PS, u64::from(ciphertext_bytes))
+	}
+
+	fn coinbase(ciphertext_bytes: u32) -> Weight {
+		Weight::from_parts(POSEIDON_EVAL_REF_TIME_PS, u64::from(ciphertext_bytes))
+	}
+
+	fn mint_coinbase(ciphertext_bytes: u32) -> Weight {
 		Weight::from_parts(SLOT_REF_TIME_PS, u64::from(ciphertext_bytes))
 	}
 }

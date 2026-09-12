@@ -58,6 +58,7 @@ members = [
 	"primitives/header",
 	"primitives/high-security",
 	"primitives/scheduler",
+	"primitives/coinbase",
 	"primitives/wormhole",
 	"qpow-math",
 	"runtime",
@@ -265,6 +266,7 @@ qp-dilithium-crypto = { path = "./primitives/dilithium-crypto", version = "0.7.0
 qp-header = { path = "./primitives/header", default-features = false }
 qp-high-security = { path = "./primitives/high-security", default-features = false }
 qp-scheduler = { path = "./primitives/scheduler", default-features = false }
+qp-coinbase = { path = "./primitives/coinbase", default-features = false }
 qp-wormhole = { path = "./primitives/wormhole", default-features = false }
 qpow-math = { path = "./qpow-math", default-features = false }
 quantus-miner-api = { path = "./miner-api", version = "0.3.0", default-features = false }

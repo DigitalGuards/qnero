@@ -22,8 +22,9 @@ pallet-zk-tree.workspace = true
 # in neither plonky2 nor the note primitives.
 qnero-circuit = { workspace = true, default-features = false }
 qnero-verifier = { workspace = true, default-features = false }
+qp-coinbase = { workspace = true, default-features = false }
 qp-plonky2-verifier = { workspace = true, default-features = false }
-qp-wormhole.workspace = true
+sp-inherents = { workspace = true, default-features = false }
 scale-info = { workspace = true, default-features = false, features = ["derive"] }
 sp-core.workspace = true
 sp-io.workspace = true
@@ -35,6 +36,7 @@ qnero-circuit-builder.workspace = true
 [dev-dependencies]
 hex = { workspace = true, features = ["alloc"] }
 qp-dilithium-crypto = { workspace = true, features = ["std"] }
+qp-wormhole = { workspace = true, features = ["std"] }
 # The tests build real batch proofs, so the test build carries the prover
 # stack. `parallel` is deliberately off: a test run must not saturate the
 # machine it is on, and the proofs are identical either way.
@@ -64,8 +66,9 @@ std = [
 	"pallet-balances/std",
 	"pallet-zk-tree/std",
 	"qnero-verifier/std",
+	"qp-coinbase/std",
 	"qp-plonky2-verifier/std",
-	"qp-wormhole/std",
+	"sp-inherents/std",
 	"scale-info/std",
 	"sp-core/std",
 	"sp-io/std",

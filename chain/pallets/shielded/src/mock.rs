@@ -105,7 +105,6 @@ impl pallet_zk_tree::Config for Test {
 }
 
 parameter_types! {
-	pub const MintingAccount: AccountId = qp_wormhole::MINTING_ACCOUNT;
 	/// Half of a settled fee is burned, half goes to the block author.
 	pub const FeeBurnRate: Permill = Permill::from_percent(50);
 	/// One quantum per real leaf slot, which is the runtime default.
@@ -117,14 +116,35 @@ parameter_types! {
 	pub const MaxCiphertextBytes: u32 = 2048;
 }
 
+/// The mock's block-author seam, which is the runtime's: the QPoW pre-runtime
+/// digest carries the miner's inner hash and the author account is the
+/// wormhole address derived from it.
+///
+/// The pallet reads the author only through [`pallet_shielded::Config::FindAuthor`],
+/// so this is the whole of what a test has to stand in for, and
+/// `set_author_preimage` is what puts a digest in front of it.
+pub struct QpowAuthor;
+
+impl frame_support::traits::FindAuthor<AccountId> for QpowAuthor {
+	fn find_author<'a, I>(digests: I) -> Option<AccountId>
+	where
+		I: 'a + IntoIterator<Item = (sp_runtime::ConsensusEngineId, &'a [u8])>,
+	{
+		for (engine, data) in digests {
+			if engine != qp_wormhole::POW_ENGINE_ID {
+				continue;
+			}
+			let preimage: [u8; 32] = data.try_into().ok()?;
+			return qp_wormhole::derive_wormhole_address(preimage).ok().map(AccountId::new);
+		}
+		None
+	}
+}
+
 impl pallet_shielded::Config for Test {
 	type Currency = Balances;
 	type ZkTree = ZkTree;
-	// The author-fee path's wormhole leaf is `pallet-wormhole`'s in the
-	// runtime. Here it records nothing, so a test that checks the author was
-	// paid reads the balance and the event.
-	type ProofRecorder = ();
-	type MintingAccount = MintingAccount;
+	type FindAuthor = QpowAuthor;
 	type BlockHashWindow = ConstU64<64>;
 	type MinLeafFee = MinLeafFee;
 	type CiphertextBytesPerFeeQuantum = CiphertextBytesPerFeeQuantum;

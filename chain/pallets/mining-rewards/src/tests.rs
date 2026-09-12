@@ -1,12 +1,15 @@
 use crate::{mock::*, weights::WeightInfo, Event};
-use frame_support::traits::{Currency, Hooks};
+use frame_support::traits::Hooks;
 use qp_wormhole::derive_wormhole_address;
 use sp_runtime::testing::Digest;
 
-/// Block reward `on_finalize` will compute from the current issuance (and any
-/// collected fees, which the pallet treats as already-burned supply).
+/// Block reward `on_finalize` will compute from the current supply: the
+/// transparent issuance, the collected fees the pallet treats as
+/// already-burned supply, and the value the shielded pool holds.
 fn expected_block_reward(tx_fees: Balance) -> Balance {
-	let current_supply = Balances::total_issuance().saturating_add(tx_fees);
+	let current_supply = Balances::total_issuance()
+		.saturating_add(tx_fees)
+		.saturating_add(ShieldedSupply::get());
 	(MaxSupply::get() - current_supply) / EmissionDivisor::get()
 }
 
@@ -20,13 +23,14 @@ fn quantize(amount: Balance) -> (Balance, Balance) {
 	(amount - dust, dust)
 }
 
-/// What `on_finalize` actually credits the miner: fees + emission, floored to the leaf quantum.
+/// What `on_finalize` actually pays into the block's coinbase note: fees plus
+/// emission, floored to the pool quantum.
 fn miner_payout(tx_fees: Balance) -> (Balance, Balance) {
 	quantize(expected_block_reward(tx_fees) + tx_fees)
 }
 
 #[test]
-fn miner_reward_works() {
+fn the_block_reward_goes_to_the_coinbase_and_not_to_an_account() {
 	new_test_ext().execute_with(|| {
 		let initial_balance = Balances::free_balance(MINER_1.account_id());
 		set_miner_preimage_digest(MINER_1.preimage());
@@ -35,17 +39,22 @@ fn miner_reward_works() {
 
 		MiningRewards::on_finalize(1);
 
-		assert_eq!(Balances::free_balance(MINER_1.account_id()), initial_balance + miner_reward);
+		assert_eq!(MockCoinbaseSink::credits(), vec![miner_reward]);
+		assert_eq!(
+			Balances::free_balance(MINER_1.account_id()),
+			initial_balance,
+			"v1 mints nothing to a transparent account"
+		);
+		assert_eq!(Balances::total_issuance(), initial_balance * 2);
 		System::assert_has_event(
-			Event::MinerRewarded { miner: MINER_1.account_id(), reward: miner_reward }.into(),
+			Event::CoinbaseCredited { author: MINER_1.account_id(), amount: miner_reward }.into(),
 		);
 	});
 }
 
 #[test]
-fn miner_reward_with_transaction_fees_works() {
+fn transaction_fees_ride_into_the_coinbase_with_the_reward() {
 	new_test_ext().execute_with(|| {
-		let initial_balance = Balances::free_balance(MINER_1.account_id());
 		set_miner_preimage_digest(MINER_1.preimage());
 
 		let fees: Balance = 25;
@@ -56,9 +65,9 @@ fn miner_reward_with_transaction_fees_works() {
 
 		MiningRewards::on_finalize(1);
 
-		assert_eq!(Balances::free_balance(MINER_1.account_id()), initial_balance + miner_reward);
+		assert_eq!(MockCoinbaseSink::credits(), vec![miner_reward]);
 		System::assert_has_event(
-			Event::MinerRewarded { miner: MINER_1.account_id(), reward: miner_reward }.into(),
+			Event::CoinbaseCredited { author: MINER_1.account_id(), amount: miner_reward }.into(),
 		);
 	});
 }
@@ -66,7 +75,6 @@ fn miner_reward_with_transaction_fees_works() {
 #[test]
 fn on_unbalanced_collects_fees() {
 	new_test_ext().execute_with(|| {
-		let initial_balance = Balances::free_balance(MINER_1.account_id());
 		MiningRewards::collect_transaction_fees(30);
 		assert_eq!(MiningRewards::collected_fees(), 30);
 
@@ -74,69 +82,66 @@ fn on_unbalanced_collects_fees() {
 		set_miner_preimage_digest(MINER_1.preimage());
 		MiningRewards::on_finalize(1);
 
-		assert_eq!(Balances::free_balance(MINER_1.account_id()), initial_balance + miner_reward);
+		assert_eq!(MockCoinbaseSink::total(), miner_reward);
 	});
 }
 
 #[test]
 fn multiple_blocks_accumulate_rewards() {
 	new_test_ext().execute_with(|| {
-		let initial_balance = Balances::free_balance(MINER_1.account_id());
-
 		set_miner_preimage_digest(MINER_1.preimage());
 		MiningRewards::collect_transaction_fees(10);
-		let (miner_block1_reward, _) = miner_payout(10);
+		let (block_1_reward, _) = miner_payout(10);
 		MiningRewards::on_finalize(1);
 
-		let balance_after_block_1 = initial_balance + miner_block1_reward;
-		assert_eq!(Balances::free_balance(MINER_1.account_id()), balance_after_block_1);
+		assert_eq!(MockCoinbaseSink::total(), block_1_reward);
 
+		// A credit that reached the pool is supply the next block's emission
+		// has to see, and the pool is where it is.
+		ShieldedSupply::set(MockCoinbaseSink::total());
 		set_miner_preimage_digest(MINER_1.preimage());
 		MiningRewards::collect_transaction_fees(15);
-		let (miner_block2_reward, _) = miner_payout(15);
+		let (block_2_reward, _) = miner_payout(15);
 		MiningRewards::on_finalize(2);
 
-		assert_eq!(
-			Balances::free_balance(MINER_1.account_id()),
-			initial_balance + miner_block1_reward + miner_block2_reward
-		);
+		assert_eq!(MockCoinbaseSink::total(), block_1_reward + block_2_reward);
+		assert!(block_2_reward < block_1_reward, "supply in the pool still decays the emission");
 	});
 }
 
+/// Each block's credit is attributed to that block's author, and the value
+/// itself goes to whichever payload that author's node supplied.
 #[test]
-fn different_miners_get_different_rewards() {
+fn each_block_credits_its_own_author() {
 	new_test_ext().execute_with(|| {
-		let initial_balance_miner1 = Balances::free_balance(MINER_1.account_id());
-		let initial_balance_miner2 = Balances::free_balance(MINER_2.account_id());
-
 		set_miner_preimage_digest(MINER_1.preimage());
 		MiningRewards::collect_transaction_fees(10);
-		let (miner_block1_reward, _) = miner_payout(10);
+		let (block_1_reward, _) = miner_payout(10);
 		MiningRewards::on_finalize(1);
 
-		let balance_after_block_1 = initial_balance_miner1 + miner_block1_reward;
-		assert_eq!(Balances::free_balance(MINER_1.account_id()), balance_after_block_1);
+		System::assert_has_event(
+			Event::CoinbaseCredited { author: MINER_1.account_id(), amount: block_1_reward }.into(),
+		);
 
 		let block_1 = System::finalize();
 		System::initialize(&2, &block_1.hash(), &Digest { logs: vec![] });
 		set_miner_preimage_digest(MINER_2.preimage());
 		MiningRewards::collect_transaction_fees(20);
-		let (miner_block2_reward, _) = miner_payout(20);
+		let (block_2_reward, _) = miner_payout(20);
 		MiningRewards::on_finalize(2);
 
-		assert_eq!(
-			Balances::free_balance(MINER_2.account_id()),
-			initial_balance_miner2 + miner_block2_reward
+		System::assert_has_event(
+			Event::CoinbaseCredited { author: MINER_2.account_id(), amount: block_2_reward }.into(),
 		);
-		assert_eq!(Balances::free_balance(MINER_1.account_id()), balance_after_block_1);
+		assert_eq!(MockCoinbaseSink::credits(), vec![block_1_reward, block_2_reward]);
+		assert_eq!(Balances::free_balance(MINER_1.account_id()), ExistentialDeposit::get());
+		assert_eq!(Balances::free_balance(MINER_2.account_id()), ExistentialDeposit::get());
 	});
 }
 
 #[test]
 fn transaction_fees_collector_works() {
 	new_test_ext().execute_with(|| {
-		let initial_balance = Balances::free_balance(MINER_1.account_id());
-
 		MiningRewards::collect_transaction_fees(10);
 		MiningRewards::collect_transaction_fees(15);
 		MiningRewards::collect_transaction_fees(5);
@@ -146,7 +151,7 @@ fn transaction_fees_collector_works() {
 		set_miner_preimage_digest(MINER_1.preimage());
 		MiningRewards::on_finalize(1);
 
-		assert_eq!(Balances::free_balance(MINER_1.account_id()), initial_balance + miner_reward);
+		assert_eq!(MockCoinbaseSink::total(), miner_reward);
 	});
 }
 
@@ -161,7 +166,6 @@ fn on_initialize_returns_correct_weight() {
 #[test]
 fn test_run_to_block_helper() {
 	new_test_ext().execute_with(|| {
-		let initial_balance = Balances::free_balance(MINER_1.account_id());
 		set_miner_preimage_digest(MINER_1.preimage());
 		MiningRewards::collect_transaction_fees(10);
 		let initial_supply = Balances::total_issuance();
@@ -169,11 +173,12 @@ fn test_run_to_block_helper() {
 		run_to_block(3);
 
 		assert_eq!(System::block_number(), 3);
-		assert!(
-			Balances::free_balance(MINER_1.account_id()) > initial_balance,
-			"Miner should have received rewards"
+		assert!(MockCoinbaseSink::total() > 0, "the pool should have taken the rewards");
+		assert_eq!(
+			Balances::total_issuance(),
+			initial_supply,
+			"transparent issuance does not move any more"
 		);
-		assert!(Balances::total_issuance() > initial_supply, "Total supply should have increased");
 	});
 }
 
@@ -216,9 +221,11 @@ fn fees_are_deferred_when_no_miner() {
 	});
 }
 
-/// Failed miner mints are retained in CollectedFees and recovered later.
+/// A block whose author supplied no coinbase inherent: the pool refuses the
+/// credit, the pallet keeps it, and the next block pays it out. The inherent
+/// check refuses such a block on import, so this is the belt under that belt.
 #[test]
-fn failed_miner_mint_is_retained_and_recovered() {
+fn a_refused_coinbase_is_retained_and_recovered() {
 	new_test_ext().execute_with(|| {
 		let miner = MINER_1.account_id();
 		let miner_before = Balances::free_balance(&miner);
@@ -229,13 +236,14 @@ fn failed_miner_mint_is_retained_and_recovered() {
 		set_miner_preimage_digest(MINER_1.preimage());
 
 		let lost = expected_block_reward(tx_fees) + tx_fees;
-		ExistentialDeposit::set(MaxSupply::get());
+		MockCoinbaseSink::set_refusing(true);
 		MiningRewards::on_finalize(1);
 
 		assert_eq!(Balances::free_balance(&miner), miner_before);
 		assert_eq!(Balances::total_issuance(), issuance_before);
+		assert_eq!(MockCoinbaseSink::total(), 0);
 		System::assert_has_event(
-			Event::MinerMintFailed { miner: miner.clone(), reward: quantize(lost).0 }.into(),
+			Event::CoinbaseRejected { author: miner.clone(), amount: quantize(lost).0 }.into(),
 		);
 		assert_eq!(
 			MiningRewards::collected_fees(),
@@ -243,12 +251,12 @@ fn failed_miner_mint_is_retained_and_recovered() {
 			"quantized credit plus dust must both be retained for retry"
 		);
 
-		ExistentialDeposit::set(1);
+		MockCoinbaseSink::set_refusing(false);
 		set_miner_preimage_digest(MINER_1.preimage());
 		let (paid, dust) = quantize(lost + expected_block_reward(lost));
 		MiningRewards::on_finalize(2);
 
-		assert_eq!(Balances::free_balance(&miner), miner_before + paid);
+		assert_eq!(MockCoinbaseSink::total(), paid);
 		assert_eq!(MiningRewards::collected_fees(), dust);
 	});
 }
@@ -267,12 +275,11 @@ fn unminted_rewards_accumulate_across_consecutive_blocks_without_a_miner() {
 			"a second miner-less block must add its own rewards to the retained pool"
 		);
 
-		let miner_before = Balances::free_balance(MINER_1.account_id());
 		set_miner_preimage_digest(MINER_1.preimage());
 		let (paid, dust) = quantize(retained_after_2 + expected_block_reward(retained_after_2));
 		MiningRewards::on_finalize(3);
 
-		assert_eq!(Balances::free_balance(MINER_1.account_id()), miner_before + paid);
+		assert_eq!(MockCoinbaseSink::total(), paid);
 		assert_eq!(MiningRewards::collected_fees(), dust);
 	});
 }
@@ -284,16 +291,15 @@ fn retried_rewards_follow_fee_destination_to_next_miner() {
 		let retained = MiningRewards::collected_fees();
 		assert!(retained > 0);
 
-		let miner_before = Balances::free_balance(MINER_1.account_id());
 		set_miner_preimage_digest(MINER_1.preimage());
 		let (paid, dust) = quantize(retained + expected_block_reward(retained));
 		MiningRewards::on_finalize(2);
 
 		assert_eq!(MiningRewards::collected_fees(), dust);
 		assert_eq!(
-			Balances::free_balance(MINER_1.account_id()),
-			miner_before + paid,
-			"deferred rewards must reach the next block's miner via the fee path"
+			MockCoinbaseSink::total(),
+			paid,
+			"deferred rewards must reach the next block's coinbase via the fee path"
 		);
 	});
 }
@@ -315,9 +321,9 @@ fn incorrect_engine_id_ignored() {
 
 		assert_eq!(MiningRewards::collected_fees(), total_reward);
 		assert_eq!(
-			Balances::free_balance(MINER_1.account_id()),
-			ExistentialDeposit::get(),
-			"Miner should not receive rewards when engine ID is incorrect"
+			MockCoinbaseSink::total(),
+			0,
+			"no coinbase is credited when the engine ID is not the chain's"
 		);
 		System::assert_has_event(Event::PayoutDeferred { amount: total_reward }.into());
 	});
@@ -373,14 +379,12 @@ fn oversized_preimage_data_ignored() {
 }
 
 #[test]
-fn test_fees_and_rewards_to_miner() {
+fn fees_and_rewards_are_credited_under_the_authors_derived_address() {
 	new_test_ext().execute_with(|| {
 		let test_preimage = [42u8; 32];
 		let miner_wormhole_address = sp_core::crypto::AccountId32::from(
 			derive_wormhole_address(test_preimage).expect("test preimage limbs are canonical"),
 		);
-		let _ = Balances::deposit_creating(&miner_wormhole_address, 0);
-		let actual_initial_balance_after_creation = Balances::free_balance(&miner_wormhole_address);
 
 		let tx_fees = 100;
 		MiningRewards::collect_transaction_fees(tx_fees);
@@ -390,22 +394,22 @@ fn test_fees_and_rewards_to_miner() {
 		set_miner_preimage_digest(test_preimage);
 		MiningRewards::on_finalize(System::block_number());
 
+		assert_eq!(MockCoinbaseSink::credits(), vec![miner_reward]);
 		assert_eq!(
 			Balances::free_balance(&miner_wormhole_address),
-			actual_initial_balance_after_creation + miner_reward,
-			"Miner should receive the quantized block reward + fees"
+			0,
+			"the derived address is a label on the event, not a payee"
 		);
 		System::assert_has_event(
-			Event::MinerRewarded { miner: miner_wormhole_address, reward: miner_reward }.into(),
+			Event::CoinbaseCredited { author: miner_wormhole_address, amount: miner_reward }.into(),
 		);
 	});
 }
 
 #[test]
-fn miner_payout_is_quantized_and_dust_is_held() {
+fn the_coinbase_credit_is_quantized_and_dust_is_held() {
 	new_test_ext().execute_with(|| {
 		let quantum = leaf_quantum();
-		let initial_miner = Balances::free_balance(MINER_1.account_id());
 		set_miner_preimage_digest(MINER_1.preimage());
 
 		let fees: Balance = 25;
@@ -416,10 +420,10 @@ fn miner_payout_is_quantized_and_dust_is_held() {
 
 		MiningRewards::on_finalize(1);
 
-		assert_eq!(Balances::free_balance(MINER_1.account_id()), initial_miner + quantized);
+		assert_eq!(MockCoinbaseSink::credits(), vec![quantized]);
 		assert_eq!(MiningRewards::collected_fees(), dust);
 		System::assert_has_event(
-			Event::MinerRewarded { miner: MINER_1.account_id(), reward: quantized }.into(),
+			Event::CoinbaseCredited { author: MINER_1.account_id(), amount: quantized }.into(),
 		);
 	});
 }
@@ -444,16 +448,14 @@ fn combined_fee_and_reward_can_recover_a_quantum() {
 			"summing before the floor must recover a quantum that two floors would drop"
 		);
 
-		let initial_miner = Balances::free_balance(MINER_1.account_id());
 		MiningRewards::on_finalize(1);
-		assert_eq!(Balances::free_balance(MINER_1.account_id()), initial_miner + combined);
+		assert_eq!(MockCoinbaseSink::total(), combined);
 	});
 }
 
 #[test]
-fn sub_quantum_credit_does_not_record_a_leaf() {
+fn sub_quantum_credit_does_not_mint_a_note() {
 	new_test_ext().execute_with(|| {
-		MockProofRecorder::clear();
 		set_miner_preimage_digest(MINER_1.preimage());
 
 		let fees: Balance = 25;
@@ -463,13 +465,10 @@ fn sub_quantum_credit_does_not_record_a_leaf() {
 
 		MiningRewards::on_finalize(1);
 
-		let proofs = MockProofRecorder::get_recorded_proofs();
-		let miner_proofs: Vec<_> = proofs.iter().filter(|p| p.to == MINER_1.account_id()).collect();
-		assert_eq!(miner_proofs.len(), 1);
-		assert_eq!(miner_proofs[0].amount, quantized);
-		assert_eq!(miner_proofs[0].amount % leaf_quantum(), 0);
+		let credits = MockCoinbaseSink::credits();
+		assert_eq!(credits, vec![quantized], "held dust must not reach the pool");
+		assert_eq!(credits[0] % leaf_quantum(), 0);
 		assert_eq!(MiningRewards::collected_fees(), dust);
-		assert_eq!(proofs.len(), 1, "held dust must not record a wormhole leaf");
 	});
 }
 
@@ -669,34 +668,30 @@ fn test_emission_simulation_120m_blocks() {
 }
 
 // =========================================================================
-// Tests for transfer proof recording during mining rewards
+// What reaches the shielded pool
 // =========================================================================
 
+/// One credit per block, and it is the whole of what the block emits.
 #[test]
-fn miner_reward_records_transfer_proof() {
+fn a_block_pays_one_coinbase_credit() {
 	new_test_ext().execute_with(|| {
-		MockProofRecorder::clear();
 		set_miner_preimage_digest(MINER_1.preimage());
-		assert_eq!(MockProofRecorder::proof_count(), 0);
+		assert_eq!(MockCoinbaseSink::credits().len(), 0);
 
 		MiningRewards::on_finalize(1);
 
-		let proofs = MockProofRecorder::get_recorded_proofs();
-		assert_eq!(proofs.len(), 1, "one combined miner leaf, no treasury split");
-
-		let miner_proof = proofs.iter().find(|p| p.to == MINER_1.account_id());
-		assert!(miner_proof.is_some(), "Should have a proof for miner reward");
-		let miner_proof = miner_proof.unwrap();
-		assert_eq!(miner_proof.asset_id, None, "Miner reward should be native token");
-		assert_eq!(miner_proof.from, MintingAccount::get(), "From should be MintingAccount");
-		assert!(miner_proof.amount > 0, "Miner reward amount should be positive");
+		let credits = MockCoinbaseSink::credits();
+		assert_eq!(credits.len(), 1, "one combined credit, no split");
+		assert!(credits[0] > 0);
 	});
 }
 
+/// Fees and the block reward are one credit, which is what lets a block recover
+/// a quantum two separate floors would drop, and what leaves the author holding
+/// one note instead of two.
 #[test]
-fn miner_reward_with_fees_records_one_combined_proof() {
+fn fees_and_the_block_reward_are_one_credit() {
 	new_test_ext().execute_with(|| {
-		MockProofRecorder::clear();
 		set_miner_preimage_digest(MINER_1.preimage());
 
 		let fees: Balance = 100;
@@ -705,67 +700,61 @@ fn miner_reward_with_fees_records_one_combined_proof() {
 
 		MiningRewards::on_finalize(1);
 
-		let proofs = MockProofRecorder::get_recorded_proofs();
-		let miner_proofs: Vec<_> = proofs.iter().filter(|p| p.to == MINER_1.account_id()).collect();
-		assert_eq!(miner_proofs.len(), 1, "fees and block reward share one leaf");
-		assert_eq!(miner_proofs[0].amount, expected);
-		assert_eq!(miner_proofs[0].from, MintingAccount::get());
+		assert_eq!(MockCoinbaseSink::credits(), vec![expected]);
 	});
 }
 
+/// A block with no author pays nothing into the pool and keeps the credit.
 #[test]
-fn no_miner_defers_payout_without_a_leaf() {
+fn no_author_defers_the_payout_without_minting_a_note() {
 	new_test_ext().execute_with(|| {
-		MockProofRecorder::clear();
 		let gross = expected_block_reward(0);
 
 		MiningRewards::on_finalize(1);
 
-		assert!(
-			MockProofRecorder::get_recorded_proofs().is_empty(),
-			"a deferred payout must not insert a leaf"
-		);
+		assert!(MockCoinbaseSink::credits().is_empty(), "a deferred payout mints no note");
 		assert_eq!(MiningRewards::collected_fees(), gross);
 		System::assert_has_event(Event::PayoutDeferred { amount: gross }.into());
 	});
 }
 
+/// Value in the shielded pool is supply. Without that term the emission would
+/// see supply fall as the pool filled and mint faster forever, which is the one
+/// thing v1 could have broken about the schedule.
 #[test]
-fn zero_reward_does_not_record_proof() {
+fn the_emission_measures_the_shielded_pool_as_supply() {
 	new_test_ext().execute_with(|| {
-		MockProofRecorder::clear();
 		set_miner_preimage_digest(MINER_1.preimage());
+		let empty_pool = expected_block_reward(0);
+
+		ShieldedSupply::set(MaxSupply::get() / 2);
+		let half_supply_in_the_pool = expected_block_reward(0);
+
+		assert!(
+			half_supply_in_the_pool < empty_pool / 2 + 1,
+			"a pool holding half the supply must halve the emission"
+		);
+
 		MiningRewards::on_finalize(1);
-		let proof_count = MockProofRecorder::proof_count();
-
-		MockProofRecorder::clear();
-		MiningRewards::on_finalize(2);
-		let proof_count_2 = MockProofRecorder::proof_count();
-
-		assert!(proof_count > 0, "First block should have proofs");
-		assert!(proof_count_2 > 0, "Second block should have proofs");
+		assert_eq!(MockCoinbaseSink::credits(), vec![quantize(half_supply_in_the_pool).0]);
 	});
 }
 
+/// The author is read through the one seam, and the address on the event is the
+/// one the consensus digest derives.
 #[test]
-fn wormhole_miner_address_records_correct_proof() {
+fn the_author_seam_derives_the_address_the_event_names() {
 	new_test_ext().execute_with(|| {
-		MockProofRecorder::clear();
-
 		let preimage = [42u8; 32];
-		let wormhole_miner = sp_core::crypto::AccountId32::from(
+		let author = sp_core::crypto::AccountId32::from(
 			derive_wormhole_address(preimage).expect("test preimage limbs are canonical"),
 		);
 
 		set_miner_preimage_digest(preimage);
 		MiningRewards::on_finalize(1);
 
-		let proofs = MockProofRecorder::get_recorded_proofs();
-		let miner_proof = proofs.iter().find(|p| p.to == wormhole_miner);
-		assert!(miner_proof.is_some(), "Should have proof for wormhole miner address");
-
-		let proof = miner_proof.unwrap();
-		assert_eq!(proof.from, MintingAccount::get());
-		assert!(proof.amount > 0);
+		let amount = MockCoinbaseSink::total();
+		assert!(amount > 0);
+		System::assert_has_event(Event::CoinbaseCredited { author, amount }.into());
 	});
 }

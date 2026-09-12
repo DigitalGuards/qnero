@@ -21,11 +21,11 @@ pub mod pallet {
 		pallet_prelude::*,
 		traits::{
 			fungible::{Inspect, Mutate},
-			Get, Imbalance, OnUnbalanced,
+			FindAuthor, Get, Imbalance, OnUnbalanced,
 		},
 	};
 	use frame_system::pallet_prelude::*;
-	use qp_wormhole::TransferProofRecorder;
+	use qp_coinbase::CoinbaseSink;
 	use sp_runtime::traits::Saturating;
 
 	pub(crate) type BalanceOf<T> =
@@ -44,18 +44,31 @@ pub mod pallet {
 		/// Weight information for extrinsics in this pallet.
 		type WeightInfo: WeightInfo;
 
-		/// Currency type for minting rewards
+		/// Currency type. Read for the transparent half of the supply
+		/// measure; this pallet mints nothing into it.
 		type Currency: Mutate<Self::AccountId>;
 
-		/// Asset ID type for the proof recorder
-		type AssetId: Default;
+		/// Where the block reward goes.
+		///
+		/// Under v1 mandatory privacy nothing is minted to an account: the
+		/// reward and the transaction fees become the value of the block's
+		/// coinbase note in the shielded pool. The sink hands back what it
+		/// could not take, which this pallet holds for the next block.
+		type CoinbaseSink: CoinbaseSink<BalanceOf<Self>>;
 
-		/// Proof recorder for storing wormhole transfer proofs
-		type ProofRecorder: qp_wormhole::TransferProofRecorder<
-			Self::AccountId,
-			Self::AssetId,
-			BalanceOf<Self>,
-		>;
+		/// Value held by the shielded pool.
+		///
+		/// The emission schedule measures supply against [`Config::MaxSupply`],
+		/// and under v1 nearly every planck lives in the pool, where
+		/// `total_issuance` does not count it: shielding burns from the
+		/// shielder. Without this term supply would appear to fall as the pool
+		/// filled and the schedule would mint faster forever.
+		type ShieldedSupply: Get<BalanceOf<Self>>;
+
+		/// The block author, as one seam. The runtime implements it over
+		/// whatever consensus is in place; this pallet never reads a digest
+		/// itself. `docs/OPS-DEV.md` carries the seam.
+		type FindAuthor: FindAuthor<Self::AccountId>;
 
 		/// The maximum total supply of tokens
 		#[pallet::constant]
@@ -68,21 +81,20 @@ pub mod pallet {
 		/// The base unit for token amounts (e.g., 1e12 for 12 decimals)
 		#[pallet::constant]
 		type Unit: Get<BalanceOf<Self>>;
-
-		/// Account ID used as the "from" account when creating transfer proofs for minted tokens
-		#[pallet::constant]
-		type MintingAccount: Get<Self::AccountId>;
 	}
 
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
-		/// A miner has been identified for a block
-		MinerRewarded {
-			/// Miner account
-			miner: T::AccountId,
-			/// Quantized reward (block reward + fees, aligned to the wormhole quantum)
-			reward: BalanceOf<T>,
+		/// The block reward and the fees became the value of this block's
+		/// coinbase note. No account was credited.
+		CoinbaseCredited {
+			/// The block's author, for the record. The note is the author's
+			/// only if the payload its node supplied was its own, which is
+			/// exactly as much as the chain can say.
+			author: T::AccountId,
+			/// Quantized credit (block reward + fees, aligned to the pool quantum)
+			amount: BalanceOf<T>,
 		},
 		/// Transaction fees were collected for later distribution
 		FeesCollected {
@@ -96,12 +108,15 @@ pub mod pallet {
 			/// Amount held for the next miner
 			amount: BalanceOf<T>,
 		},
-		/// Miner mint failed; the credit stays in `CollectedFees` for retry.
-		MinerMintFailed {
-			/// The miner who should have received the reward
-			miner: T::AccountId,
-			/// The reward amount retained
-			reward: BalanceOf<T>,
+		/// The pool could not take the credit, so it stays in `CollectedFees`
+		/// for the next block. The one reachable cause is a block whose author
+		/// supplied no coinbase inherent, and the inherent check refuses such a
+		/// block on import.
+		CoinbaseRejected {
+			/// The block's author.
+			author: T::AccountId,
+			/// The credit retained.
+			amount: BalanceOf<T>,
 		},
 	}
 
@@ -134,8 +149,13 @@ pub mod pallet {
 			// Retried unminted rewards inside `tx_fees` are likewise already-scheduled
 			// supply (they were budgeted from the remaining supply of their own block),
 			// so this line covers them too.
+			// Both books. `total_issuance` is the transparent one; the pool
+			// holds the rest and `ShieldedSupply` is what makes the emission
+			// schedule see it. See `Config::ShieldedSupply`.
 			let max_supply = T::MaxSupply::get();
-			let current_supply = T::Currency::total_issuance().saturating_add(tx_fees);
+			let current_supply = T::Currency::total_issuance()
+				.saturating_add(tx_fees)
+				.saturating_add(T::ShieldedSupply::get());
 			let emission_divisor = T::EmissionDivisor::get();
 
 			let remaining_supply = max_supply.saturating_sub(current_supply);
@@ -154,9 +174,9 @@ pub mod pallet {
 			// Extract miner ID from the pre-runtime digest
 			let miner = Self::extract_miner_from_digest();
 
-			// Fees and the block reward are one miner credit. Combining before
-			// quantizing can recover a quantum that two independent floors would drop,
-			// and the miner spends one leaf / nullifier rather than two.
+			// Fees and the block reward are one credit. Combining before
+			// quantizing can recover a quantum that two independent floors would
+			// drop, and the author holds one note rather than two.
 			let miner_gross = tx_fees.saturating_add(total_reward);
 
 			// Log readable amounts (convert to tokens by dividing by unit)
@@ -194,17 +214,22 @@ pub mod pallet {
 			};
 
 			let (quantized, dust) = Self::quantize(miner_gross);
-			Self::mint_reward(&miner, quantized);
+			Self::pay_coinbase(&miner, quantized);
 			// Remainder stays unminted so a later block can form a full quantum.
 			Self::retain_unminted(dust);
 		}
 	}
 
 	impl<T: Config> Pallet<T> {
-		/// Extract miner wormhole address by hashing the preimage from pre-runtime digest
+		/// The block author, through the one seam this pallet reads consensus
+		/// through. See [`Config::FindAuthor`].
 		fn extract_miner_from_digest() -> Option<T::AccountId> {
-			let digest = <frame_system::Pallet<T>>::digest();
-			qp_wormhole::extract_author_from_digest(digest.logs.iter())
+			T::FindAuthor::find_author(
+				<frame_system::Pallet<T>>::digest()
+					.logs
+					.iter()
+					.filter_map(|log| log.as_pre_runtime()),
+			)
 		}
 
 		pub fn collect_transaction_fees(fees: BalanceOf<T>) {
@@ -217,9 +242,11 @@ pub mod pallet {
 			});
 		}
 
-		/// The amount quantum the ZK leaf actually commits: `hash_leaf` stores
-		/// `amount / AMOUNT_SCALE_DOWN_FACTOR`. Miner credits must be multiples of this
-		/// or the remainder is unexitable.
+		/// The amount quantum a note commits: `pallet-zk-tree` stores a
+		/// wormhole leaf's amount divided by this, and `pallet-shielded`
+		/// asserts its own pool quantum is the same number. A credit that is
+		/// not a multiple of it cannot be the value of a note at all, so the
+		/// remainder waits here for a block that completes it.
 		fn leaf_quantum() -> BalanceOf<T> {
 			pallet_zk_tree::tree::AMOUNT_SCALE_DOWN_FACTOR
 				.try_into()
@@ -232,34 +259,38 @@ pub mod pallet {
 			(amount.saturating_sub(remainder), remainder)
 		}
 
-		fn mint_reward(miner: &T::AccountId, reward: BalanceOf<T>) {
-			if reward.is_zero() {
+		/// Hand the credit to the shielded pool, which turns it into this
+		/// block's coinbase note.
+		///
+		/// Nothing is minted into an account. The credit is value that is not
+		/// in `total_issuance` yet, emission that has not been created and fees
+		/// that were burned when their imbalance dropped, and the pool creates
+		/// it by standing behind a note worth exactly this much.
+		fn pay_coinbase(author: &T::AccountId, amount: BalanceOf<T>) {
+			if amount.is_zero() {
 				return;
 			}
 
 			debug_assert!(
-				(reward % Self::leaf_quantum()).is_zero(),
-				"miner credits must be leaf-quantum aligned"
+				(amount % Self::leaf_quantum()).is_zero(),
+				"a coinbase credit must be pool-quantum aligned"
 			);
 
-			match T::Currency::mint_into(miner, reward) {
-				Ok(_) => {
-					T::ProofRecorder::record_transfer_proof(
-						None, // Native token
-						T::MintingAccount::get(),
-						miner.clone(),
-						reward,
-					);
-					Self::deposit_event(Event::MinerRewarded { miner: miner.clone(), reward });
+			match T::CoinbaseSink::deposit_coinbase(amount) {
+				Ok(()) => {
+					Self::deposit_event(Event::CoinbaseCredited { author: author.clone(), amount });
 				},
-				Err(e) => {
+				Err(returned) => {
 					log::warn!(
 						target: "mining-rewards",
-						"Failed to mint {:?} to miner {:?}: {:?}, retaining for retry",
-						reward, miner, e
+						"the shielded pool refused a coinbase credit of {:?} for author {:?}, retaining for retry",
+						returned, author
 					);
-					Self::retain_unminted(reward);
-					Self::deposit_event(Event::MinerMintFailed { miner: miner.clone(), reward });
+					Self::retain_unminted(returned);
+					Self::deposit_event(Event::CoinbaseRejected {
+						author: author.clone(),
+						amount: returned,
+					});
 				},
 			}
 		}

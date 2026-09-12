@@ -406,7 +406,7 @@ fn settling_appends_two_leaves_per_slot_and_stores_their_ciphertexts() {
 }
 
 #[test]
-fn the_block_author_is_paid_its_share_of_a_settled_fee() {
+fn the_block_author_fee_share_is_held_for_the_blocks_coinbase_note() {
 	new_test_ext_with_endowments(vec![(alice(), 1_000 * UNIT)]).execute_with(|| {
 		let preimage = [7u8; 32];
 		let author = author_of(preimage);
@@ -429,14 +429,19 @@ fn the_block_author_is_paid_its_share_of_a_settled_fee() {
 		assert_ok!(Shielded::settle(bundle, vec![output(b"ct-a1", b"ct-a2")]));
 
 		// Nine quanta, burn rounds up against the author: five burned, four
-		// credited.
-		assert_eq!(Balances::balance(&author), 4 * POOL_QUANTUM);
-		System::assert_has_event(Event::AuthorFeePaid { author, amount: 4 * POOL_QUANTUM }.into());
-		// The whole fee left the pool and only the author's share came back
-		// into issuance; the burned half is the issuance the shield removed and
-		// never restored.
+		// held for the coinbase note. The author's transparent account is not
+		// touched at all, which is the whole of what v1 changed here.
+		assert_eq!(Balances::balance(&author), 0);
+		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_QUANTUM);
+		System::assert_has_event(Event::AuthorFeeAccrued { amount: 4 * POOL_QUANTUM }.into());
+		// The whole fee left the pool. The burned half is gone; the author's
+		// half is in flight, which is why the supply measure counts both books.
 		assert_eq!(Shielded::pool_value(), 91 * POOL_QUANTUM);
-		assert_eq!(Balances::total_issuance(), issuance_before + 4 * POOL_QUANTUM);
+		assert_eq!(Balances::total_issuance(), issuance_before);
+		assert_eq!(
+			<crate::ShieldedSupply<Test> as frame_support::traits::Get<u128>>::get(),
+			91 * POOL_QUANTUM + 4 * POOL_QUANTUM
+		);
 	});
 }
 
@@ -459,16 +464,16 @@ fn a_fee_larger_than_the_pool_is_refused_with_nothing_written() {
 	});
 }
 
-/// The author's fee share must not emit an event the runtime's
-/// `WormholeProofRecorderExtension` scans for.
+/// A settled fee moves no transparent balance at all.
 ///
-/// That extension turns a `Balances::Minted` (and a `Transfer`) into a wormhole
-/// transfer leaf of its own, and this pallet records the author's leaf itself,
-/// so `Mutate::mint_into` here would credit one balance against two independent
-/// leaves and let the author exit twice what it was paid. `pallet-wormhole`
-/// carries the same rule and the same test.
+/// Under v1 the author's share becomes part of a note, so nothing in the fee
+/// path mints, transfers or touches an account, and no `pallet_balances` event
+/// can come out of a settlement. The rule this replaces was narrower and had
+/// the same root: the runtime's wormhole recorder scanned `Minted` and
+/// `Transfer` events and turned them into a second spend path for one credit.
+/// There is no transparent credit to double now.
 #[test]
-fn the_author_fee_credit_emits_no_scannable_balance_event() {
+fn a_settled_fee_moves_no_transparent_balance() {
 	new_test_ext().execute_with(|| {
 		fund_pool(100);
 		let preimage = [13u8; 32];
@@ -478,16 +483,13 @@ fn the_author_fee_credit_emits_no_scannable_balance_event() {
 		System::reset_events();
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 9)]);
 		assert_ok!(Shielded::settle(bundle, vec![output(b"ct-a1", b"ct-a2")]));
-		assert_eq!(Balances::balance(&author), 4 * POOL_QUANTUM, "the credit did happen");
+		assert_eq!(Balances::balance(&author), 0, "the author holds no transparent balance");
+		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_QUANTUM, "the credit did happen");
 
 		for record in System::events() {
 			assert!(
-				!matches!(
-					record.event,
-					RuntimeEvent::Balances(pallet_balances::Event::Minted { .. }) |
-						RuntimeEvent::Balances(pallet_balances::Event::Transfer { .. })
-				),
-				"a settlement emitted a balance event the wormhole recorder scans for: {:?}",
+				!matches!(record.event, RuntimeEvent::Balances(_)),
+				"a settlement emitted a balance event: {:?}",
 				record.event
 			);
 		}
@@ -1995,21 +1997,37 @@ fn a_real_batch_below_the_minimum_fee_is_refused() {
 	});
 }
 
+/// The whole v1 fee path, over a real proof: the author's share of a settled
+/// fee leaves the pool, waits, and comes back as part of the block's coinbase
+/// note. No account balance moves anywhere along it.
 #[test]
-fn a_real_batch_pays_the_block_author() {
+fn a_real_batch_pays_the_block_author_in_a_coinbase_note() {
 	new_test_ext_with_endowments(vec![(alice(), 10_000 * UNIT)]).execute_with(|| {
 		let spend = shield_and_prove(4, 8);
 		let preimage = [11u8; 32];
 		let author = author_of(preimage);
 		set_author_preimage(preimage);
+		let inner = record_coinbase(System::block_number() as u32);
 
 		assert_ok!(Shielded::submit_private_batch(
 			RuntimeOrigin::none(),
 			spend.proof,
 			spend.outputs,
 		));
-		// Eight quanta: four burned, four to the author.
-		assert_eq!(Balances::balance(&author), 4 * POOL_QUANTUM);
+		// Eight quanta: four burned, four held for this block's coinbase.
+		assert_eq!(Balances::balance(&author), 0);
+		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_QUANTUM);
+
+		// The emission the miner would have been paid transparently, plus that
+		// share, is the value of one note.
+		assert_ok!(deposit_coinbase(2 * POOL_QUANTUM));
+		let leaf = ZkTree::leaf_count() - 1;
+		assert_eq!(Shielded::coinbase_value(leaf), Some(6));
+		assert_eq!(
+			pallet_zk_tree::Leaves::<Test>::get(leaf),
+			qnero_circuit::chain::commitment(&inner, 6)
+		);
+		assert_eq!(Balances::balance(&author), 0);
 	});
 }
 
@@ -2102,5 +2120,269 @@ fn a_real_public_batch_verifies_through_the_embedded_verifier() {
 		// are dropped at the parse, so what survives is the one segment that
 		// settles anything.
 		assert_eq!(bundle.segments.len(), 1);
+	});
+}
+
+// ===========================================================================
+// The coinbase: the only way value enters circulation at v1
+// ===========================================================================
+
+/// A coinbase note for the test's own key, as a block author's node builds one:
+/// `rho` from the block number under the coinbase tag, `r` fresh, `inner` over
+/// both. The value is not in `inner`, which is the property the whole design
+/// rests on: the chain supplies the value and hashes `cm = H(CM, inner, value)`
+/// itself.
+fn coinbase_payload(block_number: u32) -> (Hash256, Digest, Digest) {
+	let pk = shielder_keys().pk();
+	let rho = qnero_note_core::coinbase_rho(block_number);
+	let r = Digest::hash_bytes(&[b"qnero-test/coinbase-r", &block_number.to_le_bytes()]);
+	(note_inner(&pk, &rho, &r).to_bytes(), rho, r)
+}
+
+/// Record a coinbase payload the way an inherent does, at the current block.
+///
+/// No ciphertext, which is what a Qnero node publishes: the note is derived
+/// from the miner key the operator configured, so there is nothing to send.
+fn record_coinbase(block_number: u32) -> Hash256 {
+	let (inner, _, _) = coinbase_payload(block_number);
+	assert_ok!(Shielded::coinbase(RuntimeOrigin::none(), inner, Vec::new()));
+	inner
+}
+
+/// The sink call `pallet-mining-rewards` makes from its `on_finalize`.
+fn deposit_coinbase(amount: u128) -> Result<(), u128> {
+	<Shielded as qp_coinbase::CoinbaseSink<u128>>::deposit_coinbase(amount)
+}
+
+#[test]
+fn a_block_mints_one_coinbase_note_worth_the_reward() {
+	new_test_ext().execute_with(|| {
+		set_author_preimage([3u8; 32]);
+		let block = System::block_number() as u32;
+		let inner = record_coinbase(block);
+
+		assert_ok!(deposit_coinbase(7 * POOL_QUANTUM));
+
+		// The leaf the chain appended is the commitment over the author's
+		// opaque `inner` and the value the chain decided.
+		let expected = qnero_circuit::chain::commitment(&inner, 7).expect("canonical inner");
+		assert_eq!(ZkTree::leaf_count(), 1);
+		assert_eq!(pallet_zk_tree::Leaves::<Test>::get(0), Some(expected));
+		assert_eq!(Shielded::coinbase_value(0), Some(7));
+		assert_eq!(Shielded::ciphertext(0), None, "a derived coinbase stores no ciphertext");
+		assert_eq!(Shielded::leaf_block(0), Some(System::block_number()));
+		assert_eq!(Shielded::pool_value(), 7 * POOL_QUANTUM);
+		System::assert_has_event(
+			Event::CoinbaseMinted {
+				block_number: System::block_number(),
+				leaf_index: 0,
+				inner,
+				value: 7 * POOL_QUANTUM,
+				ciphertext: Vec::new(),
+			}
+			.into(),
+		);
+		// Nothing transparent happened.
+		assert_eq!(Balances::total_issuance(), 0);
+	});
+}
+
+/// The value in the leaf is the chain's arithmetic over both books: the reward
+/// the emission schedule handed over plus the author's share of every fee the
+/// block settled.
+#[test]
+fn the_coinbase_note_carries_the_block_reward_and_the_author_fee_share() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		set_author_preimage([5u8; 32]);
+		let block = System::block_number() as u32;
+		let inner = record_coinbase(block);
+
+		// Nine quanta of fee: five burned, four to the author.
+		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 9)]);
+		assert_ok!(Shielded::settle(bundle, vec![output(b"ct-a1", b"ct-a2")]));
+		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_QUANTUM);
+
+		assert_ok!(deposit_coinbase(7 * POOL_QUANTUM));
+
+		let leaf = ZkTree::leaf_count() - 1;
+		assert_eq!(Shielded::coinbase_value(leaf), Some(11));
+		let expected = qnero_circuit::chain::commitment(&inner, 11).expect("canonical inner");
+		assert_eq!(pallet_zk_tree::Leaves::<Test>::get(leaf), Some(expected));
+		assert_eq!(Shielded::pending_coinbase_fee(), 0);
+		// The pool lost the whole fee and gained the coinbase note: 100 - 9 + 11.
+		assert_eq!(Shielded::pool_value(), 102 * POOL_QUANTUM);
+	});
+}
+
+/// Two coinbase notes in one block would be two notes on one `rho`, because the
+/// block number is the whole identifier the rule hashes. The refusal is a
+/// mandatory dispatch failure, which is a dead block.
+#[test]
+fn a_second_coinbase_in_one_block_is_refused() {
+	new_test_ext().execute_with(|| {
+		set_author_preimage([3u8; 32]);
+		let block = System::block_number() as u32;
+		record_coinbase(block);
+		let (inner, _, _) = coinbase_payload(block + 1);
+		assert_noop!(
+			Shielded::coinbase(RuntimeOrigin::none(), inner, b"second".to_vec()),
+			Error::<Test>::CoinbaseAlreadySet
+		);
+	});
+}
+
+/// A block with no author has nobody to pay.
+#[test]
+fn a_coinbase_without_a_block_author_is_refused() {
+	new_test_ext().execute_with(|| {
+		let (inner, _, _) = coinbase_payload(1);
+		assert_noop!(
+			Shielded::coinbase(RuntimeOrigin::none(), inner, b"ct".to_vec()),
+			Error::<Test>::NoBlockAuthor
+		);
+	});
+}
+
+/// `on_finalize` cannot refuse anything, so the one field it hashes is checked
+/// where a refusal is still possible.
+#[test]
+fn a_coinbase_inner_that_is_not_four_canonical_limbs_is_refused() {
+	new_test_ext().execute_with(|| {
+		set_author_preimage([3u8; 32]);
+		assert_noop!(
+			Shielded::coinbase(RuntimeOrigin::none(), [0xffu8; 32], b"ct".to_vec()),
+			Error::<Test>::NonCanonicalInner
+		);
+		// An empty ciphertext is the ordinary case: a derived coinbase carries
+		// no payload at all.
+		assert_ok!(Shielded::coinbase(RuntimeOrigin::none(), coinbase_payload(1).0, Vec::new()));
+	});
+}
+
+/// No inherent, no note. The credit goes back to the caller, which holds it for
+/// the next block rather than minting it into nothing.
+#[test]
+fn a_block_with_no_coinbase_inherent_hands_the_reward_back() {
+	new_test_ext().execute_with(|| {
+		set_author_preimage([3u8; 32]);
+		assert_eq!(deposit_coinbase(7 * POOL_QUANTUM), Err(7 * POOL_QUANTUM));
+		assert_eq!(ZkTree::leaf_count(), 0);
+		assert_eq!(Shielded::pool_value(), 0);
+		System::assert_has_event(Event::CoinbaseDeferred { amount: 7 * POOL_QUANTUM }.into());
+	});
+}
+
+/// A payload never outlives its block. If it did, the next block's inherent
+/// would hit `CoinbaseAlreadySet` and die on a mandatory dispatch.
+#[test]
+fn the_previous_blocks_payload_is_cleared_before_the_next_inherent() {
+	new_test_ext().execute_with(|| {
+		set_author_preimage([3u8; 32]);
+		record_coinbase(1);
+		assert!(Shielded::pending_coinbase().is_some());
+
+		<Shielded as frame_support::traits::Hooks<u64>>::on_initialize(2);
+		assert!(Shielded::pending_coinbase().is_none());
+		// And the block after can record its own.
+		assert_ok!(Shielded::coinbase(
+			RuntimeOrigin::none(),
+			coinbase_payload(2).0,
+			b"ct".to_vec()
+		));
+	});
+}
+
+/// Sub-quantum change cannot vanish: a note's value is a whole number of pool
+/// quanta and the remainder waits for the next block.
+#[test]
+fn sub_quantum_change_stays_for_the_next_coinbase() {
+	new_test_ext().execute_with(|| {
+		set_author_preimage([3u8; 32]);
+		record_coinbase(1);
+		assert_ok!(deposit_coinbase(7 * POOL_QUANTUM + 3));
+		assert_eq!(Shielded::coinbase_value(0), Some(7));
+		assert_eq!(Shielded::pending_coinbase_fee(), 3);
+		assert_eq!(Shielded::pool_value(), 7 * POOL_QUANTUM);
+	});
+}
+
+/// The inherent contract itself: every block owes one, the coinbase call is the
+/// only inherent this pallet claims, and a settlement is not one.
+#[test]
+fn the_coinbase_is_a_required_inherent_and_the_settlements_are_not() {
+	use frame_support::inherent::ProvideInherent;
+	new_test_ext().execute_with(|| {
+		let data = sp_inherents::InherentData::new();
+		assert_eq!(
+			<Shielded as ProvideInherent>::is_inherent_required(&data),
+			Ok(Some(qp_coinbase::InherentError::Missing))
+		);
+		assert!(<Shielded as ProvideInherent>::is_inherent(&crate::Call::coinbase {
+			inner: [0u8; 32],
+			ciphertext: Vec::new(),
+		}));
+		assert!(!<Shielded as ProvideInherent>::is_inherent(&crate::Call::submit_private_batch {
+			proof: Vec::new(),
+			outputs: Vec::new()
+		}));
+		assert!(!<Shielded as ProvideInherent>::is_inherent(&crate::Call::submit_public_batch {
+			proof: Vec::new(),
+			outputs: Vec::new()
+		}));
+		// A node that supplied no payload builds no coinbase call, and the
+		// block it builds is the one `is_inherent_required` refuses.
+		assert!(<Shielded as ProvideInherent>::create_inherent(&data).is_none());
+	});
+}
+
+/// The payload round-trips from inherent data to the call the author's node
+/// puts in the block.
+#[test]
+fn the_inherent_data_becomes_the_coinbase_call() {
+	new_test_ext().execute_with(|| {
+		let (inner, _, _) = coinbase_payload(4);
+		let mut data = sp_inherents::InherentData::new();
+		data.put_data(
+			qp_coinbase::INHERENT_IDENTIFIER,
+			&qp_coinbase::CoinbaseInherentData { inner, ciphertext: b"ct".to_vec() },
+		)
+		.expect("fresh inherent data");
+		assert_eq!(
+			<Shielded as frame_support::inherent::ProvideInherent>::create_inherent(&data),
+			Some(crate::Call::coinbase { inner, ciphertext: b"ct".to_vec() })
+		);
+	});
+}
+
+/// The other coinbase shape: an author paying an address whose coinbase
+/// viewing key it does not hold encrypts `(rho, r)` into a payload, and the
+/// chain stores it beside the leaf for the recipient to decrypt. The chain
+/// treats it as opaque bytes either way.
+#[test]
+fn a_coinbase_may_carry_an_encrypted_payload() {
+	new_test_ext().execute_with(|| {
+		set_author_preimage([3u8; 32]);
+		let (inner, _, _) = coinbase_payload(System::block_number() as u32);
+		assert_ok!(Shielded::coinbase(RuntimeOrigin::none(), inner, b"payload".to_vec()));
+		assert_ok!(deposit_coinbase(3 * POOL_QUANTUM));
+
+		assert_eq!(Shielded::ciphertext(0).map(|ct| ct.to_vec()), Some(b"payload".to_vec()));
+		assert_eq!(Shielded::coinbase_value(0), Some(3));
+	});
+}
+
+/// A payload larger than the runtime's cap is refused at the inherent, where a
+/// refusal is still possible. `on_finalize` cannot refuse anything.
+#[test]
+fn a_coinbase_payload_above_the_ciphertext_cap_is_refused() {
+	new_test_ext().execute_with(|| {
+		set_author_preimage([3u8; 32]);
+		let (inner, _, _) = coinbase_payload(1);
+		let oversized = vec![0u8; (MaxCiphertextBytes::get() + 1) as usize];
+		assert_noop!(
+			Shielded::coinbase(RuntimeOrigin::none(), inner, oversized),
+			Error::<Test>::CiphertextTooLarge
+		);
 	});
 }

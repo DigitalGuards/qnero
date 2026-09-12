@@ -5,7 +5,6 @@ extern crate alloc;
 use super::*;
 use crate::Pallet as MiningRewards;
 use frame_benchmarking::v2::*;
-use frame_support::traits::fungible::{Inspect, Mutate};
 use frame_system::{pallet_prelude::BlockNumberFor, Pallet as SystemPallet};
 use sp_consensus_qpow::POW_ENGINE_ID;
 use sp_runtime::generic::{Digest, DigestItem};
@@ -13,9 +12,7 @@ use sp_runtime::generic::{Digest, DigestItem};
 #[benchmarks]
 mod benchmarks {
 	use super::*;
-	use codec::Decode;
 	use frame_support::traits::OnFinalize;
-	use sp_runtime::Saturating;
 
 	#[benchmark]
 	fn on_finalize_rewarded_miner() -> Result<(), BenchmarkError> {
@@ -24,14 +21,10 @@ mod benchmarks {
 
 		CollectedFees::<T>::put(fees_collected);
 
-		// The digest contains a 32-byte preimage, which is hashed via Poseidon
-		// to derive the actual miner wormhole address. We use a fixed preimage
-		// and derive the corresponding address for pre-funding.
+		// The digest carries the author's 32-byte preimage, which the runtime's
+		// author seam hashes into an account. Nothing is minted to that
+		// account under v1, so the benchmark neither derives nor funds it.
 		let miner_preimage: [u8; 32] = [42u8; 32];
-		let miner_address = qp_wormhole::derive_wormhole_address(miner_preimage)
-			.expect("benchmark preimage limbs are canonical");
-		let miner = T::AccountId::decode(&mut &miner_address[..])
-			.expect("AccountId should decode from 32 bytes");
 
 		let miner_digest_item = DigestItem::PreRuntime(POW_ENGINE_ID, miner_preimage.to_vec());
 
@@ -41,10 +34,10 @@ mod benchmarks {
 			&Digest { logs: alloc::vec![miner_digest_item] },
 		);
 
-		// Pre-fund the miner so mint_into does not create the account in the hook.
-		let ed = T::Currency::minimum_balance();
-		let _ = T::Currency::mint_into(&miner, ed.saturating_mul(1000u32.into()));
-
+		// The block carries no coinbase inherent, so the sink hands the credit
+		// back and this measures the path without the note. The coinbase
+		// append, the ciphertext and the maps behind it are reserved by
+		// `pallet-shielded`'s own `on_initialize`; see `MAX_LEAF_INSERTS`.
 		#[block]
 		{
 			MiningRewards::<T>::on_finalize(block_number);

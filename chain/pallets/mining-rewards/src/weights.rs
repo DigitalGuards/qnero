@@ -53,18 +53,22 @@ pub trait WeightInfo {
 	fn on_finalize_rewarded_miner() -> Weight;
 }
 
-/// Maximum number of ZK-tree leaf inserts a single `on_finalize` can trigger.
+/// ZK-tree leaf inserts this pallet's `on_finalize` reserves: none.
 ///
-/// `on_finalize` combines fees and the block reward into one miner credit
-/// (one leaf). Dust and failed mints stay in `CollectedFees` with no leaf.
-const MAX_LEAF_INSERTS: u64 = 1;
+/// `on_finalize` hands the credit to `Config::CoinbaseSink`, and the pool
+/// appends the coinbase leaf inside its own `deposit_coinbase`.
+/// `pallet-shielded`'s `on_initialize` reserves that append, the ciphertext and
+/// the maps it writes, so reserving a leaf here too would charge every block
+/// twice for one insert.
+const MAX_LEAF_INSERTS: u64 = 0;
 
 /// Non-tree storage for the worst-case finalize path.
 ///
-/// Once per finalize: `CollectedFees` take (r1 w1) and put-back of dust (r1 w1).
-/// Successful miner mint: Account (r1 w1) + `TransferCount` (r1 w1).
+/// Once per finalize: `CollectedFees` take (r1 w1) and put-back of dust (r1 w1),
+/// the digest read for the author lookup, and the shielded pool's own read of
+/// the value it stands behind.
 const BASE_READS: u64 = 4;
-const BASE_WRITES: u64 = 4;
+const BASE_WRITES: u64 = 2;
 
 /// PoV per fixed-base key (rounded up from `System::Account` MaxEncodedLen).
 const BASE_KEY_POV: u64 = 2700;
@@ -138,28 +142,26 @@ mod tests {
 	}
 
 	#[test]
-	fn base_covers_reward_transfers() {
-		// Once per finalize (outside the mint/record path).
-		// CollectedFees take (r1 w1) + dust put-back (r1 w1).
+	fn base_covers_the_finalize_path() {
+		// Once per finalize: `CollectedFees` take (r1 w1) and the dust put-back
+		// (r1 w1), plus the digest read behind the author lookup and the
+		// shielded pool's read of the value it stands behind. Nothing is minted
+		// into an account and no leaf is charged here: the coinbase append is
+		// reserved by `pallet-shielded`'s own `on_initialize`, which is what
+		// `MAX_LEAF_INSERTS` being zero says.
 		const FIXED_READS: u64 = 2;
 		const FIXED_WRITES: u64 = 2;
+		const AUTHOR_LOOKUP_READS: u64 = 2;
 
-		// Successful miner mint: Account (r1 w1) + TransferCount (r1 w1).
-		const PER_TRANSFER_READS: u64 = 2;
-		const PER_TRANSFER_WRITES: u64 = 2;
-
-		let expected_reads =
-			FIXED_READS.saturating_add(MAX_LEAF_INSERTS.saturating_mul(PER_TRANSFER_READS));
-		let expected_writes =
-			FIXED_WRITES.saturating_add(MAX_LEAF_INSERTS.saturating_mul(PER_TRANSFER_WRITES));
-
+		assert_eq!(MAX_LEAF_INSERTS, 0, "the coinbase leaf is the sink pallet's to reserve");
 		assert_eq!(
-			BASE_READS, expected_reads,
-			"BASE_READS must cover fixed overhead plus mint/TransferCount reads"
+			BASE_READS,
+			FIXED_READS + AUTHOR_LOOKUP_READS,
+			"BASE_READS must cover the fee slot and the author lookup"
 		);
 		assert_eq!(
-			BASE_WRITES, expected_writes,
-			"BASE_WRITES must cover fixed overhead plus mint/TransferCount writes"
+			BASE_WRITES, FIXED_WRITES,
+			"BASE_WRITES must cover the fee slot, and nothing mints"
 		);
 	}
 }

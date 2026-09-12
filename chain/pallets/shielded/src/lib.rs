@@ -321,19 +321,21 @@ pub fn padding_block_hash() -> Hash256 {
 pub mod pallet {
 	use super::*;
 	use frame_support::{
-		dispatch::{DispatchResultWithPostInfo, Pays},
+		dispatch::{DispatchClass, DispatchResultWithPostInfo, Pays},
 		pallet_prelude::*,
 		traits::{
-			fungible::{Inspect, Mutate, Unbalanced},
+			fungible::{Inspect, Mutate},
 			tokens::{Fortitude, Precision, Preservation},
+			FindAuthor,
 		},
 		BoundedVec,
 	};
 	use frame_system::pallet_prelude::*;
 	use pallet_zk_tree::ZkCommitmentRecorder;
-	use qp_wormhole::TransferProofRecorder;
+	use qp_coinbase::CoinbaseSink;
+	use sp_inherents::{InherentData, InherentIdentifier};
 	use sp_runtime::{
-		traits::{CheckedAdd, CheckedSub, Saturating, Zero},
+		traits::{CheckedSub, Saturating, Zero},
 		transaction_validity::{
 			InvalidTransaction, TransactionSource, TransactionValidity, TransactionValidityError,
 			ValidTransaction,
@@ -375,6 +377,30 @@ pub mod pallet {
 		pub ct_2: BoundedVec<u8, T::MaxCiphertextBytes>,
 	}
 
+	/// One block's coinbase payload, as its author supplied it.
+	///
+	/// `inner = H(NOTE, pk, rho, r)` of the note the author is minting to
+	/// itself, and a ciphertext when the recipient needs one. The chain checks
+	/// that `inner` is four canonical Goldilocks limbs, because it hashes it,
+	/// and checks nothing else: both fields are the author's own and an author
+	/// that malforms them can only strand its own reward.
+	#[derive(
+		Encode,
+		Decode,
+		DecodeWithMemTracking,
+		CloneNoBound,
+		PartialEqNoBound,
+		EqNoBound,
+		RuntimeDebugNoBound,
+		TypeInfo,
+		MaxEncodedLen,
+	)]
+	#[scale_info(skip_type_params(T))]
+	pub struct CoinbasePayload<T: Config> {
+		pub inner: Hash256,
+		pub ciphertext: BoundedVec<u8, T::MaxCiphertextBytes>,
+	}
+
 	#[pallet::config]
 	pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
 		/// The native currency. A shield burns from it and a settled fee mints
@@ -386,22 +412,18 @@ pub mod pallet {
 		/// root the block header carries.
 		type ZkTree: ZkCommitmentRecorder;
 
-		/// Records a transparent credit as a wormhole leaf.
+		/// The block author, as one seam.
 		///
-		/// The block author's fee share is minted to the QPoW-derived author
-		/// account, which has no signing key: a wormhole leaf is its only spend
-		/// path, so a credit without one is frozen forever. This is the same
-		/// seam `pallet-mining-rewards` uses for the block reward.
-		type ProofRecorder: qp_wormhole::TransferProofRecorder<
-			Self::AccountId,
-			u32,
-			BalanceOf<Self>,
-		>;
-
-		/// The nominal sender of a minted fee credit, as it appears in the
-		/// wormhole leaf. Shared with `pallet-mining-rewards`.
-		#[pallet::constant]
-		type MintingAccount: Get<Self::AccountId>;
+		/// The pallet reads the author in exactly one place, the coinbase
+		/// inherent, and it reads it through this. A block's coinbase belongs
+		/// to whoever authored the block, so a block with no author has no
+		/// coinbase to mint and is refused. Routing it through `FindAuthor` is
+		/// what keeps the proof of work out of the pallet: today the runtime's
+		/// implementation reads the QPoW pre-runtime digest, and a later engine
+		/// swaps that one implementation without touching this pallet,
+		/// `pallet-mining-rewards`, or the shape of a block. `docs/OPS-DEV.md`
+		/// carries the seam.
+		type FindAuthor: FindAuthor<Self::AccountId>;
 
 		/// How far back a settlement may anchor.
 		///
@@ -525,6 +547,42 @@ pub mod pallet {
 	#[pallet::getter(fn pool_value)]
 	pub type PoolValue<T: Config> = StorageValue<_, BalanceOf<T>, ValueQuery>;
 
+	/// The coinbase payload the author of the block being executed supplied,
+	/// held from the inherent until `on_finalize` knows what the note is worth.
+	///
+	/// Killed at the start of every block, so a payload can never outlive the
+	/// block it was supplied for, and taken when the note is minted. Its
+	/// presence is also the one-per-block rule: a second coinbase inherent
+	/// finds it set and fails, and a mandatory dispatch that fails takes the
+	/// block with it.
+	#[pallet::storage]
+	#[pallet::getter(fn pending_coinbase)]
+	pub type PendingCoinbase<T: Config> = StorageValue<_, CoinbasePayload<T>, OptionQuery>;
+
+	/// The block author's share of the fees settled so far, waiting for the
+	/// coinbase note that pays it.
+	///
+	/// A settled fee leaves [`PoolValue`] whole; the burned share is gone and
+	/// this is the rest. It is planck, always a whole number of pool quanta,
+	/// and it is value the pool still stands behind, so [`ShieldedSupply`]
+	/// counts it. A block that mints no coinbase leaves it here for the next
+	/// one.
+	#[pallet::storage]
+	#[pallet::getter(fn pending_coinbase_fee)]
+	pub type PendingCoinbaseFee<T: Config> = StorageValue<_, BalanceOf<T>, ValueQuery>;
+
+	/// Value of the coinbase note at a leaf index, in pool quanta.
+	///
+	/// A coinbase note's value is public, which is what lets the chain compute
+	/// `cm = H(CM, inner, value)` from an opaque `inner` it never checks. The
+	/// map is how a wallet reads that value: the note carries no ciphertext at
+	/// all when its recipient can derive it, so the scan takes the amount from
+	/// here and rebuilds the commitment against the leaf. Presence is also what
+	/// marks a leaf a coinbase.
+	#[pallet::storage]
+	#[pallet::getter(fn coinbase_value)]
+	pub type CoinbaseValues<T: Config> = StorageMap<_, Identity, u64, u64, OptionQuery>;
+
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
@@ -551,8 +609,25 @@ pub mod pallet {
 		/// A settlement was accepted. `slots` counts the real leaf slots and
 		/// `fee` is their summed fee in planck.
 		BatchSettled { segments: u32, slots: u32, fee: BalanceOf<T> },
-		/// The block author's share of a settled fee.
-		AuthorFeePaid { author: T::AccountId, amount: BalanceOf<T> },
+		/// The block author's share of a settled fee, held for this block's
+		/// coinbase note. It is not a transparent credit and no account was
+		/// touched.
+		AuthorFeeAccrued { amount: BalanceOf<T> },
+		/// The block's coinbase note. `value` is public and is what the chain
+		/// hashed with `inner` to get the commitment it appended; a ciphertext
+		/// is present only when the author encrypted one.
+		CoinbaseMinted {
+			block_number: BlockNumberFor<T>,
+			leaf_index: u64,
+			inner: Hash256,
+			value: BalanceOf<T>,
+			ciphertext: Vec<u8>,
+		},
+		/// The block reward could not be minted into a note and stays with
+		/// `pallet-mining-rewards` for the next block. The one reachable cause
+		/// is a block whose author supplied no coinbase inherent, which the
+		/// inherent check refuses on import.
+		CoinbaseDeferred { amount: BalanceOf<T> },
 	}
 
 	#[pallet::error]
@@ -640,12 +715,37 @@ pub mod pallet {
 		TreeFull,
 		/// A shielded value is not a positive whole number of pool quanta.
 		ValueNotQuantized,
-		/// The `inner` of a shield is not four canonical Goldilocks limbs.
+		/// The `inner` of a shield or a coinbase is not four canonical
+		/// Goldilocks limbs.
 		NonCanonicalInner,
+		/// The block already carries a coinbase inherent. One block mints one
+		/// coinbase note, and the block number is the whole identifier its
+		/// `rho` is derived from, so a second one would be a second note on one
+		/// nullifier seed.
+		CoinbaseAlreadySet,
+		/// The block has no author, so there is nobody the coinbase belongs to.
+		NoBlockAuthor,
 	}
 
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+		/// Clear the previous block's coinbase payload and reserve what minting
+		/// this block's costs.
+		///
+		/// The kill is what makes [`PendingCoinbase`]'s presence mean "this
+		/// block already has one": a payload that survived its block would
+		/// refuse the next block's inherent, and a mandatory dispatch that
+		/// fails is a dead block. The reservation covers the work
+		/// `deposit_coinbase` does in `pallet-mining-rewards`' `on_finalize`,
+		/// which is one tree append, three map writes and the pool update, at
+		/// the largest ciphertext this runtime accepts. Nothing else in the
+		/// pallet runs from a hook.
+		fn on_initialize(_block_number: BlockNumberFor<T>) -> Weight {
+			PendingCoinbase::<T>::kill();
+			T::WeightInfo::mint_coinbase(T::MaxCiphertextBytes::get())
+				.saturating_add(<T as frame_system::Config>::DbWeight::get().writes(1))
+		}
+
 		/// Both embedded verifier artifacts have to load.
 		///
 		/// They are loaded lazily, on the first settlement, and a failure there
@@ -818,6 +918,107 @@ pub mod pallet {
 				ciphertext,
 			});
 			Ok(())
+		}
+
+		/// Record this block's coinbase payload. The block author's node is the
+		/// only caller.
+		///
+		/// This writes no value and creates no note. It carries the fields the
+		/// chain cannot compute for itself from the author's node to
+		/// `on_finalize`, which is the first moment the note's value is known:
+		/// the value is the block reward plus the author's share of every fee
+		/// the block settled, and the block's settlements have not run yet when
+		/// an inherent does.
+		///
+		/// `inner = H(NOTE, pk, rho, r)` is the note with its value left out,
+		/// and it is opaque: the chain hashes it and never opens it. The
+		/// ciphertext is what carries `(rho, r)` to a recipient who cannot
+		/// derive them, and **it is usually empty**. A Qnero node cannot build
+		/// one, because it cannot link an ML-KEM implementation beside the one
+		/// its own post-quantum transport pins, so it derives the note from a
+		/// miner key its operator configured instead
+		/// (`qnero_note_core::coinbase_r`). An empty field is therefore the
+		/// ordinary case here, unlike a settling slot, where it would mean a
+		/// note nobody can find behind a `ct_digest` nothing evaluated.
+		///
+		/// Mandatory, like every inherent. The failure modes are a second
+		/// coinbase in one block, a block with no author, and a payload the
+		/// chain cannot hash, and all three make the block invalid rather than
+		/// dropping the reward: an author must not be able to mint two notes
+		/// for one block, and a block that pays its reward nowhere is a block
+		/// that mints value into nothing.
+		///
+		/// It is not in [`ValidateUnsigned`], so it cannot enter a transaction
+		/// pool at all. An author puts it in the block it is building, which is
+		/// the only place it belongs, and every other node sees it as an
+		/// inherent because [`ProvideInherent::is_inherent`] says so.
+		#[pallet::call_index(3)]
+		#[pallet::weight((T::WeightInfo::coinbase(ciphertext.len() as u32), DispatchClass::Mandatory))]
+		pub fn coinbase(
+			origin: OriginFor<T>,
+			inner: Hash256,
+			ciphertext: Vec<u8>,
+		) -> DispatchResult {
+			ensure_none(origin)?;
+			ensure!(!PendingCoinbase::<T>::exists(), Error::<T>::CoinbaseAlreadySet);
+			ensure!(Self::block_author().is_some(), Error::<T>::NoBlockAuthor);
+
+			let stored: BoundedVec<u8, T::MaxCiphertextBytes> =
+				ciphertext.try_into().map_err(|_| Error::<T>::CiphertextTooLarge)?;
+			// The one property of the payload the chain does check, because it
+			// is the one it needs: `on_finalize` hashes `inner` and cannot
+			// refuse anything. A non-canonical limb reaching the hasher there
+			// would be a block that fails to finalize.
+			ensure!(
+				qnero_circuit::chain::commitment(&inner, 0).is_some(),
+				Error::<T>::NonCanonicalInner
+			);
+
+			PendingCoinbase::<T>::put(CoinbasePayload::<T> { inner, ciphertext: stored });
+			Ok(())
+		}
+	}
+
+	#[pallet::inherent]
+	impl<T: Config> ProvideInherent for Pallet<T> {
+		type Call = Call<T>;
+		type Error = qp_coinbase::InherentError;
+		const INHERENT_IDENTIFIER: InherentIdentifier = qp_coinbase::INHERENT_IDENTIFIER;
+
+		fn create_inherent(data: &InherentData) -> Option<Self::Call> {
+			let payload: qp_coinbase::CoinbaseInherentData =
+				data.get_data(&Self::INHERENT_IDENTIFIER).ok().flatten()?;
+			Some(Call::coinbase { inner: payload.inner, ciphertext: payload.ciphertext })
+		}
+
+		/// Nothing to check. The payload is the author's own: a `pk` the chain
+		/// cannot see inside an `inner` it cannot open, and a ciphertext it
+		/// never parses. An importing node has no second opinion about either,
+		/// and the value the note carries is the chain's own arithmetic rather
+		/// than the author's claim. What is checked is that the inherent is
+		/// there at all, and [`Self::is_inherent_required`] is where that is
+		/// stated.
+		fn check_inherent(_call: &Self::Call, _data: &InherentData) -> Result<(), Self::Error> {
+			Ok(())
+		}
+
+		/// Every block carries one.
+		///
+		/// Unconditional, so it does not depend on the importing node having
+		/// built coinbase inherent data of its own: a node that is not
+		/// authoring has no miner key and no payload, and it still has to
+		/// reject a block that mints its reward nowhere. The error is fatal, so
+		/// the block is refused rather than imported.
+		fn is_inherent_required(_data: &InherentData) -> Result<Option<Self::Error>, Self::Error> {
+			Ok(Some(qp_coinbase::InherentError::Missing))
+		}
+
+		/// Only the coinbase. The two settlement calls are unsigned and go
+		/// through [`ValidateUnsigned`]; classifying them as inherents here
+		/// would let a block author put settlements in a block without the pool
+		/// ever validating them.
+		fn is_inherent(call: &Self::Call) -> bool {
+			matches!(call, Call::coinbase { .. })
 		}
 	}
 
@@ -1600,11 +1801,15 @@ pub mod pallet {
 		/// Split a settled fee between the burn and the block author, and take
 		/// it out of the pool.
 		///
-		/// The whole fee leaves the pool. The burn share simply is not minted
-		/// back, which is what makes it a burn: the value was removed from
-		/// issuance when it was shielded. The author's share is minted and
-		/// recorded as a wormhole leaf, the same path a block reward takes, so
-		/// the author can actually spend it.
+		/// The whole fee leaves the pool. The burn share simply stops existing:
+		/// it is value the pool was standing behind and now stands behind
+		/// nothing, which is what makes it a burn. The author's share is held
+		/// in [`PendingCoinbaseFee`] until `on_finalize`, where it becomes part
+		/// of the block's coinbase note. It is never a transparent credit, so
+		/// no account and no issuance moves here at all: under v1 mandatory
+		/// privacy the author is paid in notes like everyone else, and the only
+		/// thing that knows who the author is is the payload its own node
+		/// supplied.
 		fn account_fee(fee_quanta: u128) -> Result<BalanceOf<T>, DispatchError> {
 			if fee_quanta == 0 {
 				return Ok(Zero::zero());
@@ -1624,72 +1829,104 @@ pub mod pallet {
 			if author_quanta == 0 {
 				return Ok(fee);
 			}
-			let author_planck = author_quanta.saturating_mul(POOL_QUANTUM);
-			let author_amount: BalanceOf<T> =
-				author_planck.try_into().map_err(|_| Error::<T>::ValueOutOfRange)?;
-
-			let Some(author) = qp_wormhole::extract_author_from_digest::<T::AccountId, _>(
-				frame_system::Pallet::<T>::digest().logs.iter(),
-			) else {
-				// No author in the digest, which is the shape of a test block or
-				// a non-mined block. The share stays unminted, which is the
-				// same outcome as burning it.
-				return Ok(fee);
-			};
-
-			// The credit is `increase_balance`. `Mutate::mint_into` deposits
-			// `pallet_balances::Event::Minted`, which the runtime's
-			// `WormholeProofRecorderExtension` scans for and turns into a
-			// wormhole leaf of its own; this pallet records that leaf itself,
-			// just below, so the pair would credit one balance against two
-			// independent leaves and leave the author able to exit twice what
-			// it was paid. `pallet-wormhole` states the same rule at its
-			// `credit_and_record`. Today the scan does not reach a bare
-			// extrinsic, which is an accident of one default method and not a
-			// property to lean on.
-			//
-			// `increase_balance` leaves total issuance alone, so the issuance
-			// the value lost when it was shielded is put back here explicitly.
-			// That is the half of the fee that is not burned.
-			match <T::Currency as Unbalanced<_>>::increase_balance(
-				&author,
-				author_amount,
-				Precision::Exact,
-			) {
-				Ok(credited) => {
-					// Checked, the way `Mutate::mint_into` checks before it
-					// raises a balance. A saturating add would leave the
-					// author's balance raised against a capped issuance, so
-					// issuance would under-report the sum of balances with
-					// nothing on chain marking the divergence.
-					let issuance = <T::Currency as Inspect<_>>::total_issuance()
-						.checked_add(&credited)
-						.ok_or(Error::<T>::ValueOutOfRange)?;
-					<T::Currency as Unbalanced<_>>::set_total_issuance(issuance);
-					// Without the leaf the credit is frozen: a QPoW-derived
-					// author account has no signing key and a wormhole leaf is
-					// its only spend path.
-					T::ProofRecorder::record_transfer_proof(
-						None,
-						T::MintingAccount::get(),
-						author.clone(),
-						credited,
-					);
-					Self::deposit_event(Event::AuthorFeePaid { author, amount: credited });
-				},
-				Err(error) => {
-					// A mint below the existential deposit is the realistic
-					// failure. The share stays unminted; failing every
-					// settlement in the batch over one small credit would be
-					// the worse outcome.
-					log::debug!(
-						target: "runtime::shielded",
-						"author fee mint failed: {error:?}"
-					);
-				},
-			}
+			let author_amount = Self::fee_planck(author_quanta)?;
+			PendingCoinbaseFee::<T>::mutate(|pending| {
+				*pending = pending.saturating_add(author_amount)
+			});
+			Self::deposit_event(Event::AuthorFeeAccrued { amount: author_amount });
 
 			Ok(fee)
+		}
+
+		/// The block author, through the one seam this pallet reads consensus
+		/// through. See [`Config::FindAuthor`].
+		pub fn block_author() -> Option<T::AccountId> {
+			T::FindAuthor::find_author(
+				frame_system::Pallet::<T>::digest()
+					.logs
+					.iter()
+					.filter_map(|log| log.as_pre_runtime()),
+			)
+		}
+
+		/// Mint this block's coinbase note.
+		///
+		/// `minted` is the emission `pallet-mining-rewards` computed plus the
+		/// transaction fees it collected, which is value that is not in
+		/// `Balances::total_issuance()`: fees were burned when their imbalance
+		/// dropped and emission has not been created yet. Adding it to
+		/// [`PoolValue`] is what creates it, in the pool, as a note. The
+		/// author's share of this block's settled fees comes with it.
+		///
+		/// Returns the credit when there is no note to mint it into, and the
+		/// caller holds it for the next block. Sub-quantum change stays in
+		/// [`PendingCoinbaseFee`] for the same reason: a note's value is a
+		/// whole number of pool quanta, and nothing is allowed to vanish
+		/// between the two books.
+		fn mint_coinbase(minted: BalanceOf<T>) -> Result<(), BalanceOf<T>> {
+			let Some(payload) = PendingCoinbase::<T>::take() else {
+				// No coinbase inherent in this block. The inherent check
+				// refuses such a block on import, so this is reachable only in
+				// a runtime test or a block built by something that is not a
+				// Qnero node.
+				if !minted.is_zero() {
+					Self::deposit_event(Event::CoinbaseDeferred { amount: minted });
+				}
+				return Err(minted);
+			};
+
+			let pending_fee = PendingCoinbaseFee::<T>::get();
+			let total = minted.saturating_add(pending_fee);
+			let Ok(total_planck) = TryInto::<u128>::try_into(total) else {
+				return Err(minted);
+			};
+			let quanta_u128 = total_planck / POOL_QUANTUM;
+			let change = total_planck % POOL_QUANTUM;
+			let Ok(quanta) = u64::try_from(quanta_u128) else {
+				return Err(minted);
+			};
+			// The 62-bit cap, on this creation path like every other. The
+			// emission cannot reach it at any supply this chain has, and the
+			// check is here because what it protects is the argument behind the
+			// circuit's balance equation.
+			if quanta == 0 || quanta > qnero_circuit::chain::MAX_VALUE {
+				return Err(minted);
+			}
+			let Some(commitment) = qnero_circuit::chain::commitment(&payload.inner, quanta) else {
+				// Refused at the inherent, so unreachable here.
+				return Err(minted);
+			};
+			let Ok(leaf_index) = T::ZkTree::insert_commitment(commitment) else {
+				return Err(minted);
+			};
+			let Ok(value) =
+				TryInto::<BalanceOf<T>>::try_into(quanta_u128.saturating_mul(POOL_QUANTUM))
+			else {
+				return Err(minted);
+			};
+			let Ok(change) = TryInto::<BalanceOf<T>>::try_into(change) else {
+				return Err(minted);
+			};
+
+			let block_number = frame_system::Pallet::<T>::block_number();
+			// Only when there is one. A derived coinbase carries no payload and
+			// an empty entry would be a key the wallet reads for nothing.
+			if !payload.ciphertext.is_empty() {
+				Ciphertexts::<T>::insert(leaf_index, &payload.ciphertext);
+			}
+			LeafBlocks::<T>::insert(leaf_index, block_number);
+			CoinbaseValues::<T>::insert(leaf_index, quanta);
+			PoolValue::<T>::mutate(|pool| *pool = pool.saturating_add(value));
+			PendingCoinbaseFee::<T>::put(change);
+
+			Self::deposit_event(Event::CoinbaseMinted {
+				block_number,
+				leaf_index,
+				inner: payload.inner,
+				value,
+				ciphertext: payload.ciphertext.to_vec(),
+			});
+			Ok(())
 		}
 
 		/// Transaction-pool dedup tag: a hash of the submission's nullifiers,
@@ -1726,6 +1963,39 @@ pub mod pallet {
 				}
 			}
 			sp_io::hashing::blake2_256(&preimage)
+		}
+	}
+
+	/// Where `pallet-mining-rewards` pays the block reward.
+	///
+	/// The reward does not reach an account. It becomes the value of this
+	/// block's coinbase note, beside the author's share of the fees the block
+	/// settled, and the pool stands behind both.
+	impl<T: Config> CoinbaseSink<BalanceOf<T>> for Pallet<T> {
+		fn deposit_coinbase(amount: BalanceOf<T>) -> Result<(), BalanceOf<T>> {
+			Self::mint_coinbase(amount)
+		}
+	}
+
+	/// Value the pool holds, for a supply measure that has to cover both books.
+	///
+	/// `Balances::total_issuance()` counts transparent balances and nothing
+	/// else: shielding burns from the shielder and credits [`PoolValue`], so
+	/// the planck that moved into the pool left issuance behind. Under v1 that
+	/// is where nearly every planck ends up, so an emission schedule that
+	/// measured supply by issuance alone would see supply fall as the pool
+	/// filled and mint faster forever. `pallet-mining-rewards` adds this to the
+	/// issuance it reads, and the sum is the whole supply.
+	///
+	/// [`PendingCoinbaseFee`] is in it because that value is inside the pool
+	/// too: it left [`PoolValue`] on its way to a note that has not been minted
+	/// yet, and it is minted into one in the same block unless the block has no
+	/// coinbase at all.
+	pub struct ShieldedSupply<T>(core::marker::PhantomData<T>);
+
+	impl<T: Config> Get<BalanceOf<T>> for ShieldedSupply<T> {
+		fn get() -> BalanceOf<T> {
+			PoolValue::<T>::get().saturating_add(PendingCoinbaseFee::<T>::get())
 		}
 	}
 }

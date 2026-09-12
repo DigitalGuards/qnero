@@ -13,8 +13,8 @@ use sp_runtime::{
 	BuildStorage, DigestItem,
 };
 
-// Re-export shared test helpers from qp_wormhole
-pub use qp_wormhole::{TestMiner, MINTING_ACCOUNT};
+// Re-export the shared test helper from qp_wormhole
+pub use qp_wormhole::TestMiner;
 
 // Configure a mock runtime to test the pallet.
 frame_support::construct_runtime!(
@@ -91,74 +91,89 @@ impl pallet_balances::Config for Test {
 }
 
 parameter_types! {
-	/// Uses the shared MINTING_ACCOUNT constant from qp_wormhole.
-	pub const MintingAccount: sp_core::crypto::AccountId32 = MINTING_ACCOUNT;
 	pub const Unit: u128 = UNIT;
-}
-
-/// Recorded transfer proof for testing
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordedTransferProof {
-	pub asset_id: Option<u32>,
-	pub from: sp_core::crypto::AccountId32,
-	pub to: sp_core::crypto::AccountId32,
-	pub amount: u128,
+	/// The value the shielded pool holds. Zero unless a test says otherwise;
+	/// the emission schedule measures supply across both books.
+	pub static ShieldedSupply: Balance = 0;
 }
 
 thread_local! {
-	/// Storage for recorded transfer proofs (for test verification)
-	static RECORDED_PROOFS: RefCell<Vec<RecordedTransferProof>> = const { RefCell::new(Vec::new()) };
+	// Every coinbase credit the pallet handed to the pool, in order.
+	static COINBASE_CREDITS: RefCell<Vec<u128>> = const { RefCell::new(Vec::new()) };
+	// Whether the pool refuses the credit, which is what a block with no
+	// coinbase inherent looks like from here.
+	static COINBASE_REFUSES: RefCell<bool> = const { RefCell::new(false) };
 }
 
-/// Mock proof recorder that tracks recorded proofs for test verification
-pub struct MockProofRecorder;
+/// Stands in for `pallet-shielded`: it records what it was asked to mint into
+/// the block's coinbase note, and can refuse.
+pub struct MockCoinbaseSink;
 
-impl MockProofRecorder {
-	/// Get all recorded transfer proofs
-	pub fn get_recorded_proofs() -> Vec<RecordedTransferProof> {
-		RECORDED_PROOFS.with(|proofs| proofs.borrow().clone())
+impl MockCoinbaseSink {
+	/// Every credit taken, in order.
+	pub fn credits() -> Vec<u128> {
+		COINBASE_CREDITS.with(|credits| credits.borrow().clone())
 	}
 
-	/// Clear all recorded proofs (call at start of tests)
+	/// What the pool has taken in total.
+	pub fn total() -> u128 {
+		COINBASE_CREDITS.with(|credits| credits.borrow().iter().sum())
+	}
+
 	pub fn clear() {
-		RECORDED_PROOFS.with(|proofs| proofs.borrow_mut().clear());
+		COINBASE_CREDITS.with(|credits| credits.borrow_mut().clear());
+		Self::set_refusing(false);
 	}
 
-	/// Get the last recorded proof
-	pub fn last_proof() -> Option<RecordedTransferProof> {
-		RECORDED_PROOFS.with(|proofs| proofs.borrow().last().cloned())
-	}
-
-	/// Get the number of recorded proofs
-	pub fn proof_count() -> usize {
-		RECORDED_PROOFS.with(|proofs| proofs.borrow().len())
+	/// Make the next credits fail, the way a block with no coinbase inherent
+	/// does.
+	pub fn set_refusing(refusing: bool) {
+		COINBASE_REFUSES.with(|refuses| *refuses.borrow_mut() = refusing);
 	}
 }
 
-impl qp_wormhole::TransferProofRecorder<sp_core::crypto::AccountId32, u32, u128>
-	for MockProofRecorder
-{
-	fn record_transfer_proof(
-		asset_id: Option<u32>,
-		from: sp_core::crypto::AccountId32,
-		to: sp_core::crypto::AccountId32,
-		amount: u128,
-	) -> bool {
-		RECORDED_PROOFS.with(|proofs| {
-			proofs.borrow_mut().push(RecordedTransferProof { asset_id, from, to, amount });
-		});
-		true
+impl qp_coinbase::CoinbaseSink<u128> for MockCoinbaseSink {
+	fn deposit_coinbase(amount: u128) -> Result<(), u128> {
+		if COINBASE_REFUSES.with(|refuses| *refuses.borrow()) {
+			return Err(amount);
+		}
+		COINBASE_CREDITS.with(|credits| credits.borrow_mut().push(amount));
+		Ok(())
+	}
+}
+
+/// The mock's block-author seam, which is the runtime's: the QPoW pre-runtime
+/// digest carries the miner's inner hash and the author account is the
+/// wormhole address derived from it. The pallet reads the author only through
+/// `Config::FindAuthor`, so this is the whole of what a test stands in for.
+pub struct QpowAuthor;
+
+impl frame_support::traits::FindAuthor<sp_core::crypto::AccountId32> for QpowAuthor {
+	fn find_author<'a, I>(digests: I) -> Option<sp_core::crypto::AccountId32>
+	where
+		I: 'a + IntoIterator<Item = (sp_runtime::ConsensusEngineId, &'a [u8])>,
+	{
+		for (engine, data) in digests {
+			if engine != POW_ENGINE_ID {
+				continue;
+			}
+			let preimage: [u8; 32] = data.try_into().ok()?;
+			return qp_wormhole::derive_wormhole_address(preimage)
+				.ok()
+				.map(sp_core::crypto::AccountId32::new);
+		}
+		None
 	}
 }
 
 impl pallet_mining_rewards::Config for Test {
 	type Currency = Balances;
-	type AssetId = u32;
-	type ProofRecorder = MockProofRecorder;
+	type CoinbaseSink = MockCoinbaseSink;
+	type ShieldedSupply = ShieldedSupply;
+	type FindAuthor = QpowAuthor;
 	type WeightInfo = ();
 	type MaxSupply = MaxSupply;
 	type EmissionDivisor = EmissionDivisor;
-	type MintingAccount = MintingAccount;
 	type Unit = Unit;
 }
 
@@ -168,6 +183,8 @@ pub const MINER_2: TestMiner = TestMiner(2);
 
 // Build genesis storage according to the mock runtime.
 pub fn new_test_ext() -> sp_io::TestExternalities {
+	MockCoinbaseSink::clear();
+	ShieldedSupply::set(0);
 	let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
 
 	pallet_balances::GenesisConfig::<Test> {
