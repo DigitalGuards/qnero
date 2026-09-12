@@ -1,0 +1,45 @@
+[package]
+name = "qnero-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qnero v0 wallet CLI: keygen, shield, scan, spend, submit"
+
+[[bin]]
+name = "qnero-wallet"
+path = "src/main.rs"
+
+[dependencies]
+qnero-notes = { workspace = true }
+qnero-circuit = { workspace = true }
+qnero-prover = { workspace = true }
+qnero-circuit-builder = { workspace = true }
+qnero-pqcrypto = { workspace = true }
+qp-poseidon-core = { workspace = true }
+qp-rusty-crystals-dilithium = { workspace = true }
+anyhow = { workspace = true, features = ["std"] }
+clap = { workspace = true }
+codec = { workspace = true }
+frame-metadata = { workspace = true }
+scale-info = { workspace = true }
+blake2 = { workspace = true }
+twox-hash = { workspace = true }
+ureq = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# The public-batch measurement builds an aggregator's circuit over the wallet's
+# own private-batch proof. Nothing in the wallet itself aggregates.
+qnero-aggregator = { workspace = true }
+
+[features]
+default = []
+# Let plonky2 use rayon while proving. Off by default, the way `qnero-prover`
+# keeps it off: a wallet that saturates every core unasked is a wallet that
+# freezes the machine it runs on. Turn it on and bound the pool with
+# RAYON_NUM_THREADS; the proofs are identical either way.
+parallel = ["qnero-prover/parallel"]

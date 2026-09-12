@@ -150,9 +150,13 @@ KEM randomness being fresh per output. `encrypt_note` documents the
 requirement and nothing enforces it, so reusing `kem_randomness` across two
 outputs to one recipient encrypts both payloads under one ChaCha20-Poly1305 key
 and nonce, which leaks the XOR of the two plaintexts and the Poly1305
-authentication key. M5 owns two things here: make per-output freshness an
-invariant a wallet cannot violate, and decide whether to feed `cm` into the
-derivation so that a reuse bug is survivable.
+authentication key. M5 drew every output's randomness from the operating
+system's CSPRNG at the point of encryption, so the wallet has no variable to
+reuse and no path that could: `crates/qnero-wallet/src/wallet.rs` calls
+`random_bytes()` once per output. That closes it for this wallet and leaves the
+API able to be misused by the next one. The second half stays open: feeding
+`cm` into the AEAD key derivation would make a reuse bug survivable, and it is
+a wire-format change that belongs beside the M6 coinbase.
 
 ## 6. v0 spend circuit (leaf)
 
@@ -256,7 +260,7 @@ built, including the open decisions it closed.
 | M2 | Leaf circuit fork with note fragments, tests, gate profile, prove/verify bench | DONE 2026-09-11 (319 gates at M2, 320 after the M3 padding sentinel; degree_bits 9, 26 public inputs; see `docs/CIRCUIT.md`) |
 | M3 | Private and public batch aggregators on the new PI layout | DONE 2026-09-11 (private batch 5 + 21N public inputs, ZK, N = 7; public batch forwards each inner verbatim under an aggregator address and refuses a repeated inner in circuit; see `docs/CIRCUIT.md` section 8) |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | DONE 2026-09-12 (chain forked as a git subtree at `chain/`; `pallet-shielded` settles private and public batches, `shield` is the only v0 entry, `pallet-zk-tree` stores raw `Hash256` leaves; N = 6, n = 53; see `docs/CIRCUIT.md` section 9 and `docs/OPS-DEV.md`) |
-| M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | 2 weeks |
+| M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | DONE 2026-09-12 (`crates/qnero-wallet`, binary `qnero-wallet`: keygen, address, shield, sync, balance, send, status; hand-encoded extrinsics over JSON-RPC, fee floor read from runtime metadata, notes in one JSON store beside the seed; see `docs/WALLET.md`, and `docs/BENCH.md` for the public batch at `n = 53`, which M4 left unmeasured) |
 | M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | 2 weeks |
 
 About 10 to 12 weeks to a private testnet. The measured risk to retire first

@@ -2020,3 +2020,73 @@ fn a_slot_with_one_zero_commitment_is_refused_before_any_write() {
 		assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 0);
 	});
 }
+
+// ===========================================================================
+// The public batch at the chain default, through the embedded verifier
+// ===========================================================================
+
+/// Time `validate_public_batch` over a real `n = 53` proof.
+///
+/// Ignored, and it needs a proof: producing one is a full recursive run over
+/// fifty-three inner private batches, which is a minute of CPU and about ten
+/// gigabytes of peak memory, so it is not a thing a `cargo test` run should
+/// do. `crates/qnero-wallet/tests/public_batch_bench.rs` produces one against
+/// a dev chain and writes it to `target/qnero-public-batch-53.bin`; point
+/// `QNERO_PUBLIC_BATCH_PROOF` somewhere else to use another.
+///
+/// What this measures is everything the chain pays before it settles
+/// anything: the size gate, the deserialization against the embedded
+/// verifier's circuit data, the canonical-encoding round trip, the ZK verify
+/// and the public-input parse. The figure is native. A wasm runtime pays a
+/// multiple of it, which is why the declared weight for a public-batch verify
+/// is a ceiling chosen to be wrong in the safe direction (`weights.rs`).
+///
+/// It is also the first check that a proof produced at these dimensions is one
+/// this runtime's embedded verifier accepts at all. The two are built from the
+/// same circuit code and the same `N`, and nothing had ever tested that.
+#[test]
+#[ignore]
+fn a_real_public_batch_verifies_through_the_embedded_verifier() {
+	use std::time::Instant;
+
+	let path = std::env::var("QNERO_PUBLIC_BATCH_PROOF").unwrap_or_else(|_| {
+		format!("{}/../../../target/qnero-public-batch-53.bin", env!("CARGO_MANIFEST_DIR"))
+	});
+	let proof = match std::fs::read(&path) {
+		Ok(bytes) => bytes,
+		Err(error) => {
+			eprintln!("no public-batch proof at {path}: {error}");
+			eprintln!(
+				"produce one with QNERO_DEV_NODE=... cargo test --release -p qnero-wallet \
+				 --features parallel --test public_batch_bench -- --ignored --nocapture"
+			);
+			return;
+		},
+	};
+
+	new_test_ext().execute_with(|| {
+		assert!(
+			proof.len() <= crate::MAX_PROOF_BYTES,
+			"a public batch serializes to {} bytes against a {} byte cap",
+			proof.len(),
+			crate::MAX_PROOF_BYTES,
+		);
+
+		let started = Instant::now();
+		let bundle = Shielded::validate_public_batch(&proof).expect("the public batch verifies");
+		let elapsed = started.elapsed();
+
+		println!("public batch proof            {} bytes", proof.len());
+		println!("validate_public_batch native  {elapsed:.2?}");
+		println!("settleable segments           {}", bundle.segments.len());
+		println!(
+			"real slots                    {}",
+			bundle.segments.iter().map(|segment| segment.slots.len()).sum::<usize>()
+		);
+
+		// One real inner beside fifty-two padding ones: the padding segments
+		// are dropped at the parse, so what survives is the one segment that
+		// settles anything.
+		assert_eq!(bundle.segments.len(), 1);
+	});
+}

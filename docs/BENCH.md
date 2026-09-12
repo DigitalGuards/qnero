@@ -137,11 +137,12 @@ Reading these:
 - **Phone-class memory.** About 2 GiB peak. Upstream's own guidance is that
   `degree_bits = 16` limits proving to 6 GB+ devices, which matches.
 
-Not measured yet: the public batch at the chain default of 53 inner proofs.
+Not measured at M3: the public batch at the chain default of 53 inner proofs.
 The tests exercise it at 2 inner proofs over 2-leaf batches, which says nothing
 useful about its cost at production size. Upstream's 53-batch number is about
 21 s of proving on 20 threads, and the Qnero public batch is the same shape
-with a wider forwarded region.
+with a wider forwarded region. M5 measured it: 29 s on four threads, and the
+M5 section below carries the rest.
 
 ## M4: the artifact set a runtime embeds (2026-09-12)
 
@@ -178,14 +179,101 @@ before it is copied or parsed.
 | proof | serialized bytes | source |
 |---|---:|---|
 | private batch, `N = 6` | 157476 | measured at M3, asserted against the cap by `a_real_private_batch_settles_end_to_end` |
-| public batch, `n = 53`, `N = 6` | about 213000 | **estimate; the proof has never been produced** |
+| public batch, `n = 53`, `N = 6` | 237544 | measured at M5, see below |
 
 The private batch is the half a test covers: the end-to-end test proves one at
 the chain's `N` and asserts its length against the cap, so a circuit change that
-pushed it past 512 KiB fails in the test suite first. The public batch
-has never been produced at `n = 53` at any speed, so its figure is an estimate:
-a recursive proof is about the same size whatever it wraps, about 157 KB, plus
-`public_batch_pi_len(53, 6) = 6947` public-input felts at eight bytes, roughly
-213 KB in total. Nothing enforces it. If the estimate is wrong the pallet
-refuses every public-batch settlement with `ProofTooLarge` and no test says so
-first. M5 owes the measurement, in the same run that times the verify.
+pushed it past 512 KiB fails in the test suite first. The public batch figure
+was an estimate at M4 and is a measurement at M5: 237544 bytes, against an
+estimate of about 213000 built from a 157 KB recursive proof plus
+`public_batch_pi_len(53, 6) = 6947` public-input felts at eight bytes. The
+estimate was 10 percent low and the margin against the cap is 2.2x. Nothing
+enforces it in a test that runs by default: producing the proof is a minute of
+CPU and about ten gigabytes of peak memory, so the measurement is an ignored
+test. A circuit change that grew a public batch past 512 KiB would refuse every
+public-batch settlement with `ProofTooLarge` and no default test would say so
+first. The M5 section below has the whole measurement.
+
+## M5: the wallet, and the public batch at `n = 53` (2026-09-12)
+
+Same development workstation (20 cores, WSL2). Everything below was measured
+with `RAYON_NUM_THREADS=4 nice -n 19` and the crate's `parallel` feature on,
+against a `--dev --tmp` node that was producing about one block a second.
+
+### What a wallet pays per transaction
+
+`qnero-wallet send`, at the chain's `N = 6`, one real transfer and five padding
+slots, measured over the two payments of the end-to-end run in
+`docs/OPS-DEV.md`:
+
+| | `--features parallel`, `RAYON_NUM_THREADS=4` |
+|---|---:|
+| leaf + private batch circuit build, once per process | 2.4 s |
+| private batch prove | 3.3 to 3.5 s |
+| private batch proof | 150908 bytes |
+| submit to inclusion | 0.5 to 1.6 s |
+| whole `send` command, wall clock | 6.4 s |
+
+The proof is 150908 bytes at `N = 6`, where M3 measured 157476 at `N = 7`: a
+recursive proof's size moves a little with the number of inner verifications
+and mostly with the FRI config.
+
+Proving is 3.4 s where M3 measured 6.4 s for `N = 7`. That is the halving M4
+bought when it chose six slots: seven recursive verifiers are 24324 gates and
+do not fit `degree_bits = 15` once blinding adds its rows, six do.
+
+### The public batch at the chain default
+
+**This is the M4 open item, and it is now measured, verified through the
+pallet's embedded verifier, and settled on a dev chain.** The shape is the one
+`docs/CIRCUIT.md` section 9.1 describes: `n = 53` inner private batches of
+`N = 6` leaf slots, one real inner carrying one real transfer and 52 padding
+inners. `crates/qnero-wallet/tests/public_batch_bench.rs` is the measurement
+and `a_real_public_batch_verifies_through_the_embedded_verifier` in
+`chain/pallets/shielded/src/tests.rs` is the verify.
+
+| | `n = 53`, `N = 6` |
+|---|---:|
+| public batch circuit build | 28.4 to 28.9 s |
+| public batch prove | 28.9 to 29.9 s |
+| proof | **237544 bytes** |
+| public inputs | 6947 felts |
+| native verify, warm | 5.6 ms |
+| native verify, first in the process | 156 ms |
+| `validate_public_batch` in the pallet, native | **6.04 ms** |
+| `submit_public_batch` extrinsic | 241027 bytes |
+| peak RSS of the whole measurement process | 9.50 GiB |
+
+Three numbers are worth reading closely.
+
+- **237544 bytes against a 512 KiB gate.** `docs/BENCH.md` estimated about
+  213000 and `MAX_PROOF_BYTES` is 524288, so the estimate was 10 percent low
+  and the margin is 2.2x. Nothing enforces it: the end-to-end test asserts the
+  *private* batch against the cap, and the public batch is now measured once.
+  A circuit change that grew a proof by 2.2x would refuse every public-batch
+  settlement with `ProofTooLarge` and no test would say so first.
+- **6.04 ms to verify on chain, against 4.2 ms for a private batch.** Verify is
+  flat in what a proof wraps, which is the whole reason recursion is worth its
+  proving cost: 53 inner batches of up to 6 transfers each settle for about the
+  price of verifying one. The figure is native; a wasm runtime pays a multiple
+  of it, and `chain/pallets/shielded/src/weights.rs` says why its declared
+  weight is a ceiling.
+- **The first verify in a process is 156 ms and every one after it is 5.6 ms.**
+  Measured three times in a row in the proving process, which is holding about
+  9.5 GiB of circuit data at that point. The pallet's own 6.04 ms agrees with
+  the warm figure, so the cold number is first-touch cost in a large heap and
+  says nothing about what a node pays.
+
+Peak RSS is the whole measurement process: the wallet's leaf and private-batch
+circuits, the public-batch circuit, and one proving run of each. An aggregator
+that only ever proves public batches would peak lower; nothing here separates
+the terms.
+
+The anchor window is the operational constraint, and it is tighter than the
+proving cost suggests. A segment must name a block inside `BlockHashWindow`,
+256 blocks, and everything from taking the anchor to inclusion has to fit
+inside it: at `n = 53` that is about 33 s of proving on top of the inner
+batch's 3.4 s. The measurement builds every circuit before it takes an anchor,
+which is what keeps the 28 s build out of the window. An aggregator collecting
+inners from wallets has less room: its participants' anchors are already older
+when they arrive.

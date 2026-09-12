@@ -187,6 +187,20 @@ impl WalletProver {
         Ok(self.prove_submission(transfers)?.to_bytes())
     }
 
+    /// An all-padding private batch: the template a public batch fills its
+    /// empty inner slots with.
+    ///
+    /// Not a wallet's business, and it is here because the wallet is what
+    /// holds a canonical private-batch prover. An aggregator that wraps
+    /// inners from wallets needs one padding inner of exactly this shape, and
+    /// building a second private-batch circuit to produce it costs seconds
+    /// and proves nothing the first one did not. It settles nothing: a
+    /// submission whose every segment is padding is refused with
+    /// `NothingToSettle`.
+    pub fn padding_batch_proof(&self) -> Result<Proof> {
+        self.batch.prove_padding_batch()
+    }
+
     /// Verifier data for the batch circuit, so a wallet can check its own
     /// proof before sending it.
     pub fn batch_verifier_data(

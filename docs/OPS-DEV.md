@@ -564,3 +564,274 @@ left. What this run checked:
   behind that version number while leaving the metadata's structure alone, which
   is the worse half of that issue: a node on the previous runtime reads the same
   call and error indices and disagrees about which submissions are admissible.
+
+
+## The M5 wallet run, 2026-09-12
+
+The wallet CLI end to end against a fresh `--dev --tmp` node, on the same
+development workstation. `docs/WALLET.md` is the reference for the commands and
+the store format; this is the run that produced the M5 numbers.
+
+Build:
+
+```
+nice -n 19 cargo build -j 2 --release -p qnero-wallet --features parallel
+export RAYON_NUM_THREADS=4
+```
+
+Gates, all green:
+
+```
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   248 passed, 0 failed, 4 ignored
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+```
+
+The chain half was built and tested with `-j 4` from `chain/`:
+
+```
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo test -j 4 --release \
+  -p pallet-shielded --lib -- --ignored a_real_public_batch --nocapture
+```
+
+### The run
+
+Addresses are truncated in the middle: a `qn1` address is 2572 characters,
+almost all of it the ML-KEM-1024 encapsulation key.
+
+```text
+=== 1. start a fresh dev node ===
+
+$ nice -n 19 ./target/release/quantus-node --dev --tmp   (backgrounded, pidfile)
+
+$ ss -ltn | grep 9944
+LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*          
+LISTEN 0      1024            [::1]:9944          [::]:*          
+
+=== 2. wallet A ===
+
+$ qnero-wallet --file A.seed keygen
+seed    A.seed
+store   A.seed.store.json
+address qn1q9807djpussfuyauf3pekee9...uc3knnjz
+
+The seed is unencrypted hex at mode 0600. Anyone who can read it can spend every note this wallet holds.
+
+$ qnero-wallet status
+node              http://127.0.0.1:9944
+runtime           spec 152, transaction 6
+chain head        8 (5a86f1da70307b62746c071c0a7f4b83ad5389a355538d62d28f6c5e4d5e3915)
+tree leaves       13
+tree depth        2
+tree root         900fc49126275fe988cd7d95a29da563adb251b45ae6b3c2e39a7a933bfc4077
+last synced block (no wallet at qnero-wallet.seed)
+
+=== 3. shield 1000 quanta from the dev account alice into A ===
+
+$ qnero-wallet --file A.seed shield --from-dev-account alice --amount 1000 --memo first shield
+shielding 1000 quanta (10000000000000 planck) from alice
+commitment  f86cd30d42970ba0c452c0179a979b8270cf593991edc7673c1a0308cce042ee
+included    block 9 after 1.51s
+synced      1 new note(s), unspent total 1000 quanta
+
+$ qnero-wallet --file A.seed balance
+address        qn1q9807djpussfuyauf3pekee9...uc3knnjz
+unspent        1000 quanta
+pending        0 quanta
+synced through block 9
+
+      leaf        quanta    block    state  memo
+        13          1000        9  unspent  first shield
+
+=== 4. wallet B ===
+
+$ qnero-wallet --file B.seed keygen
+seed    B.seed
+store   B.seed.store.json
+address qn1qysprvaluam5kp2ztdj3mn2a...zgg7nzll
+
+The seed is unencrypted hex at mode 0600. Anyone who can read it can spend every note this wallet holds.
+
+=== 5. a fee below the floor is refused ===
+
+$ qnero-wallet --file A.seed send --to qn1qysprvaluam5kp2ztdj3mn2a...zgg7nzll --amount 300 --fee 1 --memo payment to B
+Error: a fee of 1 quanta is below this submission's floor of 8. The pallet asks MinLeafFee (1) plus one quantum per started 512 bytes of ciphertext, and the two outputs here are 3474 bytes. The fee is a public input of the proof, so it cannot be raised afterwards: the settlement would be refused with PayloadUnderpaid.
+
+=== 6. A sends 300 quanta to B at the floor ===
+
+$ time qnero-wallet --file A.seed send --to <B> --amount 300 --memo 'payment to B'
+fee         8 quanta
+circuits    built in 2.26s (6 leaf slots per batch)
+anchor      block 11
+inputs      leaves [13] for 300 quanta plus 8 fee
+change      692 quanta
+proof       150908 bytes
+proving     3.52s
+inclusion   block 13 after 1.03s
+synced      1 new note(s), unspent total 692 quanta
+wall clock  6.98 s
+
+=== 7. B sees the note; A sees the input spent and its change ===
+
+$ qnero-wallet --file B.seed sync
+scanned leaves 0..22 at block 13
+received 1 note(s) worth 300 quanta
+newly spent 0
+unspent total 300 quanta
+
+$ qnero-wallet --file B.seed balance
+address        qn1qysprvaluam5kp2ztdj3mn2a...zgg7nzll
+unspent        300 quanta
+pending        0 quanta
+synced through block 13
+
+      leaf        quanta    block    state  memo
+        18           300       13  unspent  payment to B
+
+$ qnero-wallet --file A.seed sync
+scanned leaves 22..22 at block 13
+received 0 note(s) worth 0 quanta
+newly spent 0
+unspent total 692 quanta
+
+$ qnero-wallet --file A.seed balance
+address        qn1q9807djpussfuyauf3pekee9...uc3knnjz
+unspent        692 quanta
+pending        0 quanta
+synced through block 13
+
+      leaf        quanta    block    state  memo
+        13          1000        9    spent  first shield
+        19           692       13  unspent  
+
+=== 8. B spends the note it received, back to A ===
+
+$ time qnero-wallet --file B.seed send --to <A> --amount 100 --memo 'back to A'
+fee         8 quanta
+circuits    built in 2.33s (6 leaf slots per batch)
+anchor      block 13
+inputs      leaves [18] for 100 quanta plus 8 fee
+change      192 quanta
+proof       150908 bytes
+proving     3.51s
+inclusion   block 15 after 2.05s
+synced      1 new note(s), unspent total 192 quanta
+wall clock  8.05 s
+
+$ qnero-wallet --file A.seed sync
+scanned leaves 22..27 at block 15
+received 1 note(s) worth 100 quanta
+newly spent 0
+unspent total 792 quanta
+
+$ qnero-wallet --file A.seed balance
+address        qn1q9807djpussfuyauf3pekee9...uc3knnjz
+unspent        792 quanta
+pending        0 quanta
+synced through block 15
+
+      leaf        quanta    block    state  memo
+        13          1000        9    spent  first shield
+        19           692       13  unspent  
+        23           100       15  unspent  back to A
+
+$ qnero-wallet --file B.seed balance
+address        qn1qysprvaluam5kp2ztdj3mn2a...zgg7nzll
+unspent        192 quanta
+pending        0 quanta
+synced through block 15
+
+      leaf        quanta    block    state  memo
+        18           300       13    spent  payment to B
+        24           192       15  unspent  
+
+=== 9. the store on disk ===
+
+$ ls -l A.seed A.seed.store.json
+-rw------- 1 waterfall waterfall   65 Sep 12 08:26 A.seed
+-rw------- 1 waterfall waterfall 4275 Sep 12 08:26 A.seed.store.json
+
+$ jq '{version, next_leaf, last_synced_block, notes: [.notes[] | {leaf_index, value, spent, memo}]}' A.seed.store.json
+{
+  "version": 1,
+  "next_leaf": 27,
+  "last_synced_block": 15,
+  "notes": [
+    {
+      "leaf_index": 13,
+      "value": 1000,
+      "spent": true,
+      "memo": "first shield"
+    },
+    {
+      "leaf_index": 19,
+      "value": 692,
+      "spent": false,
+      "memo": ""
+    },
+    {
+      "leaf_index": 23,
+      "value": 100,
+      "spent": false,
+      "memo": "back to A"
+    }
+  ]
+}
+
+=== 10. status, then stop the node ===
+
+$ qnero-wallet status
+node              http://127.0.0.1:9944
+runtime           spec 152, transaction 6
+chain head        15 (08aeba750f3eb4eb21ae641086b5ef3ce71b98885839902fa3f3dac0fda15e17)
+tree leaves       27
+tree depth        3
+tree root         47aca2304a0d927d7d945decfbacd81da7200c1e6b90c9e32f05c38b888bc237
+last synced block (no wallet at qnero-wallet.seed)
+
+$ kill $(cat node.pid), then wait for 9944 to close
+9944 has no listener after 1s
+```
+
+### What this run checked
+
+- **The signed path.** `shield` builds a legacy signed extrinsic by hand, with
+  `MultiAddress::Id`, a 7219-byte `Dilithium87SignatureWithPublic` behind a
+  one-byte enum index and no length prefix, an immortal era, a nonce read from
+  the best block, and the twelve transaction extensions the runtime declares.
+  The signature is made under the FIPS 204 context `QUANTUS_EXTRINSIC` over the
+  blake2-256 of the payload. The account is Poseidon2 of the public key.
+- **The unsigned path.** `send` submits a bare `submit_private_batch` with no
+  signature, no nonce and no tip, and both of its nullifiers were in
+  `UsedNullifiers` at the inclusion block.
+- **The anchor.** Every spend rebuilt its anchoring header from
+  `chain_getHeader`'s six fields plus the re-encoded digest logs, hashed it with
+  Poseidon2 and compared the result against `chain_getBlockHash` before proving.
+- **The fee floor, read from metadata.** Two ciphertexts of 1731 and 1743 bytes
+  are 3474, so the floor is `MinLeafFee(1) + ceil(3474 / 512) = 8` quanta. The
+  wallet defaults to it, refuses `--fee 1` with the arithmetic spelled out, and
+  both settlements carried exactly 8.
+- **A received note is spendable.** The last leg spends the note B received
+  from A, whose `rho` the circuit derived from the two nullifiers A's leaf
+  published and whose value and randomness reached B only inside A's ciphertext.
+- **The books.** 1000 shielded, 300 paid, 692 change, 8 fee; then 100 paid back,
+  192 change, 8 fee. A holds 792 across two unspent notes and one spent, B holds
+  192 across one unspent note and one spent.
+
+### Timings, `RAYON_NUM_THREADS=4`
+
+| | |
+|---|---:|
+| `send` wall clock, whole command | 6.98 s and 8.05 s |
+| of which circuit build, once per process | 2.26 s and 2.33 s |
+| of which private batch proving | 3.52 s and 3.51 s |
+| of which submit to inclusion | 1.03 s and 2.05 s |
+| `shield` wall clock, submit to inclusion | 1.51 s |
+| private batch proof | 150908 bytes |
+
+The circuit build is paid once per process and a longer-lived wallet would pay
+it once per run. `docs/BENCH.md` carries these beside the public batch at
+`n = 53`, which this milestone measured for the first time.

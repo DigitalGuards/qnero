@@ -9,6 +9,7 @@ members = [
     "crates/qnero-verifier",
     "crates/qnero-aggregator",
     "crates/qnero-circuit-builder",
+    "crates/qnero-wallet",
 ]
 # The chain fork is its own workspace with its own toolchain and lock file, and
 # it lives inside this directory only because it is a git subtree. Excluding it
@@ -30,6 +31,7 @@ qnero-prover = { path = "crates/qnero-prover" }
 qnero-verifier = { path = "crates/qnero-verifier" }
 qnero-aggregator = { path = "crates/qnero-aggregator" }
 qnero-circuit-builder = { path = "crates/qnero-circuit-builder" }
+qnero-wallet = { path = "crates/qnero-wallet" }
 # no_std, and its `std` feature is empty, so nothing here asks for it: the
 # runtime links this crate through `qnero-circuit` on wasm.
 qp-poseidon-core = { version = "3.1.0", default-features = false }
@@ -45,3 +47,13 @@ thiserror = "1"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Wallet-side only. The chain fork pins the same major versions (its own
+# `Cargo.toml`), so an extrinsic this workspace encodes decodes over there.
+clap = { version = "4", features = ["derive"] }
+codec = { package = "parity-scale-codec", version = "3.7", features = ["derive"] }
+frame-metadata = { version = "23", features = ["std", "decode", "current"] }
+scale-info = { version = "2.11", features = ["std"] }
+blake2 = "0.10"
+twox-hash = "1.6"
+ureq = { version = "2.12", default-features = false }
+qp-rusty-crystals-dilithium = { version = "4.1.1", default-features = false, features = ["ml-dsa-87"] }
