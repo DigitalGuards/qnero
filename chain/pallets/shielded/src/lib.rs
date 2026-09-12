@@ -29,11 +29,13 @@
 //!   whose block anchor no longer resolves is skipped on the same argument: it can never settle,
 //!   and one reorg between an aggregator's proving run and inclusion would otherwise destroy the
 //!   whole batch.
-//! - **A bound on the payload a submission carries against the payload it settles.** A skipped
-//!   segment pays no fee, because it writes no permanent state, and its ciphertexts still occupy
-//!   block space and are still sponged into a `ct_digest` by every node. `MaxPayloadSlotRatio` is
-//!   what stops a submitter that controls how many of its own segments conflict from buying a
-//!   block's whole payload budget at one segment's fee.
+//! - **Every byte a submission carries is paid for by the slots it settles.** A skipped segment
+//!   pays no fee, because it writes no permanent state, and its ciphertexts still occupy block
+//!   space and are still sponged into a `ct_digest` by every node. So the settling slots owe
+//!   `settling slots * MinLeafFee + ceil(carried bytes / CiphertextBytesPerFeeQuantum)` over the
+//!   whole submission, where the carried bytes are every ciphertext in the extrinsic, a skipped
+//!   segment's included. A griefed aggregator stays viable because a skipped position may be
+//!   emptied: a zero-length pair carries no bytes, binds nothing and prices nothing.
 //! - **`ct_digest`.** The circuit leaves it a free public input. The chain recomputes it over the
 //!   ciphertexts in the extrinsic, in output order, and rejects the slot when it differs.
 //! - **A minimum fee per real slot.** The leaf circuit's "at least one real input" constraint does
@@ -258,9 +260,14 @@ impl SettlementBundle {
 	/// This is the one statement of the order the `outputs` argument of a
 	/// settlement extrinsic follows, and it is the walk `Pallet::bind_payload`
 	/// makes: position `i` of `outputs` carries the two ciphertexts of the
-	/// `i`th real slot, skipped segments included. `Pallet::plan_settlement`
-	/// and `Pallet::settle` walk the segments themselves, because they need the
-	/// per-segment skip flag, and they count positions the same way.
+	/// `i`th real slot, skipped segments included. A position whose segment
+	/// this submission skips may instead be a pair of zero-length ciphertexts,
+	/// which carries no bytes and binds nothing; the position itself stays,
+	/// because the mapping from slot to position cannot depend on which
+	/// segments were settled by someone else in the meantime.
+	/// `Pallet::plan_settlement` and `Pallet::settle` walk the segments
+	/// themselves, because they need the per-segment skip flag, and they count
+	/// positions the same way.
 	pub fn real_slots(&self) -> impl Iterator<Item = &RealSlot> {
 		self.segments.iter().flat_map(|segment| segment.slots.iter())
 	}
@@ -407,6 +414,15 @@ pub mod pallet {
 		/// the other slot mints two spendable notes, so nothing else bounds how
 		/// many leaves a prover can produce, and each one writes two nullifier
 		/// entries and two tree slots into permanent state.
+		///
+		/// Two floors read it, and they answer two questions. The per-slot
+		/// floor asks whether a settling slot pays for the permanent state it
+		/// writes. The submission floor in [`Pallet::plan_settlement`] asks
+		/// whether the settling fees of the whole submission cover every byte
+		/// the submission carries, the bytes of its skipped segments included.
+		/// A submission that carries only what it settles passes the second
+		/// whenever it passes the first, because `sum(ceil(b_i / q))` is at
+		/// least `ceil(sum(b_i) / q)`.
 		#[pallet::constant]
 		type MinLeafFee: Get<u64>;
 
@@ -427,6 +443,11 @@ pub mod pallet {
 		/// quanta and padding to the cap is free, which is the whole of what
 		/// this term exists to price.
 		///
+		/// The same divisor prices the submission as a whole. The settling fees
+		/// must cover `ceil(carried bytes / CiphertextBytesPerFeeQuantum)` over
+		/// every ciphertext in the extrinsic, so one byte costs the same
+		/// whether the slot that published it settles or is skipped.
+		///
 		/// A wallet can compute the floor before it proves: the fee is a public
 		/// input and the ciphertext sizes are known by the time the proof is
 		/// built. Zero is refused by `integrity_test`.
@@ -441,33 +462,6 @@ pub mod pallet {
 		/// Size cap on one note ciphertext.
 		#[pallet::constant]
 		type MaxCiphertextBytes: Get<u32>;
-
-		/// Largest ratio of real leaf slots a submission may carry to real
-		/// leaf slots it settles.
-		///
-		/// A skipped segment pays no fee, because it writes no permanent
-		/// state, and its slots still occupy positions in `outputs` that the
-		/// block carries and that every node sponges into a `ct_digest`. The
-		/// fee floor is the only anti-spam mechanism and it prices the settling
-		/// slots alone, so without a bound a submitter who controls how many of
-		/// its own segments already conflict buys the block's whole payload
-		/// budget at a fraction of what the same bytes cost when they settle.
-		/// Charging the skipped slots their own fee is not available: that fee
-		/// already left `PoolValue` when those slots first settled, so counting
-		/// it again would drift the pool's books from the sum of note values.
-		/// Charging the whole payload against the settling fee would make a
-		/// single griefed segment fatal, which is what the skip rule exists to
-		/// prevent. The ratio does both jobs.
-		///
-		/// Four leaves an ordinary grief of one or two segments out of
-		/// fifty-three settling untouched and refuses a submission that settles
-		/// one segment while carrying fifty-two. A private batch has one
-		/// segment, so it either settles whole at a ratio of one or settles
-		/// nothing and is refused before this rule is reached. Zero and one are
-		/// both treated as one, which is the strictest setting: a submission
-		/// may then carry no skipped payload at all.
-		#[pallet::constant]
-		type MaxPayloadSlotRatio: Get<u32>;
 
 		/// Weights.
 		type WeightInfo: WeightInfo;
@@ -610,12 +604,24 @@ pub mod pallet {
 		CiphertextDigestMismatch,
 		/// A ciphertext is longer than `MaxCiphertextBytes`.
 		CiphertextTooLarge,
-		/// The submission carries more real leaf slots than
-		/// `MaxPayloadSlotRatio` times the number it settles. A skipped
-		/// segment pays no fee, so without this bound the payload of a
-		/// submission is priced by the fraction of it the submitter chose to
-		/// let settle.
-		PayloadRatioExceeded,
+		/// A slot this submission settles carries an empty ciphertext.
+		///
+		/// A zero-length pair is the exemption a skipped position may take: it
+		/// carries no bytes, so nothing prices it and `bind_payload` has
+		/// nothing to bind. A settling slot appends two commitments and stores
+		/// two ciphertexts, so an empty field there would write an output note
+		/// its recipient can never find, behind a `ct_digest` nothing
+		/// evaluated.
+		EmptyCiphertext,
+		/// The settling fees do not cover the bytes the submission carries.
+		///
+		/// The floor is `settling slots * MinLeafFee + ceil(carried bytes /
+		/// CiphertextBytesPerFeeQuantum)`, over every ciphertext in the
+		/// extrinsic, a skipped segment's included. A skipped segment pays no
+		/// fee of its own, so this is what keeps a submitter that picks how
+		/// many of its own segments conflict from carrying payload nothing paid
+		/// for.
+		PayloadUnderpaid,
 		/// The settlement would take the tree past the depth the circuit can
 		/// prove.
 		TreeFull,
@@ -654,7 +660,10 @@ pub mod pallet {
 		/// Settle one private batch: the transaction a wallet submits.
 		///
 		/// `outputs` carries the two note ciphertexts of every real leaf slot,
-		/// in slot order, skipped segments included.
+		/// in slot order, skipped segments included. A position belonging to a
+		/// segment this submission skips may be emptied, and a submitter whose
+		/// segments went stale after it proved does exactly that: the settling
+		/// fees have to cover every byte the submission carries.
 		///
 		/// The body verifies the proof itself, and so does
 		/// `ValidateUnsigned::pre_dispatch` before it. The declared weight
@@ -912,12 +921,23 @@ pub mod pallet {
 		pub slots: u32,
 		/// Real leaf slots of the segments this submission skips.
 		///
-		/// They settle nothing and pay nothing, and they still hold their
-		/// positions in `outputs`: the block carries their bytes and every node
-		/// sponges them into a `ct_digest`. `MaxPayloadSlotRatio` is what
-		/// bounds them against [`PlannedSettlement::slots`], and this field is
-		/// where the count that rule reads is stated.
+		/// They settle nothing and pay no fee of their own, and they still hold
+		/// their positions in `outputs`. Such a position may be emptied, and
+		/// then it carries no bytes at all; one that still carries its
+		/// ciphertexts is bound by [`Pallet::bind_payload`] and priced through
+		/// [`PlannedSettlement::carried_bytes`].
 		pub skipped_slots: u32,
+		/// Ciphertext bytes the whole submission carries: every byte of every
+		/// `ShieldedOutput`, whether the slot it belongs to settles or is
+		/// skipped.
+		///
+		/// This is what the settling fees have to cover, at
+		/// [`Config::CiphertextBytesPerFeeQuantum`] bytes per quantum, on top
+		/// of [`Config::MinLeafFee`] per settling slot. The bound reads bytes,
+		/// so it holds however a submitter splits its payload between segments
+		/// and however many slots it puts in each: both of those are the
+		/// submitter's to choose, and a byte is a byte in every shape.
+		pub carried_bytes: u64,
 		/// One flag per segment of the bundle, in order: whether this
 		/// submission settles it.
 		///
@@ -1153,17 +1173,26 @@ pub mod pallet {
 						UsedNullifiers::<T>::contains_key(nullifier) || claimed.contains(nullifier)
 					})
 				});
-				// A segment whose block anchor no longer resolves is skipped on
-				// the same argument. It cannot settle at this height or any
-				// later one: the window only moves forward, a pruned hash does
-				// not come back, and an orphaned one never becomes canonical
-				// again. Refusing the submission over it would hand an
-				// aggregator's participants the griefing the skip rule exists
-				// to close, and this half of it is the one an aggregator cannot
-				// defend against at all: one reorg between the recursive
-				// proving run and inclusion is enough, and a participant can
-				// force it by handing over an inner anchored near the edge of
-				// the window.
+				// A segment whose block anchor does not resolve is skipped on
+				// the same argument; `Self::anchor_failure` carries what each
+				// of the four conditions promises. Refusing the submission over
+				// it would hand an aggregator's participants the griefing the
+				// skip rule exists to close, and this half of it is the one an
+				// aggregator cannot defend against at all: one reorg between
+				// the recursive proving run and inclusion is enough, and a
+				// participant can force it by handing over an inner anchored
+				// near the edge of the window.
+				//
+				// The check is written per segment and it decides whole
+				// submissions for the batches the circuits produce. The
+				// public-batch circuit constrains every non-padding inner to
+				// one block hash and one block number, so a verified public
+				// batch has a single anchor and its segments stand or fall
+				// together, and a private batch has one segment to begin with.
+				// Per segment is still the shape this walk needs: it also runs
+				// at pool admission over a parsed bundle no verifier has
+				// touched, where that agreement is a claim, and the skip is
+				// what keeps the walk total there.
 				let skipped = if conflicts {
 					true
 				} else if let Some(error) = Self::anchor_failure(segment, current, window) {
@@ -1219,12 +1248,25 @@ pub mod pallet {
 						ensure!(claimed.insert(*nullifier), Error::<T>::DuplicateNullifier);
 					}
 
+					let output =
+						outputs.get(real_slots).ok_or(Error::<T>::CiphertextCountMismatch)?;
+
+					// A settling slot has to carry both of its ciphertexts. An
+					// emptied position is the exemption a skipped position may
+					// take, and `bind_payload` evaluates no `ct_digest` for
+					// one, so taking it here would store an output note no
+					// recipient can find behind a digest nothing checked. A
+					// real `NoteCiphertext` is 1731 bytes at the chain's
+					// parameter set, so nothing legitimate is refused.
+					ensure!(
+						!output.ct_1.is_empty() && !output.ct_2.is_empty(),
+						Error::<T>::EmptyCiphertext
+					);
+
 					// The fee floor is the flat minimum plus the payload the
 					// slot writes into permanent state. Only the lengths are
 					// needed here; the bytes themselves are bound in
 					// `bind_payload`.
-					let output =
-						outputs.get(real_slots).ok_or(Error::<T>::CiphertextCountMismatch)?;
 					ensure!(
 						slot.fee >= Self::fee_floor(min_fee, Self::output_bytes(output)),
 						Error::<T>::FeeBelowMinimum
@@ -1250,25 +1292,41 @@ pub mod pallet {
 				return Err(stale_anchor.unwrap_or(Error::<T>::NullifierAlreadyUsed));
 			}
 
-			// The payload a submission carries, bounded against the payload it
-			// settles. A skipped segment pays no fee, and the fee floor is the
-			// only anti-spam mechanism there is, so a submitter that controls
-			// how many of its own segments conflict would otherwise set the
-			// price of the block space it fills: fifty-two skipped segments
-			// beside one that settles is a full public batch of ciphertext
-			// bought at one segment's fee. See [`Config::MaxPayloadSlotRatio`]
-			// for why the skipped slots cannot simply be charged instead.
-			let ratio = u64::from(T::MaxPayloadSlotRatio::get().max(1));
-			let carried = u64::from(slots).saturating_add(u64::from(skipped_slots));
-			ensure!(
-				carried <= u64::from(slots).saturating_mul(ratio),
-				Error::<T>::PayloadRatioExceeded
-			);
-
 			// Exactly one `ShieldedOutput` per real slot, skipped segments
 			// included. A trailing extra would otherwise ride along unbound by
 			// any proof.
 			ensure!(outputs.len() == real_slots, Error::<T>::CiphertextCountMismatch);
+
+			// The submission floor. The slots that settle pay the flat minimum
+			// for themselves and one quantum per started
+			// [`Config::CiphertextBytesPerFeeQuantum`] bytes the submission
+			// carries, the bytes of its skipped segments included.
+			//
+			// A skipped segment pays no fee of its own, and its bytes sit in
+			// the block and go through a `ct_digest` sponge on every node all
+			// the same, so pricing the settling slots alone would let a
+			// submitter that picks how many of its own segments conflict set
+			// the price of the block space it fills. Bytes are what this reads,
+			// which is what makes it hold in every shape: the payload per slot
+			// and the slot count per segment are both the submitter's to
+			// choose, so a bound on slot counts bounds a number the submitter
+			// picks, where a byte is a byte wherever it is carried.
+			//
+			// It costs an honest submission nothing. A submission that carries
+			// only what it settles already passes this the moment it passes the
+			// per-slot floors, because `sum(ceil(b_i / q))` is at least
+			// `ceil(sum(b_i) / q)`. An aggregator griefed between submission
+			// and inclusion keeps that property by resubmitting with the
+			// skipped segments' outputs emptied: an emptied position carries
+			// zero bytes and binds nothing, so the rest of the batch settles at
+			// its own price.
+			let carried_bytes = Self::carried_bytes(outputs);
+			let payload_quanta = carried_bytes.div_ceil(Self::bytes_per_fee_quantum());
+			let submission_floor = u128::from(slots)
+				.checked_mul(u128::from(min_fee))
+				.and_then(|flat| flat.checked_add(u128::from(payload_quanta)))
+				.ok_or(Error::<T>::ValueOutOfRange)?;
+			ensure!(fee_quanta >= submission_floor, Error::<T>::PayloadUnderpaid);
 
 			// Two commitments per slot, plus at most one wormhole leaf for the
 			// author's fee share.
@@ -1287,7 +1345,7 @@ pub mod pallet {
 				Error::<T>::PoolUnderflow
 			);
 
-			Ok(PlannedSettlement { fee_quanta, slots, skipped_slots, settles })
+			Ok(PlannedSettlement { fee_quanta, slots, skipped_slots, carried_bytes, settles })
 		}
 
 		/// Why a segment's block anchor does not resolve, or `None` when it
@@ -1303,12 +1361,34 @@ pub mod pallet {
 		///
 		/// Failing any of the four skips the segment and leaves the rest of
 		/// the submission standing: see [`PlannedSettlement::settles`].
+		///
+		/// Three of the four are permanent. The window only moves forward, a
+		/// pruned hash does not come back, and an orphaned one never becomes
+		/// canonical again, so a segment that fails one of those cannot settle
+		/// at this height or at any later one, and refusing it and skipping it
+		/// are the same outcome for it.
+		///
+		/// The fourth, an anchor at or above the current height, is a claim
+		/// about a block this chain has not finished, and that height does
+		/// arrive later. It is a skip all the same, deliberately. A refusal
+		/// would hand an aggregator's participants exactly the grief the skip
+		/// rule exists to close, and an inner anchored in the future is one
+		/// line of a hand-built witness, which makes it the cheapest shape to
+		/// inflict. What the skip promises is narrower and is all a plan for
+		/// this block needs: the segment does not settle here. A skipped
+		/// segment writes nothing, so the same proof can settle in a later
+		/// submission if that height ever resolves to the hash it named, and
+		/// that takes predicting a future header hash.
 		fn anchor_failure(
 			segment: &Segment,
 			current: BlockNumberFor<T>,
 			window: BlockNumberFor<T>,
 		) -> Option<Error<T>> {
 			let anchored_at = BlockNumberFor::<T>::from(segment.block_number);
+			// The block being built has no hash yet, and a height above it is
+			// a claim about a block this chain has not produced. Skipped, for
+			// the reason in the doc above; it is the one condition of the four
+			// that is not permanent.
 			if anchored_at >= current {
 				return Some(Error::<T>::BlockOutsideWindow);
 			}
@@ -1338,6 +1418,15 @@ pub mod pallet {
 		/// submitted with it, and a slot position left unbound is a place to put
 		/// bytes no proof commits to.
 		///
+		/// One position is exempt: a pair of zero-length ciphertexts. It carries
+		/// no bytes, so there is nothing there to bind and nothing to price,
+		/// and it is what lets an aggregator whose segments went stale between
+		/// submission and inclusion resubmit the batch with those segments'
+		/// outputs emptied. The exemption is safe because
+		/// [`Pallet::plan_settlement`] refuses an emptied position in a segment
+		/// that settles, and it runs ahead of this on every path that reaches
+		/// here, so an emptied position belongs to a skipped segment.
+		///
 		/// It walks [`SettlementBundle::real_slots`], which is the order
 		/// `outputs` follows and the order `settle` writes in.
 		pub(crate) fn bind_payload(
@@ -1346,6 +1435,9 @@ pub mod pallet {
 		) -> Result<(), Error<T>> {
 			for (index, slot) in bundle.real_slots().enumerate() {
 				let output = outputs.get(index).ok_or(Error::<T>::CiphertextCountMismatch)?;
+				if output.ct_1.is_empty() && output.ct_2.is_empty() {
+					continue;
+				}
 				let recomputed = qnero_circuit::chain::ct_digest(&[
 					output.ct_1.as_slice(),
 					output.ct_2.as_slice(),
@@ -1360,6 +1452,28 @@ pub mod pallet {
 			(output.ct_1.len() as u64).saturating_add(output.ct_2.len() as u64)
 		}
 
+		/// Ciphertext bytes the whole submission carries, settling and skipped
+		/// positions alike. This is the quantity the submission fee floor
+		/// prices, and an emptied position contributes zero to it.
+		///
+		/// Saturating: `outputs` is bounded by the block length limit long
+		/// before a `u64` of bytes is reachable.
+		fn carried_bytes(outputs: &[ShieldedOutput<T>]) -> u64 {
+			outputs
+				.iter()
+				.fold(0u64, |total, output| total.saturating_add(Self::output_bytes(output)))
+		}
+
+		/// Bytes of ciphertext one quantum of fee buys.
+		///
+		/// `integrity_test` refuses a zero divisor; the clamp keeps a
+		/// misconfigured runtime from dividing by zero on a live block. Both
+		/// fee floors read it here, so the per-slot floor and the submission
+		/// floor cannot disagree about the price of a byte.
+		fn bytes_per_fee_quantum() -> u64 {
+			u64::from(T::CiphertextBytesPerFeeQuantum::get().max(1))
+		}
+
 		/// The fee one real leaf slot must carry, in pool quanta: the flat
 		/// floor plus one quantum per started
 		/// [`Config::CiphertextBytesPerFeeQuantum`] bytes of ciphertext.
@@ -1370,10 +1484,7 @@ pub mod pallet {
 		/// [`Config::MaxCiphertextBytes`] with anything it likes, so a flat
 		/// floor buys as much state as the cap allows for one quantum.
 		fn fee_floor(min_fee: u64, ciphertext_bytes: u64) -> u64 {
-			// `integrity_test` refuses a zero divisor; the clamp keeps a
-			// misconfigured runtime from dividing by zero on a live block.
-			let per_quantum = u64::from(T::CiphertextBytesPerFeeQuantum::get().max(1));
-			min_fee.saturating_add(ciphertext_bytes.div_ceil(per_quantum))
+			min_fee.saturating_add(ciphertext_bytes.div_ceil(Self::bytes_per_fee_quantum()))
 		}
 
 		/// A fee in pool quanta as a balance in planck.

@@ -717,7 +717,12 @@ fn the_ciphertexts_of_a_skipped_segment_are_still_bound_to_the_proof() {
 		fund_pool(100);
 		let block_hash = anchor(10);
 		let settled = slot("a", b"ct-a1", b"ct-a2", 3);
-		let fresh = slot("b", b"ct-b1", b"ct-b2", 5);
+		// Twelve quanta, because the skipped position here carries 4096 bytes
+		// and the submission floor makes the settling slot pay for them. That
+		// rule is the subject of `a_submission_pays_for_every_byte_it_carries`;
+		// what this test is about is what happens to those bytes once they are
+		// paid for, which is that they are still bound to the proof.
+		let fresh = slot("b", b"ct-b1", b"ct-b2", 12);
 		crate::UsedNullifiers::<Test>::insert(settled.nullifiers[0], ());
 
 		let batch = SettlementBundle {
@@ -836,20 +841,23 @@ fn a_submission_with_no_live_anchor_is_refused_by_the_anchor_rule() {
 	});
 }
 
-/// A submission may not carry unboundedly more payload than it settles.
+/// Every byte a submission carries is paid for by the slots it settles.
 ///
-/// A skipped segment pays no fee, because it writes no permanent state, and
-/// its ciphertexts still sit in the block and are still sponged into a
-/// `ct_digest` by every node that sees the submission. The per-slot fee floor
-/// is the only anti-spam mechanism there is, so without this rule the price of
-/// a submission's block space is set by the fraction of it the submitter chose
-/// to let settle, and that fraction is not the chain's to choose. At the chain
-/// defaults one settling inner beside fifty-two skipped ones is 318 real slots
-/// and 1.27 MB of never-pruned payload for the fee of six leaf slots, and the
-/// skipped inners are reusable in every later submission for the whole life of
-/// their anchors.
+/// A skipped segment pays no fee of its own, because it writes no permanent
+/// state, and its ciphertexts still sit in the block and are still sponged into
+/// a `ct_digest` by every node that sees the submission. So the settling slots
+/// owe `settling slots * MinLeafFee + ceil(carried bytes / 512)` over the whole
+/// submission, and the carried bytes are every byte in `outputs`.
+///
+/// This is the shape a slot-count bound could not price. The submitter picks
+/// the payload per slot on each side independently, so three skipped slots
+/// padded to the ciphertext cap ride on one settling slot carrying ten bytes
+/// while the slot counts stay inside any ratio a runtime would pick: 12288
+/// bytes of never-pruned payload for two quanta. Pricing the bytes is what
+/// makes the free ride impossible to construct, because a byte costs the same
+/// wherever it is carried.
 #[test]
-fn a_submission_carrying_far_more_payload_than_it_settles_is_refused() {
+fn a_submission_pays_for_every_byte_it_carries() {
 	new_test_ext().execute_with(|| {
 		fund_pool(1_000);
 		let block_hash = anchor(10);
@@ -857,15 +865,13 @@ fn a_submission_carrying_far_more_payload_than_it_settles_is_refused() {
 		let padded_1 = vec![7u8; cap];
 		let padded_2 = vec![8u8; cap];
 
-		// One segment that settles, carrying almost nothing, and `skipped`
-		// segments already spent on this chain, each padded to the ciphertext
-		// cap. The settling segment's fee is its own floor and covers none of
-		// them.
-		let build = |skipped: usize| {
+		// One segment that settles, carrying ten bytes, and `skipped` segments
+		// already spent on this chain, each padded to the ciphertext cap.
+		let build = |skipped: usize, fee: u64| {
 			let mut segments = vec![Segment {
 				block_hash,
 				block_number: 10,
-				slots: vec![slot("live", b"ct-l1", b"ct-l2", 2)],
+				slots: vec![slot("live", b"ct-l1", b"ct-l2", fee)],
 			}];
 			let mut outputs = vec![output(b"ct-l1", b"ct-l2")];
 			for index in 0..skipped {
@@ -878,33 +884,32 @@ fn a_submission_carrying_far_more_payload_than_it_settles_is_refused() {
 			(SettlementBundle { segments }, outputs)
 		};
 
-		// `MaxPayloadSlotRatio` is four in the mock: one settling slot carries
-		// at most four real slots in total.
-		let (at_the_cap, outputs) = build(3);
-		let plan = check(&at_the_cap, &outputs).expect("three skipped beside one settling");
+		// Three skipped slots at the cap: 12288 bytes beside the settling
+		// slot's ten, which is 25 started quanta, plus one flat minimum for the
+		// one slot that settles. Its own per-slot floor is two.
+		let (bundle, outputs) = build(3, 2);
+		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadUnderpaid);
+		let (bundle, outputs) = build(3, 25);
+		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadUnderpaid);
+
+		// Paid for, and it settles.
+		let (bundle, outputs) = build(3, 26);
+		let plan = check(&bundle, &outputs).expect("the settling fee covers every carried byte");
 		assert_eq!(plan.slots, 1);
 		assert_eq!(plan.skipped_slots, 3);
-
-		let (over_the_cap, outputs) = build(4);
-		assert_noop!(check(&over_the_cap, &outputs), Error::<Test>::PayloadRatioExceeded);
-
-		// The shape the rule exists to refuse: fifty-two skipped segments
-		// riding on one that settles.
-		let (bundle, outputs) = build(52);
-		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadRatioExceeded);
-		// And it is refused with nothing written.
-		assert_noop!(Shielded::settle(bundle, outputs), Error::<Test>::PayloadRatioExceeded);
-		assert_eq!(ZkTree::leaf_count(), 0);
+		assert_eq!(plan.carried_bytes, 10 + 3 * 2 * cap as u64);
+		assert_ok!(Shielded::settle(bundle, outputs));
+		assert_eq!(ZkTree::leaf_count(), 2);
 	});
 }
 
-/// The ratio counts a skipped segment however it came to be skipped. A stale
-/// anchor is the cheaper of the two shapes to produce in bulk: it needs no
-/// nullifier of the attacker's to be spent first, only an inner anchored at a
-/// block that has aged out of `BlockHashWindow`, and such an inner stays
+/// The byte price counts a skipped segment however it came to be skipped. A
+/// stale anchor is the cheaper of the two shapes to produce in bulk: it needs
+/// no nullifier of the attacker's to be spent first, only an inner anchored at
+/// a block that has aged out of `BlockHashWindow`, and such an inner stays
 /// skippable forever.
 #[test]
-fn the_payload_ratio_counts_segments_skipped_for_a_stale_anchor() {
+fn a_segment_skipped_for_a_stale_anchor_is_priced_like_any_other() {
 	new_test_ext().execute_with(|| {
 		fund_pool(1_000);
 		let block_hash = anchor(10);
@@ -912,26 +917,195 @@ fn the_payload_ratio_counts_segments_skipped_for_a_stale_anchor() {
 		let padded_1 = vec![7u8; cap];
 		let padded_2 = vec![8u8; cap];
 
+		let build = |fee: u64| {
+			let mut segments = vec![Segment {
+				block_hash,
+				block_number: 10,
+				slots: vec![slot("live", b"ct-l1", b"ct-l2", fee)],
+			}];
+			let mut outputs = vec![output(b"ct-l1", b"ct-l2")];
+			for index in 0..8 {
+				let tag = format!("stale-{index}");
+				segments.push(Segment {
+					block_hash: digest_bytes_of(&format!("orphan-{index}")),
+					block_number: 10,
+					slots: vec![slot(&tag, &padded_1, &padded_2, 9)],
+				});
+				outputs.push(output(&padded_1, &padded_2));
+			}
+			(SettlementBundle { segments }, outputs)
+		};
+
+		// Eight orphaned segments at the cap: 32768 bytes beside the settling
+		// slot's ten, 65 started quanta, plus the one flat minimum.
+		let (bundle, outputs) = build(2);
+		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadUnderpaid);
+		assert_noop!(Shielded::settle(bundle, outputs), Error::<Test>::PayloadUnderpaid);
+		assert_eq!(ZkTree::leaf_count(), 0);
+
+		let (bundle, outputs) = build(66);
+		let plan = check(&bundle, &outputs).expect("the settling fee covers the orphaned bytes");
+		assert_eq!(plan.skipped_slots, 8);
+		assert_eq!(plan.carried_bytes, 10 + 8 * 2 * cap as u64);
+
+		// Emptying them is the aggregator's move here too.
+		let (bundle, mut outputs) = build(2);
+		for position in outputs.iter_mut().skip(1) {
+			*position = output(b"", b"");
+		}
+		assert_ok!(Shielded::settle(bundle, outputs));
+		assert_eq!(ZkTree::leaf_count(), 2);
+	});
+}
+
+/// The same rule with the skipped segments' bytes removed: an emptied position
+/// carries nothing, so nothing prices it and the batch settles at its own cost.
+///
+/// This is what a griefed aggregator resubmits, and it is why pricing the whole
+/// payload against the settling fees does not make one griefed segment fatal.
+/// The 52-of-53 shape is the worst case the skip rule exists for: fifty-two
+/// participants hand over inners that re-spend a note the fifty-third settles,
+/// which the public-batch circuit permits as long as the shared note sits
+/// anywhere but slot 0 input 0. It settles here, for the fee of the slots that
+/// actually settle.
+#[test]
+fn the_grief_shape_settles_when_the_skipped_outputs_are_emptied() {
+	new_test_ext().execute_with(|| {
+		fund_pool(1_000);
+		let block_hash = anchor(10);
+
 		let mut segments = vec![Segment {
 			block_hash,
 			block_number: 10,
 			slots: vec![slot("live", b"ct-l1", b"ct-l2", 2)],
 		}];
 		let mut outputs = vec![output(b"ct-l1", b"ct-l2")];
-		for index in 0..8 {
-			let tag = format!("stale-{index}");
-			segments.push(Segment {
-				block_hash: digest_bytes_of(&format!("orphan-{index}")),
-				block_number: 10,
-				slots: vec![slot(&tag, &padded_1, &padded_2, 9)],
-			});
-			outputs.push(output(&padded_1, &padded_2));
+		for index in 0..52 {
+			let tag = format!("spent-{index}");
+			let conflicting = slot(&tag, b"ct-s1", b"ct-s2", 9);
+			crate::UsedNullifiers::<Test>::insert(conflicting.nullifiers[0], ());
+			segments.push(Segment { block_hash, block_number: 10, slots: vec![conflicting] });
+			// The aggregator's resubmission: the position stays, the bytes go.
+			outputs.push(output(b"", b""));
 		}
+		let bundle = SettlementBundle { segments };
 
-		assert_noop!(
-			check(&SettlementBundle { segments }, &outputs),
-			Error::<Test>::PayloadRatioExceeded
-		);
+		let plan =
+			check(&bundle, &outputs).expect("fifty-two emptied segments beside one that settles");
+		assert_eq!(plan.slots, 1);
+		assert_eq!(plan.skipped_slots, 52);
+		// Only the settling slot's own ciphertexts are carried.
+		assert_eq!(plan.carried_bytes, 10);
+		assert_eq!(plan.fee_quanta, 2);
+
+		assert_ok!(Shielded::settle(bundle, outputs));
+		assert_eq!(ZkTree::leaf_count(), 2);
+		assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 52 + 2);
+	});
+}
+
+/// A settling slot has to carry both of its ciphertexts.
+///
+/// The emptied position is an exemption for a segment that settles nothing:
+/// `bind_payload` evaluates no `ct_digest` for one, because there are no bytes
+/// there to bind. Taken by a slot that settles, it would append two commitments
+/// and store two empty ciphertexts behind a digest nothing checked, leaving an
+/// output note its recipient can never find. The refusal lives in
+/// `plan_settlement`, which runs ahead of the binding on every path, and this
+/// pins that pairing: the binding alone accepts the emptied position.
+#[test]
+fn a_settling_slot_may_not_empty_its_ciphertexts() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 3)]);
+
+		let emptied = vec![output(b"", b"")];
+		assert_ok!(bind(&bundle, &emptied));
+		assert_noop!(plan(&bundle, &emptied), Error::<Test>::EmptyCiphertext);
+		assert_noop!(check(&bundle, &emptied), Error::<Test>::EmptyCiphertext);
+		assert_noop!(Shielded::settle(bundle.clone(), emptied), Error::<Test>::EmptyCiphertext);
+		assert_eq!(ZkTree::leaf_count(), 0);
+		assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 0);
+
+		// One empty field is refused too. A `NoteCiphertext` is 1731 bytes at
+		// the chain's parameter set, so a zero-length one is never a real
+		// output note, and the proof's own digest is the only thing that would
+		// otherwise stand behind it.
+		let half = vec![output(b"", b"ct-a2")];
+		assert_noop!(plan(&bundle, &half), Error::<Test>::EmptyCiphertext);
+		assert_noop!(check(&bundle, &half), Error::<Test>::EmptyCiphertext);
+	});
+}
+
+/// A skipped position that still carries its ciphertexts is bound to the
+/// proof's `ct_digest`, and an emptied one is exempt. The count rule holds
+/// either way, so neither shape is a place to carry bytes no proof commits to.
+#[test]
+fn an_emptied_position_is_exempt_from_the_binding_and_a_carried_one_is_not() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		let block_hash = anchor(10);
+		let settled = slot("a", b"ct-a1", b"ct-a2", 3);
+		let fresh = slot("b", b"ct-b1", b"ct-b2", 5);
+		crate::UsedNullifiers::<Test>::insert(settled.nullifiers[0], ());
+
+		let bundle = SettlementBundle {
+			segments: vec![
+				Segment { block_hash, block_number: 10, slots: vec![settled] },
+				Segment { block_hash, block_number: 10, slots: vec![fresh] },
+			],
+		};
+
+		// Junk at the skipped position is still refused: it carries bytes.
+		let junk = vec![output(b"junk-1", b"junk-2"), output(b"ct-b1", b"ct-b2")];
+		assert_noop!(check(&bundle, &junk), Error::<Test>::CiphertextDigestMismatch);
+
+		// Emptied, it settles, and the position itself is still required.
+		let emptied = vec![output(b"", b""), output(b"ct-b1", b"ct-b2")];
+		let plan = check(&bundle, &emptied).expect("an emptied skipped position");
+		assert_eq!(plan.carried_bytes, 10);
+		assert_noop!(check(&bundle, &emptied[1..]), Error::<Test>::CiphertextCountMismatch);
+	});
+}
+
+/// A segment anchored above the current height is skipped like any other
+/// anchor failure, and the rest of the submission settles.
+///
+/// This is the one anchor condition of the four that is not permanent: the
+/// height it names arrives later. It is a skip all the same, because a refusal
+/// would hand an aggregator's participants the cheapest grief of the lot, an
+/// inner anchored in the future being one line of a hand-built witness. What
+/// the skip promises is that the segment does not settle at this height, which
+/// is what a plan for this block needs.
+#[test]
+fn a_segment_anchored_above_the_current_height_is_skipped_not_fatal() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		let block_hash = anchor(10);
+		let ahead = slot("a", b"ct-a1", b"ct-a2", 3);
+		let fresh = slot("b", b"ct-b1", b"ct-b2", 5);
+		let outputs = vec![output(b"ct-a1", b"ct-a2"), output(b"ct-b1", b"ct-b2")];
+
+		let bundle = SettlementBundle {
+			segments: vec![
+				Segment {
+					block_hash: digest_bytes_of("block-99"),
+					block_number: 99,
+					slots: vec![ahead.clone()],
+				},
+				Segment { block_hash, block_number: 10, slots: vec![fresh] },
+			],
+		};
+
+		let plan = check(&bundle, &outputs).expect("the anchored segment settles");
+		assert_eq!(plan.settles, vec![false, true]);
+		assert_eq!(plan.slots, 1);
+		assert_ok!(Shielded::settle(bundle, outputs));
+		assert_eq!(ZkTree::leaf_count(), 2);
+		// Nothing of the skipped segment was written, so the same proof can
+		// settle in a later submission if that height ever resolves to the hash
+		// it named.
+		assert!(!crate::UsedNullifiers::<Test>::contains_key(ahead.nullifiers[0]));
 	});
 }
 

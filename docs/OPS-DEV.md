@@ -313,3 +313,96 @@ What changed, and what a node operator sees once the node is rebuilt:
 The runtime identity issue above is unchanged and still open: this pass adds a
 constant and an error, which is another metadata change behind `quantus-runtime`
 spec 152.
+
+## The fourth review fix pass, 2026-09-12
+
+Same workstation. The pallet replaced its payload bound and the runtime dropped
+a constant, so the node was rebuilt and re-smoked. **This is the build the third
+pass deferred**, so its entry above is now history on one point: the constant
+and the error it said the next build would pick up
+(`MaxPayloadSlotRatio`, `PayloadRatioExceeded`) were removed before that build
+happened, and neither is in the metadata this binary serves.
+
+```
+cd chain
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+```
+
+Two builds, because a comment and a whitespace revert landed after the first
+one: 1 minute 6 seconds for the build that was smoked first (three crates:
+`pallet-shielded`, `quantus-runtime`, `quantus-node`), then 2 minutes 0 seconds
+for the build of the tree as committed, which recompiled `quantus-node` alone.
+The circuit artifact set did not regenerate in either: this pass touched neither
+`QNERO_NUM_*` nor `build.rs`. The binary is 80,468,704 bytes at
+`chain/target/release/quantus-node`, and the figures below are that binary's.
+
+`nice -n 19 ./target/release/quantus-node --dev --tmp`, 49 seconds from the
+first imported block to the stop, 48 blocks imported, height 48. Stopped by its
+pidfile; `ss -ltn` then shows no listener on 9944, a `curl` to it is refused,
+and `pgrep quantus-node` finds nothing, so the port is closed and no process is
+left. What this run checked:
+
+- `chain_getHeader`'s `zkTreeRoot` equals the root `zkTree_getState` reports
+  (`0x241adc0c8c67b7b74067dcb4f443a59491de8a1a43b53a74d4131f1ac2aa6e8d` at
+  height 42, tree depth 3, 47 leaves, all of them the wormhole's), on three
+  consecutive probe pairs.
+- `zkTree_getMerkleProof(0)` returns a proof whose `leaf_hash` and `leaf_data`
+  are the same 32 bytes.
+- `state_getMetadata` carries `Shielded` with its three calls, its five storage
+  items (`UsedNullifiers`, `Ciphertexts`, `LeafBlocks`, `EntryCount`,
+  `PoolValue`) and six constants: `MintingAccount`, `BlockHashWindow`,
+  `MinLeafFee`, `CiphertextBytesPerFeeQuantum`, `MaxCiphertextBytes` and
+  `FeeBurnRate`.
+  `MaxPayloadSlotRatio` is gone from the blob, and so is the
+  `PayloadRatioExceeded` error. Two errors are new, `PayloadUnderpaid` and
+  `EmptyCiphertext`, and `FeeBelowMinimum` and `CiphertextDigestMismatch` are
+  where they were.
+- `state_getRuntimeVersion` still reports `quantus-runtime` spec 152,
+  transaction version 6. The runtime identity issue above is unchanged and still
+  open: this pass removed a constant and moved two errors, which changes the
+  metadata and the error indices behind the same version number. Nothing is
+  affected while every chain is genesis fresh.
+
+Gates run for this pass, all green:
+
+```
+# in the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+cargo fmt --all -- --check
+
+cd chain
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p pallet-shielded -p pallet-zk-tree --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 -p pallet-shielded --all-targets
+SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 4 -p quantus-runtime
+```
+
+27 test binaries in the root workspace with no failure, 60 tests in
+`pallet-shielded` and 35 in `pallet-zk-tree`, no clippy warnings anywhere, and
+the root workspace is rustfmt clean. `cargo fmt --check` in the chain workspace
+reports drift that predates this pass, in the vendored Substrate tree and in
+files this pass did not touch: that workspace's `rustfmt.toml` asks for nightly
+options (`wrap_comments`, `imports_granularity`) that the pinned stable
+toolchain ignores. The files this pass edited add no new diff to that set,
+which was checked by running the same command against a stash of the changes.
+
+What changed, and what a node operator sees:
+
+- `MaxPayloadSlotRatio` and `PayloadRatioExceeded` are gone. The bound they
+  carried compared real leaf slot counts, and a submitter picks both the payload
+  per slot and the slot count per segment, so it priced two numbers the
+  submitter controls.
+- The settling slots of a submission now owe
+  `settling slots * MinLeafFee + ceil(carried bytes / CiphertextBytesPerFeeQuantum)`,
+  where the carried bytes are every ciphertext in the extrinsic, the positions
+  of skipped segments included. Refused with `PayloadUnderpaid`. No new
+  parameter: it reads the two the per-slot floor already reads.
+- A position belonging to a segment the submission skips may be a pair of
+  zero-length ciphertexts. Such a position carries no bytes, so it is priced at
+  nothing and no `ct_digest` is evaluated for it. An aggregator refused with
+  `PayloadUnderpaid` after a race resubmits with the skipped segments' outputs
+  emptied. A settling position may not be emptied: `EmptyCiphertext`.
+- The stale-anchor skip is unchanged. What is documented now is its scope: the
+  public-batch circuit constrains every non-padding inner to one block hash and
+  one block number, so for a batch these circuits produce the anchor decides the
+  whole submission, and a private batch has one segment anyway.
