@@ -210,7 +210,8 @@ pub fn entry_rho(block_number: u32, entry_index: u64) -> Digest {
 /// so the note adds no linkage the block did not already carry. What the
 /// derivation does keep apart is two chains: [`coinbase_r`] hashes the
 /// genesis, so one miner key used on a testnet and on mainnet mints unrelated
-/// notes at equal heights.
+/// notes at equal heights. Two chains built from one genesis, which is what a
+/// repeated `--dev --tmp` is, are one chain by this rule and do repeat.
 ///
 /// **The chain cannot check this**, for the reason [`entry_rho`] gives:
 /// `inner` is opaque. What the chain owes is the identifier, and it owes
@@ -249,7 +250,7 @@ pub fn coinbase_rho(block_number: u32) -> Digest {
 ///
 /// The chain's genesis is in the preimage because the derivation has no
 /// randomness in it. Without that binding, one miner key configured on a
-/// testnet and on mainnet, or on a chain relaunched from a fresh genesis,
+/// testnet and on mainnet, or on any two chains with different genesis blocks,
 /// mints byte-identical `inner` values at equal heights on both, and anyone
 /// who can point at that operator's coinbase notes on the chain that matters
 /// less points at them on the other by comparing 32 bytes. Both the node and

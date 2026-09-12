@@ -1724,12 +1724,15 @@ label `H(cvk, parent_hash)` is already identical for two candidates on one
 parent, so the note adds no linkage the block did not already carry. Monero
 draws a per-block random `r` and does not have even that. What determinism must
 not do is cross a chain boundary, which is why the genesis is in the preimage:
-one miner key configured on a testnet and on mainnet, or on a chain relaunched
-from a fresh genesis, would otherwise publish identical `inner` values at equal
-heights on both, and anyone who could name that operator's coinbase notes on
+one miner key configured on a testnet and on mainnet, or on any two chains with
+different genesis blocks, would otherwise publish identical `inner` values at
+equal heights on both, and anyone who could name that operator's coinbase notes on
 the chain that matters less would name them on the other by comparing 32 bytes.
 Both the node and the wallet already hold the genesis hash, so the binding
-costs a scan nothing.
+costs a scan nothing. The boundary is the genesis hash and nothing else: a
+deterministic spec rebuilt from the same inputs, `--dev --tmp` being the one
+every developer runs, is the same chain by this rule and does mint the same
+notes.
 
 What it does not cover: a coinbase paid to an address whose `cvk` the author
 does not hold. The wallet reads an encrypted payload

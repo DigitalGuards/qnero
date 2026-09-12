@@ -146,8 +146,11 @@ Two properties of that string:
 - **One key is safe on more than one chain.** A coinbase note is derived rather than drawn at
   random, so the genesis hash is in the preimage of its `r`. The same `qnm1...` on a testnet and on
   mainnet mints unrelated notes at equal heights, and nobody carries an identification from one
-  chain to the other by comparing note commitments. A chain relaunched from a fresh genesis counts
-  as another chain here, which is what makes a repeated `--dev --tmp` run safe as well.
+  chain to the other by comparing note commitments. What separates two chains is the genesis hash
+  and nothing else: `--dev --tmp` builds the same genesis every run, so two dev chains from one
+  miner key mint the identical note at every height. That is measured, not assumed, and it is
+  harmless on a throwaway chain; a network whose genesis a relaunch does not change is the same
+  chain by this rule.
 
 `--rewards-inner-hash` stays, and stays required of an authority, but it is no
 longer a payout address: under v1 no account is paid. It is the fallback author
@@ -2769,3 +2772,189 @@ the subtree carrying every runtime and node change in this milestone unchecked.
 The rebuild is a minute rather than the ten the milestone's first one took,
 because only the runtime and the node changed and every dependency below them
 was already built.
+
+## The third M6 review fix pass, 2026-09-12
+
+Eight findings against the second pass: four medium, four low. One is a real
+privacy leak in the coinbase derivation, one is a test that never tested half of
+what it is named for, and the rest are documents claiming more than the runtime
+does.
+
+### What changed
+
+- **A coinbase note is bound to the chain that minted it.** `coinbase_rho`'s rustdoc claimed `r` is
+  drawn fresh per block from the operating system. There is no randomness in the derivation at all,
+  and the node's own test asserts the opposite. The half that mattered was the chain boundary: one
+  miner key on a testnet and on mainnet published byte-identical `inner` values at equal heights on
+  both, so anyone who could name that operator's coinbase notes on the chain that matters less named
+  them on the other by comparing 32 bytes, with no keys involved. `r` now hashes the genesis:
+  `r = H(R_COINBASE, cvk, H(genesis_hash), block_number)`. The node reads the genesis from its own
+  client and the wallet from the store it is already bound to, so a scan pays nothing.
+- **What the binding does not cover, measured rather than assumed.** Two candidates at one height on
+  one chain still carry one note; the header's author label `H(cvk, parent_hash)` is already
+  identical for two candidates on one parent, so the note adds no linkage the block did not already
+  carry, and only the canonical block is ever in a tree. And the boundary is the genesis hash and
+  nothing else: `--dev --tmp` rebuilds the same genesis every run, which the run below shows by
+  syncing a second dev chain and getting the same four commitments at the same four heights. That is
+  harmless on a throwaway chain and it is worth knowing before someone reads "two chains" as "two
+  runs". `docs/CIRCUIT.md` 10.2 carries both.
+- **A genesis vesting row now has to name an account with a key.**
+  `every_genesis_planck_is_reachable_under_the_call_filter` states its property as "a preset that
+  endows a keyless account, or vests to one" and only checked the endowment half. Re-adding the
+  schedule the dev preset used to carry, paying the keyless wormhole test address, left the suite
+  green, because the pot's endowment is computed from the schedule totals and so covers a payee
+  nobody can sign for. Every beneficiary is checked against a per-preset table now.
+- **The 27% genesis allocation is not a note, and five sentences said it was.** `mainnet_vesting`
+  mints 5,670,000 QTC at genesis as transparent balances and every planck of it reaches its holder
+  through `Vesting::claim`. "Value enters circulation in exactly one place" is true of value created
+  after genesis, which is what DESIGN 7.1, the pillar list, the M6 row, CIRCUIT section 10, the
+  runtime's `NoTransferProofNeeded` comment, `qp-coinbase` and the `--rewards-miner-key` help now
+  say.
+- **CIRCUIT 10.7 gained the two rows it was missing.** A refused call is a valid extrinsic: it
+  enters a block, pays its fee and fails with `CallFiltered`, leaving the sender, the recipient and
+  the amount in the block body and the event log forever. One mistaken transfer therefore publishes
+  exactly the triple the policy exists to deny. `Balances::burn` is the other: it is on the allowed
+  list and it names the burner and the amount. DESIGN 7.2 now says the filter is a dispatch-time
+  check and names moving it into a transaction extension as the open option.
+- **`chain/docs/RUNTIME_SURFACE.md` is the v1 runtime again.** DESIGN 7.2 points at it as "the
+  surface" and it documented the wormhole exit as live, `pallet-shielded` not at all, and the spec
+  identity as `quantus-runtime` 147/6. An auditor asking what can move value out of the pool read
+  that an exit exists and that vesting payouts write ZK-spendable leaves.
+- **Two stale `spec_version` 100s** in DESIGN's M6 row and CIRCUIT section 4, both in the present
+  tense, both against a runtime that answers 101.
+
+### The run
+
+Fresh chain, fresh miner wallet, the binary built from the committed tree
+(`1.0.1-ce8ac24812a`).
+
+```
+$ QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6fix4/miner.seed miner-address | tail -1) \
+    nice -n 19 ./target/release/quantus-node --dev --tmp
+2026-09-12 22:19:28 Qnero Node
+2026-09-12 22:19:28 📋 Chain specification: Qnero DevNet
+2026-09-12 22:19:28 ⛏️ Coinbase notes are minted for miner key qnm1q998shke…636vsxqe
+```
+
+The derivation changed, so the first thing to check is that the node and the
+wallet still agree on every note:
+
+```
+$ qnero-wallet --file /tmp/qnero-m6fix4/miner.seed sync
+chain       recorded this node's genesis in the store
+scanned leaves 0..30 at block 30
+received 30 note(s) worth 1240 quanta
+
+$ qnero-wallet --file /tmp/qnero-m6fix4/miner.seed status
+runtime           spec 101, transaction 7
+chain head        30
+tree leaves       30
+tree depth        3
+```
+
+Thirty blocks, thirty coinbase notes, all thirty this wallet's, at the public
+values the chain published (41, 41, 42, repeating).
+
+The end to end, unchanged in every number the milestone measured:
+
+```
+$ QNERO_DEV_NODE=http://127.0.0.1:9944 QNERO_MINER_SEED=/tmp/qnero-m6fix4/miner.seed \
+    RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --release -p qnero-wallet \
+    --features parallel --test dev_node_e2e -- --nocapture
+
+sync: 46 leaves, 46 coinbase leaves, 46 of them this wallet's, 3141 quanta
+shield of 1000 quanta included at block 77 (2.01s), leaf 76
+5 quanta to B at fee 8: included at block 81, change 29
+coinbase of block 81: 45 quanta against 41 to 43 elsewhere, author share 4
+system_dryRun of a transparent transfer: 0x0001030005000000
+system_dryRun of set_high_security: 0x0001030005000000
+system_dryRun of a vesting claim: 0x0001031602000000
+test the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused ... ok
+300 quanta to B: proved in 3.75s, 150908 proof bytes, included at block 85
+100 quanta back to A: proved in 3.08s, included at block 91
+test a_shield_a_payment_and_a_payment_back_settle_end_to_end ... ok
+
+test result: ok. 2 passed; 0 failed
+```
+
+Then the measurement that corrected a sentence in this pass's own
+documentation. The node was stopped, a second `--dev --tmp` chain started with
+the same miner key, and a copy of the store synced against it:
+
+```
+chain 1  genesis 035c0a98a01c566a
+  leaf 0  block 1  41 quanta  cm ff59e44df24240895eda85ee0bfe1fa7…
+  leaf 1  block 2  41 quanta  cm b227e6eebfeaeddaac21f827f4efb496…
+  leaf 2  block 3  42 quanta  cm f1036d0dc50e6dd1072ea5628ba765b4…
+  leaf 3  block 4  41 quanta  cm 81adab02422e79ce9ded52487467f2b1…
+
+chain 2  genesis 035c0a98a01c566a
+  leaf 0  block 1  41 quanta  cm ff59e44df24240895eda85ee0bfe1fa7…
+  leaf 1  block 2  41 quanta  cm b227e6eebfeaeddaac21f827f4efb496…
+  leaf 2  block 3  42 quanta  cm f1036d0dc50e6dd1072ea5628ba765b4…
+  leaf 3  block 4  41 quanta  cm 81adab02422e79ce9ded52487467f2b1…
+```
+
+Identical, because the dev chain spec is deterministic and both runs have the
+same genesis hash. The draft of this entry had claimed a `--dev --tmp` relaunch
+counts as another chain; it does not, and the docs say so now. Two chains are
+two genesis blocks, which is what a testnet and a mainnet are.
+
+```
+$ kill $(cat node.pid), then wait for 9944 to close
+port 9944 closed
+node stopped
+```
+
+### Gates
+
+```
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   38 suites ok, 0 failed
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+
+# the chain workspace
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
+  -p pallet-shielded -p pallet-mining-rewards --release
+   74 + 31 passed, 0 failed
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p quantus-runtime --release
+   42 lib + 9 call_filter + 60 integration passed, 0 failed
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p quantus-runtime --all-targets
+   no warnings
+LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p quantus-node -p sc-consensus-qpow --all-targets
+   no warnings
+cargo +nightly-2026-08-30 fmt --all -- --check
+   clean
+```
+
+### Timings
+
+| Step | Wall | Peak RSS |
+|---|---|---|
+| `cargo build -j 4 --release -p quantus-node`, the one rebuild this pass owes | 9:40 | 5.4 GB |
+| chain pallet tests | 25 s | |
+| runtime tests, all three targets | under 1 s | |
+| root workspace tests | 2:10 | |
+| the end-to-end, both tests, three proofs | 16.4 s | |
+
+The rebuild is the milestone's first one again rather than the previous pass's
+minute, because `qnero-note-core` changed: it sits under `pallet-shielded`, so
+the runtime, its WASM and the node all rebuilt below it.
+
+### Verifying the two new guards against the defects they name
+
+Both were run against a deliberately broken tree and both failed, which is the
+only evidence that a green test means anything:
+
+- Genesis dropped from the coinbase `r` preimage:
+  `a_coinbase_from_another_chain_is_not_this_wallets_note` fails, receiving 2 coinbase notes where
+  it expects 1.
+- A fourth dev vesting schedule paying a keyless address:
+  `every_genesis_planck_is_reachable_under_the_call_filter` fails, naming the address and the
+  missing list.
