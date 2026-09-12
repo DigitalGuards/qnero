@@ -211,7 +211,23 @@ pub mod pallet {
 	use frame_support::pallet_prelude::*;
 	use frame_system::pallet_prelude::*;
 
+	/// Version of this pallet's storage layout.
+	///
+	/// One. M4 changed `Leaves` from a typed `ZkLeaf` to a raw `Hash256`
+	/// (`docs/CIRCUIT.md` section 4), which is a storage layout change and the
+	/// version has to say so. There is deliberately no migration: a chain
+	/// carrying v0 entries cannot take this
+	/// runtime, because every existing entry would fail to decode as `[u8; 32]`
+	/// and `tree::get_leaf_hash` turns a decode failure into the absence
+	/// sentinel, silently folding a tree of empty hashes and publishing a root
+	/// that disagrees with every root already in the chain's headers. The
+	/// change is genesis only. A chain that needs to carry v0 state across owes
+	/// a `MigrateV0ToV1` that rehashes each stored `ZkLeaf` through
+	/// `tree::hash_leaf`, or that refuses the upgrade outright.
+	pub const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+
 	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
@@ -339,9 +355,16 @@ pub mod pallet {
 		///
 		/// # Infallibility
 		///
-		/// This function is infallible because the only theoretical failure mode
-		/// (exceeding MAX_TREE_DEPTH of 32) would require 4^32 leaves, which is
-		/// astronomically larger than any practical blockchain state.
+		/// This function is infallible because its caller,
+		/// `ZkTreeRecorder::record_transfer`, is: a wormhole transfer leaf is
+		/// built by the recorder itself and has no caller-supplied value to
+		/// refuse. That is why it does not carry
+		/// [`Self::insert_commitment`]'s capacity check, and the asymmetry is
+		/// real: nothing stops wormhole inserts alone taking `LeafCount` past
+		/// `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)`, at which point
+		/// [`Self::process_pending_leaves`] reports the condition and the
+		/// shielded pool refuses every settlement. Reaching it needs 4^16
+		/// wormhole transfers.
 		pub fn insert_leaf(
 			to: AccountIdOf<T>,
 			transfer_count: u64,
@@ -430,10 +453,17 @@ pub mod pallet {
 			// `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)`, and a settlement
 			// extrinsic checks the whole batch fits before it mutates
 			// anything, so this loop should never meet its own bound.
-			debug_assert!(
-				tree::capacity_at_depth(depth) >= leaf_count,
-				"ZK tree exceeded the depth the circuit can prove"
-			);
+			if tree::capacity_at_depth(depth) < leaf_count {
+				// `defensive!` panics in a debug build and logs in a release
+				// one. A release runtime that reached this is folding a tree
+				// too shallow to address every leaf, which is silent from the
+				// outside: the root is simply wrong and `remaining_capacity`
+				// saturates to zero. The condition has to reach an operator.
+				frame_support::defensive!(
+					"ZK tree exceeded the depth the circuit can prove",
+					(leaf_count, depth)
+				);
+			}
 			if depth > old_depth {
 				tree::grow_tree::<T>(old_depth);
 				Depth::<T>::put(depth);

@@ -68,17 +68,24 @@ pub const CIRCUIT_CONFIG_SNIPPET: &str = "qnero_circuit_config.rs";
 
 /// The chain defaults, and why they are what they are.
 ///
-/// Seven leaves per private batch is a wallet-side memory decision: it is what
-/// a phone can prove. Fifty-three private batches per public batch is an
+/// Six leaves per private batch is a wallet-side memory decision: it is what a
+/// phone can prove. Blinding adds about 9000 rows at this size, so a private
+/// batch fits `degree_bits = 15` only below about 23700 gates and seven
+/// recursive verifiers are 24324; seven pays about 2x in proving time and about
+/// 2x in peak memory, 2.1 GiB against roughly half that, for one more slot per
+/// batch (`docs/BENCH.md`). Fifty-three private batches per public batch is an
 /// aggregator-side cost decision, amortizing one on-chain verification across
 /// many wallets.
 ///
 /// They live in the library, so that a pallet's `build.rs`, which calls
 /// [`generate_all_artifacts`] directly and cannot depend on a bin target,
-/// reads the same numbers the CLI and the docs do.
-/// Shipping `N = 6` is an open decision (`docs/BENCH.md`), and when it lands
-/// it has to move in one place.
-pub const DEFAULT_NUM_LEAF_PROOFS: usize = 7;
+/// reads the same numbers the CLI and the docs do. `pallet-shielded`'s build
+/// script reads these constants, so the dimensions have one home: a wallet or
+/// an aggregator that builds its artifact set from the builder's defaults has
+/// to land on the dimensions the chain embeds, or its proofs carry the wrong
+/// public-input length and the chain refuses them with nothing in the message
+/// naming the dimension.
+pub const DEFAULT_NUM_LEAF_PROOFS: usize = 6;
 /// See [`DEFAULT_NUM_LEAF_PROOFS`].
 pub const DEFAULT_NUM_PRIVATE_BATCH_PROOFS: usize = 53;
 

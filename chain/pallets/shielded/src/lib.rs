@@ -66,12 +66,11 @@ pub type Hash256 = [u8; 32];
 
 /// Fixed transaction-pool priority for unsigned settlement submissions.
 ///
-/// Must not be derived from the public inputs. Pool admission runs only cheap
-/// pre-validation, so those values are attacker controlled until `pre_dispatch`
-/// verifies the proof; combined with the nullifier-derived `provides` tag, an
-/// amount-derived priority would let junk usurp a victim's same-tag settlement,
-/// because the pool replaces on strictly higher priority. A constant makes
-/// first seen win.
+/// Must not be derived from the public inputs. Combined with the
+/// nullifier-derived `provides` tag, an amount-derived priority would let one
+/// submission usurp a victim's same-tag settlement, because the pool replaces
+/// on strictly higher priority, and the public inputs a priority would read
+/// are the prover's own claim. A constant makes first seen win.
 pub const UNSIGNED_SETTLEMENT_PRIORITY: u64 = 1;
 
 /// Hard upper bound on a serialized settlement proof, applied before the blob
@@ -96,6 +95,18 @@ pub const MAX_PROOF_BYTES: usize = 512 * 1024;
 pub const POOL_QUANTUM: u128 = 10_000_000_000;
 
 const _: () = assert!(POOL_QUANTUM == pallet_zk_tree::tree::AMOUNT_SCALE_DOWN_FACTOR);
+
+/// The depth the tree may grow to and the depth the circuit can prove are one
+/// number, and it is held here because the two crates that carry it never see
+/// each other: `pallet-zk-tree` links no prover stack, and `qnero-circuit`'s
+/// Merkle gadget is behind the `circuit` feature this pallet does not enable.
+/// Raising one without the other is silent either way. A circuit that proves
+/// deeper than the tree grows caps the pool early; a tree that grows deeper
+/// than the circuit proves needs a longer path for every note already in it,
+/// and the whole pool becomes unspendable with no error from the chain.
+const _: () = assert!(
+	pallet_zk_tree::CIRCUIT_MAX_TREE_DEPTH as usize == qnero_circuit::chain::MAX_TREE_DEPTH
+);
 
 /// Circuit sizing constants, written by `build.rs` from `QNERO_NUM_*`.
 pub mod circuit_config {
@@ -273,7 +284,7 @@ pub mod pallet {
 		dispatch::{DispatchResultWithPostInfo, Pays},
 		pallet_prelude::*,
 		traits::{
-			fungible::{Inspect, Mutate},
+			fungible::{Inspect, Mutate, Unbalanced},
 			tokens::{Fortitude, Precision, Preservation},
 		},
 		BoundedVec,
@@ -282,7 +293,7 @@ pub mod pallet {
 	use pallet_zk_tree::ZkCommitmentRecorder;
 	use qp_wormhole::TransferProofRecorder;
 	use sp_runtime::{
-		traits::{Saturating, Zero},
+		traits::{CheckedSub, Saturating, Zero},
 		transaction_validity::{
 			InvalidTransaction, TransactionSource, TransactionValidity, TransactionValidityError,
 			ValidTransaction,
@@ -508,6 +519,12 @@ pub mod pallet {
 		/// A value entering the pool is at or above `2^62`, or a fee sum
 		/// overflowed.
 		ValueOutOfRange,
+		/// The settled fee is larger than the value the pool is standing in
+		/// for. Unreachable while the circuit's balance equation holds and
+		/// `shield` is the only entry, which is exactly why it fails closed:
+		/// the alternative is minting the block author a share of a fee that
+		/// nothing backs, and zeroing the pool's own books on the way past.
+		PoolUnderflow,
 		/// The number of `ShieldedOutput`s does not match the number of real
 		/// leaf slots.
 		CiphertextCountMismatch,
@@ -549,13 +566,19 @@ pub mod pallet {
 		/// Settle one private batch: the transaction a wallet submits.
 		///
 		/// `outputs` carries the two note ciphertexts of every real leaf slot,
-		/// in slot order. The body deliberately re-runs only the cheap
-		/// pre-validation: the ZK verify already ran in
+		/// in slot order, skipped segments included. The body deliberately
+		/// re-runs only the cheap pre-validation: the ZK verify already ran in
 		/// `ValidateUnsigned::pre_dispatch`, which is the block-inclusion gate,
-		/// and repeating it here would double the verify cost while the declared
-		/// weight accounts for one.
+		/// and repeating it here would double the verify cost. The settlement
+		/// check does run twice, once there and once in `settle`, and the
+		/// declared weight prices both passes: the second is the only guard on
+		/// a path that reaches a dispatch without `ValidateUnsigned`, which a
+		/// root-scheduled `dispatch_as` would be.
 		#[pallet::call_index(0)]
-		#[pallet::weight(T::WeightInfo::submit_private_batch(outputs.len() as u32))]
+		#[pallet::weight(T::WeightInfo::submit_private_batch(
+			outputs.len() as u32,
+			Pallet::<T>::ciphertext_bytes(outputs),
+		))]
 		pub fn submit_private_batch(
 			origin: OriginFor<T>,
 			proof: Vec<u8>,
@@ -572,7 +595,10 @@ pub mod pallet {
 		/// says nothing about one nullifier appearing in two different inners,
 		/// so the whole submission is validated before any of it is written.
 		#[pallet::call_index(1)]
-		#[pallet::weight(T::WeightInfo::submit_public_batch(outputs.len() as u32))]
+		#[pallet::weight(T::WeightInfo::submit_public_batch(
+			outputs.len() as u32,
+			Pallet::<T>::ciphertext_bytes(outputs),
+		))]
 		pub fn submit_public_batch(
 			origin: OriginFor<T>,
 			proof: Vec<u8>,
@@ -669,16 +695,32 @@ pub mod pallet {
 		type Call = Call<T>;
 
 		fn validate_unsigned(_source: TransactionSource, call: &Self::Call) -> TransactionValidity {
-			// Pool admission runs on every gossiped transaction, so it does the
-			// cheap work only: size gate, deserialize, canonical-encoding round
-			// trip, public-input parse, and the whole settlement check short of
-			// the ZK verify. The verify is the block-inclusion gate in
-			// `pre_dispatch`. Reversing the two would let unsigned, fee-free
-			// gossip force unbounded verification work per byte variant of one
-			// proof.
+			// Pool admission verifies the proof, in this order: the size gate
+			// before anything is copied, deserialization, the canonical-encoding
+			// round trip, the public-input parse, the ZK verify, and only then
+			// the settlement check.
+			//
+			// The verify belongs at admission, and `pre_dispatch` repeats it
+			// for block import. That is what makes a settlement expensive to
+			// forge. Nothing in the parse is
+			// cryptography: a proof carries its public inputs as a plain
+			// vector, so anyone can take a genuine proof, rewrite its public
+			// inputs to claim any nullifiers, commitments, fee and block
+			// anchor, re-serialize canonically, and produce a blob that passes
+			// every check short of the verify. Admitting that blob costs each
+			// node the whole per-slot settlement walk, which at a full public
+			// batch is far more work than the verify it was deferring, and
+			// `propagate(true)` hands it to the next node. It reaches a block
+			// author, fails `pre_dispatch`, and is charged nothing: settlement
+			// extrinsics are unsigned and `Pays::No`.
+			//
+			// What the split was written to prevent, one proof's byte variants
+			// each forcing a verify, is closed by the canonical-encoding round
+			// trip: one proof has exactly one encoding, so a distinct admitted
+			// proof needs real proving work.
 			let (bundle, prefix) = match call {
 				Call::submit_private_batch { proof, outputs } => (
-					Self::pre_validate_private_batch(proof)
+					Self::validate_private_batch(proof)
 						.and_then(|bundle| {
 							Self::check_settlement(&bundle, outputs)?;
 							Ok(bundle)
@@ -687,7 +729,7 @@ pub mod pallet {
 					"QneroPrivateBatch",
 				),
 				Call::submit_public_batch { proof, outputs } => (
-					Self::pre_validate_public_batch(proof)
+					Self::validate_public_batch(proof)
 						.and_then(|bundle| {
 							Self::check_settlement(&bundle, outputs)?;
 							Ok(bundle)
@@ -733,12 +775,26 @@ pub mod pallet {
 
 	/// What a validated settlement will do, carried from the check to the write
 	/// so the two cannot disagree.
-	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+	#[derive(Clone, Debug, PartialEq, Eq)]
 	pub struct PlannedSettlement {
-		/// Summed fee of every real slot, in pool quanta.
+		/// Summed fee of every slot that will settle, in pool quanta. A segment
+		/// that settled before contributes nothing: its fee was accounted then.
 		pub fee_quanta: u128,
-		/// Real leaf slots across every segment.
+		/// Real leaf slots that will settle.
 		pub slots: u32,
+		/// One flag per segment of the bundle, in order: whether this
+		/// submission settles it.
+		///
+		/// A segment every one of whose nullifiers is already in
+		/// `UsedNullifiers` settled before and is skipped whole. That case is
+		/// reachable for free: every inner of an aggregator's public batch is
+		/// exactly the artifact `submit_private_batch` accepts, so a
+		/// participant can settle its own inner directly and, if a repeat were
+		/// fatal, strand the other fifty-two transfers in the batch and waste
+		/// the aggregator's recursive proving run. Skipping is value neutral,
+		/// because that segment's commitments were appended and its fee
+		/// accounted by the settlement that got there first.
+		pub settles: Vec<bool>,
 	}
 
 	impl<T: Config> Pallet<T> {
@@ -746,7 +802,40 @@ pub mod pallet {
 		// Verification pipeline
 		// ------------------------------------------------------------------
 
+		/// Why the verifier refused a proof, as this pallet's own error.
+		///
+		/// The four kinds are four different operator problems and the pallet
+		/// declares an error for each. A deserialization failure is also what a
+		/// proof built at other circuit dimensions looks like, which is the
+		/// realistic version of it: a wallet whose artifact set was generated
+		/// with a different `QNERO_NUM_LEAF_PROOFS` produces proofs this
+		/// runtime cannot read, so the log line names the dimensions the
+		/// runtime was built for.
+		fn proof_error(rejection: qnero_verifier::ProofRejection) -> Error<T> {
+			use qnero_verifier::ProofRejection;
+			match rejection {
+				ProofRejection::TooLarge => Error::<T>::ProofTooLarge,
+				ProofRejection::Deserialization => {
+					log::debug!(
+						target: "runtime::shielded",
+						"a settlement proof did not deserialize; this runtime embeds verifiers for \
+						 {} leaf slots per private batch and {} private batches per public batch",
+						circuit_config::NUM_LEAF_PROOFS,
+						circuit_config::NUM_PRIVATE_BATCH_PROOFS,
+					);
+					Error::<T>::ProofDeserializationFailed
+				},
+				ProofRejection::NonCanonicalEncoding => Error::<T>::NonCanonicalProofEncoding,
+				ProofRejection::PublicInputLayout => Error::<T>::InvalidPublicInputs,
+				ProofRejection::Verification => Error::<T>::ProofVerificationFailed,
+			}
+		}
+
 		/// Everything short of the ZK verify, for a private batch.
+		///
+		/// This is the dispatch body's path, after `pre_dispatch` has already
+		/// verified. Nothing in it establishes that the public inputs are a
+		/// proof's: only a verify does that.
 		pub(crate) fn pre_validate_private_batch(
 			proof: &[u8],
 		) -> Result<SettlementBundle, Error<T>> {
@@ -754,8 +843,7 @@ pub mod pallet {
 			ensure!(proof.len() <= MAX_PROOF_BYTES, Error::<T>::ProofTooLarge);
 			let verifier =
 				private_batch_verifier().map_err(|_| Error::<T>::VerifierNotAvailable)?;
-			let inputs =
-				verifier.parse_proof_bytes(proof).map_err(|_| Error::<T>::InvalidPublicInputs)?;
+			let inputs = verifier.parse_proof_bytes(proof).map_err(Self::proof_error)?;
 			Ok(SettlementBundle::from_private_batch(&inputs))
 		}
 
@@ -764,9 +852,7 @@ pub mod pallet {
 			ensure!(proof.len() <= MAX_PROOF_BYTES, Error::<T>::ProofTooLarge);
 			let verifier =
 				private_batch_verifier().map_err(|_| Error::<T>::VerifierNotAvailable)?;
-			let inputs = verifier
-				.verify_proof_bytes(proof)
-				.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+			let inputs = verifier.verify_proof_bytes(proof).map_err(Self::proof_error)?;
 			Ok(SettlementBundle::from_private_batch(&inputs))
 		}
 
@@ -776,8 +862,7 @@ pub mod pallet {
 		) -> Result<SettlementBundle, Error<T>> {
 			ensure!(proof.len() <= MAX_PROOF_BYTES, Error::<T>::ProofTooLarge);
 			let verifier = public_batch_verifier().map_err(|_| Error::<T>::VerifierNotAvailable)?;
-			let inputs =
-				verifier.parse_proof_bytes(proof).map_err(|_| Error::<T>::InvalidPublicInputs)?;
+			let inputs = verifier.parse_proof_bytes(proof).map_err(Self::proof_error)?;
 			Ok(SettlementBundle::from_public_batch(&inputs))
 		}
 
@@ -785,10 +870,24 @@ pub mod pallet {
 		pub(crate) fn validate_public_batch(proof: &[u8]) -> Result<SettlementBundle, Error<T>> {
 			ensure!(proof.len() <= MAX_PROOF_BYTES, Error::<T>::ProofTooLarge);
 			let verifier = public_batch_verifier().map_err(|_| Error::<T>::VerifierNotAvailable)?;
-			let inputs = verifier
-				.verify_proof_bytes(proof)
-				.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+			let inputs = verifier.verify_proof_bytes(proof).map_err(Self::proof_error)?;
 			Ok(SettlementBundle::from_public_batch(&inputs))
+		}
+
+		/// Ciphertext bytes one settlement carries, for the declared weight.
+		///
+		/// The per-slot `ct_digest` is a byte sponge over both ciphertexts of
+		/// the slot, so the hashing a settlement costs is linear in this, where
+		/// the slot count alone says little. Saturating: an `outputs` vector
+		/// large enough
+		/// to overflow is refused by the block length limit long before it
+		/// reaches a dispatch.
+		pub fn ciphertext_bytes(outputs: &[ShieldedOutput<T>]) -> u32 {
+			outputs.iter().fold(0u32, |total, output| {
+				total
+					.saturating_add(output.ct_1.len() as u32)
+					.saturating_add(output.ct_2.len() as u32)
+			})
 		}
 
 		// ------------------------------------------------------------------
@@ -817,6 +916,13 @@ pub mod pallet {
 			let mut claimed = alloc::collections::BTreeSet::new();
 			let mut fee_quanta: u128 = 0;
 			let mut slots: u32 = 0;
+			let mut settles = Vec::with_capacity(bundle.segments.len());
+			// Walks every real slot of every segment, settling or not.
+			// `outputs` covers all of them: a submitter cannot know which
+			// segments were settled by someone else in the meantime, so the
+			// positional mapping from slot to ciphertext pair has to stay
+			// independent of that.
+			let mut real_slots: u32 = 0;
 
 			for segment in &bundle.segments {
 				// A segment that reached this far is not padding, so it must
@@ -826,6 +932,26 @@ pub mod pallet {
 				// where the rule is what should refuse it.
 				debug_assert_ne!(segment.block_hash, padding_block_hash());
 				ensure!(!segment.slots.is_empty(), Error::<T>::NothingToSettle);
+				let segment_slots =
+					u32::try_from(segment.slots.len()).map_err(|_| Error::<T>::ValueOutOfRange)?;
+
+				// A segment whose every nullifier is already settled was
+				// settled before, commitments, fee and all. Skip it whole and
+				// let the submission stand: see
+				// `PlannedSettlement::settles`. A segment that is only partly
+				// settled is not this case and falls through to the per-slot
+				// check, which refuses it with `NullifierAlreadyUsed`.
+				let settled_before = segment
+					.slots
+					.iter()
+					.all(|slot| slot.nullifiers.iter().all(UsedNullifiers::<T>::contains_key));
+				if settled_before {
+					settles.push(false);
+					real_slots =
+						real_slots.checked_add(segment_slots).ok_or(Error::<T>::ValueOutOfRange)?;
+					continue;
+				}
+				settles.push(true);
 
 				let anchored_at = BlockNumberFor::<T>::from(segment.block_number);
 				ensure!(anchored_at < current, Error::<T>::BlockOutsideWindow);
@@ -870,8 +996,9 @@ pub mod pallet {
 						ensure!(claimed.insert(*nullifier), Error::<T>::DuplicateNullifier);
 					}
 
-					let output =
-						outputs.get(slots as usize).ok_or(Error::<T>::CiphertextCountMismatch)?;
+					let output = outputs
+						.get(real_slots as usize)
+						.ok_or(Error::<T>::CiphertextCountMismatch)?;
 					let recomputed = qnero_circuit::chain::ct_digest(&[
 						output.ct_1.as_slice(),
 						output.ct_2.as_slice(),
@@ -882,19 +1009,47 @@ pub mod pallet {
 						.checked_add(slot.fee as u128)
 						.ok_or(Error::<T>::ValueOutOfRange)?;
 					slots = slots.checked_add(1).ok_or(Error::<T>::ValueOutOfRange)?;
+					real_slots = real_slots.checked_add(1).ok_or(Error::<T>::ValueOutOfRange)?;
 				}
 			}
 
-			// Exactly one `ShieldedOutput` per real slot. A trailing extra would
-			// otherwise ride along unbound by any proof.
-			ensure!(outputs.len() == slots as usize, Error::<T>::CiphertextCountMismatch);
+			// Every segment was settled before: the whole submission is a
+			// replay, and accepting it as a no-op would let anyone spend a
+			// block's admission work for free.
+			ensure!(slots > 0, Error::<T>::NullifierAlreadyUsed);
+
+			// Exactly one `ShieldedOutput` per real slot, skipped segments
+			// included. A trailing extra would otherwise ride along unbound by
+			// any proof.
+			ensure!(outputs.len() == real_slots as usize, Error::<T>::CiphertextCountMismatch);
 
 			// Two commitments per slot, plus at most one wormhole leaf for the
 			// author's fee share.
 			let appends = u64::from(slots).saturating_mul(2).saturating_add(1);
 			ensure!(appends <= T::ZkTree::remaining_capacity(), Error::<T>::TreeFull);
 
-			Ok(PlannedSettlement { fee_quanta, slots })
+			// The fee leaves the pool, so the pool has to hold it. A fee above
+			// `PoolValue` means the circuit's balance equation was broken or an
+			// entry point forgot to credit the pool, and the settlement is
+			// refused before anything is written. A saturating subtraction here
+			// would mint the author a share of a fee nothing backs and zero the
+			// pallet's own books on the way past, with nothing on chain to say
+			// the two stopped agreeing.
+			ensure!(
+				PoolValue::<T>::get() >= Self::fee_planck(fee_quanta)?,
+				Error::<T>::PoolUnderflow
+			);
+
+			Ok(PlannedSettlement { fee_quanta, slots, settles })
+		}
+
+		/// A fee in pool quanta as a balance in planck.
+		fn fee_planck(fee_quanta: u128) -> Result<BalanceOf<T>, Error<T>> {
+			fee_quanta
+				.checked_mul(POOL_QUANTUM)
+				.ok_or(Error::<T>::ValueOutOfRange)?
+				.try_into()
+				.map_err(|_| Error::<T>::ValueOutOfRange)
 		}
 
 		/// Check everything, then write.
@@ -906,7 +1061,14 @@ pub mod pallet {
 
 			let block_number = frame_system::Pallet::<T>::block_number();
 			let mut output_index = 0usize;
-			for segment in &bundle.segments {
+			for (segment, settles) in bundle.segments.iter().zip(plan.settles.iter()) {
+				// A segment settled by an earlier submission is skipped whole.
+				// Its ciphertexts still occupy their positions in `outputs`, so
+				// the index walks past them.
+				if !settles {
+					output_index = output_index.saturating_add(segment.slots.len());
+					continue;
+				}
 				for slot in &segment.slots {
 					for nullifier in &slot.nullifiers {
 						UsedNullifiers::<T>::insert(nullifier, ());
@@ -936,7 +1098,7 @@ pub mod pallet {
 
 			let fee = Self::account_fee(plan.fee_quanta)?;
 			Self::deposit_event(Event::BatchSettled {
-				segments: bundle.segments.len() as u32,
+				segments: plan.settles.iter().filter(|settles| **settles).count() as u32,
 				slots: plan.slots,
 				fee,
 			});
@@ -956,12 +1118,14 @@ pub mod pallet {
 			if fee_quanta == 0 {
 				return Ok(Zero::zero());
 			}
-			let fee_planck =
-				fee_quanta.checked_mul(POOL_QUANTUM).ok_or(Error::<T>::ValueOutOfRange)?;
-			let fee: BalanceOf<T> =
-				fee_planck.try_into().map_err(|_| Error::<T>::ValueOutOfRange)?;
+			let fee = Self::fee_planck(fee_quanta)?;
 
-			PoolValue::<T>::mutate(|pool| *pool = pool.saturating_sub(fee));
+			// `check_settlement` already refused a fee above the pool, so this
+			// subtraction cannot fail. It is checked so that a future entry
+			// point which forgets to credit `PoolValue` fails the settlement,
+			// where a saturating subtraction would mint the difference.
+			let pool = PoolValue::<T>::get().checked_sub(&fee).ok_or(Error::<T>::PoolUnderflow)?;
+			PoolValue::<T>::put(pool);
 
 			// Rounds against the author.
 			let burn_quanta = T::FeeBurnRate::get().mul_ceil(fee_quanta);
@@ -982,8 +1146,30 @@ pub mod pallet {
 				return Ok(fee);
 			};
 
-			match T::Currency::mint_into(&author, author_amount) {
-				Ok(_) => {
+			// The credit is `increase_balance`. `Mutate::mint_into` deposits
+			// `pallet_balances::Event::Minted`, which the runtime's
+			// `WormholeProofRecorderExtension` scans for and turns into a
+			// wormhole leaf of its own; this pallet records that leaf itself,
+			// just below, so the pair would credit one balance against two
+			// independent leaves and leave the author able to exit twice what
+			// it was paid. `pallet-wormhole` states the same rule at its
+			// `credit_and_record`. Today the scan does not reach a bare
+			// extrinsic, which is an accident of one default method and not a
+			// property to lean on.
+			//
+			// `increase_balance` leaves total issuance alone, so the issuance
+			// the value lost when it was shielded is put back here explicitly.
+			// That is the half of the fee that is not burned.
+			match <T::Currency as Unbalanced<_>>::increase_balance(
+				&author,
+				author_amount,
+				Precision::Exact,
+			) {
+				Ok(credited) => {
+					let issuance = <T::Currency as Inspect<_>>::total_issuance();
+					<T::Currency as Unbalanced<_>>::set_total_issuance(
+						issuance.saturating_add(credited),
+					);
 					// Without the leaf the credit is frozen: a QPoW-derived
 					// author account has no signing key and a wormhole leaf is
 					// its only spend path.
@@ -991,9 +1177,9 @@ pub mod pallet {
 						None,
 						T::MintingAccount::get(),
 						author.clone(),
-						author_amount,
+						credited,
 					);
-					Self::deposit_event(Event::AuthorFeePaid { author, amount: author_amount });
+					Self::deposit_event(Event::AuthorFeePaid { author, amount: credited });
 				},
 				Err(error) => {
 					// A mint below the existential deposit is the realistic
@@ -1016,6 +1202,13 @@ pub mod pallet {
 		/// Sorting within a segment keeps two proofs that publish the same
 		/// multiset in different privately chosen orders on one tag, while the
 		/// segment boundaries stay part of the preimage.
+		///
+		/// The tag commits to the nullifiers and to nothing else, so two
+		/// submissions spending the same notes are mutually exclusive in the
+		/// pool, which is the double-spend exclusion the tag exists for. That
+		/// is sound only because admission verifies: a forged blob carrying a
+		/// victim's nullifiers would otherwise take the victim's pool slot, and
+		/// under a constant priority whichever arrived first would hold it.
 		pub(crate) fn settlement_provides_tag(bundle: &SettlementBundle) -> Hash256 {
 			let mut preimage = Vec::new();
 			preimage.extend_from_slice(&(bundle.segments.len() as u32).to_le_bytes());

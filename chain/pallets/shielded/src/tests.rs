@@ -22,6 +22,11 @@ use std::{
 
 use frame_support::{assert_noop, assert_ok, traits::fungible::Inspect, BoundedVec};
 use qnero_circuit::{
+	batch_layout::{
+		private_batch_pi_len, public_batch_inner_start, public_batch_pi_len, slot_commitment_index,
+		slot_ct_digest_index, slot_fee_index, slot_nullifier_index, AGGREGATOR_ADDRESS_START,
+		BLOCK_HASH_START, BLOCK_NUMBER_INDEX,
+	},
 	chain::ct_digest,
 	header::{HeaderInputs, DIGEST_LOGS_SIZE},
 	merkle::MerklePath,
@@ -29,11 +34,15 @@ use qnero_circuit::{
 };
 use qnero_note_core::{derive_pk, entry_rho, note_inner, DerivedKeys, Digest, Note};
 use qnero_prover::WalletProver;
+use qnero_verifier::{
+	parse_private_batch_public_input_felts, parse_public_batch_public_input_felts,
+};
+use qp_plonky2_verifier::{field::types::Field, F};
 use sp_core::H256;
 use sp_runtime::{traits::ValidateUnsigned, transaction_validity::TransactionSource};
 
 use crate::{
-	circuit_config, mock::*, padding_block_hash, Error, Event, Hash256, RealSlot, Segment,
+	circuit_config, mock::*, padding_block_hash, weights, Error, Event, Hash256, RealSlot, Segment,
 	SettlementBundle, ShieldedOutput, POOL_QUANTUM,
 };
 
@@ -43,6 +52,15 @@ use crate::{
 
 fn digest_bytes_of(tag: &str) -> Hash256 {
 	qp_poseidon_core::hash_bytes(tag.as_bytes())
+}
+
+/// Write a 32-byte digest into a public-input vector at `start`, the way the
+/// batch wrapper registers one: four canonical limbs, little endian per limb.
+fn write_digest(felts: &mut [F], start: usize, digest: &Hash256) {
+	for (index, limb) in digest.chunks_exact(8).enumerate() {
+		felts[start + index] =
+			F::from_canonical_u64(u64::from_le_bytes(limb.try_into().expect("8 bytes")));
+	}
 }
 
 fn output(a: &[u8], b: &[u8]) -> ShieldedOutput<Test> {
@@ -91,6 +109,16 @@ fn one_segment(block_number: u32, slots: Vec<RealSlot>) -> SettlementBundle {
 	}
 }
 
+/// Stand `quanta` of pool value behind a synthetic settlement.
+///
+/// A settled fee leaves the pool, and the pallet refuses a fee larger than the
+/// pool is holding, and refuses the settlement when it is not.
+/// The end-to-end tests shield for real; these hand-built bundles have no
+/// entry, so they seed the counter directly.
+fn fund_pool(quanta: u128) {
+	crate::PoolValue::<Test>::put(quanta * POOL_QUANTUM);
+}
+
 #[test]
 fn a_bundle_with_no_settleable_segment_is_refused() {
 	new_test_ext().execute_with(|| {
@@ -107,6 +135,7 @@ fn a_bundle_with_no_settleable_segment_is_refused() {
 #[test]
 fn a_valid_single_segment_bundle_passes_and_counts_its_fee() {
 	new_test_ext().execute_with(|| {
+		fund_pool(100);
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 3)]);
 		let outputs = vec![output(b"ct-a1", b"ct-a2")];
 		let plan = check(&bundle, &outputs).expect("valid");
@@ -118,10 +147,13 @@ fn a_valid_single_segment_bundle_passes_and_counts_its_fee() {
 #[test]
 fn a_nullifier_already_settled_is_refused() {
 	new_test_ext().execute_with(|| {
+		fund_pool(100);
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 3)]);
 		let outputs = vec![output(b"ct-a1", b"ct-a2")];
 		assert_ok!(check(&bundle, &outputs));
 
+		// One of the two settled, the other not: the segment is partly settled,
+		// which is not the skippable case and is refused.
 		crate::UsedNullifiers::<Test>::insert(bundle.segments[0].slots[0].nullifiers[1], ());
 		assert_noop!(check(&bundle, &outputs), Error::<Test>::NullifierAlreadyUsed);
 	});
@@ -134,6 +166,7 @@ fn a_nullifier_already_settled_is_refused() {
 #[test]
 fn both_nullifiers_of_a_slot_are_checked_and_settled() {
 	new_test_ext().execute_with(|| {
+		fund_pool(100);
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 3)]);
 		let outputs = vec![output(b"ct-a1", b"ct-a2")];
 		assert_ok!(Shielded::settle(bundle.clone(), outputs.clone()));
@@ -141,7 +174,8 @@ fn both_nullifiers_of_a_slot_are_checked_and_settled() {
 		for nullifier in bundle.segments[0].slots[0].nullifiers {
 			assert!(crate::UsedNullifiers::<Test>::contains_key(nullifier));
 		}
-		// And the whole submission is a replay now.
+		// And the whole submission is a replay now: every segment is already
+		// settled, so there is nothing left to settle and it is refused.
 		assert_noop!(check(&bundle, &outputs), Error::<Test>::NullifierAlreadyUsed);
 	});
 }
@@ -311,6 +345,7 @@ fn a_slot_below_the_minimum_fee_is_refused() {
 #[test]
 fn settling_appends_two_leaves_per_slot_and_stores_their_ciphertexts() {
 	new_test_ext().execute_with(|| {
+		fund_pool(100);
 		let bundle = one_segment(
 			10,
 			vec![slot("a", b"ct-a1", b"ct-a2", 3), slot("b", b"ct-b1", b"ct-b2", 5)],
@@ -339,19 +374,90 @@ fn settling_appends_two_leaves_per_slot_and_stores_their_ciphertexts() {
 
 #[test]
 fn the_block_author_is_paid_its_share_of_a_settled_fee() {
-	new_test_ext().execute_with(|| {
+	new_test_ext_with_endowments(vec![(alice(), 1_000 * UNIT)]).execute_with(|| {
 		let preimage = [7u8; 32];
 		let author = author_of(preimage);
 		set_author_preimage(preimage);
 		assert_eq!(Balances::balance(&author), 0);
 
+		// Shield first, so the fee the settlement pays out is value the pool
+		// actually holds. Asserting the author's credit against an empty pool
+		// would assert that the underflow guard is a no-op.
+		assert_ok!(Shielded::shield(
+			RuntimeOrigin::signed(alice()),
+			100 * POOL_QUANTUM,
+			note_inner(&shielder_keys().pk(), &entry_rho(1, 0), &Digest::hash_bytes(&[b"r"]))
+				.to_bytes(),
+			b"ct".to_vec(),
+		));
+		let issuance_before = Balances::total_issuance();
+
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 9)]);
 		assert_ok!(Shielded::settle(bundle, vec![output(b"ct-a1", b"ct-a2")]));
 
 		// Nine quanta, burn rounds up against the author: five burned, four
-		// minted.
+		// credited.
 		assert_eq!(Balances::balance(&author), 4 * POOL_QUANTUM);
 		System::assert_has_event(Event::AuthorFeePaid { author, amount: 4 * POOL_QUANTUM }.into());
+		// The whole fee left the pool and only the author's share came back
+		// into issuance; the burned half is the issuance the shield removed and
+		// never restored.
+		assert_eq!(Shielded::pool_value(), 91 * POOL_QUANTUM);
+		assert_eq!(Balances::total_issuance(), issuance_before + 4 * POOL_QUANTUM);
+	});
+}
+
+/// `PoolValue` is the pallet's record of the issuance the pool stands in for.
+/// A fee above it means the circuit's balance equation was broken or an entry
+/// point forgot to credit the pool, and the response has to be a refusal:
+/// a saturating subtraction would mint the author a share of a fee nothing
+/// backs and zero the books on the way past, with nothing on chain to say so.
+#[test]
+fn a_fee_larger_than_the_pool_is_refused_with_nothing_written() {
+	new_test_ext().execute_with(|| {
+		fund_pool(2);
+		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 3)]);
+		let outputs = vec![output(b"ct-a1", b"ct-a2")];
+		assert_noop!(check(&bundle, &outputs), Error::<Test>::PoolUnderflow);
+		assert_noop!(Shielded::settle(bundle, outputs), Error::<Test>::PoolUnderflow);
+		assert_eq!(ZkTree::leaf_count(), 0);
+		assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 0);
+		assert_eq!(Shielded::pool_value(), 2 * POOL_QUANTUM);
+	});
+}
+
+/// The author's fee share must not emit an event the runtime's
+/// `WormholeProofRecorderExtension` scans for.
+///
+/// That extension turns a `Balances::Minted` (and a `Transfer`) into a wormhole
+/// transfer leaf of its own, and this pallet records the author's leaf itself,
+/// so `Mutate::mint_into` here would credit one balance against two independent
+/// leaves and let the author exit twice what it was paid. `pallet-wormhole`
+/// carries the same rule and the same test.
+#[test]
+fn the_author_fee_credit_emits_no_scannable_balance_event() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		let preimage = [13u8; 32];
+		let author = author_of(preimage);
+		set_author_preimage(preimage);
+
+		System::reset_events();
+		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 9)]);
+		assert_ok!(Shielded::settle(bundle, vec![output(b"ct-a1", b"ct-a2")]));
+		assert_eq!(Balances::balance(&author), 4 * POOL_QUANTUM, "the credit did happen");
+
+		for record in System::events() {
+			assert!(
+				!matches!(
+					record.event,
+					RuntimeEvent::Balances(pallet_balances::Event::Minted { .. })
+						| RuntimeEvent::Balances(pallet_balances::Event::Transfer { .. })
+				),
+				"a settlement emitted a balance event the wormhole recorder scans for: {:?}",
+				record.event
+			);
+		}
 	});
 }
 
@@ -360,14 +466,174 @@ fn the_block_author_is_paid_its_share_of_a_settled_fee() {
 /// where that is decided, so a settleable segment never carries one.
 #[test]
 fn a_padding_slot_is_dropped_at_the_parse() {
+	let sentinel = padding_block_hash();
+	assert_ne!(sentinel, [0u8; 32]);
+	// The sentinel is what the chain recognises padding by, and it is not a
+	// hash any chain can produce.
+	assert_eq!(
+		hex::encode(sentinel),
+		"34b4e468a910702ae5c6124a10a5ed2e2eea369e90faa8bb5244e83015939269"
+	);
+
+	// Two slots, the second one padding: commitments zeroed, nullifiers still
+	// carrying the prover's randomness, fee and `ct_digest` zeroed.
+	let mut felts = vec![F::ZERO; private_batch_pi_len(2)];
+	let block_hash = digest_bytes_of("a real block");
+	write_digest(&mut felts, BLOCK_HASH_START, &block_hash);
+	felts[BLOCK_NUMBER_INDEX] = F::from_canonical_u64(10);
+	write_digest(&mut felts, slot_nullifier_index(0, 0), &digest_bytes_of("real-nf1"));
+	write_digest(&mut felts, slot_nullifier_index(0, 1), &digest_bytes_of("real-nf2"));
+	write_digest(&mut felts, slot_commitment_index(0, 0), &digest_bytes_of("real-cm1"));
+	write_digest(&mut felts, slot_commitment_index(0, 1), &digest_bytes_of("real-cm2"));
+	felts[slot_fee_index(0)] = F::from_canonical_u64(3);
+	write_digest(&mut felts, slot_ct_digest_index(0), &ct_digest(&[b"ct-1", b"ct-2"]));
+	write_digest(&mut felts, slot_nullifier_index(1, 0), &digest_bytes_of("padding-nf1"));
+	write_digest(&mut felts, slot_nullifier_index(1, 1), &digest_bytes_of("padding-nf2"));
+
+	let inputs = parse_private_batch_public_input_felts(&felts, 2).expect("the layout parses");
+	let bundle = SettlementBundle::from_private_batch(&inputs);
+	assert_eq!(bundle.segments.len(), 1);
+	let segment = &bundle.segments[0];
+	assert_eq!(segment.block_hash, block_hash);
+	assert_eq!(segment.block_number, 10);
+	// Only the real slot survives, and the padding slot's two nullifiers never
+	// reach the chain's nullifier set.
+	assert_eq!(segment.slots.len(), 1);
+	assert_eq!(segment.slots[0].nullifiers[0], digest_bytes_of("real-nf1"));
+	assert_eq!(segment.slots[0].nullifiers[1], digest_bytes_of("real-nf2"));
+	assert_eq!(segment.slots[0].fee, 3);
+}
+
+/// The public-batch twin. A padding inner keeps the sentinel header with its
+/// whole slot region zeroed, so settling it would insert the all-zero
+/// nullifier and make the chain refuse its own next batch as a double spend.
+#[test]
+fn a_padding_inner_is_dropped_at_the_parse() {
+	let mut felts = vec![F::ZERO; public_batch_pi_len(2, 1)];
+	write_digest(&mut felts, AGGREGATOR_ADDRESS_START, &digest_bytes_of("an aggregator"));
+
+	// Inner 0 is real.
+	let real = public_batch_inner_start(0, 1);
+	let block_hash = digest_bytes_of("a real block");
+	write_digest(&mut felts, real + BLOCK_HASH_START, &block_hash);
+	felts[real + BLOCK_NUMBER_INDEX] = F::from_canonical_u64(7);
+	write_digest(&mut felts, real + slot_nullifier_index(0, 0), &digest_bytes_of("nf1"));
+	write_digest(&mut felts, real + slot_nullifier_index(0, 1), &digest_bytes_of("nf2"));
+	write_digest(&mut felts, real + slot_commitment_index(0, 0), &digest_bytes_of("cm1"));
+	write_digest(&mut felts, real + slot_commitment_index(0, 1), &digest_bytes_of("cm2"));
+	felts[real + slot_fee_index(0)] = F::from_canonical_u64(1);
+
+	// Inner 1 is padding: the sentinel header over a zeroed slot region.
+	let padding = public_batch_inner_start(1, 1);
+	write_digest(&mut felts, padding + BLOCK_HASH_START, &padding_block_hash());
+
+	let inputs = parse_public_batch_public_input_felts(&felts, 2, 1).expect("the layout parses");
+	let bundle = SettlementBundle::from_public_batch(&inputs);
+	assert_eq!(bundle.segments.len(), 1, "the padding inner settles nothing");
+	assert_eq!(bundle.segments[0].block_hash, block_hash);
+	assert_eq!(bundle.segments[0].slots.len(), 1);
+}
+
+/// `block_number` arrives as a field element, which is wider than the `u32` the
+/// chain compares against. The cast saturates: a truncating one would let an
+/// out-of-range claim alias a real height, leaving
+/// the block-hash comparison as the only thing between it and a settlement
+/// anchored at a block the prover never saw.
+#[test]
+fn an_out_of_range_block_number_saturates_and_is_then_refused() {
+	let mut felts = vec![F::ZERO; private_batch_pi_len(1)];
+	write_digest(&mut felts, BLOCK_HASH_START, &digest_bytes_of("a block"));
+	felts[BLOCK_NUMBER_INDEX] = F::from_canonical_u64(1u64 << 32);
+	write_digest(&mut felts, slot_nullifier_index(0, 0), &digest_bytes_of("nf1"));
+	write_digest(&mut felts, slot_nullifier_index(0, 1), &digest_bytes_of("nf2"));
+	write_digest(&mut felts, slot_commitment_index(0, 0), &digest_bytes_of("cm1"));
+	write_digest(&mut felts, slot_commitment_index(0, 1), &digest_bytes_of("cm2"));
+	felts[slot_fee_index(0)] = F::from_canonical_u64(1);
+	write_digest(&mut felts, slot_ct_digest_index(0), &ct_digest(&[b"ct-1", b"ct-2"]));
+
+	let inputs = parse_private_batch_public_input_felts(&felts, 1).expect("the layout parses");
+	let bundle = SettlementBundle::from_private_batch(&inputs);
+	assert_eq!(bundle.segments[0].block_number, u32::MAX);
+
 	new_test_ext().execute_with(|| {
-		let sentinel = padding_block_hash();
-		assert_ne!(sentinel, [0u8; 32]);
-		// The sentinel is what the chain recognises padding by, and it is not
-		// a hash any chain can produce.
-		assert_eq!(
-			hex::encode(sentinel),
-			"34b4e468a910702ae5c6124a10a5ed2e2eea369e90faa8bb5244e83015939269"
+		fund_pool(100);
+		System::set_block_number(20);
+		assert_noop!(
+			check(&bundle, &[output(b"ct-1", b"ct-2")]),
+			Error::<Test>::BlockOutsideWindow
+		);
+	});
+}
+
+/// An aggregator's public batch wraps proofs that are each, on their own,
+/// exactly what `submit_private_batch` accepts. A participant can therefore
+/// settle its own inner directly before the batch lands. If that made the whole
+/// public batch fatal, one participant could strand the other fifty-two
+/// transfers and waste the aggregator's recursive proving run, for free and as
+/// often as it liked. The already-settled segment is skipped.
+#[test]
+fn a_segment_settled_by_an_earlier_submission_is_skipped_not_fatal() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		let block_hash = anchor(10);
+		let first = slot("a", b"ct-a1", b"ct-a2", 3);
+		let second = slot("b", b"ct-b1", b"ct-b2", 5);
+		let outputs = vec![output(b"ct-a1", b"ct-a2"), output(b"ct-b1", b"ct-b2")];
+
+		// The first segment settles on its own.
+		assert_ok!(Shielded::settle(
+			SettlementBundle {
+				segments: vec![Segment {
+					block_hash,
+					block_number: 10,
+					slots: vec![first.clone()],
+				}],
+			},
+			vec![outputs[0].clone()],
+		));
+		assert_eq!(ZkTree::leaf_count(), 2);
+
+		// Now the batch that wraps it arrives. The settled segment contributes
+		// no leaves and no fee; the other one settles.
+		let batch = SettlementBundle {
+			segments: vec![
+				Segment { block_hash, block_number: 10, slots: vec![first.clone()] },
+				Segment { block_hash, block_number: 10, slots: vec![second.clone()] },
+			],
+		};
+		let plan = check(&batch, &outputs).expect("the batch settles what is left");
+		assert_eq!(plan.settles, vec![false, true]);
+		assert_eq!(plan.slots, 1);
+		assert_eq!(plan.fee_quanta, 5);
+
+		assert_ok!(Shielded::settle(batch.clone(), outputs.clone()));
+		assert_eq!(ZkTree::leaf_count(), 4);
+		assert_eq!(ZkTree::leaf(2), Some(second.commitments[0]));
+		// The skipped segment's ciphertexts were not rewritten over the
+		// earlier settlement's leaves, and the second segment's ciphertexts
+		// landed against their own leaf indices.
+		assert_eq!(Shielded::ciphertext(2).map(|c| c.to_vec()), Some(b"ct-b1".to_vec()));
+		assert_eq!(Shielded::ciphertext(0).map(|c| c.to_vec()), Some(b"ct-a1".to_vec()));
+
+		// Re-submitting the whole thing now settles nothing at all, which is a
+		// replay and is refused.
+		assert_noop!(check(&batch, &outputs), Error::<Test>::NullifierAlreadyUsed);
+	});
+}
+
+/// A segment that is only *partly* settled is not the skippable case: one of
+/// its notes is spent and the rest are not, which no honest settlement
+/// produces. The whole submission is refused.
+#[test]
+fn a_partly_settled_segment_is_still_fatal() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		let only = slot("a", b"ct-a1", b"ct-a2", 3);
+		crate::UsedNullifiers::<Test>::insert(only.nullifiers[0], ());
+		let bundle = one_segment(10, vec![only]);
+		assert_noop!(
+			check(&bundle, &[output(b"ct-a1", b"ct-a2")]),
+			Error::<Test>::NullifierAlreadyUsed
 		);
 	});
 }
@@ -679,10 +945,162 @@ fn a_settled_batch_cannot_be_replayed() {
 	});
 }
 
-/// Pool admission does the cheap work; `pre_dispatch` is the block-inclusion
-/// gate that runs the ZK verify. A tampered proof passes neither, and the
-/// difference between them is what stops fee-free gossip forcing a verify per
-/// byte variant.
+/// Pool admission verifies. Nothing short of the verify establishes that a
+/// proof's public inputs are a proof's: they are a plain vector in the
+/// serialized blob, so a body-tampered clone of a genuine proof carries the
+/// victim's nullifiers, passes the canonical-encoding round trip and the whole
+/// settlement check, and would be admitted and re-gossiped by every node if
+/// admission stopped short of the verify. It would also take the victim's
+/// `provides` tag, which is derived from those same nullifiers, and under a
+/// constant priority whichever arrived first would hold the pool slot.
+#[test]
+fn an_unverifiable_proof_is_refused_at_pool_admission() {
+	new_test_ext_with_endowments(vec![(alice(), 10_000 * UNIT)]).execute_with(|| {
+		let spend = shield_and_prove(4, 2);
+
+		// A byte in the proof body, well clear of the public-input tail, so the
+		// settlement check sees exactly the values the genuine proof carries.
+		let mut tampered = spend.proof.clone();
+		tampered[spend.proof.len() / 3] ^= 0x01;
+		assert_ne!(tampered, spend.proof);
+
+		let genuine = crate::Call::submit_private_batch {
+			proof: spend.proof.clone(),
+			outputs: spend.outputs.clone(),
+		};
+		let forged =
+			crate::Call::submit_private_batch { proof: tampered, outputs: spend.outputs.clone() };
+
+		// The forgery and the genuine transaction are the same settlement as
+		// far as every check short of the verify is concerned: same tag.
+		let bundle = Shielded::pre_validate_private_batch(match &forged {
+			crate::Call::submit_private_batch { proof, .. } => proof,
+			_ => unreachable!(),
+		})
+		.expect("the public inputs still parse");
+		assert_eq!(
+			Shielded::settlement_provides_tag(&bundle),
+			Shielded::settlement_provides_tag(
+				&Shielded::pre_validate_private_batch(&spend.proof).expect("parses")
+			),
+			"the forgery would occupy the genuine settlement's pool slot"
+		);
+		assert_ok!(Shielded::check_settlement(&bundle, &spend.outputs));
+
+		// Admission refuses it anyway, so it never enters a pool and is never
+		// re-gossiped.
+		assert!(<Shielded as ValidateUnsigned>::validate_unsigned(
+			TransactionSource::External,
+			&forged
+		)
+		.is_err());
+		assert!(<Shielded as ValidateUnsigned>::pre_dispatch(&forged).is_err());
+		assert!(<Shielded as ValidateUnsigned>::validate_unsigned(
+			TransactionSource::External,
+			&genuine
+		)
+		.is_ok());
+	});
+}
+
+/// The per-slot `ct_digest` is a byte sponge over kilobytes of note
+/// ciphertext, and the weight has to charge for the bytes it actually absorbs.
+/// This pins the weight's model against the encoding the real hasher uses: four
+/// bytes per field element plus a terminator, eight field elements absorbed per
+/// permutation.
+#[test]
+fn ciphertext_digest_permutations_match_the_hashed_bytes() {
+	assert_eq!(weights::SPONGE_RATE as usize, qp_poseidon_core::SPONGE_RATE);
+
+	for (ct_1, ct_2) in [
+		(vec![0u8; 0], vec![0u8; 0]),
+		(vec![0u8; 1_731], vec![0u8; 1_731]),
+		(vec![7u8; 2_048], vec![7u8; 2_048]),
+		(vec![9u8; 4_096], vec![9u8; 4_096]),
+	] {
+		// The preimage `qnero_circuit::chain::ct_digest` builds.
+		let mut preimage = Vec::new();
+		preimage.extend_from_slice(b"qnero/ct");
+		preimage.extend_from_slice(&2u32.to_le_bytes());
+		for ct in [&ct_1, &ct_2] {
+			preimage.extend_from_slice(&(ct.len() as u32).to_le_bytes());
+			preimage.extend_from_slice(ct);
+		}
+		assert_eq!(
+			preimage.len() as u64,
+			weights::CT_DIGEST_FRAMING_BYTES + (ct_1.len() + ct_2.len()) as u64,
+			"the weight's framing does not match the preimage"
+		);
+
+		let felts = qp_poseidon_core::serialization::bytes_to_felts(&preimage).len() as u64;
+		let permutations = felts.div_ceil(weights::SPONGE_RATE);
+		assert_eq!(
+			weights::ct_digest_permutations((ct_1.len() + ct_2.len()) as u64),
+			permutations,
+			"charged permutations do not match the sponge over {} bytes",
+			preimage.len()
+		);
+		// The digest itself has to be computable over these bytes, which is
+		// what makes the count a real cost.
+		let _ = ct_digest(&[&ct_1, &ct_2]);
+	}
+}
+
+/// The chain's header hash and the circuit's must agree, or every settlement
+/// fails `BlockHashMismatch` on the first real chain with nothing to say which
+/// side moved.
+///
+/// The end-to-end test writes the circuit's own value into
+/// `frame_system::BlockHash`, so it compares that encoding against itself. This
+/// is the one place the two implementations meet.
+#[test]
+fn the_chain_header_hash_matches_the_circuits() {
+	use codec::Encode;
+
+	assert_eq!(qp_header::DIGEST_LOGS_SIZE, DIGEST_LOGS_SIZE);
+
+	let parent = qp_poseidon_core::hash_bytes(b"qnero-test/parent-header");
+	let zk_tree_root = qp_poseidon_core::hash_bytes(b"qnero-test/zk-tree-root");
+	// Blake2 outputs, which need not be canonical field elements; both sides
+	// reduce them through the same lossy decode.
+	let state_root = [0xABu8; 32];
+	let extrinsics_root = [0xCDu8; 32];
+
+	let mut digest = sp_runtime::Digest::default();
+	digest.push(sp_runtime::DigestItem::PreRuntime(qp_wormhole::POW_ENGINE_ID, vec![5u8; 32]));
+
+	let header = qp_header::Header::<u64, sp_runtime::traits::BlakeTwo256>::new_with_zk_root(
+		42,
+		H256::from(extrinsics_root),
+		H256::from(state_root),
+		H256::from(parent),
+		H256::from(zk_tree_root),
+		digest.clone(),
+	);
+
+	// The chain pads the SCALE-encoded digest to the fixed window before
+	// hashing it, and bytes past the window are not committed at all, which is
+	// why the import path refuses a longer one.
+	let encoded = digest.encode();
+	assert!(encoded.len() <= DIGEST_LOGS_SIZE);
+	let mut padded = [0u8; DIGEST_LOGS_SIZE];
+	padded[..encoded.len()].copy_from_slice(&encoded);
+
+	let circuit = HeaderInputs::new(
+		Digest::from_bytes(&parent).expect("canonical"),
+		42,
+		state_root,
+		extrinsics_root,
+		Digest::from_bytes(&zk_tree_root).expect("canonical"),
+		&padded,
+	)
+	.expect("the digest window is the documented length");
+
+	assert_eq!(header.hash().as_bytes(), circuit.block_hash().to_bytes());
+}
+
+/// A tampered proof passes neither gate, and a byte variant of a genuine one is
+/// a different transaction identity the canonical-encoding round trip refuses.
 #[test]
 fn a_tampered_proof_is_refused() {
 	new_test_ext_with_endowments(vec![(alice(), 10_000 * UNIT)]).execute_with(|| {
@@ -696,14 +1114,30 @@ fn a_tampered_proof_is_refused() {
 		assert!(<Shielded as ValidateUnsigned>::pre_dispatch(&call).is_err());
 
 		// Trailing bytes are a different transaction identity for the same
-		// proof, and plonky2's reader would accept them.
+		// proof, and plonky2's reader would accept them. The pallet names that
+		// failure, which is the point of declaring it: an operator debugging a
+		// rejected settlement can tell a byte-mangled proof from a genuine
+		// public-input layout mismatch and from a proof built for other circuit
+		// dimensions.
 		let mut padded = spend.proof.clone();
 		padded.push(0);
+		assert!(matches!(
+			Shielded::pre_validate_private_batch(&padded),
+			Err(Error::<Test>::NonCanonicalProofEncoding)
+		));
 		assert!(<Shielded as ValidateUnsigned>::validate_unsigned(
 			TransactionSource::External,
 			&crate::Call::submit_private_batch { proof: padded, outputs: spend.outputs.clone() }
 		)
 		.is_err());
+
+		// A truncated proof does not deserialize at all, which is also what a
+		// proof built at another `N` looks like.
+		let truncated = spend.proof[..spend.proof.len() / 2].to_vec();
+		assert!(matches!(
+			Shielded::pre_validate_private_batch(&truncated),
+			Err(Error::<Test>::ProofDeserializationFailed)
+		));
 
 		// The genuine proof passes both.
 		let good = crate::Call::submit_private_batch { proof: spend.proof, outputs: spend.outputs };

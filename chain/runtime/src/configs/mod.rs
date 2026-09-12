@@ -862,9 +862,20 @@ parameter_types! {
 	/// Half of a settled fee is burned, half is minted to the block author. The
 	/// same split `pallet-wormhole` applies to its volume fee.
 	pub const ShieldedFeeBurnRate: Permill = Permill::from_percent(50);
-	/// Size cap on one note ciphertext: an ML-KEM-1024 encapsulation (1568
-	/// bytes) plus two AEAD payloads, with room for a memo.
-	pub const ShieldedMaxCiphertextBytes: u32 = 4096;
+	/// Size cap on one note ciphertext: 2048 bytes.
+	///
+	/// A `NoteCiphertext` at the chain's parameter set serializes to 1731 bytes
+	/// with an empty memo: 11 bytes of framing, an ML-KEM-1024 encapsulation
+	/// (1568), the 112-byte note payload under a ChaCha20-Poly1305 tag (128),
+	/// and the memo's own tag (16). The cap leaves 317 bytes of memo.
+	///
+	/// The slack is deliberately small. `Ciphertexts` is never pruned and the
+	/// chain never parses these bytes, so whatever slack the cap leaves is
+	/// permanent state a settler can pad into for the flat `MinLeafFee`. A
+	/// wallet reads this bound from the pallet's metadata, where a hardcoded
+	/// copy would drift: exceeding it fails the extrinsic's SCALE decode after
+	/// the proof that committed to those exact bytes has already been built.
+	pub const ShieldedMaxCiphertextBytes: u32 = 2048;
 }
 
 impl pallet_shielded::Config for Runtime {

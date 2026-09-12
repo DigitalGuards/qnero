@@ -48,8 +48,12 @@ kilobytes of ML-KEM and AEAD ciphertext in circuit would dominate the proof;
 the chain recomputes the digest from the bytes it was handed and compares.
 
 That comparison binds the ciphertexts only while the rule is unambiguous, so
-the rule is fixed here and implemented once, in `qnero_notes::ct_digest`, which
-both the wallet and `pallet-shielded` call:
+the rule is fixed here and implemented once, in
+`qnero_circuit::chain::ct_digest` (re-exported as `qnero_verifier::chain`),
+which both the wallet and `pallet-shielded` call. It sits in the circuit
+crate's layout-only surface, which compiles without the `circuit` feature, and
+that is what lets a wasm runtime with no prover stack call the same function a
+wallet does:
 
 ```text
 ct_digest = H_bytes("qnero/ct" || u32_le(count)
@@ -189,6 +193,20 @@ takes them as raw `[u8; 32]` and reduces them identically. Validating them
 instead would leave a wallet unable to prove any spend anchored at such a
 block, with an error naming a hash the chain considers perfectly valid.
 
+`digest(28)` is the SCALE-encoded digest **zero padded to 110 bytes**
+(`DIGEST_LOGS_SIZE`, the same constant on both sides) and then encoded
+injectively at 4 bytes per field element with a terminator, which is the 28
+felts. The padding is not optional and it is not a detail: the chain hashes a
+fixed-size window, so a wallet that feeds the encoded digest unpadded computes a
+different `block_hash` and every settlement it builds is refused with
+`BlockHashMismatch`. Bytes past the window are not committed at all, which is
+why the import path refuses a header whose encoded digest is longer, and why
+runtime code must never deposit a digest item.
+`the_chain_header_hash_matches_the_circuits` in `pallet-shielded`'s tests is
+the cross-crate check that `qp_header::Header::hash` and
+`HeaderInputs::block_hash` agree, digest window included; nothing else holds
+the two encodings together.
+
 ## 4. Leaf hash rule (the M4 contract)
 
 **A commitment tree leaf is the note commitment itself. `leaf_hash = cm`.**
@@ -226,8 +244,8 @@ reproduces the chain's shape so the adapter is covered by a test.
 
 ### What `pallet-zk-tree` changed at M4
 
-Done, with two deviations from the list below, both because the fork keeps
-`pallet-wormhole` working beside the shielded pool on one tree instance.
+Done, with three deviations from the list below, all three because the fork
+keeps `pallet-wormhole` working beside the shielded pool on one tree instance.
 
 Item 4 is partial. `hash_leaf` and `canonicalize_account_bytes` are still in
 `tree.rs`, because a wormhole transfer leaf still has a typed preimage and
@@ -246,6 +264,18 @@ circuit can prove), where a transfer leaf is built by the recorder itself and
 cannot fail, and folding the fallible case into the existing signature would
 have made every wormhole call site handle an error it cannot produce.
 
+Item 3 is additive, for the same reason as item 6. `insert_leaf` keeps its four
+typed arguments, because the wormhole path still builds a typed leaf and
+something has to hash it, and `insert_commitment(Hash256)` is the raw-hash door
+beside it. The two entry points differ by argument type and both stay, so there
+is no typed path into the tree that a shielded commitment could take by
+accident. The asymmetry the fork did not close is the
+capacity check: `insert_commitment` refuses an append past
+`capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)` and `insert_leaf` cannot, because
+its caller's signature is infallible. Reaching that bound through wormhole
+transfers alone needs 4^16 of them, and `process_pending_leaves` reports the
+condition through `defensive!` if it ever happens.
+
 Item 8 landed in two places, which is what the item asks for. The growth loop
 clamps at `CIRCUIT_MAX_TREE_DEPTH`, and `insert_commitment` refuses an append
 past `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)` so the clamp is never reached;
@@ -253,7 +283,22 @@ past `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)` so the clamp is never reached;
 anything, because a settlement that ran out of capacity halfway would otherwise
 depend on the dispatch layer's rollback to stay consistent.
 
-Everything else is as listed. The original list follows.
+Everything else is as listed.
+
+**The `Leaves` type change is genesis only.** `pallet-zk-tree` now declares
+storage version 1 and carries no migration. A chain holding v0 entries, which is
+any Quantus chain and any Qnero devnet started before M4, cannot take this
+runtime: every existing entry would fail to decode as `[u8; 32]`, and
+`tree::get_leaf_hash` turns a decode failure into the absence sentinel, so the
+fold would silently build a tree of empty hashes and publish a root that
+disagrees with every root already in the chain's headers. Carrying v0 state
+across needs a `MigrateV0ToV1` that rehashes each stored `ZkLeaf` through
+`tree::hash_leaf`, or that refuses the upgrade outright. The fork also still
+identifies as `quantus-runtime` at `spec_version` 152, which is an open issue
+in `docs/OPS-DEV.md`: two runtimes with different metadata and an incompatible
+storage layout currently answer the same version triple.
+
+The original list follows.
 
 ### The original list
 
@@ -528,9 +573,10 @@ Both verify their inner proofs against a verifier key baked in as circuit
 **constants**. A witnessed verifier key would let a prover substitute a circuit
 of their own with no constraints at all and have the wrapper accept its proof.
 
-Chain defaults: `N = 7` leaves per private batch, `n = 53` private batches per
-public batch, both overridable at artifact-build time. Seven is a wallet-side
-memory decision, fifty-three an aggregator-side cost one.
+Chain defaults: `N = 6` leaves per private batch, `n = 53` private batches per
+public batch, both overridable at artifact-build time. Six is a wallet-side
+memory decision, fifty-three an aggregator-side cost one; section 9.1 carries
+why six, where M3 measured at seven.
 
 ### 8.1 Private batch public inputs
 
@@ -557,7 +603,8 @@ then, for each slot `i` in `0..N`, at `5 + 21*i`:
 There is no trailing padding: the length is a function of `N` alone. Upstream
 pads its aggregated output to a legacy size; Qnero has no legacy to preserve.
 
-At `N = 7` that is 152 felts.
+At the chain's `N = 6` that is 131 felts; M3's measurements were taken at
+`N = 7`, which is 152.
 
 **Fees are not summed in circuit.** A leaf's fee is a 62-bit field element, so
 seven of them can exceed the Goldilocks modulus and the sum would wrap. Each
@@ -589,11 +636,14 @@ buckets the proofs it pools by block.
 
 The aggregator address is four felts of pure witness, registered as the first
 four public inputs and constrained by nothing in circuit. It names who may
-claim the batch's fees. Whoever holds the inner proofs can re-prove the same
-batch under another address, so an aggregator that accepts a finished proof
-from elsewhere must compare the exposed address against its own **off circuit**
-or it will settle batches whose fees are payable to someone else;
-`QneroPublicBatchProver::verify` is that check.
+claim the batch's fees under a settlement rule that pays the aggregator;
+**M4 pays the block author and ignores this public input entirely**, so at M4
+these four felts buy an aggregator nothing on chain. Section 9.7 says
+what M4 does and carries aggregator payment as an open decision. Whoever holds
+the inner proofs can re-prove the same batch under another address, so an
+aggregator that accepts a finished proof from elsewhere and that settles under
+a rule which pays the address must compare the exposed address against its own
+**off circuit**; `QneroPublicBatchProver::verify` is that check.
 
 ### 8.3 The forwarding contract
 
@@ -707,12 +757,12 @@ invariant that crosses a circuit boundary:
 
 **A padding slot is identifiable, and the batch's real-transfer count is
 public.** The mask zeroes a padding slot's commitment pair, and a real slot's
-commitments are Poseidon2 outputs, so anyone reading the 152 published felts of
-a `N = 7` batch filters the slots on `commitments == 0` and learns exactly how
+commitments are Poseidon2 outputs, so anyone reading the 131 published felts of
+a `N = 6` batch filters the slots on `commitments == 0` and learns exactly how
 many transfers the submission carries and which positions they sit in.
 `BatchLeafSlot::is_padding` is that classifier, and the chain needs it to know
 which commitments to append. What the padding buys is a fixed proof shape and a
-fixed public-input length: every submission is one 152-felt private batch of
+fixed public-input length: every submission is one 131-felt private batch of
 the same size, whatever it carries. Hiding the count would mean giving a
 padding slot commitments indistinguishable from a real one's and telling the
 chain by another route which to append, which is a design change; section 8.6
@@ -838,7 +888,7 @@ needs a tagged circuit to pin.
   real-transfer count should be hidden at all.** These are one decision. A
   padding slot is identifiable today, because the wrapper zeroes its
   commitments and the chain needs that to know what to append (section 8.4), so
-  a one-transfer batch at `N = 7` publishes twelve unlinkable padding
+  a one-transfer batch at `N = 6` publishes ten unlinkable padding
   nullifiers that buy no count hiding and that a chain settling by one rule
   writes into permanent state. Either the chain skips a padding slot's
   nullifiers the way it already skips a zero commitment, which removes
@@ -849,7 +899,7 @@ needs a tagged circuit to pin.
   settlement-format change together, and it is the only version that makes the
   shuffle buy anything.
 - **Pallet-side `ct_digest` recomputation.** The rule is fixed (section 1) and
-  implemented once in `qnero_notes::ct_digest`. What M4 owes is the call:
+  implemented once in `qnero_circuit::chain::ct_digest`. What M4 owes is the call:
   recompute the digest over the ciphertexts in the settlement extrinsic, in
   output order, and reject the leaf when it differs from the forwarded value.
   Without that call the ciphertexts are attached to a proof that says nothing
@@ -879,10 +929,19 @@ side of it is in section 4.
 ### 9.1 Chain defaults
 
 `N = 6` leaf slots per private batch, `n = 53` private batches per public batch,
-both from `chain/pallets/shielded/build.rs` and both overridable with
-`QNERO_NUM_LEAF_PROOFS` / `QNERO_NUM_PRIVATE_BATCH_PROOFS`, which the build
-script declares with `cargo:rerun-if-env-changed` so Cargo cannot reuse an
-`OUT_DIR` built for other dimensions.
+both overridable with `QNERO_NUM_LEAF_PROOFS` /
+`QNERO_NUM_PRIVATE_BATCH_PROOFS`, which `chain/pallets/shielded/build.rs`
+declares with `cargo:rerun-if-env-changed` so Cargo cannot reuse an `OUT_DIR`
+built for other dimensions.
+
+The numbers live in **one** place, `qnero_circuit_builder::DEFAULT_NUM_*`, and
+the build script reads them from there. That matters because the builder is
+also what a wallet or an aggregator runs to produce its own artifact set: a set
+built at a different `N` produces proofs whose public-input length this
+runtime's embedded verifier cannot read, and the rejection arrives after the
+full proving cost has been paid. The pallet distinguishes that failure
+(`ProofDeserializationFailed`) from a layout failure and logs the dimensions the
+runtime was built for.
 
 `N = 6`, where M3 measured seven. Blinding adds about 9000 rows at this
 size, so a private batch fits `degree_bits = 15` only below about 23700 gates,
@@ -936,8 +995,24 @@ ct_digest = H_bytes("qnero/ct" || u32_le(count)
 
 The chain recomputes it per slot, over exactly two ciphertexts, and rejects the
 slot when it differs. The count of `ShieldedOutput`s must equal the count of
-real slots exactly: a trailing extra would otherwise ride along bound by
-nothing.
+real slots exactly, a segment this submission skips included (section 9.5): a
+trailing extra would otherwise ride along bound by nothing, and a positional
+mapping that depended on which segments were already settled would depend on
+something the submitter cannot know.
+
+**Each ciphertext is capped at `MaxCiphertextBytes`, 2048 bytes in the
+runtime.** A `NoteCiphertext` serializes to 1731 bytes at the chain's parameter
+set with an empty memo (11 bytes of framing, a 1568-byte ML-KEM-1024
+encapsulation, the 112-byte note payload under a ChaCha20-Poly1305 tag, and the
+memo's own tag), so the cap leaves 317 bytes of memo. The slack is deliberately
+small: `Ciphertexts` is never pruned and the chain never parses these bytes, so
+whatever slack the cap leaves is permanent state a settler can pad into for the
+flat `MinLeafFee`. A wallet reads the bound from the pallet's metadata rather
+than hardcoding it. Exceeding it fails the extrinsic's SCALE decode, after the
+proof that committed to those exact bytes has already been built, so a wallet
+checks before it proves. The declared weight carries a per-byte term for the
+same reason the cap is tight: the per-slot `ct_digest` is a byte sponge over
+kilobytes of payload.
 
 ### 9.4 Padding
 
@@ -968,10 +1043,24 @@ must not try, and a note spent from input slot 1 is marked used only if slot 1's
 nullifier is settled.
 
 Every nullifier of every settleable segment goes into one set before anything is
-written. A repeat, against `UsedNullifiers` or against the submission itself,
-aborts the whole submission. The private-batch circuit already forbids a repeat
-inside one batch; nothing in the public-batch circuit compares two different
-inners, which is why this is a chain rule.
+written. A repeat inside the submission aborts the whole submission. The
+private-batch circuit already forbids a repeat inside one batch; nothing in the
+public-batch circuit compares two different inners, which is why this is a chain
+rule.
+
+A repeat against `UsedNullifiers` is treated per segment. A segment **every**
+one of whose nullifiers is already settled settled before,
+commitments, fee and all, and this submission skips it whole. A segment that is
+only partly settled is not that case and refuses the submission with
+`NullifierAlreadyUsed`. The distinction matters because an aggregator's public
+batch wraps `n` proofs that are each, on their own, exactly what
+`submit_private_batch` accepts: one participant can settle its own inner
+directly, and if that made the whole public batch fatal it could strand the
+other fifty-two transfers and waste the aggregator's recursive proving run, for
+free and as often as it liked. Skipping is value neutral, because the skipped
+segment's leaves and fee were accounted by whoever got there first. A submission
+whose every segment is skipped settles nothing and is refused, the same way a
+standalone padding batch is.
 
 The all-zero nullifier is refused outright. It cannot reach here through the
 padding filter, and the check is what keeps that true if the filter ever moves.
@@ -1006,15 +1095,38 @@ Every real slot must carry at least `MinLeafFee`, one quantum in the runtime.
 This is the anti-spam mechanism and it is the only one, for the reason section
 8.6 gives.
 
-The sum leaves the pool. `FeeBurnRate` of it (half in the runtime, rounded up
-against the author) is simply not minted back, which is what makes it a burn:
-the value left issuance when it was shielded. The rest is minted to the QPoW
-block author, taken from the pre-runtime digest the same way
-`pallet-mining-rewards` takes it, and recorded as a wormhole leaf through
-`TransferProofRecorder`. Without that leaf the credit would be frozen: a
-QPoW-derived author account has no signing key, and a wormhole leaf is its only
-spend path. With no author in the digest, or a mint that fails below the
-existential deposit, the share stays unminted and the settlement stands.
+The sum leaves the pool, and the pool has to be holding it: a fee above
+`PoolValue` refuses the settlement with `PoolUnderflow` before anything is
+written. That case is unreachable while the circuit's balance equation holds and
+`shield` is the only entry, which is why it fails closed. A saturating
+subtraction would mint the author a share of a fee nothing backs and zero the
+pallet's own books on the way past, with nothing on chain to say the two stopped
+agreeing.
+
+`FeeBurnRate` of the fee (half in the runtime, rounded up against the author) is
+simply not credited back, which is what makes it a burn: the value left issuance
+when it was shielded. The rest goes to the QPoW block author, taken from the
+pre-runtime digest the same way `pallet-mining-rewards` takes it, and recorded
+as a wormhole leaf through `TransferProofRecorder`. Without that leaf the credit
+would be frozen: a QPoW-derived author account has no signing key, and a
+wormhole leaf is its only spend path. With no author in the digest, or a credit
+that fails below the existential deposit, the share stays uncredited and the
+settlement stands.
+
+The credit is `Unbalanced::increase_balance` plus an explicit
+`set_total_issuance`. `Mutate::mint_into` deposits
+`Balances::Minted`, which the runtime's `WormholeProofRecorderExtension` scans
+for and turns into a wormhole leaf of its own; paired with the leaf this pallet
+records itself, that would be one balance against two independent leaves and an
+author able to exit twice what it was paid. `pallet-wormhole` states the same
+rule for the same reason. The issuance bump is correct here and absent there:
+the value left issuance at `shield`, so the unburned half is put back.
+
+**The aggregator address is unused at M4.** A public batch registers it as its
+first four public inputs (section 8.2) and the pallet ignores it: the whole fee
+goes to the block author, whichever aggregator paid the proving cost. Whether an
+aggregator should be paid out of the fee is an open decision, beside the M6
+coinbase item.
 
 ### 9.8 Entry: the shield extrinsic, and `rho` outside a spend
 
@@ -1088,23 +1200,81 @@ at M6, when the transparent layer is removed.
 
 ### 9.10 Admission
 
-`validate_unsigned` does the cheap work: the size gate before anything is
+`validate_unsigned` verifies, in this order: the size gate before anything is
 copied, deserialization against the embedded verifier's circuit data, the
-canonical-encoding round trip, the public-input parse, and the whole settlement
-check short of the ZK verify. `pre_dispatch` runs the verify and is the
-block-inclusion gate.
+canonical-encoding round trip, the public-input parse, the ZK verify, and only
+then the settlement check. `pre_dispatch` runs the same sequence again and is
+the block-inclusion gate, because `validate_unsigned` does not run on block
+import.
 
-The split is upstream's and it is deliberate. Pool admission runs on every
-gossiped candidate, and settlement extrinsics are unsigned and fee free, so a
-`validate_unsigned` that verified would let one proof's byte variants force a
-verify each. The canonical-encoding round trip is what bounds those variants in
-the first place: plonky2's reader ignores trailing bytes and accepts
-non-canonical field limbs, so without it one proof has unlimited distinct
-transaction identities.
+Upstream splits the two, verifying only at `pre_dispatch`, and M4 shipped that
+split before a review took it apart. **The split does not hold, and Qnero does
+not keep it.** Nothing short of the verify is cryptography: a proof carries its
+public inputs as a plain vector in the serialized blob, so anyone can take a
+genuine proof, rewrite its public inputs to claim any nullifiers, commitments,
+fee and block anchor, re-serialize canonically, and produce a blob that passes
+every remaining check. Three things follow, and all three are worse than the
+cost the split was avoiding:
+
+- the forgery is admitted and, under `propagate(true)`, re-gossiped by every
+  node, each of which has already paid the whole per-slot settlement walk. At a
+  full public batch that walk is a ciphertext sponge over hundreds of kilobytes,
+  which is more work than the verify being deferred, and the submission is
+  unsigned and `Pays::No`, so none of it is charged;
+- the pool tag is derived from the nullifiers, which are readable from any
+  transaction sitting in a mempool, so a forged clone of a victim's settlement
+  carries the victim's tag. The pool replaces on strictly higher priority and
+  the priority is constant, so whichever arrived first holds the slot and the
+  other is refused: censorship at no cost and with nothing on chain to show for
+  it;
+- the junk reaches a block author and dies at `pre_dispatch`, which is exactly
+  where the verify was supposed to be cheap.
+
+What the split was written to prevent, one proof's byte variants each forcing a
+verify, is closed by the canonical-encoding round trip: plonky2's reader
+ignores trailing bytes and accepts non-canonical field limbs, so without the
+round trip one proof has unlimited distinct transaction identities, and with it
+a distinct admitted proof needs real proving work. Verifying at admission
+therefore costs one verify per distinct proof, and an invalid proof dies at the
+first hop, where before it reached every node in the network.
+
+The order inside `validate_unsigned` is load bearing for the same reason: the
+verify comes before the per-slot settlement check, so no unbounded per-slot work
+runs on a proof that has not been verified.
 
 The pool tag is a Blake2 hash of the submission's nullifiers, sorted within each
-segment, with the segment boundaries in the preimage. Priority is the constant
-`UNSIGNED_SETTLEMENT_PRIORITY = 1`: an amount-derived priority combined with a
-nullifier-derived tag would let junk with inflated public inputs usurp a
-victim's same-tag settlement, because the pool replaces on strictly higher
-priority.
+segment, with the segment boundaries in the preimage. It commits to the
+nullifiers and to nothing else, so two submissions spending the same notes are
+mutually exclusive in the pool, which is the double-spend exclusion the tag
+exists for. That is sound only because admission verifies. Priority is the
+constant `UNSIGNED_SETTLEMENT_PRIORITY = 1`: an amount-derived priority combined
+with a nullifier-derived tag would let a submission with inflated public inputs
+usurp a victim's same-tag settlement, because the pool replaces on strictly
+higher priority, and the public inputs a priority would read are the prover's
+own claim.
+
+### 9.11 Weights
+
+**No benchmark has produced these numbers.** They are calibrated the way
+`pallet-wormhole`'s are, from verification times and from the storage operations
+a settlement performs, so a runtime has a defensible ceiling to meter against.
+Three things about them are worth carrying into M5:
+
+- **Both verify figures are native measurements times a factor.** The node
+  builds a `WasmExecutor` and nothing else, so the verify a block import pays is
+  plonky2 FRI over Goldilocks under wasmtime, without the native build's 64-bit
+  multiply and SIMD paths. `WASM_VERIFY_FACTOR = 5` is a stand-in for a number
+  nobody has measured, and weight is what bounds block execution time, so an
+  under-declared verify is real import work nothing accounts for. M5 owes a
+  measurement taken inside the runtime.
+- **The public batch has never been built or timed at `n = 53`.** Its 30 ms
+  native figure is a ceiling chosen to be wrong in the safe direction.
+- **The ciphertext digest is priced per byte, and the settlement check is priced
+  twice.** A slot's `ct_digest` absorbs kilobytes of ML-KEM and AEAD ciphertext
+  at four bytes per field element and eight field elements per permutation, so a
+  flat per-slot charge was wrong by more than an order of magnitude. And an
+  included settlement runs the whole check twice, once in `pre_dispatch` and
+  once in the dispatch body, so the per-slot reads and the digest work are
+  charged twice. The body's second pass stays: it is the only guard on a path
+  that reaches a dispatch without `ValidateUnsigned`, which a root-scheduled
+  `dispatch_as` would be.

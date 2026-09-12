@@ -50,9 +50,9 @@ pub use qnero_circuit::chain;
 pub use batch::{
     parse_private_batch_public_input_felts, parse_private_batch_public_inputs,
     parse_public_batch_public_input_felts, parse_public_batch_public_inputs,
-    public_batch_artifact_header, BatchLeafSlot, PrivateBatchPublicInputs, PublicBatchPublicInputs,
-    QneroPrivateBatchVerifier, QneroPublicBatchVerifier, PUBLIC_BATCH_ARTIFACT_HEADER_LEN,
-    PUBLIC_BATCH_ARTIFACT_MAGIC,
+    public_batch_artifact_header, BatchLeafSlot, PrivateBatchPublicInputs, ProofRejection,
+    PublicBatchPublicInputs, QneroPrivateBatchVerifier, QneroPublicBatchVerifier,
+    PUBLIC_BATCH_ARTIFACT_HEADER_LEN, PUBLIC_BATCH_ARTIFACT_MAGIC,
 };
 #[cfg(feature = "leaf")]
 pub use leaf::{parse_public_input_felts, parse_public_inputs, LeafPublicInputs, QneroVerifier};

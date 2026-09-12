@@ -2,42 +2,57 @@
 //!
 //! **TODO(M5): these are calibrated constants. No benchmark has produced
 //! them.** What is here is built the way `pallet-wormhole`'s weights are
-//! built, from measured proof-verification times and from the storage
-//! operations a settlement performs, so a runtime has a defensible ceiling to
-//! meter against before the benchmarks land. Two figures carry real
-//! uncertainty and are marked below: the public-batch verify, which has never
-//! been measured at the chain's dimensions, and the per-slot storage cost,
-//! which is derived arithmetic over a table of database operations.
+//! built, from proof-verification times and from the storage operations a
+//! settlement performs, so a runtime has a defensible ceiling to meter against
+//! before the benchmarks land.
 //!
-//! The private-batch verify is measured: 4.2 ms at `N = 7` on the development
-//! workstation (`docs/BENCH.md`), and verification is flat in `N`, which is the
-//! property that makes the recursion worth its proving cost.
+//! Three figures carry real uncertainty and are marked below: the two proof
+//! verifications, which are measured natively where the runtime executes in
+//! wasm, and the public-batch one, which has never been measured at the chain's
+//! dimensions at any speed.
 
 use core::marker::PhantomData;
 
 use frame_support::{traits::Get, weights::Weight};
 
+/// Factor between a native verify and the same verify inside the wasm runtime.
+///
+/// The node builds a `WasmExecutor` and nothing else, so the verification a
+/// block import actually pays is plonky2 FRI over Goldilocks running under
+/// wasmtime, without the native build's 64-bit multiply and SIMD paths. Weight
+/// is what bounds block execution time, so a native figure under-declares the
+/// dominant cost of every settlement by roughly this factor, and settlements
+/// are `Pays::No`, so nobody pays the difference.
+///
+/// **Five is a conservative stand-in. Nobody has measured it.** M5 owes a number
+/// measured inside the runtime (a benchmark, or an `sc-executor` harness
+/// calling the validation entry points through the compiled wasm) at the
+/// chain's `N = 6` / `n = 53`.
+pub const WASM_VERIFY_FACTOR: u64 = 5;
+
 /// Reference time of one private-batch proof verification, in picoseconds.
 ///
-/// Measured (`docs/BENCH.md`, M3): 4.1 to 4.2 ms, single threaded and with
-/// rayon, over a batch of six or seven leaf slots. Rounded up to 5 ms.
-pub const PRIVATE_BATCH_VERIFY_REF_TIME_PS: u64 = 5_000_000_000;
+/// Measured natively (`docs/BENCH.md`, M3): 4.1 to 4.2 ms, single threaded and
+/// with rayon, over a batch of six or seven leaf slots. Rounded up to 5 ms and
+/// multiplied by [`WASM_VERIFY_FACTOR`].
+pub const PRIVATE_BATCH_VERIFY_REF_TIME_PS: u64 = 5_000_000_000 * WASM_VERIFY_FACTOR;
 
 /// Reference time of one public-batch proof verification, in picoseconds.
 ///
-/// **Not measured.** The public batch has never been built or timed at the
-/// chain default of 53 inner proofs; M3 exercised it at two. Upstream's
-/// comparable circuit verifies in about 11 ms at eight inner proofs and its
-/// pallet meters 21 ms, and the Qnero public batch is the same shape with a
-/// wider forwarded public-input region, whose parse is linear in `n * N`. 30 ms
-/// is a ceiling chosen to be wrong in the safe direction. Re-measure before a
-/// public network.
-pub const PUBLIC_BATCH_VERIFY_REF_TIME_PS: u64 = 30_000_000_000;
+/// **Not measured, at either speed.** The public batch has never been built or
+/// timed at the chain default of 53 inner proofs; M3 exercised it at two.
+/// Upstream's comparable circuit verifies in about 11 ms at eight inner proofs
+/// and its pallet meters 21 ms, and the Qnero public batch is the same shape
+/// with a wider forwarded public-input region, whose parse is linear in
+/// `n * N`. 30 ms is a native ceiling chosen to be wrong in the safe direction,
+/// multiplied by [`WASM_VERIFY_FACTOR`] like the private batch. Re-measure
+/// before a public network.
+pub const PUBLIC_BATCH_VERIFY_REF_TIME_PS: u64 = 30_000_000_000 * WASM_VERIFY_FACTOR;
 
 /// Reference time of the cheap pre-validation that runs in the dispatch body
 /// after `pre_dispatch` has already verified: deserialize, canonical-encoding
-/// round trip, public-input parse. Roughly a fifth of a verify.
-pub const PRE_VALIDATE_REF_TIME_PS: u64 = 1_000_000_000;
+/// round trip, public-input parse. Roughly a fifth of a native verify.
+pub const PRE_VALIDATE_REF_TIME_PS: u64 = 1_000_000_000 * WASM_VERIFY_FACTOR;
 
 /// Reference time of one Poseidon2 permutation, matching `pallet-zk-tree`.
 pub const POSEIDON_EVAL_REF_TIME_PS: u64 = pallet_zk_tree::POSEIDON_EVAL_REF_TIME_PS;
@@ -46,29 +61,80 @@ pub const POSEIDON_EVAL_REF_TIME_PS: u64 = pallet_zk_tree::POSEIDON_EVAL_REF_TIM
 /// `pallet-zk-tree`'s figure for a tree key.
 pub const KEY_POV: u64 = pallet_zk_tree::TREE_KEY_POV;
 
-/// Storage operations one real leaf slot performs, beyond the tree's own.
-///
-/// Reads: two `UsedNullifiers` probes. Writes: two `UsedNullifiers`, two
-/// `Ciphertexts`, two `LeafBlocks`.
-const SLOT_DB_OPS: (u64, u64) = (2, 6);
+/// Field elements the byte sponge absorbs per Poseidon2 permutation
+/// (`qp_poseidon_core::SPONGE_RATE`).
+pub const SPONGE_RATE: u64 = 8;
 
-/// Poseidon2 permutations one real leaf slot costs outside the tree: the
-/// ciphertext digest over two note ciphertexts, which the byte sponge absorbs
-/// at a rate of eight felts.
-const SLOT_POSEIDON_EVALS: u64 = 6;
+/// Bytes the injective byte encoding packs into one field element
+/// (`qp_poseidon_core::serialization::bytes_to_felts`, 4 bytes per felt plus a
+/// one-byte terminator over the whole input).
+pub const BYTES_PER_FELT: u64 = 4;
+
+/// Fixed bytes of one slot's `ct_digest` preimage, outside the ciphertexts:
+/// the eight-byte `"qnero/ct"` prefix, a `u32` count, and a `u32` length per
+/// ciphertext. `ciphertext_digest_permutations_match_the_hashed_bytes` in the
+/// pallet's tests pins this against what `qnero_circuit::chain::ct_digest`
+/// actually builds.
+pub const CT_DIGEST_FRAMING_BYTES: u64 = 8 + 4 + 4 + 4;
+
+/// Storage operations one settling leaf slot performs, beyond the tree's own.
+///
+/// Reads: two `UsedNullifiers` probes, and the settlement check runs twice per
+/// included extrinsic, once in `pre_dispatch` and once in the dispatch body's
+/// `settle`, so the reads are charged twice. Writes happen once: two
+/// `UsedNullifiers`, two `Ciphertexts`, two `LeafBlocks`.
+const SLOT_DB_OPS: (u64, u64) = (4, 6);
+
+/// Permutations the `ct_digest` of one slot costs, given the bytes of its two
+/// ciphertexts.
+///
+/// The sponge absorbs [`SPONGE_RATE`] field elements per permutation and the
+/// encoding packs [`BYTES_PER_FELT`] bytes into each, so this is linear in the
+/// payload and independent of the slot count. Charging a constant here is what
+/// under-priced a settlement by a factor of eighteen to forty-three: a slot
+/// carries kilobytes of ML-KEM and AEAD ciphertext.
+pub const fn ct_digest_permutations(ciphertext_bytes: u64) -> u64 {
+	let bytes = CT_DIGEST_FRAMING_BYTES.saturating_add(ciphertext_bytes);
+	// `+ 1` is the encoding's terminator byte.
+	let felts = bytes.saturating_add(1).div_ceil(BYTES_PER_FELT);
+	felts.div_ceil(SPONGE_RATE)
+}
+
+/// Poseidon2 reference time a settlement's ciphertext digests cost.
+///
+/// `ciphertext_bytes` is the whole submission's payload and `slots` its slot
+/// count, so the framing is charged per slot and the payload once. One extra
+/// permutation per slot covers the per-slot rounding, which cannot be shared
+/// because every slot's sponge is finalized on its own; that makes this an
+/// upper bound on the sum of [`ct_digest_permutations`] over the slots,
+/// whatever the payload split between them. Doubled: the settlement check runs
+/// twice per included extrinsic, and both passes recompute every digest.
+pub const fn ct_digest_ref_time(slots: u64, ciphertext_bytes: u64) -> u64 {
+	let per_slot_framing = slots.saturating_mul(CT_DIGEST_FRAMING_BYTES.saturating_add(1));
+	let felts = per_slot_framing.saturating_add(ciphertext_bytes).div_ceil(BYTES_PER_FELT);
+	felts
+		.div_ceil(SPONGE_RATE)
+		.saturating_add(slots)
+		.saturating_mul(POSEIDON_EVAL_REF_TIME_PS)
+		.saturating_mul(2)
+}
 
 pub trait WeightInfo {
 	/// `slots` is the number of real leaf slots, which is the number of
-	/// `ShieldedOutput`s the call carries.
-	fn submit_private_batch(slots: u32) -> Weight;
-	fn submit_public_batch(slots: u32) -> Weight;
+	/// `ShieldedOutput`s the call carries, and `ciphertext_bytes` their total
+	/// payload. The payload is a weight term of its own: the per-slot
+	/// `ct_digest` is a byte sponge over it, and the bytes are written to
+	/// permanent state.
+	fn submit_private_batch(slots: u32, ciphertext_bytes: u32) -> Weight;
+	fn submit_public_batch(slots: u32, ciphertext_bytes: u32) -> Weight;
 	fn shield() -> Weight;
 }
 
-/// Weight of settling `slots` real leaf slots, excluding the proof
-/// verification.
-fn settlement_weight<T: frame_system::Config>(slots: u32) -> Weight {
+/// Weight of settling `slots` real leaf slots carrying `ciphertext_bytes` of
+/// payload, excluding the proof verification.
+fn settlement_weight<T: frame_system::Config>(slots: u32, ciphertext_bytes: u32) -> Weight {
 	let slots = u64::from(slots);
+	let ciphertext_bytes = u64::from(ciphertext_bytes);
 	// Two tree leaves per slot, plus at most one wormhole leaf for the block
 	// author's fee share.
 	let leaves = slots.saturating_mul(2).saturating_add(1);
@@ -88,31 +154,34 @@ fn settlement_weight<T: frame_system::Config>(slots: u32) -> Weight {
 
 	let hashing = leaves
 		.saturating_mul(pallet_zk_tree::INSERT_LEAF_POSEIDON_EVALS)
-		.saturating_add(slots.saturating_mul(SLOT_POSEIDON_EVALS))
-		.saturating_mul(POSEIDON_EVAL_REF_TIME_PS);
+		.saturating_mul(POSEIDON_EVAL_REF_TIME_PS)
+		.saturating_add(ct_digest_ref_time(slots, ciphertext_bytes));
 
 	<T as frame_system::Config>::DbWeight::get()
 		.reads_writes(reads, writes)
-		.saturating_add(Weight::from_parts(hashing, reads.saturating_mul(KEY_POV)))
+		.saturating_add(Weight::from_parts(
+			hashing,
+			reads.saturating_mul(KEY_POV).saturating_add(ciphertext_bytes),
+		))
 }
 
 pub struct SubstrateWeight<T>(PhantomData<T>);
 
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
-	fn submit_private_batch(slots: u32) -> Weight {
+	fn submit_private_batch(slots: u32, ciphertext_bytes: u32) -> Weight {
 		Weight::from_parts(
 			PRIVATE_BATCH_VERIFY_REF_TIME_PS.saturating_add(PRE_VALIDATE_REF_TIME_PS),
 			0,
 		)
-		.saturating_add(settlement_weight::<T>(slots))
+		.saturating_add(settlement_weight::<T>(slots, ciphertext_bytes))
 	}
 
-	fn submit_public_batch(slots: u32) -> Weight {
+	fn submit_public_batch(slots: u32, ciphertext_bytes: u32) -> Weight {
 		Weight::from_parts(
 			PUBLIC_BATCH_VERIFY_REF_TIME_PS.saturating_add(PRE_VALIDATE_REF_TIME_PS),
 			0,
 		)
-		.saturating_add(settlement_weight::<T>(slots))
+		.saturating_add(settlement_weight::<T>(slots, ciphertext_bytes))
 	}
 
 	fn shield() -> Weight {
@@ -134,28 +203,29 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 /// Marginal cost of one real leaf slot in the `()` impl, in picoseconds.
 ///
 /// Two nullifier writes, two tree appends with their Poseidon2 work, two
-/// ciphertext writes and a digest over two ciphertexts. Well under a
-/// millisecond in practice; 200 microseconds is the placeholder, and it is
-/// deliberately far below a proof verification, which is the shape the real
-/// numbers have to keep.
+/// ciphertext writes and a digest over two ciphertexts. 200 microseconds is the
+/// placeholder for the fixed part; the payload term below is the one that
+/// dominates a real slot.
 const SLOT_REF_TIME_PS: u64 = 200_000_000;
 
 /// For mocks and for a runtime that has not wired its own.
 impl WeightInfo for () {
-	fn submit_private_batch(slots: u32) -> Weight {
+	fn submit_private_batch(slots: u32, ciphertext_bytes: u32) -> Weight {
 		Weight::from_parts(
 			PRIVATE_BATCH_VERIFY_REF_TIME_PS
 				.saturating_add(PRE_VALIDATE_REF_TIME_PS)
-				.saturating_add(u64::from(slots).saturating_mul(SLOT_REF_TIME_PS)),
+				.saturating_add(u64::from(slots).saturating_mul(SLOT_REF_TIME_PS))
+				.saturating_add(ct_digest_ref_time(u64::from(slots), u64::from(ciphertext_bytes))),
 			0,
 		)
 	}
 
-	fn submit_public_batch(slots: u32) -> Weight {
+	fn submit_public_batch(slots: u32, ciphertext_bytes: u32) -> Weight {
 		Weight::from_parts(
 			PUBLIC_BATCH_VERIFY_REF_TIME_PS
 				.saturating_add(PRE_VALIDATE_REF_TIME_PS)
-				.saturating_add(u64::from(slots).saturating_mul(SLOT_REF_TIME_PS)),
+				.saturating_add(u64::from(slots).saturating_mul(SLOT_REF_TIME_PS))
+				.saturating_add(ct_digest_ref_time(u64::from(slots), u64::from(ciphertext_bytes))),
 			0,
 		)
 	}
@@ -170,31 +240,59 @@ mod tests {
 	use super::*;
 
 	/// Whatever the numbers turn out to be, the shape has to hold: settling
-	/// more slots costs more, and a public batch costs at least what a private
-	/// batch of the same slot count does, because it verifies a larger proof
-	/// over the same settlement work.
+	/// more slots costs more, carrying more ciphertext costs more, and a public
+	/// batch costs at least what a private batch of the same shape does,
+	/// because it verifies a larger proof over the same settlement work.
 	#[test]
-	fn settlement_weight_is_monotonic_in_the_slot_count() {
+	fn settlement_weight_is_monotonic_in_the_slot_count_and_the_payload() {
 		for slots in 0u32..8 {
-			let private = <() as WeightInfo>::submit_private_batch(slots);
-			let public = <() as WeightInfo>::submit_public_batch(slots);
+			let private = <() as WeightInfo>::submit_private_batch(slots, slots * 3_500);
+			let public = <() as WeightInfo>::submit_public_batch(slots, slots * 3_500);
 			assert!(public.ref_time() >= private.ref_time());
 			if slots > 0 {
 				assert!(
-					private.ref_time() >
-						<() as WeightInfo>::submit_private_batch(slots - 1).ref_time()
+					private.ref_time()
+						> <() as WeightInfo>::submit_private_batch(slots - 1, (slots - 1) * 3_500)
+							.ref_time()
 				);
 			}
+			assert!(
+				<() as WeightInfo>::submit_private_batch(slots, 8_192).ref_time()
+					>= <() as WeightInfo>::submit_private_batch(slots, 0).ref_time()
+			);
 		}
 	}
 
-	/// The verify dominates a full batch. This is the shape the real
-	/// benchmarks have to keep: if a settlement's storage work ever outgrew
-	/// the proof verification, a fixed verify cost per call would stop being
-	/// the right way to meter one.
+	/// The ciphertext digest is a real cost. One slot absorbs two
+	/// kilobyte-scale ciphertexts, and the old flat charge of six permutations
+	/// was wrong by more than an order of magnitude. This pins the order of magnitude;
+	/// `ciphertext_digest_permutations_match_the_hashed_bytes` in the pallet's
+	/// tests pins the exact number against the real hasher's encoding.
 	#[test]
-	fn the_proof_verification_dominates_a_full_batch() {
-		let full = <() as WeightInfo>::submit_private_batch(6).ref_time();
+	fn the_ciphertext_digest_is_priced_per_byte() {
+		// Two 4096-byte ciphertexts: 8212 bytes of preimage, 2054 felts, 257
+		// permutations.
+		assert_eq!(ct_digest_permutations(2 * 4_096), 257);
+		// An empty pair is the framing alone.
+		assert_eq!(ct_digest_permutations(0), 1);
+		// Two ciphertexts at the real ML-KEM-1024 size with no memo.
+		assert_eq!(ct_digest_permutations(2 * 1_731), 109);
+
+		// The aggregate charge is an upper bound on the per-slot sum, whatever
+		// the split. Six slots of two maximum ciphertexts each:
+		let per_slot: u64 = 6 * ct_digest_permutations(2 * 4_096);
+		let charged = ct_digest_ref_time(6, 6 * 2 * 4_096) / POSEIDON_EVAL_REF_TIME_PS / 2;
+		assert!(charged >= per_slot, "charged {charged} permutations against {per_slot} real");
+	}
+
+	/// The verify dominates a settlement at a realistic payload, which is the
+	/// shape a fixed verify cost per call assumes. It stops dominating at the
+	/// maximum ciphertext size, which is why the payload is a weight term and
+	/// why the cap is set where it is.
+	#[test]
+	fn the_proof_verification_dominates_a_full_batch_at_a_realistic_payload() {
+		let realistic = 6 * 2 * 1_731;
+		let full = <() as WeightInfo>::submit_private_batch(6, realistic).ref_time();
 		let settlement = full - PRIVATE_BATCH_VERIFY_REF_TIME_PS - PRE_VALIDATE_REF_TIME_PS;
 		assert!(
 			settlement < PRIVATE_BATCH_VERIFY_REF_TIME_PS,

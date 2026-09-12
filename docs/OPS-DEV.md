@@ -175,5 +175,19 @@ Blocks from the first second: `Imported #1` two seconds after genesis, height
   its constants (`BlockHashWindow`, `MinLeafFee`, `FeeBurnRate`,
   `MaxCiphertextBytes`), its events and the `ShieldedOutput` type.
 - `state_getRuntimeVersion` reports `quantus-runtime` spec 152, transaction
-  version 6. Both are deliberately unchanged: adding a pallet changes neither
-  the runtime's own version nor the signed extrinsic encoding.
+  version 6. `transaction_version` is genuinely unchanged, because the signed
+  extrinsic encoding did not move. `spec_version` is a different matter and the
+  number was left alone for a different reason: upstream's release workflow owns
+  that field (`runtime/src/lib.rs` says so), and a feature branch that bumps it
+  fights the release tooling.
+
+  **This is an open issue.** The runtime did change:
+  it carries a new pallet and a `pallet-zk-tree` whose `Leaves` storage went
+  from a typed `ZkLeaf` to a raw `Hash256`, with no migration (see
+  `docs/CIRCUIT.md` section 4). Two runtimes with different metadata and an
+  incompatible storage layout now answer the same `quantus-runtime` 152, which
+  is the one thing the version triple exists to prevent: a node cannot tell them
+  apart, and `set_code` refuses an upgrade whose `spec_version` did not
+  increase. Before the fork runs anything but a throwaway `--dev` chain it needs
+  its own identity, `spec_name = "qnero-runtime"` or a distinct `spec_version`.
+  Nothing here is affected while every chain is genesis fresh.

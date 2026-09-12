@@ -227,7 +227,7 @@ To prove "I (Bob) received transfer #3 of 500 QTU," a user (or wallet software) 
    │  Response:                                    │
    │  {                                            │
    │    leaf_index: 42,                            │
-   │    leaf_data: <encoded ZkLeaf>,               │
+   │    leaf_data: <32-byte leaf hash>,            │
    │    leaf_hash: [u8; 32],                       │
    │    siblings: [[sibling; 3]; depth],           │
    │    root: [u8; 32],                            │
@@ -240,8 +240,9 @@ To prove "I (Bob) received transfer #3 of 500 QTU," a user (or wallet software) 
    │ Step 2: Build the ZK circuit witness          │
    │                                               │
    │  Private inputs (known only to prover):       │
-   │    - leaf_data (to, transfer_count,           │
-   │                 asset_id, amount)             │
+   │    - the typed leaf (to, transfer_count,      │
+   │      asset_id, amount), from the prover's own │
+   │      records: the RPC no longer returns it    │
    │    - siblings at each tree level              │
    │                                               │
    │  Public inputs (visible to verifier):         │
@@ -253,7 +254,7 @@ To prove "I (Bob) received transfer #3 of 500 QTU," a user (or wallet software) 
    ┌──────────────────────────────────────────────┐
    │ Step 3: ZK circuit logic                      │
    │                                               │
-   │  1. Recompute leaf_hash from leaf_data        │
+   │  1. Recompute leaf_hash from the typed leaf   │
    │     using Poseidon (efficient in circuit)     │
    │                                               │
    │  2. Walk up the tree using siblings:          │
@@ -386,7 +387,7 @@ All ZK trie data is stored as standard Substrate pallet storage:
 
 | Storage Item | Key | Value | Description |
 |-------------|-----|-------|-------------|
-| `Leaves` | `u64` (leaf index) | `ZkLeaf` | Raw leaf data |
+| `Leaves` | `u64` (leaf index) | `Hash256` | The leaf hash itself |
 | `Nodes` | `(u8, u64)` (level, index) | `Hash256` | Internal node hashes |
 | `LeafCount` | -- | `u64` | Total leaves inserted |
 | `Depth` | -- | `u8` | Current tree depth |
@@ -430,10 +431,22 @@ Storage keys use `Identity` hasher since leaf indices are sequential (no adversa
 }
 ```
 
-The `leaf_data` field is SCALE-encoded `ZkLeaf<AccountId32, u32, u128>` (60 bytes total):
-- Bytes 0-31: `to` (AccountId32)
-- Bytes 32-39: `transfer_count` (u64 LE)
-- Bytes 40-43: `asset_id` (u32 LE)
-- Bytes 44-59: `amount` (u128 LE, raw planck value)
+**`leaf_data` is the 32-byte stored leaf hash, identical to `leaf_hash`.** The
+Qnero fork changed `Leaves` from a typed `ZkLeaf` to a raw `Hash256`, because a
+shielded note commitment *is* its leaf hash (`docs/CIRCUIT.md` section 4), so a
+wormhole transfer leaf is hashed by `tree::hash_leaf` at insert time and only
+the hash is kept. The JSON shape did not change and the field did not go away,
+which is exactly why this needs saying: a client built to the old spec reads 32
+bytes where it expects 60, and a client that recomputes the leaf hash from
+`leaf_data` hashes a hash and gets a value that is not the stored leaf, so every
+Merkle proof fails against the root with nothing pointing at the RPC.
 
-Note: The amount stored on-chain is the raw planck value. When hashing for the ZK circuit, amounts are **quantized** by dividing by 10^10 to fit in a single field element with 2 decimal places of precision.
+The `ZkLeaf` preimage is no longer recoverable from chain state. A wormhole
+prover must reconstruct the typed leaf from its own records or from the
+`NativeTransferred` / `AssetTransferred` events, which carry `to`,
+`transfer_count`, `asset_id`, `amount` and the `leaf_index` they were inserted
+at.
+
+Note: the amount stored on-chain is the raw planck value. When hashing a typed
+wormhole leaf, amounts are **quantized** by dividing by 10^10 to fit in a single
+field element with 2 decimal places of precision.

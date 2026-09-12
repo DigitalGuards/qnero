@@ -431,24 +431,62 @@ fn deserialize_verifier_data(bytes: &[u8], label: &str) -> Result<VerifierCircui
 fn decode_canonical_proof(
     proof_bytes: &[u8],
     common: &CommonCircuitData<F, D>,
-    label: &str,
-) -> Result<ProofWithPublicInputs<F, C, D>> {
-    ensure!(
-        proof_bytes.len() <= MAX_PROOF_BYTES,
-        "the {} proof is {} bytes, above the {} byte limit",
-        label,
-        proof_bytes.len(),
-        MAX_PROOF_BYTES
-    );
+) -> core::result::Result<ProofWithPublicInputs<F, C, D>, ProofRejection> {
+    if proof_bytes.len() > MAX_PROOF_BYTES {
+        return Err(ProofRejection::TooLarge);
+    }
     let proof = ProofWithPublicInputs::<F, C, D>::from_bytes(proof_bytes.to_vec(), common)
-        .map_err(|e| anyhow!("failed to deserialize the {} proof: {}", label, e))?;
-    ensure!(
-        proof.to_bytes() == proof_bytes,
-        "the {} proof bytes are not the canonical encoding of the proof they decode to",
-        label
-    );
+        .map_err(|_| ProofRejection::Deserialization)?;
+    if proof.to_bytes() != proof_bytes {
+        return Err(ProofRejection::NonCanonicalEncoding);
+    }
     Ok(proof)
 }
+
+/// Why a serialized batch proof was refused, in the order the checks run.
+///
+/// A chain settling these proofs has to tell the four apart. They are four
+/// different operator problems: bytes above the cap, a blob that is not a proof
+/// of this circuit **or is a proof of the same circuit built at other
+/// dimensions**, a proof re-encoded non-canonically, and public inputs that do
+/// not parse at the documented indices. Flattening them into one error leaves
+/// an operator debugging a rejected settlement unable to tell a truncated blob
+/// from a wallet whose artifact set was generated at the wrong `N`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofRejection {
+    /// Above [`MAX_PROOF_BYTES`]. Checked before anything is copied or parsed.
+    TooLarge,
+    /// The bytes did not deserialize against this verifier's circuit data. A
+    /// proof built for other circuit dimensions lands here.
+    Deserialization,
+    /// The bytes are not the canonical encoding of the proof they decode to:
+    /// see [`decode_canonical_proof`] for what that closes.
+    NonCanonicalEncoding,
+    /// The public inputs did not parse at the documented indices.
+    PublicInputLayout,
+    /// The proof did not verify.
+    Verification,
+}
+
+impl core::fmt::Display for ProofRejection {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let message = match self {
+            Self::TooLarge => "the proof is above the byte limit",
+            Self::Deserialization => {
+                "the proof did not deserialize against the verifier's circuit data, which is also \
+                 what a proof built for other circuit dimensions looks like"
+            }
+            Self::NonCanonicalEncoding => {
+                "the bytes are not the canonical encoding of the proof they decode to"
+            }
+            Self::PublicInputLayout => "the public inputs did not parse at the documented indices",
+            Self::Verification => "the proof did not verify",
+        };
+        f.write_str(message)
+    }
+}
+
+impl core::error::Error for ProofRejection {}
 
 /// Verifier for private-batch proofs over one fixed slot count.
 #[derive(Debug)]
@@ -504,17 +542,26 @@ impl QneroPrivateBatchVerifier {
     ///
     /// What comes back is attacker controlled until a verify succeeds. Treat it
     /// as a claim about what the proof says, which only a verify establishes.
-    pub fn parse_proof_bytes(&self, proof_bytes: &[u8]) -> Result<PrivateBatchPublicInputs> {
-        let proof =
-            decode_canonical_proof(proof_bytes, &self.circuit_data.common, "private-batch")?;
+    pub fn parse_proof_bytes(
+        &self,
+        proof_bytes: &[u8],
+    ) -> core::result::Result<PrivateBatchPublicInputs, ProofRejection> {
+        let proof = decode_canonical_proof(proof_bytes, &self.circuit_data.common)?;
         parse_private_batch_public_inputs(&proof, self.num_leaves)
+            .map_err(|_| ProofRejection::PublicInputLayout)
     }
 
     /// Verify a serialized proof and read its public inputs.
-    pub fn verify_proof_bytes(&self, proof_bytes: &[u8]) -> Result<PrivateBatchPublicInputs> {
-        let proof =
-            decode_canonical_proof(proof_bytes, &self.circuit_data.common, "private-batch")?;
-        self.verify_and_parse(proof)
+    pub fn verify_proof_bytes(
+        &self,
+        proof_bytes: &[u8],
+    ) -> core::result::Result<PrivateBatchPublicInputs, ProofRejection> {
+        let proof = decode_canonical_proof(proof_bytes, &self.circuit_data.common)?;
+        let public = parse_private_batch_public_inputs(&proof, self.num_leaves)
+            .map_err(|_| ProofRejection::PublicInputLayout)?;
+        self.verify(proof)
+            .map_err(|_| ProofRejection::Verification)?;
+        Ok(public)
     }
 
     /// Verify and read the public inputs in one step.
@@ -629,14 +676,25 @@ impl QneroPublicBatchVerifier {
     /// Read a serialized proof's public inputs **without verifying it**. See
     /// [`QneroPrivateBatchVerifier::parse_proof_bytes`] for what that is for
     /// and what it does not establish.
-    pub fn parse_proof_bytes(&self, proof_bytes: &[u8]) -> Result<PublicBatchPublicInputs> {
-        let proof = decode_canonical_proof(proof_bytes, &self.circuit_data.common, "public-batch")?;
+    pub fn parse_proof_bytes(
+        &self,
+        proof_bytes: &[u8],
+    ) -> core::result::Result<PublicBatchPublicInputs, ProofRejection> {
+        let proof = decode_canonical_proof(proof_bytes, &self.circuit_data.common)?;
         parse_public_batch_public_inputs(&proof, self.num_inner, self.num_leaves)
+            .map_err(|_| ProofRejection::PublicInputLayout)
     }
 
-    pub fn verify_proof_bytes(&self, proof_bytes: &[u8]) -> Result<PublicBatchPublicInputs> {
-        let proof = decode_canonical_proof(proof_bytes, &self.circuit_data.common, "public-batch")?;
-        self.verify_and_parse(proof)
+    pub fn verify_proof_bytes(
+        &self,
+        proof_bytes: &[u8],
+    ) -> core::result::Result<PublicBatchPublicInputs, ProofRejection> {
+        let proof = decode_canonical_proof(proof_bytes, &self.circuit_data.common)?;
+        let public = parse_public_batch_public_inputs(&proof, self.num_inner, self.num_leaves)
+            .map_err(|_| ProofRejection::PublicInputLayout)?;
+        self.verify(proof)
+            .map_err(|_| ProofRejection::Verification)?;
+        Ok(public)
     }
 
     pub fn verify_and_parse(

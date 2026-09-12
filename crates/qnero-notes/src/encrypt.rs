@@ -45,13 +45,13 @@ pub fn encrypt_note(
     )?)
 }
 
-/// `ct_digest`, the leaf public input that binds a spend proof to the
-/// ciphertexts submitted with it, is **not** here. It is
-/// `qnero_circuit::chain::ct_digest`, which takes ciphertext bytes and
-/// compiles without the circuit feature, so `pallet-shielded` and a wallet
-/// call one function, where two copies of one rule could drift. Feed it
-/// [`NoteCiphertext::to_bytes`] in output order.
-///
+// `ct_digest`, the leaf public input that binds a spend proof to the
+// ciphertexts submitted with it, is **not** here. It is
+// `qnero_circuit::chain::ct_digest`, which takes ciphertext bytes and compiles
+// without the circuit feature, so `pallet-shielded` and a wallet call one
+// function, where two copies of one rule could drift. Feed it
+// `NoteCiphertext::to_bytes` in output order.
+
 /// A note this viewing key can read, with its memo and commitment.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReceivedNote {

@@ -19,20 +19,23 @@
 
 use std::{env, path::Path, time::Instant};
 
-/// Leaf slots per private batch.
+/// The dimensions, read from the circuit builder so one definition serves both.
 ///
-/// Six. The circuit builder's own default is seven, and M3 measured that seven
-/// recursive verifiers cross a degree boundary: blinding adds about 9000 rows,
-/// so a batch fits `degree_bits = 15` only below about 23700 gates and seven
-/// verifiers are 24324. Six fits, seven pays about 2x in wallet proving time
-/// and about 2x in memory (2.1 GiB peak against roughly half that) for one
-/// more slot per batch. `docs/BENCH.md` carries the measurements.
-const DEFAULT_NUM_LEAF_PROOFS: usize = 6;
-
-/// Private batches per public batch. Unchanged from upstream's default: this
-/// is an aggregator-side cost, paid on a server, and a larger batch amortizes
-/// the aggregator's proving cost over more settlements.
-const DEFAULT_NUM_PRIVATE_BATCH_PROOFS: usize = 53;
+/// Six leaf slots per private batch, because M3 measured that seven recursive
+/// verifiers cross a degree boundary: blinding adds about 9000 rows, so a batch
+/// fits `degree_bits = 15` only below about 23700 gates and seven verifiers are
+/// 24324. Six fits, seven pays about 2x in wallet proving time and about 2x in
+/// memory (2.1 GiB peak against roughly half that) for one more slot per batch.
+/// Fifty-three private batches per public batch is an aggregator-side cost,
+/// paid on a server, and a larger batch amortizes the proving cost over more
+/// settlements. `docs/BENCH.md` carries the measurements.
+///
+/// These are the builder's own defaults on purpose. A wallet or an aggregator
+/// that generates its artifact set with no `QNERO_NUM_*` set gets whatever the
+/// builder defaults to, and a set built at other dimensions produces proofs
+/// whose public-input length the chain's embedded verifier refuses. One
+/// definition is what keeps the two ends on the same number.
+use qnero_circuit_builder::{DEFAULT_NUM_LEAF_PROOFS, DEFAULT_NUM_PRIVATE_BATCH_PROOFS};
 
 fn main() {
 	println!("cargo:rerun-if-env-changed=QNERO_NUM_LEAF_PROOFS");

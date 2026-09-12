@@ -34,15 +34,15 @@ pub const ARITY: usize = 4;
 /// Siblings carried per level.
 pub const SIBLINGS_PER_LEVEL: usize = ARITY - 1;
 
-/// Maximum tree depth the circuit supports. A depth-16 4-ary tree holds
-/// 4^16, about 4.3 billion, commitments.
+/// Maximum tree depth the circuit supports, under the name the circuit code
+/// uses.
 ///
-/// This is a hard constant shared with the chain (`pallets/zk-tree`
-/// `CIRCUIT_MAX_TREE_DEPTH`). The circuit pays for all 16 levels on every
-/// proof regardless of the tree's real depth, so raising it costs every
-/// prover, and lowering or raising it later is a coordinated release of new
-/// circuit crates plus a runtime upgrade carrying the regenerated verifier.
-pub const MAX_DEPTH: usize = 16;
+/// Defined in [`crate::chain`], which compiles without the `circuit` feature,
+/// so a runtime reads the same constant without the prover stack and
+/// `pallet-shielded` can const-assert it against `pallet-zk-tree`'s
+/// `CIRCUIT_MAX_TREE_DEPTH`. A second definition here would be a second number
+/// to keep in step.
+pub use crate::chain::MAX_TREE_DEPTH as MAX_DEPTH;
 
 /// Bits needed to hold a depth in `0..=MAX_DEPTH`.
 pub const DEPTH_BITS: usize = 5;

@@ -203,8 +203,18 @@ fn a_bit_flipped_artifact_never_verifies_a_real_proof() {
             continue;
         }
 
+        // Two error types meet here: loading an artifact is `anyhow`, verifying
+        // a proof against it is a typed `ProofRejection`. The test only asks
+        // whether the flipped artifact rejected the proof somewhere, so both
+        // are flattened to `()`.
         let outcome = QneroPrivateBatchVerifier::from_artifact_bytes(&flipped, NUM_LEAVES)
-            .and_then(|verifier| verifier.verify_proof_bytes(&batch));
+            .map_err(|_| ())
+            .and_then(|verifier| {
+                verifier
+                    .verify_proof_bytes(&batch)
+                    .map(|_| ())
+                    .map_err(|_| ())
+            });
         assert!(
             outcome.is_err(),
             "an artifact with a flipped bit at byte {position} verified a real proof"

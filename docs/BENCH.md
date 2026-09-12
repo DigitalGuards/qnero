@@ -23,10 +23,13 @@ verify series beyond n=8 is missing. Rerun with `RAYON_NUM_THREADS=4 nice -n
 | 36 | 18.6 s | 7.3 ms |
 | 49 | 18.7 s | 6.6 ms |
 
-The chain default is N = 7, so one shielded transaction (the private batch the
-wallet submits) costs about 4 s of proving on 20 threads and about 5 ms to
-verify on chain. Verify time is flat in N, which is what makes recursion
-worth it.
+These are M3 measurements at N = 7, which is where the aggregator was built and
+timed. **The chain default is N = 6** (M4, see the degree-boundary note below
+and `docs/CIRCUIT.md` section 9.1), so one shielded transaction (the private
+batch the wallet submits) costs less than the N = 7 row and about 5 ms to
+verify on chain. Verify time is flat in N, which is what makes recursion worth
+it, and the runtime meters it with a wasm slowdown factor on top: the figures
+here are native.
 
 ## Public batch (delegatable aggregator): n private batches of 7 leaves
 

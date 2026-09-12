@@ -137,7 +137,10 @@ Output on chain: `cm` (32 bytes), ML-KEM ciphertext (1088 or 1568 bytes),
 AEAD ciphertext of `(v, rho, r, memo)`. Recipients scan every output by
 decapsulating and attempting decryption, the same linear scan Monero wallets
 do. The leaf's `ct_digest` public input binds the ciphertexts to the proof;
-`qnero_notes::ct_digest` is the rule and `docs/CIRCUIT.md` section 1 states it.
+`qnero_circuit::chain::ct_digest` is the rule and `docs/CIRCUIT.md` section 1
+states it. It lives in the circuit crate's layout-only surface, which compiles
+without the prover stack, which is what lets the chain and a wallet call one
+function, where two copies of one rule could drift.
 
 The AEAD key and nonce come from the KEM shared secret, a per-payload label and
 the crypto suite (`qnero_pqcrypto::note_encryption`), with the version, suite
@@ -252,7 +255,7 @@ built, including the open decisions it closed.
 
 About 10 to 12 weeks to a private testnet. The measured risk to retire first
 is wallet-side proving time and memory for a 2-in/2-out leaf plus a
-7-slot private batch (see `docs/BENCH.md` once measured).
+6-slot private batch (see `docs/BENCH.md`).
 
 ## 9. Open questions
 
