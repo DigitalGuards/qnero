@@ -64,16 +64,21 @@ fn enrolling_in_high_security_is_refused() {
 	});
 }
 
-/// An account enrolled before v1 can still move its own balance out of the
-/// transparent layer.
+/// A stolen high-security key cannot reach an immediate, irreversible drain.
 ///
 /// The whitelist runs at validation, before the filter, so an enrolled account
-/// can sign only what is on it. `shield` and `burn` are on it for that reason,
-/// and both are allowed here, so the balance of an account that enrolled while
-/// the feature worked is not frozen.
+/// can sign only what is on it, and everything on it is delayed: the owner's
+/// `cancel` and the guardian's `recover_funds` both beat the delay. Adding
+/// `Shielded::shield` or `Balances::burn` to unfreeze an account enrolled
+/// before v1 would put an undelayed, unrecoverable call on that list, which is
+/// the drain the feature exists to stop. A `shield` commits to a `pk` the
+/// thief chose and settles next block; `recover_funds` walks
+/// `PendingTransfersBySender` and releases holds, so there would be nothing
+/// left for the guardian to find. The enrolment itself is refused under v1
+/// (`enrolling_in_high_security_is_refused`), so no chain reaches
+/// the freeze this would have been paying for.
 #[test]
-fn an_enrolled_account_can_still_shield_and_burn() {
-	use frame_support::traits::Contains;
+fn the_whitelist_refuses_the_undelayed_drain() {
 	use qp_high_security::HighSecurityInspector;
 
 	for call in [
@@ -88,12 +93,8 @@ fn an_enrolled_account_can_still_shield_and_burn() {
 		}),
 	] {
 		assert!(
-			quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
-			"{call:?} must pass the high-security whitelist at validation"
-		);
-		assert!(
-			quantus_runtime::configs::QneroCallFilter::contains(&call),
-			"{call:?} must pass the base call filter at dispatch"
+			!quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
+			"{call:?} is immediate and outside recover_funds, so it must not be whitelisted"
 		);
 	}
 }

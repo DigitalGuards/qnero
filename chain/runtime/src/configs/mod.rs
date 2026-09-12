@@ -226,12 +226,12 @@ fn refused_under_v1(call: &RuntimeCall) -> bool {
 /// `AccountAlreadyHighSecurity`. From the block it succeeds in, the account's
 /// every call goes through `HighSecurityConfig::is_whitelisted`, which is a
 /// reversible-transfers list, and v1 refuses every call on that list. The
-/// account would keep `shield` and `burn`, which
-/// [`HighSecurityConfig::is_whitelisted_leaf`] carries for the accounts
-/// already enrolled, and it would gain nothing else until a milestone gives
-/// the feature something to guard. Refusing the enrolment is what keeps the
-/// answer to "what can this account still do" from depending on a block
-/// number.
+/// account is left unable to sign anything at all. Widening
+/// [`HighSecurityConfig::is_whitelisted_leaf`] with an immediate, irreversible
+/// call would unfreeze it by voiding the guarantee the feature exists for, so
+/// the whitelist stays as it is and the enrolment is what v1 refuses. That
+/// keeps any account out of that state, and it keeps the answer to "what can
+/// this account still do" from depending on a block number.
 fn enrols_in_a_feature_v1_refuses(call: &RuntimeCall) -> bool {
 	matches!(
 		call,
@@ -914,16 +914,18 @@ parameter_types! {
 ///   cannot pad `MultiAddress::Raw` and exfiltrate via the length fee
 /// - `cancel`: Cancel pending delayed transfer
 /// - `recover_funds`: Guardian-initiated recovery
-/// - `Shielded::shield` and `Balances::burn`: v1 refuses the three above at dispatch, so without
-///   these an enrolled account could put nothing at all in a block. Neither names another account.
 /// - `Utility::batch_all`: a flat, non-empty batch of at most [`MaxHighSecurityBatchLen`] leaf
 ///   calls, each of which must itself be whitelisted. Nested `batch_all` is rejected so a packed
 ///   wrapper cannot inflate the inclusion fee. The pallet still re-checks each child at dispatch so
 ///   a same-tx enrollment cannot smuggle a later drain.
 ///
-/// v1 also refuses `set_high_security` itself ([`QneroCallFilter`]), so this
-/// list is what the accounts already enrolled keep rather than a feature a new
-/// account can opt into.
+/// v1 also refuses `set_high_security` itself ([`QneroCallFilter`]), so nothing
+/// enrols an account on a v1-genesis chain: no non-benchmark preset seeds
+/// `HighSecurityAccounts` either. An account that enrolled before v1 keeps a
+/// list whose every value-moving call v1 refuses at dispatch, so its balance
+/// stays where it is until a milestone gives the feature something to guard.
+/// That freeze is the documented cost of keeping the guarantee whole, and
+/// `chain/docs/RUNTIME_SURFACE.md` section 5 carries it.
 ///
 /// `Vesting::claim` is not listed: it is permissionless, so a third party can
 /// claim on behalf of a high-security beneficiary. The HS signer does not need
@@ -947,23 +949,27 @@ parameter_types! {
 pub struct HighSecurityConfig;
 
 impl HighSecurityConfig {
-	/// Leaf whitelist: the reversible-transfer calls, plus the two ways an
-	/// account moves its own balance out of the transparent layer. `batch_all`
-	/// is a wrapper and is never a valid child, so nesting cannot pad fees.
-	/// `schedule_transfer` dest must be `MultiAddress::Id` so a stolen key
-	/// cannot pad `Raw` and inflate the length fee.
+	/// Leaf whitelist: the reversible-transfer calls, and nothing else.
+	/// `batch_all` is a wrapper and is never a valid child, so nesting cannot
+	/// pad fees. `schedule_transfer` dest must be `MultiAddress::Id` so a
+	/// stolen key cannot pad `Raw` and inflate the length fee.
 	///
-	/// `Shielded::shield` and `Balances::burn` are on the list because v1
-	/// refuses every reversible-transfer call above
-	/// ([`QneroCallFilter`]), and this list is checked at validation, before
-	/// the filter is reached. Without them an account already enrolled in high
-	/// security could not put a single extrinsic in a block: the three
-	/// whitelisted calls die at dispatch on the filter, and everything else
-	/// dies at validation on this list. Both move the account's own balance
-	/// and neither can name another account, so a stolen key gains nothing it
-	/// did not already have from `schedule_transfer`. `shield`'s ciphertext is
-	/// variable length, which the [`MAX_HIGH_SECURITY_EXTRINSIC_LEN`] and
-	/// [`MAX_HIGH_SECURITY_INCLUSION_FEE`] caps already bound.
+	/// Every call on this list is delayed and reversible, and that is the
+	/// whole of the guarantee: a stolen key can only schedule, and the owner
+	/// has `cancel` and the guardian has `recover_funds` before the delay
+	/// runs out. `Shielded::shield` and `Balances::burn` are deliberately off
+	/// the list even though v1 refuses the three above at dispatch, which
+	/// leaves an already-enrolled account unable to sign anything. Both are
+	/// immediate, irreversible and outside `recover_funds`, which walks
+	/// `PendingTransfersBySender` and releases holds: a `shield` carrying an
+	/// `inner` only the thief committed to settles in the next block with the
+	/// value inside the pool, and a `burn` destroys it outright. Admitting
+	/// either would trade the guarantee the feature exists for against a
+	/// freeze that no v1-genesis chain can reach, since [`QneroCallFilter`]
+	/// refuses the enrolment and no non-benchmark preset seeds
+	/// `HighSecurityAccounts`. An exit for an account enrolled before v1 has
+	/// to come through the pallet's own delay machinery, so `cancel` and
+	/// `recover_funds` still apply to it.
 	fn is_whitelisted_leaf(call: &RuntimeCall) -> bool {
 		match call {
 			RuntimeCall::ReversibleTransfers(
@@ -973,8 +979,6 @@ impl HighSecurityConfig {
 				pallet_reversible_transfers::Call::cancel { .. } |
 				pallet_reversible_transfers::Call::recover_funds { .. },
 			) => true,
-			RuntimeCall::Shielded(pallet_shielded::Call::shield { .. }) |
-			RuntimeCall::Balances(pallet_balances::Call::burn { .. }) => true,
 			_ => false,
 		}
 	}

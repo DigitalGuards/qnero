@@ -146,11 +146,12 @@ fn the_reversible_vesting_and_scheduled_transfer_paths_are_refused() {
 /// one with `AccountAlreadyHighSecurity`. Once an account is in, every call on
 /// `HighSecurityConfig`'s whitelist that moves value is refused at dispatch by
 /// this filter, and every call off that whitelist is refused at validation by
-/// `ReversibleTransactionExtension`, before it can reach a block at all. What
-/// the account keeps is `shield` and `burn`, which the whitelist carries for
-/// the accounts already enrolled. Refusing the enrolment is what keeps a new
-/// account out of that state until a milestone gives the feature something to
-/// guard.
+/// `ReversibleTransactionExtension`, before it can reach a block at all, so the
+/// account can sign nothing. Refusing the enrolment is what keeps any account
+/// from reaching that state, and it is the reason the whitelist stays as it is:
+/// widening it with an immediate call would unfreeze the account by voiding the
+/// guarantee the feature exists for
+/// (`the_high_security_whitelist_admits_only_reversible_calls`).
 #[test]
 fn enrolling_in_high_security_is_refused() {
 	new_test_ext().execute_with(|| {
@@ -176,15 +177,23 @@ fn enrolling_in_high_security_is_refused() {
 	});
 }
 
-/// An account that is already in high security can still reach the pool.
+/// The high-security whitelist admits delayed, reversible calls and nothing
+/// else.
 ///
-/// The whitelist is checked at validation, before the filter, so a high
-/// security account can only sign what is on it. `shield` and `burn` are on it
-/// for that reason: without them the accounts enrolled before v1, and the
-/// benchmark genesis one, could sign nothing at all and their balance would be
-/// frozen forever.
+/// This is the guarantee the feature sells: a stolen key can only schedule a
+/// transfer, and the owner's `cancel` or the guardian's `recover_funds` beats
+/// it to the delay. `Shielded::shield` and `Balances::burn` are the two calls
+/// that would break it, because both are immediate, both are irreversible and
+/// neither is reachable by `recover_funds`, which walks
+/// `PendingTransfersBySender` and releases holds. A `shield` whose `inner`
+/// commits to a `pk` only the thief holds settles in the next block and the
+/// value is a note in the pool with nothing to cancel; a `burn` is the same
+/// shape with total loss. Admitting them to unfreeze an account enrolled
+/// before v1 would trade the guarantee against a freeze no v1-genesis chain
+/// can reach, since the enrolment itself is refused
+/// (`enrolling_in_high_security_is_refused`).
 #[test]
-fn a_high_security_account_can_still_shield_and_burn() {
+fn the_high_security_whitelist_admits_only_reversible_calls() {
 	use frame_support::traits::Contains as _;
 	use qp_high_security::HighSecurityInspector;
 
@@ -197,12 +206,42 @@ fn a_high_security_account_can_still_shield_and_burn() {
 		RuntimeCall::Balances(pallet_balances::Call::burn { value: UNIT, keep_alive: true }),
 	] {
 		assert!(
-			quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
-			"{call:?} must pass the high-security whitelist at validation"
+			!quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
+			"{call:?} is immediate and irreversible, so a stolen high-security key must not \
+			 be able to sign it"
 		);
+		// And not smuggled in through the one wrapper the whitelist admits.
+		let wrapped =
+			RuntimeCall::Utility(pallet_utility::Call::batch_all { calls: vec![call.clone()] });
+		assert!(
+			!quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&wrapped),
+			"a batch_all carrying {call:?} must be refused the same way"
+		);
+		// The base filter is a different question and still allows both: this
+		// is a high-security restriction, and an ordinary account keeps its
+		// door into the pool.
 		assert!(
 			QneroCallFilter::contains(&call),
-			"{call:?} must also pass the base call filter at dispatch"
+			"{call:?} must still pass the base call filter for an ordinary account"
+		);
+	}
+
+	// What stays on the list is the delayed path and the two ways out of it.
+	for call in [
+		RuntimeCall::ReversibleTransfers(pallet_reversible_transfers::Call::schedule_transfer {
+			dest: MultiAddress::Id(account(2)),
+			amount: UNIT,
+		}),
+		RuntimeCall::ReversibleTransfers(pallet_reversible_transfers::Call::cancel {
+			tx_id: sp_core::H256::zero(),
+		}),
+		RuntimeCall::ReversibleTransfers(pallet_reversible_transfers::Call::recover_funds {
+			account: account(2),
+		}),
+	] {
+		assert!(
+			quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
+			"{call:?} is the delayed path the guarantee is built on and must stay whitelisted"
 		);
 	}
 }
