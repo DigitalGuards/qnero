@@ -115,6 +115,8 @@ parameter_types! {
 	/// The runtime's own cap, so a ciphertext the production runtime refuses at
 	/// its SCALE decode cannot pass a test here.
 	pub const MaxCiphertextBytes: u32 = 2048;
+	/// Four real slots carried per real slot settled, the runtime default.
+	pub static MaxPayloadSlotRatio: u32 = 4;
 }
 
 impl pallet_shielded::Config for Test {
@@ -130,6 +132,7 @@ impl pallet_shielded::Config for Test {
 	type CiphertextBytesPerFeeQuantum = CiphertextBytesPerFeeQuantum;
 	type FeeBurnRate = FeeBurnRate;
 	type MaxCiphertextBytes = MaxCiphertextBytes;
+	type MaxPayloadSlotRatio = MaxPayloadSlotRatio;
 	type WeightInfo = ();
 }
 

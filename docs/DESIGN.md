@@ -269,8 +269,14 @@ is wallet-side proving time and memory for a 2-in/2-out leaf plus a
 2. Proof size and verify weight for the private batch under the new PI
    layout; Wormhole's numbers are the baseline.
 3. Whether to keep QPoW or bring RandomX; unrelated to privacy, defer.
-4. Fee visibility: fees are public, as in Monero. Fixed-fee tiers would reduce
-   fingerprinting; decide at M4.
+4. Fee visibility: fees are public, as in Monero. **M4 decided: per-slot public
+   fees, no tiering.** Each real leaf slot's fee is a 62-bit public field
+   element the chain sums in `u128` (`docs/CIRCUIT.md` 9.7), and the floor
+   `MinLeafFee + ceil(ciphertext_bytes / CiphertextBytesPerFeeQuantum)` is
+   itself payload dependent, so a tier would have to quantize the payload term
+   too. Whether to quantize fees into tiers to reduce fingerprinting is
+   re-deferred to M6, where the coinbase changes what a fee has to cover
+   anyway.
 5. Memo field size and whether it is mandatory (Zcash pads to 512 bytes).
 
 ## 10. Positioning: Qnero vs Hegemon
@@ -311,7 +317,12 @@ Where Qnero beats it, if we execute:
    Qnero. Hegemon has one Electron app.
 4. Reviewability. A reviewer can read Qnero's delta over Quantus in a day.
 5. Mining story. Consider RandomX in place of QPoW so Monero miners can move
-   over with the software they already run. Decision deferred to M4.
+   over with the software they already run. **M4 kept QPoW**: the shielded
+   pool's author fee reads the QPoW pre-runtime digest and credits the
+   QPoW-derived account through a wormhole leaf (`docs/CIRCUIT.md` 9.7), which
+   is the same seam `pallet-mining-rewards` uses, and nothing in M4 depends on
+   which proof of work sits behind that digest. The RandomX evaluation is
+   re-deferred to M6, which is the milestone that touches the coinbase.
 
 Concrete "beat it" targets for the first testnet:
 - proof per tx smaller than 105 KB, or clearly amortized below it per batch

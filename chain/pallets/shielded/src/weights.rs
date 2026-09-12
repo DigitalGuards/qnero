@@ -185,7 +185,10 @@ pub trait WeightInfo {
 	/// permanent state.
 	fn submit_private_batch(slots: u32, ciphertext_bytes: u32) -> Weight;
 	fn submit_public_batch(slots: u32, ciphertext_bytes: u32) -> Weight;
-	fn shield() -> Weight;
+	/// `ciphertext_bytes` is the one ciphertext a shield writes into
+	/// `Ciphertexts`, which is the same never-pruned map a settlement writes
+	/// to, so it carries the same proof-size term.
+	fn shield(ciphertext_bytes: u32) -> Weight;
 }
 
 /// Weight of settling `slots` real leaf slots carrying `ciphertext_bytes` of
@@ -242,7 +245,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		.saturating_add(settlement_weight::<T>(slots, ciphertext_bytes))
 	}
 
-	fn shield() -> Weight {
+	fn shield(ciphertext_bytes: u32) -> Weight {
 		let (tree_reads, tree_writes) = pallet_zk_tree::INSERT_LEAF_DB_OPS;
 		// Reads: the signer's account, `EntryCount`, `PoolValue`, plus the
 		// tree's. Writes: the signer's account, `EntryCount`, `PoolValue`,
@@ -254,7 +257,16 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 			.saturating_mul(POSEIDON_EVAL_REF_TIME_PS);
 		<T as frame_system::Config>::DbWeight::get()
 			.reads_writes(reads, writes)
-			.saturating_add(Weight::from_parts(hashing, reads.saturating_mul(KEY_POV)))
+			// The ciphertext is in the proof size for the same reason
+			// `settlement_weight` puts one there: a shield writes it into
+			// `Ciphertexts`, the same never-pruned map a settled slot writes
+			// two of. The runtime leaves `proof_size` uncapped today, so
+			// nothing is metered against this yet; the term is here so that
+			// the declaration is an upper bound on the day it is.
+			.saturating_add(Weight::from_parts(
+				hashing,
+				reads.saturating_mul(KEY_POV).saturating_add(u64::from(ciphertext_bytes)),
+			))
 	}
 }
 
@@ -286,8 +298,8 @@ impl WeightInfo for () {
 		)
 	}
 
-	fn shield() -> Weight {
-		Weight::from_parts(SLOT_REF_TIME_PS, 0)
+	fn shield(ciphertext_bytes: u32) -> Weight {
+		Weight::from_parts(SLOT_REF_TIME_PS, u64::from(ciphertext_bytes))
 	}
 }
 

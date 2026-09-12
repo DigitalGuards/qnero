@@ -203,8 +203,16 @@ LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quan
 ```
 
 3 minutes 17 seconds of wall clock against the warm tree from the first pass,
-of which 54 seconds was the circuit artifact set regenerating: the build script
-reruns whenever the pallet's sources change. The binary is 80 MB at
+of which 54 seconds was the circuit artifact set regenerating. The reason is
+that this pass edited `chain/pallets/shielded/build.rs` itself: the build
+script binary was recompiled, so Cargo threw away its cached output and ran it
+again. Editing the pallet's Rust sources does **not** do that, and the module
+doc at the top of `build.rs` states the contract: the script emits only
+`cargo:rerun-if-env-changed` for the two `QNERO_NUM_*` knobs, and a script that
+emits any `rerun-if` directive at all opts out of Cargo's default "rerun when
+any file in the package changed" scan. What triggers a regeneration is one of
+those two vars changing, the build script or its build-dependency graph
+changing, or a fresh `OUT_DIR`. The binary is 80 MB at
 `chain/target/release/quantus-node`.
 
 `--dev --tmp` again, stopped after about two minutes at height 17. Blocks from
@@ -258,3 +266,50 @@ from the first second. What this run checked:
   transaction version 6. The runtime identity issue above is unchanged and still
   open: this pass changed a constant's value, which is another metadata change
   behind the same version number.
+
+## The third review fix pass, 2026-09-12
+
+Same workstation. The pallet changed the settlement plan and the runtime gained
+one constant. **The node was deliberately not rebuilt in this pass**, so
+`chain/target/release/quantus-node` and the metadata it serves are still the
+second pass's: they carry neither the `MaxPayloadSlotRatio` constant nor the
+`PayloadRatioExceeded` error. The next build of the node picks both up, and it
+will not regenerate the circuit artifact set, because this pass touched neither
+`QNERO_NUM_*` nor `build.rs` (see the correction in the first pass's entry
+above).
+
+Gates run for this pass, all green:
+
+```
+cd chain
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p pallet-shielded -p pallet-zk-tree --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 -p pallet-shielded -p pallet-zk-tree --all-targets
+SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 4 -p quantus-runtime
+```
+
+56 tests in `pallet-shielded` and 35 in `pallet-zk-tree`, no clippy warnings in
+either, and the runtime compiles against the new `Config` item. The root
+workspace was unchanged and its four gates were re-run for the record.
+
+What changed, and what a node operator sees once the node is rebuilt:
+
+- One new pallet constant in the metadata, `MaxPayloadSlotRatio`, set to `4`.
+  It bounds the real leaf slots a submission may carry against the real leaf
+  slots it settles. A skipped segment pays no fee, so without it the fraction
+  of a submission that settles is the fraction of its payload that is priced,
+  and the submitter picks that fraction.
+- One new error, `PayloadRatioExceeded`.
+- A settlement whose block anchor does not resolve is now skipped like a
+  nullifier conflict, where before it refused the whole submission. A submission
+  with nothing left to settle still refuses, and it names the anchor error
+  (`BlockOutsideWindow`, `BlockNotFound`, `BlockHashMismatch`) when an anchor
+  was the reason, so a wallet's single-segment private batch reports what it
+  reported before.
+- `shield`'s declared weight takes the ciphertext length and adds it to
+  `proof_size`, matching what a settlement already declares for the same map.
+  Nothing is metered against it while `RuntimeBlockWeights` leaves `proof_size`
+  at `u64::MAX`.
+
+The runtime identity issue above is unchanged and still open: this pass adds a
+constant and an error, which is another metadata change behind `quantus-runtime`
+spec 152.

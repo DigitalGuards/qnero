@@ -25,7 +25,15 @@
 //!   The chain does it. A segment holding a nullifier this chain already settled, or one an earlier
 //!   segment of the same submission claimed, is skipped whole and the rest settles; a submission
 //!   that settles nothing is refused. Aborting the whole submission instead would let one
-//!   participant destroy an aggregator's batch by settling a note of its own inner first.
+//!   participant destroy an aggregator's batch by settling a note of its own inner first. A segment
+//!   whose block anchor no longer resolves is skipped on the same argument: it can never settle,
+//!   and one reorg between an aggregator's proving run and inclusion would otherwise destroy the
+//!   whole batch.
+//! - **A bound on the payload a submission carries against the payload it settles.** A skipped
+//!   segment pays no fee, because it writes no permanent state, and its ciphertexts still occupy
+//!   block space and are still sponged into a `ct_digest` by every node. `MaxPayloadSlotRatio` is
+//!   what stops a submitter that controls how many of its own segments conflict from buying a
+//!   block's whole payload budget at one segment's fee.
 //! - **`ct_digest`.** The circuit leaves it a free public input. The chain recomputes it over the
 //!   ciphertexts in the extrinsic, in output order, and rejects the slot when it differs.
 //! - **A minimum fee per real slot.** The leaf circuit's "at least one real input" constraint does
@@ -84,8 +92,19 @@ pub const UNSIGNED_SETTLEMENT_PRIORITY: u64 = 1;
 /// node copies and feeds to the plonky2 parser is the block length limit. Proof
 /// sizes are fixed by the compiled dimensions: a private batch serializes to
 /// about 157 KB at the chain default, and a public batch is the same shape with
-/// a wider forwarded region. If a circuit change ever pushes a real proof past
-/// this cap, every settlement test fails at the same time as the size gate.
+/// a wider forwarded region.
+///
+/// **One of the two proof kinds is covered by a test.**
+/// `a_real_private_batch_settles_end_to_end` proves a private batch at the
+/// chain's `N` and asserts its serialized length against this cap, so a circuit
+/// change that pushed the private batch past it fails there. The public batch
+/// has never been produced at `n = 53` at all, at any speed: the build script
+/// writes a verifier, which needs the circuit built and no proof. Its size is
+/// an estimate, about 157 KB of recursive proof plus 6947 public-input felts at
+/// eight bytes, roughly 213 KB, and nothing enforces it. If that estimate is
+/// wrong, `pre_validate_public_batch` refuses every public-batch settlement
+/// with `ProofTooLarge` on a live chain and no test says so first.
+/// `docs/BENCH.md` carries the figures and M5 owes the measurement.
 pub const MAX_PROOF_BYTES: usize = 512 * 1024;
 
 /// One pool quantum in planck: the unit a note value is counted in.
@@ -423,6 +442,33 @@ pub mod pallet {
 		#[pallet::constant]
 		type MaxCiphertextBytes: Get<u32>;
 
+		/// Largest ratio of real leaf slots a submission may carry to real
+		/// leaf slots it settles.
+		///
+		/// A skipped segment pays no fee, because it writes no permanent
+		/// state, and its slots still occupy positions in `outputs` that the
+		/// block carries and that every node sponges into a `ct_digest`. The
+		/// fee floor is the only anti-spam mechanism and it prices the settling
+		/// slots alone, so without a bound a submitter who controls how many of
+		/// its own segments already conflict buys the block's whole payload
+		/// budget at a fraction of what the same bytes cost when they settle.
+		/// Charging the skipped slots their own fee is not available: that fee
+		/// already left `PoolValue` when those slots first settled, so counting
+		/// it again would drift the pool's books from the sum of note values.
+		/// Charging the whole payload against the settling fee would make a
+		/// single griefed segment fatal, which is what the skip rule exists to
+		/// prevent. The ratio does both jobs.
+		///
+		/// Four leaves an ordinary grief of one or two segments out of
+		/// fifty-three settling untouched and refuses a submission that settles
+		/// one segment while carrying fifty-two. A private batch has one
+		/// segment, so it either settles whole at a ratio of one or settles
+		/// nothing and is refused before this rule is reached. Zero and one are
+		/// both treated as one, which is the strictest setting: a submission
+		/// may then carry no skipped payload at all.
+		#[pallet::constant]
+		type MaxPayloadSlotRatio: Get<u32>;
+
 		/// Weights.
 		type WeightInfo: WeightInfo;
 	}
@@ -564,6 +610,12 @@ pub mod pallet {
 		CiphertextDigestMismatch,
 		/// A ciphertext is longer than `MaxCiphertextBytes`.
 		CiphertextTooLarge,
+		/// The submission carries more real leaf slots than
+		/// `MaxPayloadSlotRatio` times the number it settles. A skipped
+		/// segment pays no fee, so without this bound the payload of a
+		/// submission is priced by the fraction of it the submitter chose to
+		/// let settle.
+		PayloadRatioExceeded,
 		/// The settlement would take the tree past the depth the circuit can
 		/// prove.
 		TreeFull,
@@ -678,7 +730,7 @@ pub mod pallet {
 		/// opaque by construction; what it owes is the identifier, and a
 		/// shielder who ignores the rule can only strand its own note.
 		#[pallet::call_index(2)]
-		#[pallet::weight(T::WeightInfo::shield())]
+		#[pallet::weight(T::WeightInfo::shield(ciphertext.len() as u32))]
 		pub fn shield(
 			origin: OriginFor<T>,
 			value: BalanceOf<T>,
@@ -858,12 +910,30 @@ pub mod pallet {
 		pub fee_quanta: u128,
 		/// Real leaf slots that will settle.
 		pub slots: u32,
+		/// Real leaf slots of the segments this submission skips.
+		///
+		/// They settle nothing and pay nothing, and they still hold their
+		/// positions in `outputs`: the block carries their bytes and every node
+		/// sponges them into a `ct_digest`. `MaxPayloadSlotRatio` is what
+		/// bounds them against [`PlannedSettlement::slots`], and this field is
+		/// where the count that rule reads is stated.
+		pub skipped_slots: u32,
 		/// One flag per segment of the bundle, in order: whether this
 		/// submission settles it.
 		///
-		/// A segment is skipped when any nullifier it publishes is already in
+		/// A segment is skipped for either of two reasons, and neither is fatal
+		/// to the submission. Any nullifier it publishes is already in
 		/// `UsedNullifiers`, or was claimed by an earlier segment of this same
-		/// submission. Refusing the whole submission instead is what lets one
+		/// submission. Or its block anchor no longer resolves: outside
+		/// `BlockHashWindow`, pruned from `frame_system::BlockHash`, or holding
+		/// a hash that is no longer the canonical one at that height. Both are
+		/// conditions the segment cannot recover from under any ordering, and
+		/// both are conditions a participant can inflict on an aggregator after
+		/// its batch is fixed: the anchor case needs only a one-block reorg
+		/// between the recursive proving run and inclusion, or an inner handed
+		/// over already near the edge of the window.
+		///
+		/// Refusing the whole submission instead is what lets one
 		/// participant destroy an aggregator's batch: every inner of a public
 		/// batch is exactly the artifact `submit_private_batch` accepts, so a
 		/// participant can settle a note of its own inner directly, in its own
@@ -879,11 +949,16 @@ pub mod pallet {
 		/// every real slot a real note, and one of that segment's published
 		/// nullifiers is already spent, so the segment is a double spend by
 		/// construction. Refusing it and skipping it are the same outcome for
-		/// it; they differ only for the segments around it. Nothing of a
+		/// it; they differ only for the segments around it. The same argument
+		/// covers the anchor: a segment whose block anchor does not resolve is
+		/// refused at every height from here on, because the window only moves
+		/// forward and a pruned or orphaned hash never comes back. Nothing of a
 		/// skipped segment is written: no commitment appended, no nullifier
 		/// marked, no fee counted, so its own fresh nullifiers stay unspent.
 		/// Which of two conflicting segments wins is the order they appear in
-		/// the proof, which is fixed, so every node decides the same way.
+		/// the proof, which is fixed, so every node decides the same way, and
+		/// the anchor rule reads chain state that every node agrees on at that
+		/// height.
 		pub settles: Vec<bool>,
 	}
 
@@ -1036,6 +1111,14 @@ pub mod pallet {
 			let mut claimed = alloc::collections::BTreeSet::new();
 			let mut fee_quanta: u128 = 0;
 			let mut slots: u32 = 0;
+			let mut skipped_slots: u32 = 0;
+			// The first anchor failure of the walk, kept so that a submission
+			// settling nothing says why. An anchor that does not resolve is a
+			// skip like a nullifier conflict, and a private batch has exactly
+			// one segment, so without this a wallet whose proof named a block
+			// this chain cannot resolve would be told its nullifiers were
+			// already used.
+			let mut stale_anchor: Option<Error<T>> = None;
 			let mut settles = Vec::with_capacity(bundle.segments.len());
 			// Walks every real slot of every segment, settling or not.
 			// `outputs` covers all of them: a submitter cannot know which
@@ -1070,7 +1153,26 @@ pub mod pallet {
 						UsedNullifiers::<T>::contains_key(nullifier) || claimed.contains(nullifier)
 					})
 				});
-				if conflicts {
+				// A segment whose block anchor no longer resolves is skipped on
+				// the same argument. It cannot settle at this height or any
+				// later one: the window only moves forward, a pruned hash does
+				// not come back, and an orphaned one never becomes canonical
+				// again. Refusing the submission over it would hand an
+				// aggregator's participants the griefing the skip rule exists
+				// to close, and this half of it is the one an aggregator cannot
+				// defend against at all: one reorg between the recursive
+				// proving run and inclusion is enough, and a participant can
+				// force it by handing over an inner anchored near the edge of
+				// the window.
+				let skipped = if conflicts {
+					true
+				} else if let Some(error) = Self::anchor_failure(segment, current, window) {
+					stale_anchor.get_or_insert(error);
+					true
+				} else {
+					false
+				};
+				if skipped {
 					settles.push(false);
 					// The slots of a skipped segment still hold their positions
 					// in `outputs`, and `bind_payload` still binds them: every
@@ -1079,31 +1181,18 @@ pub mod pallet {
 					// fee-free extrinsic. No fee is evaluated for them, because a
 					// skipped segment writes no nullifier, appends no leaf and
 					// stores no ciphertext, so there is no state for a fee to
-					// price.
+					// price. What bounds the bytes they carry is the ratio rule
+					// below, against the slots that do settle.
+					skipped_slots = u32::try_from(segment.slots.len())
+						.ok()
+						.and_then(|count| skipped_slots.checked_add(count))
+						.ok_or(Error::<T>::ValueOutOfRange)?;
 					real_slots = real_slots
 						.checked_add(segment.slots.len())
 						.ok_or(Error::<T>::ValueOutOfRange)?;
 					continue;
 				}
 				settles.push(true);
-
-				let anchored_at = BlockNumberFor::<T>::from(segment.block_number);
-				ensure!(anchored_at < current, Error::<T>::BlockOutsideWindow);
-				ensure!(
-					current.saturating_sub(anchored_at) <= window,
-					Error::<T>::BlockOutsideWindow
-				);
-				let on_chain = frame_system::Pallet::<T>::block_hash(anchored_at);
-				// `BlockHash` returns the default hash for a height outside the
-				// pruning window, which is also the all-zero sentinel.
-				ensure!(
-					on_chain != <T as frame_system::Config>::Hash::default(),
-					Error::<T>::BlockNotFound
-				);
-				ensure!(
-					on_chain.as_ref() == segment.block_hash.as_slice(),
-					Error::<T>::BlockHashMismatch
-				);
 
 				for slot in &segment.slots {
 					ensure!(
@@ -1153,8 +1242,28 @@ pub mod pallet {
 			// which is what a replay looks like, and accepting it as a no-op
 			// would let anyone spend a block's admission work for free. This is
 			// the refusal the free forgery lands on, and it is reached without
-			// hashing a byte of the payload.
-			ensure!(slots > 0, Error::<T>::NullifierAlreadyUsed);
+			// hashing a byte of the payload. An anchor failure is reported in
+			// preference to the replay error, because a private batch has one
+			// segment and a wallet whose proof named a block this chain cannot
+			// resolve is owed the reason it cannot.
+			if slots == 0 {
+				return Err(stale_anchor.unwrap_or(Error::<T>::NullifierAlreadyUsed));
+			}
+
+			// The payload a submission carries, bounded against the payload it
+			// settles. A skipped segment pays no fee, and the fee floor is the
+			// only anti-spam mechanism there is, so a submitter that controls
+			// how many of its own segments conflict would otherwise set the
+			// price of the block space it fills: fifty-two skipped segments
+			// beside one that settles is a full public batch of ciphertext
+			// bought at one segment's fee. See [`Config::MaxPayloadSlotRatio`]
+			// for why the skipped slots cannot simply be charged instead.
+			let ratio = u64::from(T::MaxPayloadSlotRatio::get().max(1));
+			let carried = u64::from(slots).saturating_add(u64::from(skipped_slots));
+			ensure!(
+				carried <= u64::from(slots).saturating_mul(ratio),
+				Error::<T>::PayloadRatioExceeded
+			);
 
 			// Exactly one `ShieldedOutput` per real slot, skipped segments
 			// included. A trailing extra would otherwise ride along unbound by
@@ -1178,7 +1287,44 @@ pub mod pallet {
 				Error::<T>::PoolUnderflow
 			);
 
-			Ok(PlannedSettlement { fee_quanta, slots, settles })
+			Ok(PlannedSettlement { fee_quanta, slots, skipped_slots, settles })
+		}
+
+		/// Why a segment's block anchor does not resolve, or `None` when it
+		/// does.
+		///
+		/// A settleable segment must name a block that is already finished,
+		/// inside [`Config::BlockHashWindow`], present in
+		/// `frame_system::BlockHash`, and whose hash equals the segment's
+		/// `block_hash` public input. The public input arrives as four
+		/// canonical Goldilocks limbs and the chain's header hash is a
+		/// Poseidon2 output stored in the same 32-byte little-endian-per-limb
+		/// form, so the comparison is lossless.
+		///
+		/// Failing any of the four skips the segment and leaves the rest of
+		/// the submission standing: see [`PlannedSettlement::settles`].
+		fn anchor_failure(
+			segment: &Segment,
+			current: BlockNumberFor<T>,
+			window: BlockNumberFor<T>,
+		) -> Option<Error<T>> {
+			let anchored_at = BlockNumberFor::<T>::from(segment.block_number);
+			if anchored_at >= current {
+				return Some(Error::<T>::BlockOutsideWindow);
+			}
+			if current.saturating_sub(anchored_at) > window {
+				return Some(Error::<T>::BlockOutsideWindow);
+			}
+			let on_chain = frame_system::Pallet::<T>::block_hash(anchored_at);
+			// `BlockHash` returns the default hash for a height outside the
+			// pruning window, which is also the all-zero sentinel.
+			if on_chain == <T as frame_system::Config>::Hash::default() {
+				return Some(Error::<T>::BlockNotFound);
+			}
+			if on_chain.as_ref() != segment.block_hash.as_slice() {
+				return Some(Error::<T>::BlockHashMismatch);
+			}
+			None
 		}
 
 		/// Bind every real slot's ciphertexts to the `ct_digest` its proof

@@ -169,3 +169,23 @@ not *timed* at that size: the builder writes a verifier, which needs the circuit
 built but no proof produced. The pallet's weight for a public-batch verify is a
 ceiling chosen to be wrong in the safe direction, and `chain/pallets/shielded/src/weights.rs`
 says so at the constant.
+
+### Proof size against the pallet's size gate
+
+`pallet-shielded` refuses a settlement blob above `MAX_PROOF_BYTES`, 512 KiB,
+before it is copied or parsed.
+
+| proof | serialized bytes | source |
+|---|---:|---|
+| private batch, `N = 6` | 157476 | measured at M3, asserted against the cap by `a_real_private_batch_settles_end_to_end` |
+| public batch, `n = 53`, `N = 6` | about 213000 | **estimate; the proof has never been produced** |
+
+The private batch is the half a test covers: the end-to-end test proves one at
+the chain's `N` and asserts its length against the cap, so a circuit change that
+pushed it past 512 KiB fails in the test suite first. The public batch
+has never been produced at `n = 53` at any speed, so its figure is an estimate:
+a recursive proof is about the same size whatever it wraps, about 157 KB, plus
+`public_batch_pi_len(53, 6) = 6947` public-input felts at eight bytes, roughly
+213 KB in total. Nothing enforces it. If the estimate is wrong the pallet
+refuses every public-batch settlement with `ProofTooLarge` and no test says so
+first. M5 owes the measurement, in the same run that times the verify.

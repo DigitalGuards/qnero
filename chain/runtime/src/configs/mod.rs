@@ -900,6 +900,27 @@ parameter_types! {
 	/// fails the extrinsic's SCALE decode after the proof that committed to
 	/// those exact bytes has already been built.
 	pub const ShieldedMaxCiphertextBytes: u32 = 2048;
+	/// Largest ratio of real leaf slots a submission may carry to real leaf
+	/// slots it settles: four.
+	///
+	/// A segment the chain skips, because a nullifier it publishes is already
+	/// spent or because its block anchor no longer resolves, pays no fee: it
+	/// writes no permanent state, and charging it the fee it paid when it first
+	/// settled would drift `PoolValue` from the sum of the notes behind it. Its
+	/// ciphertexts are still in the block and every node still sponges them
+	/// into a `ct_digest`, and the per-slot fee floor is the only anti-spam
+	/// mechanism there is, so the fraction of a submission that settles is the
+	/// fraction of its payload that is priced, and the submitter chooses that
+	/// fraction. At `n = 53` and `N = 6` a submission of one settling segment
+	/// beside fifty-two skipped ones carries 318 real slots and up to 1.27 MB
+	/// of never-pruned payload for the fee of six leaf slots.
+	///
+	/// Four is chosen so that an ordinary grief leaves an aggregator alone: one
+	/// or two segments out of fifty-three conflicting is a ratio just above
+	/// one, and a reorg that strands a handful of anchors is the same shape. A
+	/// private batch carries one segment, so it settles whole at a ratio of one
+	/// or settles nothing and is refused before this rule is reached.
+	pub const ShieldedMaxPayloadSlotRatio: u32 = 4;
 }
 
 impl pallet_shielded::Config for Runtime {
@@ -921,5 +942,6 @@ impl pallet_shielded::Config for Runtime {
 	type CiphertextBytesPerFeeQuantum = ShieldedCiphertextBytesPerFeeQuantum;
 	type FeeBurnRate = ShieldedFeeBurnRate;
 	type MaxCiphertextBytes = ShieldedMaxCiphertextBytes;
+	type MaxPayloadSlotRatio = ShieldedMaxPayloadSlotRatio;
 	type WeightInfo = pallet_shielded::weights::SubstrateWeight<Runtime>;
 }
