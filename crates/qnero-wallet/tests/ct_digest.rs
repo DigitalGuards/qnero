@@ -13,6 +13,7 @@ use codec::{Compact, Decode};
 use qnero_circuit::chain::ct_digest;
 use qnero_notes::{encrypt_note, Digest, Note, SpendingKey};
 use qnero_wallet::extrinsic::{encode_submit_private_batch, ShieldedOutput};
+use qnero_wallet::memo::{pad_memo, CIPHERTEXT_FIXED_BYTES, MEMO_BYTES};
 use qnero_wallet::metadata::{ChainMetadata, KNOWN_SIGNED_EXTENSIONS};
 use qnero_wallet::wallet::output_ct_digest;
 
@@ -98,14 +99,28 @@ fn the_digest_binds_the_output_order() {
     assert_ne!(forward, reversed);
 }
 
-/// A real `NoteCiphertext` is 1731 bytes with an empty memo, which is what
-/// makes a slot's fee floor eight quanta at this runtime's parameters. The
-/// wallet sizes its fee from the bytes it is about to send, so a drift here
-/// would be a fee that no longer clears the floor.
+/// Two sizes, and the wallet pays for the second.
+///
+/// The fixed part of a `NoteCiphertext` is 1731 bytes: that is the constant
+/// `memo::CIPHERTEXT_FIXED_BYTES` pins, and both the memo pad and the fee are
+/// derived from it. What this wallet actually sends is
+/// `CIPHERTEXT_FIXED_BYTES + memo::MEMO_BYTES` for every output, because every
+/// memo is padded, so the pair it publishes is twice that and its slot floor
+/// is `MinLeafFee + ceil(2 * (1731 + MEMO_BYTES) / 512)`. The wallet sizes its
+/// fee from the bytes it is about to send, so a drift in either number is a
+/// fee that no longer clears the floor.
 #[test]
 fn an_empty_memo_ciphertext_is_the_documented_size() {
-    assert_eq!(ciphertext(5, 1, b"").len(), 1731);
-    assert_eq!(ciphertext(5, 1, b"seven!!").len(), 1731 + 7);
+    assert_eq!(ciphertext(5, 1, b"").len(), CIPHERTEXT_FIXED_BYTES);
+    assert_eq!(
+        ciphertext(5, 1, b"seven!!").len(),
+        CIPHERTEXT_FIXED_BYTES + 7
+    );
+    // The size that reaches the chain, and the one the fee is computed over.
+    assert_eq!(
+        ciphertext(5, 1, &pad_memo("a memo").expect("it fits")).len(),
+        CIPHERTEXT_FIXED_BYTES + MEMO_BYTES
+    );
 }
 
 /// Pull the `Vec<ShieldedOutput>` back out of an encoded extrinsic, the way

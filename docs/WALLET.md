@@ -82,11 +82,28 @@ all reads it.
   its own exact byte count, `len(ct_1) - len(ct_2)` correlates any two payments
   carrying the same memo string, and a spend's change note, whose memo is
   always empty, is always the shorter of the published pair. Every memo is
-  therefore padded to `memo::MEMO_BYTES`, 256 bytes, which fits inside the
-  budget `MaxCiphertextBytes` leaves over a memoless ciphertext. Zcash's
-  512-byte memo field is the precedent; the size differs because this
-  ciphertext's fixed part is larger. A memo over the pad is refused, at the top
-  of the command.
+  therefore padded to `memo::MEMO_BYTES`, 61 bytes, so every ciphertext this
+  wallet writes is exactly 1792 bytes. Zcash's 512-byte memo field is the
+  precedent; the size differs because this ciphertext's fixed part is larger
+  and because this chain prices payload bytes. A memo over the pad is refused,
+  at the top of the command.
+
+  The pad is bounded twice and the tighter bound picks it. `MaxCiphertextBytes`
+  leaves 317 bytes over a memoless ciphertext, and a pad over that fails the
+  extrinsic's SCALE decode after the proof exists. The fee is the tighter one:
+  `ShieldedCiphertextBytesPerFeeQuantum` (512) is sized so a real pair and a
+  pair padded to `MaxCiphertextBytes` fall in different buckets, since the
+  chain never parses those bytes and `Shielded::Ciphertexts` is never pruned,
+  and a pad of 61 is the largest that keeps `2 * (1731 + pad) = 3584` a bucket
+  below `2 * 2048 = 4096`. A 256-byte pad put the two in the same bucket, which
+  let a settler pad both ciphertexts to the cap, write 512 bytes of permanent
+  state per slot and pay exactly what an honest spend pays.
+  `fee::the_wallets_own_pair_stays_a_bucket_below_a_padded_one` is the gate on
+  this side and `a_slot_pays_for_the_ciphertext_bytes_it_publishes` is the one
+  on the chain's. `fee::ensure_memo_pad_fits` checks the compiled-in pad
+  against the runtime's own `MaxCiphertextBytes` once per command, because
+  every other chain value this wallet uses is read from metadata and this one
+  cannot be.
 - **Which output is the change is drawn per spend.** `ct_1` belongs to
   `cm_out_1` and `SlotSettled` names both leaf indices, so a payment fixed at
   output slot 0 splits the pool's outputs publicly into "went to a
@@ -200,16 +217,43 @@ Most leaves carry no ciphertext at all and that is normal: the shielded pool
 shares one commitment tree with wormhole transfers and with the mining-reward
 leaf every block appends.
 
-A leaf whose commitment this wallet already holds is not skipped: its recorded
-leaf index and block are compared against where the chain now carries it and
-repaired when they differ. Every read is pinned to `chain_getHeader`, which is
-the best block, and a best block can still be orphaned, so a leaf index is
-provisional when a scan first records it. When the block a note settled in is orphaned the extrinsic is
+Before the range is computed, the sync checks whether the chain forked under
+it. Every read is pinned to `chain_getHeader`, which is the best block, and a
+best block can still be orphaned, so a leaf index is provisional when a scan
+first records it. When the block a note settled in is orphaned the extrinsic is
 still in the pool, is re-included, and appends the identical commitment at
 whatever index the replacement block has room for. A stale index makes the note
 unspendable: the path rebuild refuses a leaf whose commitment is not the note's,
 and `--merkle-rpc` refuses it the same way, while the balance goes on reporting
 it as spendable.
+
+The watermark alone cannot see that. It only moves forward, and a reorg happens
+because the replacement branch is heavier, so it normally carries at least as
+many leaves as the branch it replaced and the re-included commitment lands at
+or below where it was: below the watermark, and never re-read. So the store
+keeps a `checkpoints` list, one entry per sync, each the block that sync
+finished at and the watermark it left. A sync asks `chain_getBlockHash` at the
+newest checkpoint's height: the same hash means every leaf below that watermark
+was folded at or before a block that is still canonical and cannot have moved,
+and a different hash, or no block at that height at all, means that checkpoint
+belongs to a branch that is gone. The walk pops checkpoints until one survives,
+so the ordinary cost is one call, and then the watermark is rewound to the
+survivor's before the scan range is taken. Every moved leaf is inside that
+range, and a commitment the scan meets again is relocated in place.
+A fork deeper than the sixteen checkpoints the store keeps rewinds to zero and
+rescans the whole tree, which is correct and slow.
+
+This deliberately does not re-read `ZkTree::Leaves` at each held note's
+recorded index, which would be the cheaper check. That names this wallet's own
+leaves to the node, which is the property the local tree rebuild pays for.
+`chain_getBlockHash` at a height names nothing.
+
+A held note inside a rescanned range that the scan did not meet again is a note
+the current chain does not have: its settlement was orphaned and has not been
+re-included. The sync reports the count and changes nothing, because a later
+block can still re-include the extrinsic and the recorded leaf index is the
+only handle on where the note was. A spend that selects it fails loudly on the
+path rebuild.
 
 Every ciphertext that decrypts goes through `qnero_notes::try_receive`, which
 also checks the plaintext opens the commitment the chain published beside it.
@@ -227,9 +271,23 @@ store's `rejected` list with its reason, so a wallet can say why a payment
 someone claims to have sent is missing from its balance.
 
 Finally the settled nullifier set is read whole, pinned to the same block, and
-every unspent note whose nullifier is in it is marked spent. Only the nullifier
-key can compute those values at all, and the question is asked locally: see
-"What the node learns" above.
+every note's spent flag is derived from it, in both directions. Only the
+nullifier key can compute those values at all, and the question is asked
+locally: see "What the node learns" above.
+
+Both directions, because the flag used to be a latch. The set is repaged whole
+on every sync, so the store always holds the chain's current answer, and a
+settlement whose block is orphaned and which does not re-land, because the
+unsigned extrinsic leaves the pool after five blocks or its anchor falls
+outside the 256-block window, leaves its nullifier permanently absent. The note
+it spent then stayed `spent` forever: out of the balance, passed over by every
+selection, and fully spendable on chain, recoverable only by deleting the
+store. A note whose
+nullifier is no longer in the set comes back into the balance and its
+`spent_seen_at_block` is cleared. `submit_spend` still latches the flag the
+moment it has confirmed both nullifiers are settled at the inclusion block,
+which covers the window before the next sync repages the set, so
+`send --no-sync` cannot select the same input twice.
 
 Every storage key a sync builds is checked against the runtime's own metadata
 first (`ensure_known_storage`). On the read path a drifted name or hasher is
@@ -247,12 +305,26 @@ and choose the memo's bytes, and printed byte for byte that is an escape
 sequence injection into the operator's terminal: `\r\x1b[2K` erases the row
 just written and lets the sender redraw the table with leaf indices, values and
 spent flags of their choosing, and OSC 52 writes the sender's own address into
-the clipboard the operator then pastes into `send --to`. So every control
-character and every bidirectional formatting character is escaped as
-`\u{..}` on the way to the terminal, and the rendering is truncated, so one
-note is always one row. The store keeps the raw bytes: serde_json escapes
-control characters on the way to the file, and a wallet that rewrote what it
-received could not show an operator what was actually sent.
+the clipboard the operator then pastes into `send --to`. So everything outside
+printable ASCII is escaped as `\u{..}` on the way to the terminal, and the
+rendering is truncated to the terminal's width less the 44 columns of table
+prefix, so one note is always one row.
+
+The escaping is wider than the set of characters that can drive a terminal, and
+that is what makes the truncation hold. Counting characters is only counting
+columns while every character is one column wide: an East Asian Wide glyph
+costs two, a combining mark costs none, so a character budget let a sender of
+full-width digits draw a row past any ordinary terminal width, wrap it, and
+shape the continuation line into a forged balance row without using one control
+byte. U+200B, U+200D, U+2028 and U+2029 are none of them control characters
+either, and the first two make two different memos render identically. Escaping
+everything outside printable ASCII makes character count and column count the
+same number by construction. The budget comes from `COLUMNS` when the
+environment exports one and from 80 otherwise.
+
+The store keeps the raw bytes: serde_json escapes control characters on the way
+to the file, and a wallet that rewrote what it received could not show an
+operator what was actually sent.
 
 ### `send --to <qn1...> --amount N [--fee F] [--memo TEXT] [--no-sync] [--merkle-rpc]`
 
@@ -263,12 +335,12 @@ refusal costs nothing:
 
 1. **Fee floor.** Measured from the ciphertexts the submission will actually
    carry. A `NoteCiphertext` is 1731 bytes plus its padded memo and a note's
-   value does not move that, so a probe encryption gives the exact size: 1987
+   value does not move that, so a probe encryption gives the exact size: 1792
    bytes for both outputs, and the two are asserted equal, since a difference
    is the leak the padding closes. The floor is
    `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)`, and for the
    single real slot a wallet submits it equals the whole-submission floor. At
-   the current runtime that is 9 quanta for two outputs. `--fee`
+   the current runtime that is 8 quanta for two outputs. `--fee`
    defaults to it and a lower one is refused with the arithmetic spelled out:
    the fee is a public input of the proof, fixed at proving time, so it cannot
    be raised afterwards and the chain would refuse the settlement with
@@ -366,7 +438,7 @@ copied between machines under a permissive umask.
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "address": "qn1...",
   "last_synced_block": 1062,
   "next_leaf": 1069,
@@ -406,7 +478,14 @@ copied between machines under a permissive umask.
       "reason": "its nullifier duplicates a note this wallet already holds"
     }
   ],
-  "used_nullifiers": ["<64 hex chars>", "..."]
+  "used_nullifiers": ["<64 hex chars>", "..."],
+  "checkpoints": [
+    {
+      "block_number": 1062,
+      "block_hash": "<64 hex chars>",
+      "next_leaf": 1069
+    }
+  ]
 }
 ```
 
@@ -434,27 +513,48 @@ Field notes:
   `last_synced_block`, paged whole on every sync. It is public data, and it is
   here so that spent status is decided locally: see "What the node learns".
   Deleting it costs nothing; the next sync repages it.
-- `version` is 2. A version-1 store, written before `used_nullifiers` existed,
-  is refused. Deleting it and re-syncing recovers every unspent note, which is
-  the same recovery the paragraph below describes.
+- `checkpoints` is one entry per sync, oldest first, at most sixteen: the block
+  that sync finished at, its hash, and the leaf watermark it left. It is the
+  fork detector's memory, and `sync` above says what it is for. Deleting it
+  costs nothing except the ability to notice a fork that happened before the
+  next sync.
+- `version` is 3. A version-2 store, written before `checkpoints` existed, is
+  upgraded in place on load with an empty checkpoint list. A version-1 store,
+  written before `used_nullifiers` existed, is refused. Deleting a store and
+  re-syncing recovers every unspent note, which is the same recovery the
+  paragraph below describes.
 
 Note secrets never reach a `Debug` format. `StoredNote`, `PendingNote`,
-`WalletStore` and `PreparedSpend` all hand-write `Debug` and print
-`[REDACTED]`, the way every other type in this workspace that touches note
-material does: `rho`, `r` and the memo for the three store types, and for
-`PreparedSpend` the nullifiers it is about to publish, the nullifiers of the
-notes it spends and the leaf indices it holds. A derive would put all of that
-into the first log line anyone adds while chasing an inclusion timeout, and
-`rho` and `r` beside a published nullifier are the whole link from a settled
-spend to its note. `store.rs::debug_output_carries_no_note_secrets` and
-`wallet.rs::a_prepared_spend_prints_no_nullifier_and_no_leaf_index` are the
-gates behind that.
+`RejectedNote`, `WalletStore`, `SecretHex` and `PreparedSpend` all hand-write
+`Debug` and print `[REDACTED]`, the way every other type in this workspace that
+touches note material does. What is covered, field by field: `rho`, `r`, the
+memo and the nullifier for the store types, and for `PreparedSpend` the
+nullifiers it is about to publish, the nullifiers of the notes it spends and
+the leaf indices it holds.
 
-The store's own JSON text is read and written inside `Zeroizing`, so the two
-buffers the wallet owns are wiped on the way out, with no copy of a note's
-`rho` or `r` left in freed memory; the seed one file over gets the same
-treatment for the same reason. serde_json's internal buffers are not wiped, so a core dump or a swap
-page can still reach a copy the wallet does not own.
+The nullifier is covered because for a note that has not been spent it has
+never appeared anywhere: it is exactly the value `Chain::used_nullifiers_at`
+pages a whole public map for, so a log line carrying it lets whoever reads that
+file later watch the chain and attribute the settlement that publishes it to
+this wallet with certainty. What is deliberately not
+covered is `StoredNote::leaf_index`, and `SendReport` likewise prints the input
+leaves of a settled spend. A leaf index names a leaf this wallet owns, which
+carries its own weight, and what it stops short of is predicting a value the
+wallet has yet to publish.
+`commitment` stays in the clear as well, since the chain published it beside
+the leaf. `store.rs::debug_output_carries_no_note_secrets` and
+`wallet.rs::a_prepared_spend_prints_no_nullifier_and_no_leaf_index` are the
+gates behind all of it.
+
+Note secrets are wiped when they are dropped. `rho` and `r` are held in
+`SecretHex`, a transparent newtype over `String` that zeroizes on drop, so the
+copies the wallet keeps longest, the ones `serde_json` allocates while parsing
+and the clones `prepare_spend` takes, are wiped on the way out. The
+store's own JSON text is read and written inside `Zeroizing` as well, and the
+seed one file over gets the same treatment. What is not covered: serde_json's
+internal buffers, and any `String` that reallocated while growing, which leaves
+the old allocation behind. These are built once from a fixed 64-character hex
+and never grown.
 
 Deleting the store and re-syncing recovers every unspent note, because every
 note's plaintext is on chain in its ciphertext. What it does not recover is
@@ -580,9 +680,12 @@ are cited at each site.
    uniform means holding the submission until the anchor plus a fixed number of
    blocks, which is latency M5 does not spend. See "What every chain reader
    learns".
-10. **A memo is capped at 256 bytes.** Every memo is padded to one size so the
-    published ciphertext lengths say nothing, and the pad has to fit inside
-    what `MaxCiphertextBytes` leaves over a memoless ciphertext. A longer memo
-    is refused, so nothing goes out at a length of its own. Raising the cap is a
-    one-constant change as long as the runtime's bound allows it, and every
-    wallet on the chain has to agree on the size or the padding buys nothing.
+10. **A memo is capped at 61 bytes.** Every memo is padded to one size so the
+    published ciphertext lengths say nothing, and the fee bounds the pad ahead
+    of the ciphertext cap: it has to leave `2 * (1731 + pad)` a
+    `CiphertextBytesPerFeeQuantum` bucket below `2 * MaxCiphertextBytes`, or a
+    settler pads to the cap and writes permanent state for free. A longer memo
+    is refused, so nothing goes out at a length of its own. Raising the cap is
+    a coordinated change: the pad and the runtime's divisor move together, and
+    every wallet on the chain has to agree on the size or the padding buys
+    nothing.

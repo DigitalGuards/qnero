@@ -68,8 +68,12 @@ mod tests {
             value,
             commitment: Digest::hash_bytes(&[b"cm", &leaf_index.to_le_bytes()]).to_hex(),
             nullifier: Digest::hash_bytes(&[b"nf", &leaf_index.to_le_bytes()]).to_hex(),
-            rho: Digest::hash_bytes(&[b"rho", &leaf_index.to_le_bytes()]).to_hex(),
-            r: Digest::hash_bytes(&[b"r", &leaf_index.to_le_bytes()]).to_hex(),
+            rho: Digest::hash_bytes(&[b"rho", &leaf_index.to_le_bytes()])
+                .to_hex()
+                .into(),
+            r: Digest::hash_bytes(&[b"r", &leaf_index.to_le_bytes()])
+                .to_hex()
+                .into(),
             memo: String::new(),
             origin: NoteOrigin::Shield,
             spent: false,

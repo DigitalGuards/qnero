@@ -38,6 +38,15 @@ pub struct NodeState {
     pub requests: Vec<String>,
     /// Set when a submission should be included in the next block.
     pub include_submissions: bool,
+    /// Which branch this node is on.
+    ///
+    /// Mixed into the hash of every block at or above `fork_from`, so bumping
+    /// it makes `chain_getBlockHash` answer a different hash from that height
+    /// up and the same hash below it: a reorg, as a wallet sees one. The block
+    /// number stays in the first four bytes, so a hash still names its height.
+    pub fork_tag: u8,
+    /// The lowest height `fork_tag` applies to.
+    pub fork_from: u32,
 }
 
 impl NodeState {
@@ -57,6 +66,20 @@ impl NodeState {
     pub fn put_storage(&mut self, key: &[u8], value: &[u8]) {
         self.storage
             .insert(format!("0x{}", hex::encode(key)), value.to_vec());
+    }
+
+    pub fn remove_storage(&mut self, key: &[u8]) {
+        self.storage.remove(&format!("0x{}", hex::encode(key)));
+    }
+
+    /// The hash this node answers at a height, on whichever branch it is on.
+    pub fn hash_at(&self, number: u32) -> [u8; 32] {
+        let tag = if number >= self.fork_from {
+            self.fork_tag
+        } else {
+            0
+        };
+        forked_block_hash(number, tag)
     }
 }
 
@@ -141,7 +164,7 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
                 Some(hash) => block_number_of(hash),
                 None => state.head_number,
             };
-            Ok(header_json(number))
+            Ok(header_json(number, state.hash_at(number.saturating_sub(1))))
         }
         "chain_getBlockHash" => {
             let number = params
@@ -151,7 +174,7 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
             if number > state.head_number {
                 return Ok(Value::Null);
             }
-            Ok(json!(format!("0x{}", hex::encode(block_hash(number)))))
+            Ok(json!(format!("0x{}", hex::encode(state.hash_at(number)))))
         }
         "chain_getBlock" => {
             let number = params
@@ -187,7 +210,7 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
                 })
                 .collect();
             Ok(
-                json!([{"block": format!("0x{}", hex::encode(block_hash(state.head_number))), "changes": changes}]),
+                json!([{"block": format!("0x{}", hex::encode(state.hash_at(state.head_number))), "changes": changes}]),
             )
         }
         "state_getKeysPaged" => {
@@ -239,8 +262,15 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
 /// Block hashes are the block number, repeated. The wallet treats them as
 /// opaque keys, and a readable one makes a failing assertion legible.
 pub fn block_hash(number: u32) -> [u8; 32] {
+    forked_block_hash(number, 0)
+}
+
+/// The same, on a named branch. Two branches answer different hashes at one
+/// height, which is what a wallet's fork check reads.
+pub fn forked_block_hash(number: u32, fork_tag: u8) -> [u8; 32] {
     let mut hash = [0u8; 32];
     hash[..4].copy_from_slice(&number.to_le_bytes());
+    hash[4] = fork_tag;
     hash
 }
 
@@ -251,9 +281,9 @@ fn block_number_of(hash: &str) -> u32 {
     u32::from_le_bytes(number)
 }
 
-fn header_json(number: u32) -> Value {
+fn header_json(number: u32, parent_hash: [u8; 32]) -> Value {
     json!({
-        "parentHash": format!("0x{}", hex::encode(block_hash(number.saturating_sub(1)))),
+        "parentHash": format!("0x{}", hex::encode(parent_hash)),
         "number": format!("0x{number:x}"),
         "stateRoot": format!("0x{}", "11".repeat(32)),
         "extrinsicsRoot": format!("0x{}", "22".repeat(32)),

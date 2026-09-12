@@ -126,6 +126,21 @@ impl<'a> Chain<'a> {
         })
     }
 
+    /// The canonical hash at a height, or `None` when the chain has no block
+    /// there.
+    ///
+    /// Apart from [`Chain::block_hash`] because a height above the current
+    /// head is an ordinary answer for the fork check: after a reorg onto a
+    /// shorter branch, a checkpoint this wallet recorded can sit above the new
+    /// head, and that absence is the fork itself.
+    pub fn block_hash_at_height(&self, number: u32) -> Result<Option<[u8; 32]>> {
+        let hash: Option<String> = self
+            .rpc
+            .call_as("chain_getBlockHash", json!([number]))
+            .with_context(|| format!("no block hash at height {number}"))?;
+        hash.as_deref().map(decode_hash).transpose()
+    }
+
     pub fn block_hash(&self, number: u32) -> Result<[u8; 32]> {
         let hash: Option<String> = self
             .rpc

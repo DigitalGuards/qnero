@@ -154,8 +154,12 @@ fn note(value: u64, leaf_index: u64, nullifier: Digest) -> StoredNote {
         value,
         commitment: Digest::hash_bytes(&[b"cm", &leaf_index.to_le_bytes()]).to_hex(),
         nullifier: nullifier.to_hex(),
-        rho: Digest::hash_bytes(&[b"rho", &leaf_index.to_le_bytes()]).to_hex(),
-        r: Digest::hash_bytes(&[b"r", &leaf_index.to_le_bytes()]).to_hex(),
+        rho: Digest::hash_bytes(&[b"rho", &leaf_index.to_le_bytes()])
+            .to_hex()
+            .into(),
+        r: Digest::hash_bytes(&[b"r", &leaf_index.to_le_bytes()])
+            .to_hex()
+            .into(),
         memo: String::new(),
         origin: NoteOrigin::Spend,
         spent: false,

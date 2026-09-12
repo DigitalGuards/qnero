@@ -9,7 +9,7 @@ use qnero_prover::WalletProver;
 use qnero_wallet::chain::Chain;
 use qnero_wallet::dev_account::TransparentKey;
 use qnero_wallet::keys::{create_seed, default_seed_path, store_path_for};
-use qnero_wallet::memo::{render_memo, MEMO_BYTES};
+use qnero_wallet::memo::{memo_budget, render_memo_within, MEMO_BYTES};
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{RpcClient, DEFAULT_NODE_URL};
 use qnero_wallet::store::PendingKind;
@@ -73,8 +73,8 @@ enum Command {
         /// Pool quanta to move into the pool.
         #[arg(long)]
         amount: u64,
-        /// Memo carried in the note's ciphertext. Padded to a fixed size, so
-        /// at most 256 bytes.
+        /// Memo carried in the note's ciphertext. Every memo is padded to one
+        /// fixed size, so a longer one is refused.
         #[arg(long, default_value = "")]
         memo: String,
     },
@@ -94,8 +94,8 @@ enum Command {
         /// value below it is refused: the fee is a public input of the proof.
         #[arg(long)]
         fee: Option<u64>,
-        /// Memo carried in the payment's ciphertext. Padded to a fixed size,
-        /// so at most 256 bytes.
+        /// Memo carried in the payment's ciphertext. Every memo is padded to
+        /// one fixed size, so a longer one is refused.
         #[arg(long, default_value = "")]
         memo: String,
         /// Skip the sync that normally runs first.
@@ -192,13 +192,38 @@ fn main() -> Result<()> {
                     wallet.store_path.display()
                 );
             }
+            if let (Some(from), Some(to), Some(block)) = (
+                report.rewound_from,
+                report.rewound_to,
+                report.forked_at_block,
+            ) {
+                println!(
+                    "the chain forked below block {}: rescanned leaves from {to} where this \
+                     wallet had reached {from}",
+                    block + 1
+                );
+            }
             if report.relocated > 0 {
                 println!(
                     "moved {} note(s) to the leaf the chain now carries them at",
                     report.relocated
                 );
             }
+            if report.vanished > 0 {
+                println!(
+                    "{} note(s) this wallet holds are not on the current chain: their settlement \
+                     was orphaned and has not been re-included. They are still listed, and a \
+                     spend that selects one fails on the path rebuild.",
+                    report.vanished
+                );
+            }
             println!("newly spent {}", report.newly_spent);
+            if report.newly_unspent > 0 {
+                println!(
+                    "back in the balance {}: their settlement is no longer on the chain",
+                    report.newly_unspent
+                );
+            }
             println!("unspent total {} quanta", wallet.store.unspent_total());
         }
         Command::Balance => {
@@ -228,8 +253,11 @@ fn main() -> Result<()> {
                         // A memo is remote input: anyone holding this address
                         // can send a note and choose its bytes. Printed raw it
                         // is an escape sequence injection into this terminal.
-                        // See `qnero_wallet::memo::render_memo`.
-                        render_memo(&note.memo)
+                        // See `qnero_wallet::memo::render_memo_within`. The
+                        // budget is this terminal's width less the 44 columns
+                        // of prefix above, so the row cannot wrap and a
+                        // sender cannot draw a second one.
+                        render_memo_within(&note.memo, memo_budget())
                     );
                 }
             }

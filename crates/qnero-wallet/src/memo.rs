@@ -22,21 +22,72 @@
 
 use anyhow::{bail, Result};
 
+/// What a `NoteCiphertext` serializes to with an empty memo.
+///
+/// Fixed by the crypto suite: 19 bytes of framing, an
+/// ML-KEM-1024 encapsulation (1568), the note payload under a
+/// ChaCha20-Poly1305 tag (128) and the memo's own tag (16).
+/// `an_empty_memo_ciphertext_serializes_to_1731_bytes` in `qnero-pqcrypto`
+/// pins it against the serializer and `tests/ct_digest.rs` pins it here.
+/// Every size below is derived from it.
+pub const CIPHERTEXT_FIXED_BYTES: usize = 1731;
+
 /// Every memo this wallet encrypts is exactly this many bytes.
 ///
-/// The budget is `MaxCiphertextBytes` (2048 in the M4 runtime) minus the 1731
-/// bytes of a memoless `NoteCiphertext`, which is 317. This is the largest
-/// round size inside it with headroom left, and it is a wallet-side constant:
-/// the chain does not care what a memo is, only that the ciphertext fits
-/// under its bound, which `fee::ensure_ciphertext_fits` checks against the
-/// runtime's own value before anything is proved.
+/// Two bounds decide it, and the tighter one wins.
+///
+/// The loose bound is `MaxCiphertextBytes` (2048 in the M4 runtime) minus
+/// [`CIPHERTEXT_FIXED_BYTES`], which leaves 317 bytes. A pad over that fails
+/// the extrinsic's SCALE decode, after the proof committing to those bytes
+/// exists.
+///
+/// The tight bound is the fee. A slot's payload term is
+/// `ceil((len(ct_1) + len(ct_2)) / CiphertextBytesPerFeeQuantum)`, and the
+/// runtime sizes that divisor (512) so that an honest pair and a pair padded
+/// to the cap land in different buckets: the chain never parses these bytes
+/// and `Shielded::Ciphertexts` is never pruned, so without the separation a
+/// settler pads both ciphertexts to the cap and writes the extra bytes of
+/// permanent state for no extra fee. A pad of 256 put this wallet's own pair
+/// at `2 * (1731 + 256) = 3974` bytes, in the same bucket as `2 * 2048 =
+/// 4096`, which voided that separation for every real spend on the chain.
+/// A pad of 61 puts the pair at 3584 bytes, one bucket below the cap's, and
+/// 61 is the largest pad that does.
+///
+/// `fee::the_wallets_own_pair_stays_a_bucket_below_a_padded_one` is the gate,
+/// and `fee::ensure_memo_pad_fits` checks the loose bound against the runtime
+/// the wallet is actually talking to, since this constant is compiled in and
+/// `MaxCiphertextBytes` is read from metadata.
 ///
 /// Zcash's 512-byte memo field is the precedent for padding at all. The size
-/// differs because this ciphertext's fixed part is larger.
-pub const MEMO_BYTES: usize = 256;
+/// differs because this ciphertext's fixed part is larger and because the
+/// chain prices payload bytes.
+pub const MEMO_BYTES: usize = 61;
 
-/// Columns of memo `balance` will print before it truncates.
-pub const MEMO_DISPLAY_COLUMNS: usize = 64;
+/// Columns the `balance` table spends before the memo column starts.
+///
+/// `{:>10}  {:>12}  {:>7}  {:>7}  ` in `main.rs`: four right-aligned fields
+/// and the two spaces after each.
+pub const BALANCE_PREFIX_COLUMNS: usize = 44;
+
+/// The terminal width assumed when nothing says otherwise.
+pub const DEFAULT_TERMINAL_COLUMNS: usize = 80;
+
+/// Columns of memo `balance` prints before it truncates, at the default
+/// terminal width.
+pub const MEMO_DISPLAY_COLUMNS: usize = DEFAULT_TERMINAL_COLUMNS - BALANCE_PREFIX_COLUMNS;
+
+/// The memo budget for this terminal.
+///
+/// `COLUMNS` when the environment exports one, the 80-column default
+/// otherwise, minus the table's fixed prefix. The floor keeps a very narrow
+/// terminal from reducing the column to the ellipsis alone.
+pub fn memo_budget() -> usize {
+    let columns = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TERMINAL_COLUMNS);
+    columns.saturating_sub(BALANCE_PREFIX_COLUMNS).max(16)
+}
 
 /// Pad a memo to [`MEMO_BYTES`] with trailing zeros.
 pub fn pad_memo(memo: &str) -> Result<Vec<u8>> {
@@ -67,7 +118,12 @@ pub fn unpad_memo(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
-/// Render a memo for a terminal.
+/// Render a memo for a terminal, at the default budget.
+pub fn render_memo(memo: &str) -> String {
+    render_memo_within(memo, MEMO_DISPLAY_COLUMNS)
+}
+
+/// Render a memo for a terminal, inside `columns` display columns.
 ///
 /// A memo is remote input: anyone holding this wallet's address can send it a
 /// note, and the memo rides along. Printed byte for byte it is an escape
@@ -77,40 +133,67 @@ pub fn unpad_memo(bytes: &[u8]) -> &[u8] {
 /// writes the sender's own address into the clipboard the operator then pastes
 /// into `send --to`. Bidi controls reorder a line without any escape at all.
 ///
-/// So every control character and every bidi override is escaped, and the
-/// result is truncated, so one note can never exceed one row. The store keeps
-/// the raw memo: serde_json escapes control characters on the way to the file,
-/// and a wallet that rewrote what it received could not show an operator what
-/// was actually sent.
-pub fn render_memo(memo: &str) -> String {
-    let mut out = String::new();
-    let mut columns = 0usize;
-    for character in memo.chars() {
-        let rendered = if needs_escaping(character) {
-            format!("\\u{{{:02x}}}", character as u32)
-        } else {
-            character.to_string()
-        };
-        let width = rendered.chars().count();
-        if columns + width > MEMO_DISPLAY_COLUMNS {
-            out.push_str("...");
-            return out;
-        }
-        columns += width;
-        out.push_str(&rendered);
+/// So everything outside printable ASCII is escaped as `\u{..}`, and the
+/// result is capped at `columns`, which the caller sizes from the terminal
+/// width minus the table's own prefix. One note is one row.
+///
+/// The escaping is deliberately wider than the set of characters that can
+/// drive a terminal. Counting characters is only the same as counting columns
+/// while every character is one column wide: an East Asian Wide glyph costs
+/// two columns and a combining mark costs none, so a budget that counted
+/// characters let a sender of 64 full-width digits draw 128 columns, wrap the
+/// row on any ordinary terminal, and shape the continuation line into a
+/// forged balance row without using one control byte. U+200B, U+200D, U+2028
+/// and U+2029 are none of them `char::is_control`, and the first two also make
+/// two different memos render identically. Escaping the lot makes character
+/// count and column count the same number by construction, which is the only
+/// version of this that stays true when someone adds a field to the table.
+///
+/// The store keeps the raw memo: serde_json escapes control characters on the
+/// way to the file, and a wallet that rewrote what it received could not show
+/// an operator what was actually sent.
+pub fn render_memo_within(memo: &str, columns: usize) -> String {
+    const ELLIPSIS: &str = "...";
+    let columns = columns.max(ELLIPSIS.len());
+    let pieces: Vec<String> = memo
+        .chars()
+        .map(|character| {
+            if needs_escaping(character) {
+                format!("\\u{{{:02x}}}", character as u32)
+            } else {
+                character.to_string()
+            }
+        })
+        .collect();
+    // Every piece is printable ASCII, so its character count is its column
+    // count.
+    let total: usize = pieces.iter().map(String::len).sum();
+    if total <= columns {
+        return pieces.concat();
     }
+    let budget = columns - ELLIPSIS.len();
+    let mut out = String::new();
+    let mut used = 0usize;
+    for piece in pieces {
+        if used + piece.len() > budget {
+            break;
+        }
+        used += piece.len();
+        out.push_str(&piece);
+    }
+    out.push_str(ELLIPSIS);
     out
 }
 
 /// Whether a character may not reach a terminal as itself.
 ///
-/// C0 and C1 controls, DEL, and the bidirectional formatting characters. The
-/// first group moves the cursor and starts escape sequences; the second
-/// reorders a line's visible text without one.
+/// Everything outside printable ASCII. The controls move the cursor and start
+/// escape sequences and the bidi overrides reorder a line without one, which
+/// is the reason the escaping exists; the rest is escaped so that one
+/// character is one column and the truncation above can hold a row to its
+/// width. See [`render_memo_within`].
 fn needs_escaping(character: char) -> bool {
-    character.is_control()
-        || matches!(character, '\u{7f}'..='\u{9f}')
-        || matches!(character, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    !matches!(character, ' '..='~')
 }
 
 #[cfg(test)]
@@ -209,18 +292,67 @@ mod tests {
         assert_eq!(measure(&bob, "x"), payment);
     }
 
-    /// One note is one row. A memo is up to `MEMO_BYTES`, and a table that
-    /// wraps is a table a sender controls the shape of.
+    /// One note is one row, measured the way a terminal measures one.
+    ///
+    /// The regression: the budget counted characters and the table prints a
+    /// 44-column prefix before the memo, so a memo of full-width characters
+    /// cost two columns each, drew a row past any ordinary terminal width and
+    /// wrapped, and the continuation line was drawn entirely from bytes the
+    /// sender chose. That is the forged balance row the escaping exists to
+    /// stop, reached without one control character. Everything outside
+    /// printable ASCII is escaped now, so one character is one column, and the
+    /// budget is the terminal width less the prefix.
     #[test]
     fn a_long_memo_is_truncated_to_one_row() {
+        let row = |memo: &str| BALANCE_PREFIX_COLUMNS + render_memo(memo).chars().count();
+
         let rendered = render_memo(&"m".repeat(MEMO_BYTES));
-        assert!(
-            rendered.chars().count() <= MEMO_DISPLAY_COLUMNS + 3,
-            "{} chars",
-            rendered.chars().count()
-        );
         assert!(rendered.ends_with("..."));
+        assert!(
+            row(&"m".repeat(MEMO_BYTES)) <= DEFAULT_TERMINAL_COLUMNS,
+            "an ASCII memo overflowed the row: {} columns",
+            row(&"m".repeat(MEMO_BYTES))
+        );
+
+        // Full-width digits: two columns each to a terminal, one `char` each
+        // to `chars().count()`. Escaped, each is eight ASCII columns and the
+        // budget sees every one of them.
+        let wide = "\u{ff10}".repeat(MEMO_BYTES / 3);
+        let rendered = render_memo(&wide);
+        assert!(!rendered.contains('\u{ff10}'), "{rendered}");
+        assert!(
+            row(&wide) <= DEFAULT_TERMINAL_COLUMNS,
+            "a full-width memo overflowed the row: {} columns",
+            row(&wide)
+        );
+
+        // Neither a zero-width character nor a line separator is a control
+        // character, and both were printed as themselves: the first makes two
+        // different memos render identically, the second breaks the row in
+        // terminals and log viewers.
+        for hidden in ['\u{200b}', '\u{200d}', '\u{2028}', '\u{2029}'] {
+            let rendered = render_memo(&format!("paid{hidden}bob"));
+            assert!(!rendered.contains(hidden), "{rendered}");
+            assert!(rendered.contains("\\u{"), "{rendered}");
+        }
+        assert_ne!(render_memo("paid\u{200b}bob"), render_memo("paidbob"));
+
         assert_eq!(render_memo("short"), "short");
         assert_eq!(render_memo(""), "");
+    }
+
+    /// The budget is the terminal's width less the table's own prefix, so the
+    /// row fits whatever terminal it is printed into.
+    #[test]
+    fn the_budget_leaves_room_for_the_table_prefix() {
+        assert_eq!(
+            MEMO_DISPLAY_COLUMNS,
+            DEFAULT_TERMINAL_COLUMNS - BALANCE_PREFIX_COLUMNS
+        );
+        // A narrow terminal still gets a usable column, and a wide one is not
+        // truncated to the default.
+        assert_eq!(render_memo_within("abcdefghij", 6), "abc...");
+        assert_eq!(render_memo_within("abcdefghij", 10), "abcdefghij");
+        assert!(render_memo_within(&"m".repeat(MEMO_BYTES), 200).len() == MEMO_BYTES);
     }
 }

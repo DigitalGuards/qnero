@@ -1255,15 +1255,23 @@ fn a_slot_pays_for_the_ciphertext_bytes_it_publishes() {
 		// `an_empty_memo_ciphertext_serializes_to_1731_bytes` in
 		// `qnero-pqcrypto`; the cap is read from the pallet's own config so
 		// the two cannot drift apart.
+		//
+		// The real endpoint is that fixed part plus the memo pad, because a
+		// wallet pads every memo to one size so the published lengths say
+		// nothing, and 1731 alone is a slot no wallet on this chain produces.
+		// `MEMO_BYTES` in `crates/qnero-wallet/src/memo.rs` is chosen against
+		// this test: the pad has to leave the padded pair a bucket below the
+		// padded-to-the-cap pair, or the payload term prices nothing.
+		const WALLET_MEMO_PAD: usize = 61;
 		let cap = <Test as crate::Config>::MaxCiphertextBytes::get() as usize;
-		let real_1 = vec![3u8; 1_731];
-		let real_2 = vec![4u8; 1_731];
+		let real_1 = vec![3u8; 1_731 + WALLET_MEMO_PAD];
+		let real_2 = vec![4u8; 1_731 + WALLET_MEMO_PAD];
 		let real_outputs = vec![output(&real_1, &real_2)];
 		let padded_1 = vec![5u8; cap];
 		let padded_2 = vec![6u8; cap];
 		let padded_outputs = vec![output(&padded_1, &padded_2)];
 
-		// A real pair settles at eight quanta.
+		// A real padded pair settles at eight quanta.
 		let real = one_segment(13, vec![slot("c", &real_1, &real_2, 8)]);
 		assert_ok!(check(&real, &real_outputs));
 

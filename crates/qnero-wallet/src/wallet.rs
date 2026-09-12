@@ -1,5 +1,6 @@
 //! The wallet's operations: scan, shield, spend.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -12,11 +13,13 @@ use qnero_notes::{IncomingViewingKey, SpendingKey};
 use qnero_prover::WalletProver;
 use rand::{Rng, TryRngCore};
 
-use crate::chain::Chain;
+use crate::chain::{Chain, ChainHead};
 use crate::extrinsic::{
     encode_shield_call, encode_signed, encode_submit_private_batch, ShieldedOutput, SigningContext,
 };
-use crate::fee::{ensure_ciphertext_fits, slot_fee_floor, submission_fee_floor};
+use crate::fee::{
+    ensure_ciphertext_fits, ensure_memo_pad_fits, slot_fee_floor, submission_fee_floor,
+};
 use crate::keys::store_path_for;
 use crate::memo::{pad_memo, unpad_memo};
 use crate::metadata::ChainMetadata;
@@ -155,13 +158,25 @@ impl Wallet {
         // chain. Reading the public map whole and deciding locally asks the
         // same question and names nothing.
         self.store.used_nullifiers = chain.used_nullifiers_at(&head.hash)?;
+        // Before the watermark is read: a fork moves leaves, and the ones it
+        // moves are normally below the watermark.
+        let rewind = self.rewind_past_fork(chain, &head)?;
         let start = self.store.next_leaf;
         let mut report = SyncReport {
             head_block: head.number,
             scanned_from: start,
             scanned_to: leaf_count,
+            rewound_from: rewind.as_ref().map(|rewind| rewind.from),
+            rewound_to: rewind.as_ref().map(|rewind| rewind.to),
+            forked_at_block: rewind.as_ref().map(|rewind| rewind.at_block),
             ..Default::default()
         };
+
+        // Commitments this wallet already holds that the scan saw again. Only
+        // collected after a rewind, which is the only time a held leaf is
+        // inside the range at all, and it is what tells a note that moved
+        // apart from a note whose block was orphaned and never re-included.
+        let mut seen_again: BTreeSet<String> = BTreeSet::new();
 
         if leaf_count > start {
             let ivk = self.ivk();
@@ -193,10 +208,13 @@ impl Wallet {
                 let commitment_hex = commitment.to_hex();
                 if self.store.has_commitment(&commitment_hex) {
                     // Already held, and possibly not where it was. A rescan
-                    // reaches this line when the head regressed and the leaf
-                    // range was walked again, which is what an orphaned block
-                    // and a re-included extrinsic look like from here. See
-                    // `WalletStore::relocate_note`.
+                    // reaches this line when the fork check rewound the
+                    // watermark and the leaf range was walked again, which is
+                    // what an orphaned block and a re-included extrinsic look
+                    // like from here. See `WalletStore::relocate_note`.
+                    if rewind.is_some() {
+                        seen_again.insert(commitment_hex.clone());
+                    }
                     if self
                         .store
                         .relocate_note(&commitment_hex, record.index, record.block_number)
@@ -245,14 +263,20 @@ impl Wallet {
                 };
                 report.received += 1;
                 report.received_value += received.note.value;
+                if rewind.is_some() {
+                    // A note first recorded by this very scan is on the chain
+                    // by construction, and the vanished count below walks
+                    // every note inside the rescanned range.
+                    seen_again.insert(commitment_hex.clone());
+                }
                 self.store.notes.push(StoredNote {
                     leaf_index: record.index,
                     block_number: record.block_number,
                     value: received.note.value,
                     commitment: commitment_hex.clone(),
                     nullifier: nullifier_hex,
-                    rho: received.note.rho.to_hex(),
-                    r: received.note.r.to_hex(),
+                    rho: received.note.rho.to_hex().into(),
+                    r: received.note.r.to_hex().into(),
                     memo: String::from_utf8_lossy(unpad_memo(&received.memo)).into_owned(),
                     origin,
                     spent: false,
@@ -264,26 +288,97 @@ impl Wallet {
             }
         }
 
-        // Spent status, decided against the local copy of the settled set.
-        // Only the nullifier key can compute these values at all, and a note
-        // this wallet holds may have been spent by another copy of the same
-        // seed, so the question is asked of every unspent note on every sync.
-        // It is asked locally: see the note above the set's refresh.
-        let newly_spent: Vec<String> = self
-            .store
-            .unspent()
-            .filter(|note| self.store.used_nullifiers.contains(&note.nullifier))
-            .map(|note| note.nullifier.clone())
-            .collect();
-        for nullifier in &newly_spent {
-            self.store.mark_spent(nullifier, head.number);
-            report.newly_spent += 1;
+        // A rescanned range that did not carry a note back is a note the
+        // current chain does not have: its settlement was orphaned and never
+        // re-included. Nothing here edits it, because the leaf index it holds
+        // is the only handle on where it was and because a later block can
+        // still re-include the extrinsic. It is reported, and a spend that
+        // selects it fails loudly on the path rebuild.
+        if rewind.is_some() {
+            report.vanished = self
+                .store
+                .notes
+                .iter()
+                .filter(|note| !note.spent && note.leaf_index >= start)
+                .filter(|note| !seen_again.contains(&note.commitment))
+                .count() as u64;
         }
+
+        // Spent status, derived against the local copy of the settled set that
+        // was just repaged. Only the nullifier key can compute these values at
+        // all, and a note this wallet holds may have been spent by another
+        // copy of the same seed, so every note is decided on every sync. It is
+        // decided locally: see the note above the set's refresh.
+        //
+        // Both directions. The flag used to be a latch, and a settlement that
+        // was orphaned out of the chain left the note it spent reported spent
+        // forever, out of the balance and unselectable, with the value fully
+        // spendable on chain. See `WalletStore::reconcile_spent`.
+        let (newly_spent, newly_unspent) = self.store.reconcile_spent(head.number);
+        report.newly_spent = newly_spent;
+        report.newly_unspent = newly_unspent;
 
         self.store.next_leaf = leaf_count;
         self.store.last_synced_block = head.number;
+        self.store
+            .record_checkpoint(head.number, hex::encode(head.hash), leaf_count);
         self.save()?;
         Ok(report)
+    }
+
+    /// Rewind the scan watermark past a fork, before the range is computed.
+    ///
+    /// The regression this closes: a rescan repaired a note's leaf index only
+    /// when the scan happened to walk that leaf again, and the scan starts at
+    /// the watermark. A reorg happens because the replacement branch is
+    /// heavier, so it normally carries at least as many leaves as the branch
+    /// it replaced and a re-included commitment lands at or below where it
+    /// was, which is below the watermark and is never re-read. The store kept
+    /// a leaf index that now holds somebody else's commitment: `balance` went
+    /// on reporting the note spendable, and every spend that selected it
+    /// failed on the path rebuild until the JSON was edited by hand.
+    ///
+    /// So the fork is detected directly, through the block hashes. Each
+    /// checkpoint is a block a sync finished at and the watermark it left;
+    /// `chain_getBlockHash` at that height either still answers with the same
+    /// hash, in which case every leaf below that watermark was folded at or
+    /// before a block that is still canonical and cannot have moved, or it
+    /// does not, in which case that checkpoint belongs to a branch that is
+    /// gone. The walk stops at the first surviving checkpoint, so the usual
+    /// cost is one call.
+    ///
+    /// What this deliberately does not do is re-read `ZkTree::Leaves` at each
+    /// held note's recorded index. That would name this wallet's own leaves to
+    /// the node, which is the property `Chain::rebuild_tree` and
+    /// `Chain::used_nullifiers_at` both pay for. `chain_getBlockHash` at a
+    /// height names nothing.
+    fn rewind_past_fork(&mut self, chain: &Chain, head: &ChainHead) -> Result<Option<ForkRewind>> {
+        let from = self.store.next_leaf;
+        let mut dropped = 0u32;
+        while let Some(checkpoint) = self.store.checkpoints.last().cloned() {
+            if checkpoint.block_number <= head.number {
+                let hash = chain.block_hash_at_height(checkpoint.block_number)?;
+                if hash.map(hex::encode).as_deref() == Some(checkpoint.block_hash.as_str()) {
+                    break;
+                }
+            }
+            // Either the chain is shorter than this checkpoint or the block at
+            // its height is a different one. Both are the fork.
+            self.store.checkpoints.pop();
+            dropped += 1;
+        }
+        if dropped == 0 {
+            return Ok(None);
+        }
+        let (at_block, to) = match self.store.checkpoints.last() {
+            Some(checkpoint) => (checkpoint.block_number, checkpoint.next_leaf),
+            // Every checkpoint the wallet kept is on a branch that is gone.
+            // Rescanning the whole tree is correct and slow, and it is what a
+            // reorg deeper than `MAX_CHECKPOINTS` syncs costs.
+            None => (0, 0),
+        };
+        self.store.rewind_to(at_block, to);
+        Ok(Some(ForkRewind { from, to, at_block }))
     }
 
     /// Move transparent value into the pool as one note owned by this wallet.
@@ -309,6 +404,7 @@ impl Wallet {
         // was burned for nothing and sent to look at the dev account instead
         // of at the runtime.
         metadata.ensure_known_storage()?;
+        ensure_memo_pad_fits(metadata)?;
         if quanta == 0 {
             bail!("a shield of zero moves nothing and the chain refuses it");
         }
@@ -361,8 +457,8 @@ impl Wallet {
             kind: PendingKind::Shield,
             commitment: note.commitment().to_hex(),
             value: quanta,
-            rho: rho.to_hex(),
-            r: r.to_hex(),
+            rho: rho.to_hex().into(),
+            r: r.to_hex().into(),
             memo: memo.to_string(),
             submitted_at_block: head.number,
             extrinsic: hex_0x(&encoded),
@@ -446,6 +542,7 @@ impl Wallet {
         requested_fee: Option<u64>,
         memo: &str,
     ) -> Result<u64> {
+        ensure_memo_pad_fits(metadata)?;
         let fee = self.resolve_fee(metadata, to, memo, requested_fee)?;
         let target = amount
             .checked_add(fee)
@@ -562,6 +659,7 @@ impl Wallet {
         merkle: MerkleSource,
     ) -> Result<PreparedSpend> {
         metadata.ensure_known_storage()?;
+        ensure_memo_pad_fits(metadata)?;
         let fee = self.resolve_fee(metadata, to, memo, requested_fee)?;
         let (probe_payment, probe_change) = self.probe_lengths(to, memo)?;
 
@@ -736,8 +834,8 @@ impl Wallet {
                 kind: PendingKind::Change,
                 commitment: change_note.commitment().to_hex(),
                 value: change,
-                rho: change_note.rho.to_hex(),
-                r: change_note.r.to_hex(),
+                rho: change_note.rho.to_hex().into(),
+                r: change_note.r.to_hex().into(),
                 memo: String::new(),
                 submitted_at_block: head.number,
                 extrinsic: String::new(),
@@ -1074,8 +1172,28 @@ pub struct SyncReport {
     pub received_value: u64,
     pub rejected: u64,
     pub newly_spent: u64,
+    /// Notes whose nullifier left the settled set: the block that settled
+    /// them was orphaned and the settlement did not re-land.
+    pub newly_unspent: u64,
     /// Notes already held that the chain now carries at a different leaf.
     pub relocated: u64,
+    /// The watermark this sync rewound from, when it found a fork.
+    pub rewound_from: Option<u64>,
+    /// The watermark it rewound to.
+    pub rewound_to: Option<u64>,
+    /// The newest block this wallet had synced that is still canonical.
+    pub forked_at_block: Option<u32>,
+    /// Held notes inside a rescanned range that the chain no longer carries.
+    pub vanished: u64,
+}
+
+/// What a fork check found: the watermark it rewound from, the one it rewound
+/// to, and the newest still-canonical block it could anchor that on.
+#[derive(Debug, Clone, Copy)]
+struct ForkRewind {
+    from: u64,
+    to: u64,
+    at_block: u32,
 }
 
 #[derive(Debug)]
@@ -1284,8 +1402,8 @@ mod tests {
                 kind: PendingKind::Change,
                 commitment: "aa".repeat(32),
                 value: 699,
-                rho: Digest::hash_bytes(&[b"change rho"]).to_hex(),
-                r: Digest::hash_bytes(&[b"change r"]).to_hex(),
+                rho: Digest::hash_bytes(&[b"change rho"]).to_hex().into(),
+                r: Digest::hash_bytes(&[b"change r"]).to_hex().into(),
                 memo: String::new(),
                 submitted_at_block: 11,
                 extrinsic: String::new(),
@@ -1304,7 +1422,10 @@ mod tests {
         assert!(!printed.contains(&hex::encode(second)), "{printed}");
         assert!(!printed.contains(&spent), "{printed}");
         assert!(!printed.contains("1068"), "a leaf index leaked: {printed}");
-        assert!(!printed.contains(&prepared.change_note.r), "{printed}");
+        assert!(
+            !printed.contains(prepared.change_note.r.as_str()),
+            "{printed}"
+        );
         assert!(printed.contains(crate::store::REDACTED), "{printed}");
         // The lengths stay, because they are what a log line is for.
         assert!(printed.contains("150908"), "{printed}");

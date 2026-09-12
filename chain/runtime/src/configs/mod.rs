@@ -868,21 +868,27 @@ parameter_types! {
 	pub const ShieldedMinLeafFee: u64 = 1;
 	/// Bytes of note ciphertext one quantum of fee buys: 512 bytes.
 	///
-	/// A real slot carries two ciphertexts of 1731 bytes, so it pays seven
-	/// quanta of payload on top of `ShieldedMinLeafFee`, and a slot padded to
-	/// the cap (two ciphertexts of `ShieldedMaxCiphertextBytes`, 4096 bytes in
-	/// total) pays eight. The flat floor alone would price either at one
+	/// A real slot carries two ciphertexts whose fixed part is 1731 bytes
+	/// each, plus whatever memo pad the wallet writing them uses; the v0
+	/// wallet pads to 61, so the pair it publishes is 3584 bytes and pays
+	/// seven quanta of payload on top of `ShieldedMinLeafFee`. A slot padded
+	/// to the cap (two ciphertexts of `ShieldedMaxCiphertextBytes`, 4096 bytes
+	/// in total) pays eight. The flat floor alone would price either at one
 	/// quantum. The chain never parses these bytes and `Ciphertexts` is never
 	/// pruned, so the whole cap is usable by a settler and the payload is what
 	/// has to be priced.
 	///
 	/// The divisor has to sit below the slack between the real ciphertext size
 	/// and the cap, or the term prices nothing it was added to price: at one
-	/// kilobyte both 3462 and 4096 bytes round to four quanta, so a settler
-	/// could pad both ciphertexts to the cap and add 634 bytes of permanent,
+	/// kilobyte both 3584 and 4096 bytes round to four quanta, so a settler
+	/// could pad both ciphertexts to the cap and add 512 bytes of permanent,
 	/// never-pruned, never-parsed state for no extra fee.
 	/// `a_slot_pays_for_the_ciphertext_bytes_it_publishes` in the pallet's
-	/// tests pins the two endpoints apart.
+	/// tests pins the two endpoints apart, and the real endpoint it pins is
+	/// the padded pair a wallet actually sends. The memo pad eats the same
+	/// slack: a pad of 256 would put a real pair at 3974 bytes,
+	/// in the cap's own bucket, and the separation would be gone for every
+	/// spend on the chain while both test suites stayed green.
 	///
 	/// It prices the submission as well as the slot. A segment the chain skips,
 	/// because a nullifier it publishes is already spent or because its block
