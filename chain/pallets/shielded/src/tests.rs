@@ -39,7 +39,10 @@ use qnero_verifier::{
 };
 use qp_plonky2_verifier::{field::types::Field, F};
 use sp_core::H256;
-use sp_runtime::{traits::ValidateUnsigned, transaction_validity::TransactionSource};
+use sp_runtime::{
+	traits::ValidateUnsigned,
+	transaction_validity::{InvalidTransaction, TransactionSource},
+};
 
 use crate::{
 	circuit_config, mock::*, padding_block_hash, weights, Error, Event, Hash256, RealSlot, Segment,
@@ -2383,6 +2386,28 @@ fn a_coinbase_payload_above_the_ciphertext_cap_is_refused() {
 		assert_noop!(
 			Shielded::coinbase(RuntimeOrigin::none(), inner, oversized),
 			Error::<Test>::CiphertextTooLarge
+		);
+	});
+}
+
+/// The coinbase is an inherent, so it has to pass the gate every bare
+/// extrinsic passes on its way into a block, and it must not pass the one that
+/// admits a transaction into a pool.
+///
+/// The regression this pins cost a chain: `pre_dispatch` refused every call
+/// that was not a settlement, the block builder dropped the inherent it had
+/// just created, and every block it then proposed was refused by its own
+/// import with "the block carries no coinbase inherent". The node mined
+/// nothing at all.
+#[test]
+fn the_coinbase_passes_pre_dispatch_and_never_enters_the_pool() {
+	new_test_ext().execute_with(|| {
+		let call = crate::Call::<Test>::coinbase { inner: [0u8; 32], ciphertext: Vec::new() };
+		assert_ok!(<Shielded as ValidateUnsigned>::pre_dispatch(&call));
+		assert_eq!(
+			<Shielded as ValidateUnsigned>::validate_unsigned(TransactionSource::External, &call),
+			Err(InvalidTransaction::Call.into()),
+			"a coinbase belongs to the block its author is building, not to a pool"
 		);
 	});
 }

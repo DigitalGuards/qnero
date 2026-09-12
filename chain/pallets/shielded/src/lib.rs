@@ -1108,7 +1108,18 @@ pub mod pallet {
 			// verify. Returning `Err` here excludes the transaction from the
 			// block being built and makes a block that includes an unverifiable
 			// proof invalid on import.
+			//
+			// It is also the gate every *inherent* passes, which is why the
+			// coinbase is named here and refused in `validate_unsigned` above.
+			// A bare extrinsic reaches `I::pre_dispatch` on its way into a block
+			// and `I::validate_unsigned` on its way into a pool
+			// (`sp_runtime`'s `CheckedExtrinsic::apply` and `validate`), so the
+			// two answers are what keep the coinbase to the block its author is
+			// building: the block builder may include one, and nobody can
+			// gossip one. Its own checks are in the dispatch, where a failure
+			// is a mandatory-dispatch failure and the block dies with it.
 			match call {
+				Call::coinbase { .. } => Ok(()),
 				Call::submit_private_batch { proof, outputs } => {
 					let bundle = Self::validate_private_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
