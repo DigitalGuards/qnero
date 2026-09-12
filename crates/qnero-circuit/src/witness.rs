@@ -203,9 +203,11 @@ pub struct SpendWitness {
     pub inputs: [InputNote; NUM_INPUTS],
     pub outputs: [OutputNote; NUM_OUTPUTS],
     pub fee: u64,
-    /// Digest of the output ciphertexts, from [`qnero_note_core::ct_digest`]. The
-    /// circuit passes it through; the chain recomputes it with that same
-    /// function from the ciphertexts it was handed and compares.
+    /// Digest of the output ciphertexts, from
+    /// [`chain::ct_digest`](crate::chain::ct_digest), which compiles without
+    /// the `circuit` feature so the chain and the wallet call one function.
+    /// The circuit passes the digest through; the chain recomputes it with
+    /// that same function from the ciphertexts it was handed and compares.
     pub ct_digest: Digest,
 }
 

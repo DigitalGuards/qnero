@@ -445,13 +445,16 @@ fn decode_canonical_proof(
 
 /// Why a serialized batch proof was refused, in the order the checks run.
 ///
-/// A chain settling these proofs has to tell the four apart. They are four
-/// different operator problems: bytes above the cap, a blob that is not a proof
-/// of this circuit **or is a proof of the same circuit built at other
-/// dimensions**, a proof re-encoded non-canonically, and public inputs that do
-/// not parse at the documented indices. Flattening them into one error leaves
-/// an operator debugging a rejected settlement unable to tell a truncated blob
-/// from a wallet whose artifact set was generated at the wrong `N`.
+/// A chain settling these proofs declares an error per variant, so a rejected
+/// settlement says which layer refused it: the byte cap, deserialization, the
+/// canonical-encoding round trip, the public-input layout, or the verification
+/// itself. That is as far as the split goes. It does not separate a truncated
+/// blob from a proof of the same circuit built at other dimensions, because
+/// both fail `from_bytes` and land in [`Self::Deserialization`]; an operator
+/// looking at that variant has to check the wallet's artifact dimensions and
+/// the upload separately. Carrying plonky2's own message here, behind `std`,
+/// is what would separate them, and this enum deliberately carries no payload
+/// so it stays `Copy` on a `no_std` runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProofRejection {
     /// Above [`MAX_PROOF_BYTES`]. Checked before anything is copied or parsed.
@@ -533,12 +536,20 @@ impl QneroPrivateBatchVerifier {
 
     /// Read a serialized proof's public inputs **without verifying it**.
     ///
-    /// This is the cheap half of admission: the size cap, the canonical
-    /// encoding round trip and the layout parse, and none of the recursive
-    /// verification. A chain admitting unsigned, fee-free settlements to its
-    /// transaction pool runs this on every gossiped candidate and keeps
-    /// [`Self::verify_proof_bytes`] for the block-inclusion gate, so a byte
-    /// variant of one proof cannot force a verify per variant.
+    /// This is the size cap, the canonical-encoding round trip and the layout
+    /// parse, and none of the recursive verification. It is for reading a
+    /// proof whose verification happens somewhere else: a dispatch body behind
+    /// a gate that already verified, a filter that discards obvious junk
+    /// before the expensive work, an indexer reading a settlement out of a
+    /// block that was already validated.
+    ///
+    /// A transaction pool admitting unsigned, fee-free settlements must call
+    /// [`Self::verify_proof_bytes`] before it admits or re-gossips one.
+    /// Admitting on this call alone is unsound: see `docs/CIRCUIT.md` section
+    /// 9.10 in the Qnero repository. The public inputs are a plain vector in
+    /// the serialized blob, so a body-tampered clone of a genuine proof parses
+    /// to exactly the victim's nullifiers, takes the victim's nullifier-derived
+    /// pool tag, and costs every node that relays it the whole settlement walk.
     ///
     /// What comes back is attacker controlled until a verify succeeds. Treat it
     /// as a claim about what the proof says, which only a verify establishes.
@@ -674,8 +685,9 @@ impl QneroPublicBatchVerifier {
     }
 
     /// Read a serialized proof's public inputs **without verifying it**. See
-    /// [`QneroPrivateBatchVerifier::parse_proof_bytes`] for what that is for
-    /// and what it does not establish.
+    /// [`QneroPrivateBatchVerifier::parse_proof_bytes`] for what that is for,
+    /// what it does not establish, and why a transaction pool cannot admit on
+    /// it alone.
     pub fn parse_proof_bytes(
         &self,
         proof_bytes: &[u8],

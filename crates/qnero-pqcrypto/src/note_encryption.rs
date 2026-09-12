@@ -444,6 +444,57 @@ mod tests {
         (keypair, ciphertext)
     }
 
+    /// The number the chain's ciphertext cap is derived from.
+    ///
+    /// `pallet-shielded` bounds one ciphertext at 2048 bytes and the runtime
+    /// constant documents that as a real `NoteCiphertext` plus a memo budget.
+    /// That derivation is prose on the chain side, and a wallet sizing a memo
+    /// from it overruns the bound if the number moves, after the proof that
+    /// commits to those exact bytes has already been built. So the number is
+    /// pinned here, against the serializer.
+    #[test]
+    fn an_empty_memo_ciphertext_serializes_to_1731_bytes() {
+        let keypair = MlKemKeyPair::generate_deterministic(b"test-keypair-seed-framing");
+        let note = NotePlaintext::new(1_000, 0, [1u8; 32], [2u8; 32], Vec::new());
+        let ciphertext = NoteCiphertext::encrypt(
+            &keypair.public_key(),
+            [42u8; 32],
+            1,
+            3,
+            0,
+            &note,
+            &[7u8; 32],
+        )
+        .unwrap();
+
+        // Nineteen bytes of framing: version, crypto suite and diversifier
+        // index, then a `u32` length before each of the three payloads.
+        assert_eq!(
+            ciphertext.kem_ciphertext.len(),
+            crate::ml_kem::ML_KEM_CIPHERTEXT_LEN
+        );
+        assert_eq!(
+            ciphertext.note_payload.len(),
+            128,
+            "112 plaintext bytes under an AEAD tag"
+        );
+        assert_eq!(
+            ciphertext.memo_payload.len(),
+            16,
+            "an empty memo is its tag alone"
+        );
+        let framing = 1 + 2 + 4 + 3 * 4;
+        assert_eq!(framing, 19);
+        assert_eq!(
+            ciphertext.to_bytes().len(),
+            framing
+                + ciphertext.kem_ciphertext.len()
+                + ciphertext.note_payload.len()
+                + ciphertext.memo_payload.len()
+        );
+        assert_eq!(ciphertext.to_bytes().len(), 1731);
+    }
+
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let keypair = MlKemKeyPair::generate_deterministic(b"test-keypair-seed-1234");

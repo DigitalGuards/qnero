@@ -191,3 +191,36 @@ Blocks from the first second: `Imported #1` two seconds after genesis, height
   increase. Before the fork runs anything but a throwaway `--dev` chain it needs
   its own identity, `spec_name = "qnero-runtime"` or a distinct `spec_version`.
   Nothing here is affected while every chain is genesis fresh.
+
+## The review fix pass, 2026-09-12
+
+Same workstation. The pallet and the runtime changed, so the node was rebuilt
+and re-smoked.
+
+```
+cd chain
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+```
+
+3 minutes 17 seconds of wall clock against the warm tree from the first pass,
+of which 54 seconds was the circuit artifact set regenerating: the build script
+reruns whenever the pallet's sources change. The binary is 80 MB at
+`chain/target/release/quantus-node`.
+
+`--dev --tmp` again, stopped after about two minutes at height 17. Blocks from
+the first second, `Imported #1` through `#17`. What this run checked:
+
+- `chain_getHeader`'s `zkTreeRoot` equals the root `zkTree_getState` reports
+  (`0x900fc49126275fe988cd7d95a29da563adb251b45ae6b3c2e39a7a933bfc4077` at
+  height 8, tree depth 2, 13 leaves, all of them the wormhole's).
+- `zkTree_getMerkleProof(0)` returns a proof whose `leaf_hash` and `leaf_data`
+  are the same 32 bytes.
+- `state_getMetadata` carries `Shielded` with its three calls, its five storage
+  items, its errors including `FeeBelowMinimum` and `CiphertextDigestMismatch`,
+  and its five constants: `BlockHashWindow`, `MinLeafFee`,
+  `CiphertextBytesPerFeeQuantum` (new in this pass, the per-byte half of the fee
+  floor), `FeeBurnRate` and `MaxCiphertextBytes`.
+- `state_getRuntimeVersion` still reports `quantus-runtime` spec 152,
+  transaction version 6. The runtime identity issue above is unchanged and still
+  open: this pass added a pallet constant, which is another metadata change
+  behind the same version number.

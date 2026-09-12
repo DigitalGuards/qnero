@@ -18,8 +18,16 @@
 //!   `qnero_note_core::entry_rho`, over an identifier the chain publishes and
 //!   never hashes.
 //!
-//! This is the single definition of both. A wallet calls the same functions,
-//! so the two sides cannot drift.
+//! The two rules are held to the wallet side differently, and the difference
+//! matters to anyone refactoring here. [`ct_digest`] has one implementation:
+//! the chain and the wallet call this same function, so it cannot drift.
+//! [`commitment`] and the [`domain::CM`] tag are restated copies, because this
+//! module compiles without the prover stack and so cannot call
+//! `qnero_note_core`. What holds them to `qnero-note-core` is two tests,
+//! `commitment_matches_the_note_primitives` and `domain_tags_match_qnero_notes`
+//! below, and those run only where the `circuit` feature is on. Keep both when
+//! refactoring either copy: a drifted `CM` puts every entry note's commitment
+//! outside the image the spend circuit checks membership against.
 
 use alloc::vec::Vec;
 

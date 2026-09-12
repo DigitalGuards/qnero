@@ -152,10 +152,13 @@ fn a_nullifier_already_settled_is_refused() {
 		let outputs = vec![output(b"ct-a1", b"ct-a2")];
 		assert_ok!(check(&bundle, &outputs));
 
-		// One of the two settled, the other not: the segment is partly settled,
-		// which is not the skippable case and is refused.
+		// One of the two nullifiers is settled. The segment is skipped, and
+		// with nothing else in the submission there is nothing left to settle,
+		// so the submission is refused.
 		crate::UsedNullifiers::<Test>::insert(bundle.segments[0].slots[0].nullifiers[1], ());
 		assert_noop!(check(&bundle, &outputs), Error::<Test>::NullifierAlreadyUsed);
+		assert_noop!(Shielded::settle(bundle, outputs), Error::<Test>::NullifierAlreadyUsed);
+		assert_eq!(ZkTree::leaf_count(), 0);
 	});
 }
 
@@ -184,9 +187,14 @@ fn both_nullifiers_of_a_slot_are_checked_and_settled() {
 /// unreachable through a valid private batch. It is reachable through a public
 /// batch: nothing in that circuit compares the nullifiers of two different
 /// inner proofs, which is `n * 2N` digests and not affordable in circuit.
+///
+/// The later segment is skipped and the earlier one settles. Refusing the
+/// submission instead would let one participant kill an aggregator's batch by
+/// handing it two inners that spend one note.
 #[test]
-fn a_nullifier_repeated_across_two_segments_aborts_the_submission() {
+fn a_nullifier_repeated_across_two_segments_skips_the_later_one() {
 	new_test_ext().execute_with(|| {
+		fund_pool(100);
 		let block_hash = anchor(10);
 		let shared = slot("a", b"ct-a1", b"ct-a2", 3);
 		let mut second = slot("b", b"ct-b1", b"ct-b2", 3);
@@ -194,18 +202,24 @@ fn a_nullifier_repeated_across_two_segments_aborts_the_submission() {
 
 		let bundle = SettlementBundle {
 			segments: vec![
-				Segment { block_hash, block_number: 10, slots: vec![shared] },
-				Segment { block_hash, block_number: 10, slots: vec![second] },
+				Segment { block_hash, block_number: 10, slots: vec![shared.clone()] },
+				Segment { block_hash, block_number: 10, slots: vec![second.clone()] },
 			],
 		};
 		let outputs = vec![output(b"ct-a1", b"ct-a2"), output(b"ct-b1", b"ct-b2")];
 
-		assert_noop!(check(&bundle, &outputs), Error::<Test>::DuplicateNullifier);
-		// Nothing was written: the whole submission is refused before any
-		// state changes, so the first segment's nullifiers are still free.
-		assert_noop!(Shielded::settle(bundle, outputs), Error::<Test>::DuplicateNullifier);
-		assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 0);
-		assert_eq!(ZkTree::leaf_count(), 0);
+		let plan = check(&bundle, &outputs).expect("the first segment settles");
+		assert_eq!(plan.settles, vec![true, false]);
+		assert_eq!(plan.slots, 1);
+		assert_eq!(plan.fee_quanta, 3);
+
+		assert_ok!(Shielded::settle(bundle, outputs));
+		// The first segment's leaves are there and the second's are not, and
+		// the second segment's own fresh nullifier was never marked, so the
+		// note behind it is still spendable in another batch.
+		assert_eq!(ZkTree::leaf_count(), 2);
+		assert!(crate::UsedNullifiers::<Test>::contains_key(shared.nullifiers[0]));
+		assert!(!crate::UsedNullifiers::<Test>::contains_key(second.nullifiers[1]));
 	});
 }
 
@@ -451,8 +465,8 @@ fn the_author_fee_credit_emits_no_scannable_balance_event() {
 			assert!(
 				!matches!(
 					record.event,
-					RuntimeEvent::Balances(pallet_balances::Event::Minted { .. })
-						| RuntimeEvent::Balances(pallet_balances::Event::Transfer { .. })
+					RuntimeEvent::Balances(pallet_balances::Event::Minted { .. }) |
+						RuntimeEvent::Balances(pallet_balances::Event::Transfer { .. })
 				),
 				"a settlement emitted a balance event the wormhole recorder scans for: {:?}",
 				record.event
@@ -621,20 +635,111 @@ fn a_segment_settled_by_an_earlier_submission_is_skipped_not_fatal() {
 	});
 }
 
-/// A segment that is only *partly* settled is not the skippable case: one of
-/// its notes is spent and the rest are not, which no honest settlement
-/// produces. The whole submission is refused.
+/// A segment that is only *partly* settled is skipped too, and this is the
+/// case that matters. A note's nullifier is a function of the note alone, so a
+/// participant that hands an aggregator an inner and then spends one of those
+/// notes in a differently composed batch of its own leaves the aggregator's
+/// inner partly settled: one nullifier used, the rest fresh. Under an
+/// all-or-nothing rule that one participant strands the other fifty-two
+/// transfers in the batch and wastes the recursive proving run, for free and
+/// as often as it likes, and the aggregator cannot defend against it because
+/// the conflict is created after its batch is fixed. An honest wallet that
+/// gives up waiting and re-spends produces the same shape.
 #[test]
-fn a_partly_settled_segment_is_still_fatal() {
+fn a_partly_settled_segment_does_not_strand_the_rest_of_the_batch() {
 	new_test_ext().execute_with(|| {
 		fund_pool(100);
-		let only = slot("a", b"ct-a1", b"ct-a2", 3);
-		crate::UsedNullifiers::<Test>::insert(only.nullifiers[0], ());
-		let bundle = one_segment(10, vec![only]);
-		assert_noop!(
-			check(&bundle, &[output(b"ct-a1", b"ct-a2")]),
-			Error::<Test>::NullifierAlreadyUsed
-		);
+		let block_hash = anchor(10);
+		let griefed = slot("a", b"ct-a1", b"ct-a2", 3);
+		let bystander = slot("b", b"ct-b1", b"ct-b2", 5);
+		let other = slot("c", b"ct-c1", b"ct-c2", 7);
+
+		// One of the first segment's twelve nullifiers is spent elsewhere.
+		crate::UsedNullifiers::<Test>::insert(griefed.nullifiers[0], ());
+
+		let batch = SettlementBundle {
+			segments: vec![
+				Segment { block_hash, block_number: 10, slots: vec![griefed.clone()] },
+				Segment { block_hash, block_number: 10, slots: vec![bystander.clone()] },
+				Segment { block_hash, block_number: 10, slots: vec![other.clone()] },
+			],
+		};
+		let outputs = vec![
+			output(b"ct-a1", b"ct-a2"),
+			output(b"ct-b1", b"ct-b2"),
+			output(b"ct-c1", b"ct-c2"),
+		];
+
+		let plan = check(&batch, &outputs).expect("the unaffected segments settle");
+		assert_eq!(plan.settles, vec![false, true, true]);
+		assert_eq!(plan.slots, 2);
+		assert_eq!(plan.fee_quanta, 12);
+
+		assert_ok!(Shielded::settle(batch, outputs));
+		// Four leaves, two per bystander segment. The skipped segment
+		// appended none.
+		assert_eq!(ZkTree::leaf_count(), 4);
+		assert_eq!(ZkTree::leaf(0), Some(bystander.commitments[0]));
+		assert_eq!(ZkTree::leaf(2), Some(other.commitments[0]));
+		// Nothing of the skipped segment was written, so its unspent nullifier
+		// is still free and the note behind it can settle in another batch.
+		assert!(!crate::UsedNullifiers::<Test>::contains_key(griefed.nullifiers[1]));
+	});
+}
+
+/// Every real slot's ciphertexts are bound to the `ct_digest` its proof
+/// publishes, whether or not this submission settles that slot. The count rule
+/// requires an `outputs` entry per real slot, so a position left unchecked
+/// would be a place to carry bytes no proof commits to, on an unsigned and fee
+/// free extrinsic the block then has to carry.
+#[test]
+fn the_ciphertexts_of_a_skipped_segment_are_still_bound_to_the_proof() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		let block_hash = anchor(10);
+		let settled = slot("a", b"ct-a1", b"ct-a2", 3);
+		let fresh = slot("b", b"ct-b1", b"ct-b2", 5);
+		crate::UsedNullifiers::<Test>::insert(settled.nullifiers[0], ());
+
+		let batch = SettlementBundle {
+			segments: vec![
+				Segment { block_hash, block_number: 10, slots: vec![settled] },
+				Segment { block_hash, block_number: 10, slots: vec![fresh] },
+			],
+		};
+		// The skipped segment's position carries junk where the proof
+		// committed to real ciphertexts.
+		let padded = vec![output(&[9u8; 2_048], &[9u8; 2_048]), output(b"ct-b1", b"ct-b2")];
+		assert_noop!(check(&batch, &padded), Error::<Test>::CiphertextDigestMismatch);
+
+		let honest = vec![output(b"ct-a1", b"ct-a2"), output(b"ct-b1", b"ct-b2")];
+		assert_ok!(check(&batch, &honest));
+	});
+}
+
+/// The fee floor is linear in the payload, because the payload is what the
+/// settlement writes into permanent state. The chain never parses these bytes
+/// and `Ciphertexts` is never pruned, so a flat floor would buy as much state
+/// as the ciphertext cap allows for one quantum.
+#[test]
+fn a_slot_pays_for_the_ciphertext_bytes_it_publishes() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		// Two kilobyte-and-a-half ciphertexts: three started kilobytes over
+		// the flat minimum of one quantum.
+		let big_1 = vec![1u8; 1_500];
+		let big_2 = vec![2u8; 1_500];
+		let outputs = vec![output(&big_1, &big_2)];
+
+		let cheap = one_segment(10, vec![slot("a", &big_1, &big_2, 3)]);
+		assert_noop!(check(&cheap, &outputs), Error::<Test>::FeeBelowMinimum);
+
+		let paid = one_segment(11, vec![slot("a", &big_1, &big_2, 4)]);
+		assert_ok!(check(&paid, &outputs));
+
+		// A slot carrying almost nothing still pays the flat floor and no more.
+		let small = one_segment(12, vec![slot("b", b"ct-b1", b"ct-b2", 2)]);
+		assert_ok!(check(&small, &[output(b"ct-b1", b"ct-b2")]));
 	});
 }
 
@@ -953,6 +1058,12 @@ fn a_settled_batch_cannot_be_replayed() {
 /// admission stopped short of the verify. It would also take the victim's
 /// `provides` tag, which is derived from those same nullifiers, and under a
 /// constant priority whichever arrived first would hold the pool slot.
+///
+/// The canonical-encoding round trip does not close this: it rejects other
+/// encodings of one decoded proof and says nothing about a mutated proof
+/// object, which is what the tamper below is. What verifying at admission buys
+/// is that the blob stops at the first node it reaches. Without it the blob
+/// travels the whole network and every node pays a settlement walk for it.
 #[test]
 fn an_unverifiable_proof_is_refused_at_pool_admission() {
 	new_test_ext_with_endowments(vec![(alice(), 10_000 * UNIT)]).execute_with(|| {
@@ -1000,6 +1111,97 @@ fn an_unverifiable_proof_is_refused_at_pool_admission() {
 			&genuine
 		)
 		.is_ok());
+	});
+}
+
+/// Admission runs the cheap gate first, and that is what bounds the work a
+/// gossiped variant can force.
+///
+/// A settlement proof is public by construction: the extrinsic carrying it is
+/// gossiped and old ones sit in finalized blocks. An attacker keeps the proof
+/// byte identical, flips one byte of `outputs`, and has a transaction with a
+/// new hash that no node has seen, so every node validates it fresh. There is
+/// no proving work and no fee behind that, and it can be repeated as fast as
+/// the blobs can be pushed. Admission parses and walks the settlement before
+/// it verifies, so each variant dies on a bounded walk: a few hundred storage
+/// reads and one ciphertext sponge per slot. The FRI verification never runs
+/// for them.
+#[test]
+fn a_ciphertext_variant_of_a_gossiped_settlement_dies_on_the_cheap_gate() {
+	new_test_ext_with_endowments(vec![(alice(), 10_000 * UNIT)]).execute_with(|| {
+		let spend = shield_and_prove(4, 2);
+
+		let mut variant = spend.outputs.clone();
+		let mut bytes = variant[0].ct_1.to_vec();
+		bytes[0] ^= 0x01;
+		variant[0].ct_1 = BoundedVec::try_from(bytes).expect("the length did not change");
+
+		// This is exactly what admission runs before any verification: the
+		// parse, then the settlement walk against chain state.
+		let parsed = Shielded::pre_validate_private_batch(&spend.proof).expect("parses");
+		assert_noop!(check(&parsed, &variant), Error::<Test>::CiphertextDigestMismatch);
+
+		let call =
+			crate::Call::submit_private_batch { proof: spend.proof.clone(), outputs: variant };
+		assert!(<Shielded as ValidateUnsigned>::validate_unsigned(
+			TransactionSource::External,
+			&call
+		)
+		.is_err());
+
+		// A settled proof is the other free variant: the blob is in a finalized
+		// block for anyone to copy. It dies on the same walk.
+		assert_ok!(Shielded::submit_private_batch(
+			RuntimeOrigin::none(),
+			spend.proof.clone(),
+			spend.outputs.clone(),
+		));
+		let replayed = Shielded::pre_validate_private_batch(&spend.proof).expect("parses");
+		assert_noop!(check(&replayed, &spend.outputs), Error::<Test>::NullifierAlreadyUsed);
+		assert!(<Shielded as ValidateUnsigned>::validate_unsigned(
+			TransactionSource::External,
+			&crate::Call::submit_private_batch { proof: spend.proof, outputs: spend.outputs }
+		)
+		.is_err());
+	});
+}
+
+/// The dispatch body verifies, and this is the call that proves it: it reaches
+/// the body directly, the way a general-format extrinsic does.
+///
+/// `ensure_none` is satisfied by any dispatch with no origin, and
+/// `ExtrinsicFormat::General` reaches a call with `None` as its origin without
+/// `ValidateUnsigned` running at all. That path is closed in the runtime today
+/// by one transaction extension refusing a non-signed origin, which is a tuple
+/// entry a future runtime may reorder or relax. What it would open, if the
+/// body only parsed, is a settlement whose public inputs were rewritten
+/// wholesale: attacker-chosen commitments appended as tree leaves with no
+/// proof behind them.
+#[test]
+fn the_dispatch_body_refuses_a_proof_that_does_not_verify() {
+	new_test_ext_with_endowments(vec![(alice(), 10_000 * UNIT)]).execute_with(|| {
+		let spend = shield_and_prove(4, 2);
+
+		// A byte in the proof body, clear of the public-input tail, so the
+		// bundle the body builds is the genuine one and only the verify can
+		// refuse it.
+		let mut tampered = spend.proof.clone();
+		tampered[spend.proof.len() / 3] ^= 0x01;
+		assert_ok!(Shielded::pre_validate_private_batch(&tampered));
+
+		assert_noop!(
+			Shielded::submit_private_batch(RuntimeOrigin::none(), tampered, spend.outputs.clone()),
+			Error::<Test>::ProofVerificationFailed
+		);
+		assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 0);
+		// The shielded note's own leaf and nothing else.
+		assert_eq!(ZkTree::leaf_count(), 1);
+
+		assert_ok!(Shielded::submit_private_batch(
+			RuntimeOrigin::none(),
+			spend.proof,
+			spend.outputs,
+		));
 	});
 }
 

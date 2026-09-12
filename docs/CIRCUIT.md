@@ -702,8 +702,8 @@ caller-supplied padding inner in the same pass because padding is the prover's
 to append. That map binds the honest prover path alone:
 `QneroPublicBatchCircuit` is public and a witness can be filled through
 plonky2's own API. The chain's settled-nullifier set is the backstop, which is
-why section 8.6 makes a settlement all or nothing and makes a nullifier
-repeated across segments abort it before any state changes.
+why section 8.6 has the chain dedupe across every segment itself and check the
+whole submission before it writes anything.
 
 ### 8.4 The padding rule
 
@@ -876,14 +876,19 @@ needs a tagged circuit to pin.
   identifiable either way. Commitments have no such choice: append the
   nonzero ones and skip the zero digest, which is the absence sentinel and is
   how a padding slot says it created no note.
-- **Settlement of one public batch is all or nothing.** This is a blocking
-  acceptance item for M4. The circuit stops the same inner segment appearing
-  twice; nothing in it stops one nullifier appearing in two different segments
-  (section 8.3). A settlement extrinsic
-  must therefore collect every nullifier of every settleable segment, reject
-  the batch when one repeats, and mutate no state before that check passes. A
-  pallet that settled segment by segment without transactional rollback would
-  half-settle such a batch.
+- **A public batch is checked whole before it writes anything.** This is a
+  blocking acceptance item for M4. The circuit stops the same inner segment
+  appearing twice; nothing in it stops one nullifier appearing in two different
+  segments (section 8.3). A settlement extrinsic must therefore walk every
+  nullifier of every settleable segment and decide the whole submission before
+  it mutates state. A pallet that settled segment by segment without
+  transactional rollback would half-settle such a batch. What that decision is
+  per segment was settled at M4 and is section 9.5: a segment holding a
+  nullifier this chain already settled, or one an earlier segment of the same
+  submission claimed, is skipped whole and the rest settles, because refusing
+  the submission instead lets one participant destroy an aggregator's batch for
+  free. A repeat inside one segment still refuses the submission, and a
+  submission that settles nothing is refused.
 - **Whether a padding slot's nullifiers are worth their state, and whether the
   real-transfer count should be hidden at all.** These are one decision. A
   padding slot is identifiable today, because the wrapper zeroes its
@@ -998,21 +1003,33 @@ slot when it differs. The count of `ShieldedOutput`s must equal the count of
 real slots exactly, a segment this submission skips included (section 9.5): a
 trailing extra would otherwise ride along bound by nothing, and a positional
 mapping that depended on which segments were already settled would depend on
-something the submitter cannot know.
+something the submitter cannot know. **Every real slot is bound, skipped
+segments included.** Checking only the slots that settle would leave the skipped
+positions carrying bytes nothing commits to, on an unsigned and fee-free
+extrinsic the block then has to carry; at `n = 53` that is over a megabyte of
+free-ridden block space. A submitter always holds the real ciphertexts, because
+they arrived with the proof, so binding them costs nothing legitimate.
 
 **Each ciphertext is capped at `MaxCiphertextBytes`, 2048 bytes in the
 runtime.** A `NoteCiphertext` serializes to 1731 bytes at the chain's parameter
-set with an empty memo (11 bytes of framing, a 1568-byte ML-KEM-1024
-encapsulation, the 112-byte note payload under a ChaCha20-Poly1305 tag, and the
-memo's own tag), so the cap leaves 317 bytes of memo. The slack is deliberately
-small: `Ciphertexts` is never pruned and the chain never parses these bytes, so
-whatever slack the cap leaves is permanent state a settler can pad into for the
-flat `MinLeafFee`. A wallet reads the bound from the pallet's metadata rather
-than hardcoding it. Exceeding it fails the extrinsic's SCALE decode, after the
-proof that committed to those exact bytes has already been built, so a wallet
-checks before it proves. The declared weight carries a per-byte term for the
-same reason the cap is tight: the per-slot `ct_digest` is a byte sponge over
-kilobytes of payload.
+set with an empty memo: 19 bytes of framing (a version byte, a two-byte crypto
+suite, a four-byte diversifier index, and a `u32` length before each of the
+three payloads), a 1568-byte ML-KEM-1024 encapsulation, the 112-byte note
+payload under a ChaCha20-Poly1305 tag, and the memo's own tag.
+`an_empty_memo_ciphertext_serializes_to_1731_bytes` in `qnero-pqcrypto` pins
+that total against the serializer, so a wallet sizing a memo from these parts
+cannot be misled by prose that drifted. The cap leaves 317 bytes of memo.
+
+A settler can use the whole cap, and the 317 bytes of memo slack is the wrong
+figure to reason from: the chain never parses these bytes, so nothing holds a
+submission to a real `NoteCiphertext` shape, and `Ciphertexts` is never pruned
+and takes no storage deposit. Two mechanisms price that: the fee floor is
+linear in the payload (section 9.7), and the declared weight carries a per-byte
+term, because the per-slot `ct_digest` is a byte sponge over kilobytes. A
+wallet reads the bound from the pallet's metadata; a hardcoded copy drifts.
+Exceeding it fails the extrinsic's SCALE decode, after the proof that committed
+to those exact bytes has already been built, so a wallet checks before it
+proves.
 
 ### 9.4 Padding
 
@@ -1042,25 +1059,48 @@ included: inside a real slot the chain cannot tell a dummy from a real one and
 must not try, and a note spent from input slot 1 is marked used only if slot 1's
 nullifier is settled.
 
-Every nullifier of every settleable segment goes into one set before anything is
-written. A repeat inside the submission aborts the whole submission. The
-private-batch circuit already forbids a repeat inside one batch; nothing in the
-public-batch circuit compares two different inners, which is why this is a chain
-rule.
+Every nullifier of every settling segment goes into one set before anything is
+written. The private-batch circuit already forbids a repeat inside one batch;
+nothing in the public-batch circuit compares two different inners, which is why
+this is a chain rule.
 
-A repeat against `UsedNullifiers` is treated per segment. A segment **every**
-one of whose nullifiers is already settled settled before,
-commitments, fee and all, and this submission skips it whole. A segment that is
-only partly settled is not that case and refuses the submission with
-`NullifierAlreadyUsed`. The distinction matters because an aggregator's public
-batch wraps `n` proofs that are each, on their own, exactly what
-`submit_private_batch` accepts: one participant can settle its own inner
-directly, and if that made the whole public batch fatal it could strand the
-other fifty-two transfers and waste the aggregator's recursive proving run, for
-free and as often as it liked. Skipping is value neutral, because the skipped
-segment's leaves and fee were accounted by whoever got there first. A submission
-whose every segment is skipped settles nothing and is refused, the same way a
-standalone padding batch is.
+**A conflict skips its segment. It does not refuse the submission.** A segment
+is skipped when any nullifier it publishes is already in `UsedNullifiers`, or
+was claimed by an earlier segment of the same submission. A repeat inside one
+segment is the one case that still refuses the submission, with
+`DuplicateNullifier`; the circuit forbids it, so only a hand-built bundle or a
+future circuit change reaches it.
+
+The reason is that refusing lets one participant destroy an aggregator's batch
+for free. An aggregator's public batch wraps `n` proofs that are each, on their
+own, exactly what `submit_private_batch` accepts. A nullifier is a function of
+the note alone, identical wherever that note is spent, so a participant can hand
+an aggregator an inner, wait for the recursive run to start, and then settle a
+different batch of its own that spends one of those same notes. The aggregator's
+inner is now partly settled: one nullifier used, the rest fresh. Under an
+all-or-nothing rule the whole public batch can never settle, the other
+fifty-two participants' transfers are stranded until their anchors expire, and
+the aggregator cannot defend against it because the conflict is created after
+its batch is fixed. Handing an aggregator two inners that spend one common note
+does the same thing for nothing at all. An honest wallet that gives up waiting
+and re-proves produces the same shape, since a re-proof draws fresh dummy
+nullifiers and matches no earlier segment byte for byte.
+
+Skipping is sound because a skipped segment could not have settled anyway.
+Constraint 9 makes at least one input of every real slot a real note, and one of
+the segment's published nullifiers is already spent, so the segment is a double
+spend by construction: refusing it and skipping it are the same outcome for that
+segment, and they differ only for the segments around it. Nothing of a skipped
+segment is written: no commitment appended, no nullifier marked, no fee counted,
+so its own fresh nullifiers stay unspent and the notes behind them can still
+settle elsewhere. Which of two conflicting segments wins is the order they
+appear in the proof, which is fixed, so every node decides the same way.
+
+A submission whose every segment is skipped settles nothing and is refused with
+`NullifierAlreadyUsed`, the same way a standalone padding batch is: admission
+work is not free and a no-op settlement would spend it for nothing. The
+ciphertexts of a skipped segment are still bound to its `ct_digest` (section
+9.3); only the nullifier writes, the fee and the appends are skipped.
 
 The all-zero nullifier is refused outright. It cannot reach here through the
 padding filter, and the check is what keeps that true if the filter ever moves.
@@ -1091,9 +1131,27 @@ Each real slot's fee is a 62-bit field element counted in pool quanta
 wormhole leaf amount). The pallet sums them in `u128`, which is why the circuit
 does not sum them: six 62-bit fees overflow Goldilocks.
 
-Every real slot must carry at least `MinLeafFee`, one quantum in the runtime.
-This is the anti-spam mechanism and it is the only one, for the reason section
-8.6 gives.
+Every real slot must carry at least
+
+```text
+MinLeafFee + ceil(ciphertext_bytes / CiphertextBytesPerFeeQuantum)
+```
+
+quanta, where `ciphertext_bytes` is the two ciphertexts that slot publishes. The
+runtime sets `MinLeafFee = 1` and `CiphertextBytesPerFeeQuantum = 1024`, so a
+slot carrying two real `NoteCiphertext`s pays five quanta and a slot padded to
+the cap pays nine. This is the anti-spam mechanism and it is the only one, for
+the reason section 8.6 gives.
+
+The payload term exists because the flat floor alone prices permanent state at
+whatever the ciphertext cap allows: one quantum, 0.01 QTC, would buy 4096 bytes
+of state that is never pruned and never parsed, and half of every fee comes back
+to a settler that is also the block author. The floor is computable before
+proving, because the fee is a public input and the ciphertext sizes are known by
+then, so a wallet owes the arithmetic above at witness-building time. A slot
+this submission skips is exempt: its fee was accounted when it settled, and
+re-evaluating a floor that governance may have moved since would make an
+already-settled segment fatal on its second appearance.
 
 The sum leaves the pool, and the pool has to be holding it: a fee above
 `PoolValue` refuses the settlement with `PoolUnderflow` before anything is
@@ -1200,12 +1258,26 @@ at M6, when the transparent layer is removed.
 
 ### 9.10 Admission
 
-`validate_unsigned` verifies, in this order: the size gate before anything is
-copied, deserialization against the embedded verifier's circuit data, the
-canonical-encoding round trip, the public-input parse, the ZK verify, and only
-then the settlement check. `pre_dispatch` runs the same sequence again and is
-the block-inclusion gate, because `validate_unsigned` does not run on block
-import.
+`validate_unsigned` runs two gates, in cost order, and it runs both. The cheap
+gate is the size check before anything is copied, deserialization against the
+embedded verifier's circuit data, the canonical-encoding round trip, the
+public-input parse, and then the settlement check: a bounded walk over the
+segments against chain state, at most a few hundred `UsedNullifiers` reads and
+one ciphertext sponge per slot. The expensive gate is the ZK verify, and it runs
+on what survives. `pre_dispatch` runs the parse, the verify and the settlement
+check again and is the block-inclusion gate, because `validate_unsigned` does
+not run on block import. The dispatch body verifies as well, for the reason
+section 9.11 gives; those two passes are the ones block execution pays and the
+declared weight charges.
+
+The cheap gate comes first because a settlement proof is public by construction:
+the extrinsic carrying it is gossiped and old ones sit in finalized blocks.
+Anyone can take a genuine proof, keep the blob byte identical, change one byte
+of `outputs`, and have a transaction with a new hash that no node has seen, so
+every node validates it fresh. There is no proving work and no fee behind that
+and it repeats as fast as blobs can be pushed. Each such variant dies on the
+ciphertext binding or on `NullifierAlreadyUsed`, orders of magnitude below a FRI
+verification.
 
 Upstream splits the two, verifying only at `pre_dispatch`, and M4 shipped that
 split before a review took it apart. **The split does not hold, and Qnero does
@@ -1230,28 +1302,43 @@ cost the split was avoiding:
 - the junk reaches a block author and dies at `pre_dispatch`, which is exactly
   where the verify was supposed to be cheap.
 
-What the split was written to prevent, one proof's byte variants each forcing a
-verify, is closed by the canonical-encoding round trip: plonky2's reader
-ignores trailing bytes and accepts non-canonical field limbs, so without the
-round trip one proof has unlimited distinct transaction identities, and with it
-a distinct admitted proof needs real proving work. Verifying at admission
-therefore costs one verify per distinct proof, and an invalid proof dies at the
-first hop, where before it reached every node in the network.
+What verifying at admission buys is that a junk blob stops at the first node it
+reaches, where before it cost every node on its path a settlement walk and then
+reached a block author to die there. It does **not** bound the number of
+verifies an attacker can force. The canonical-encoding round trip is sometimes
+offered as that bound, and it is not one: it rejects other encodings of one
+decoded proof, which is what stops `proof || padding` and `+ p` limbs from
+multiplying one proof's transaction identities, and it says nothing about a
+mutated proof object. A private-batch proof is about 157 KB, on the order of
+10^5 single-bit variants that all round-trip exactly, and each costs the node
+that receives it one full verify, unsigned and unpaid.
 
-The order inside `validate_unsigned` is load bearing for the same reason: the
-verify comes before the per-slot settlement check, so no unbounded per-slot work
-runs on a proof that has not been verified.
+**Open issue, M5.** One unpaid verify per distinct gossiped blob, with no rate
+limit. A rejection cache keyed on `blake2_256(proof)` bounds the repeat case, so
+one blob cannot be re-verified once per `outputs` variant; it does not bound
+distinct blobs. The residual is recorded here and next to `WASM_VERIFY_FACTOR`
+in `pallets/shielded/src/weights.rs`.
 
 The pool tag is a Blake2 hash of the submission's nullifiers, sorted within each
-segment, with the segment boundaries in the preimage. It commits to the
-nullifiers and to nothing else, so two submissions spending the same notes are
-mutually exclusive in the pool, which is the double-spend exclusion the tag
-exists for. That is sound only because admission verifies. Priority is the
-constant `UNSIGNED_SETTLEMENT_PRIORITY = 1`: an amount-derived priority combined
-with a nullifier-derived tag would let a submission with inflated public inputs
-usurp a victim's same-tag settlement, because the pool replaces on strictly
-higher priority, and the public inputs a priority would read are the prover's
-own claim.
+segment, with the segment boundaries in the preimage. What it excludes is
+byte-different rebroadcasts of one submission: they hash to one tag, hold one
+pool slot, and the first seen keeps it. It is deliberately not cross-submission
+double-spend exclusion, because the preimage carries the submission's
+segmentation: a private batch and the public batch that wraps it as one inner
+spend the same notes and hash to different tags, so both are admitted and both
+can reach one block. What excludes a double spend is `UsedNullifiers` inside the
+settlement check, and the segment-skip rule of section 9.5 is what lets that
+pair settle once between them. Nothing may be built on the
+tag as an exclusion: dropping the dispatch body's settlement check, or trading
+the per-slot `UsedNullifiers` probe for pool-level exclusion, would let the same
+notes settle twice.
+
+Priority is the constant `UNSIGNED_SETTLEMENT_PRIORITY = 1`: an amount-derived
+priority combined with a nullifier-derived tag would let a submission with
+inflated public inputs usurp a victim's same-tag settlement, because the pool
+replaces on strictly higher priority, and the public inputs a priority would
+read are the prover's own claim. That the tag cannot be stolen at all rests on
+admission verifying.
 
 ### 9.11 Weights
 
@@ -1269,12 +1356,34 @@ Three things about them are worth carrying into M5:
   measurement taken inside the runtime.
 - **The public batch has never been built or timed at `n = 53`.** Its 30 ms
   native figure is a ceiling chosen to be wrong in the safe direction.
-- **The ciphertext digest is priced per byte, and the settlement check is priced
-  twice.** A slot's `ct_digest` absorbs kilobytes of ML-KEM and AEAD ciphertext
-  at four bytes per field element and eight field elements per permutation, so a
-  flat per-slot charge was wrong by more than an order of magnitude. And an
-  included settlement runs the whole check twice, once in `pre_dispatch` and
-  once in the dispatch body, so the per-slot reads and the digest work are
-  charged twice. The body's second pass stays: it is the only guard on a path
-  that reaches a dispatch without `ValidateUnsigned`, which a root-scheduled
-  `dispatch_as` would be.
+- **The ciphertext digest is priced per byte, and everything an included
+  settlement does twice is charged twice.** A slot's `ct_digest` absorbs
+  kilobytes of ML-KEM and AEAD ciphertext at four bytes per field element and
+  eight field elements per permutation, so a flat per-slot charge was wrong by
+  more than an order of magnitude. And an included settlement runs the parse,
+  the verify and the settlement check twice, once in `pre_dispatch` and once in
+  the dispatch body, so all three are charged twice.
+- **The parse has two terms.** The blob round trip does not scale with the
+  public inputs and the layout walk does: `private_batch_pi_len(6)` is 131 felts
+  against `public_batch_pi_len(53, 6)` at 6947, and the parse allocates a slot
+  per forwarded leaf. One flat constant for both under-declares the public
+  batch. The flat constant scaled by the felt ratio over-declares it
+  fiftyfold, because the blob round trip does not scale with the public
+  inputs. Neither term is measured; 100 ns per felt is roughly an order of
+  magnitude above what a copy and a range-reduced comparison cost natively.
+- **The dispatch body verifies, and that is why the verify is charged twice.**
+  `ensure_none` is satisfied by any dispatch with no origin, and sp-runtime's
+  `ExtrinsicFormat::General` reaches a call with `None` as its origin without
+  `ValidateUnsigned` running at all: the checked extrinsic dispatches that
+  format without calling `pre_dispatch`. In this runtime that path is closed
+  today by `ReversibleTransactionExtension` refusing a non-signed origin, which
+  is one entry in a tuple a future runtime may reorder or relax, while
+  `CheckNonce` and `ChargeTransactionPayment` both wave a `None` origin through
+  free of charge. A body that only parsed would settle a bundle whose public
+  inputs were rewritten wholesale: attacker-chosen commitments appended as tree
+  leaves, which is unbounded pool inflation with no proof behind it. The second
+  verify makes that structural, and a test in the pallet reaches the dispatch
+  body directly the way that path would.
+- **Admission's unpaid verify is not metered at all.** See the open issue in
+  section 9.10: weight bounds block execution, and nothing bounds what a
+  transaction pool absorbs before a block.

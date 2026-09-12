@@ -228,8 +228,11 @@ shape.
    leaf index for wallet sync.
 4. Fee: sum of the leaf fees of those same segments, split burn / block author
    as Wormhole does today.
-5. Settlement of one public batch is all or nothing, and a nullifier repeated
-   across segments aborts it before any state change.
+5. A public batch is checked whole before any state changes. A segment holding a
+   nullifier already settled, or one an earlier segment of the same submission
+   claimed, is skipped and the rest settles; a repeat inside one segment refuses
+   the submission, and a submission that settles nothing is refused.
+   `docs/CIRCUIT.md` section 9.5 carries the reasoning.
 6. Entry in v0: `shield(value, inner, ciphertext)`, a signed extrinsic that
    burns transparent value and appends `cm = H(CM, inner, value)`. There is no
    exit in v0: value that enters the pool moves only between notes. Both go at

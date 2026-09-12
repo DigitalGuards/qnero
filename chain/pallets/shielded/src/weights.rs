@@ -28,6 +28,14 @@ use frame_support::{traits::Get, weights::Weight};
 /// measured inside the runtime (a benchmark, or an `sc-executor` harness
 /// calling the validation entry points through the compiled wasm) at the
 /// chain's `N = 6` / `n = 53`.
+///
+/// **Open issue, M5.** The same measurement owes an answer on the cost a
+/// transaction pool absorbs that no weight bounds: admission verifies every
+/// distinct gossiped settlement blob once, unpaid and unrate-limited, because
+/// nothing short of a verify establishes that a proof's public inputs are a
+/// proof's. `docs/CIRCUIT.md` section 9.11 carries the analysis. A rejection
+/// cache keyed on the proof hash bounds the repeat case; it does not bound
+/// distinct blobs.
 pub const WASM_VERIFY_FACTOR: u64 = 5;
 
 /// Reference time of one private-batch proof verification, in picoseconds.
@@ -49,10 +57,56 @@ pub const PRIVATE_BATCH_VERIFY_REF_TIME_PS: u64 = 5_000_000_000 * WASM_VERIFY_FA
 /// before a public network.
 pub const PUBLIC_BATCH_VERIFY_REF_TIME_PS: u64 = 30_000_000_000 * WASM_VERIFY_FACTOR;
 
-/// Reference time of the cheap pre-validation that runs in the dispatch body
-/// after `pre_dispatch` has already verified: deserialize, canonical-encoding
-/// round trip, public-input parse. Roughly a fifth of a native verify.
-pub const PRE_VALIDATE_REF_TIME_PS: u64 = 1_000_000_000 * WASM_VERIFY_FACTOR;
+/// Reference time of one proof parse: deserialize, canonical-encoding round
+/// trip, public-input parse, and no cryptography. Roughly a fifth of a native
+/// private-batch verify.
+///
+/// Two terms, because the parse of a public batch is not the parse of a
+/// private batch. The blob round trip is the fixed part: a recursive proof is
+/// about the same size whatever it wraps. What grows is the public-input
+/// vector, which the round trip writes back and the layout parse walks:
+/// `private_batch_pi_len(6)` is 131 felts against `public_batch_pi_len(53, 6)`
+/// at 6947, and the parse allocates a slot per forwarded leaf. Charging one
+/// flat constant for both under-declares the public batch; charging the flat
+/// constant scaled by the felt ratio would over-declare it by a factor of
+/// fifty, because the blob round trip does not scale with the public inputs.
+///
+/// **Neither term is measured.** 100 nanoseconds per felt is chosen to be wrong
+/// in the safe direction: it is roughly an order of magnitude above what a copy
+/// and a range-reduced comparison cost natively.
+pub const PRE_VALIDATE_BASE_REF_TIME_PS: u64 = 1_000_000_000 * WASM_VERIFY_FACTOR;
+
+/// Reference time the parse spends per public-input field element. See
+/// [`PRE_VALIDATE_BASE_REF_TIME_PS`].
+pub const PRE_VALIDATE_PER_FELT_REF_TIME_PS: u64 = 100_000 * WASM_VERIFY_FACTOR;
+
+/// Reference time of one proof parse over `pi_felts` public inputs.
+pub const fn pre_validate_ref_time(pi_felts: u64) -> u64 {
+	PRE_VALIDATE_BASE_REF_TIME_PS
+		.saturating_add(pi_felts.saturating_mul(PRE_VALIDATE_PER_FELT_REF_TIME_PS))
+}
+
+/// Public inputs one private-batch proof carries, at this runtime's dimensions.
+pub const PRIVATE_BATCH_PI_FELTS: u64 =
+	qnero_circuit::batch_layout::private_batch_pi_len(crate::circuit_config::NUM_LEAF_PROOFS)
+		as u64;
+
+/// Public inputs one public-batch proof carries, at this runtime's dimensions.
+pub const PUBLIC_BATCH_PI_FELTS: u64 = qnero_circuit::batch_layout::public_batch_pi_len(
+	crate::circuit_config::NUM_PRIVATE_BATCH_PROOFS,
+	crate::circuit_config::NUM_LEAF_PROOFS,
+) as u64;
+
+/// What one included settlement pays for verification and parsing.
+///
+/// Both happen twice. `ValidateUnsigned::pre_dispatch` parses and verifies as
+/// the block-inclusion gate, and the dispatch body parses and verifies again,
+/// because `ensure_none` alone does not establish that `ValidateUnsigned` ran:
+/// a general-format extrinsic reaches a dispatch with no origin and no
+/// `pre_dispatch`. See `Pallet::submit_private_batch`.
+const fn verify_ref_time(verify: u64, pi_felts: u64) -> u64 {
+	verify.saturating_add(pre_validate_ref_time(pi_felts)).saturating_mul(2)
+}
 
 /// Reference time of one Poseidon2 permutation, matching `pallet-zk-tree`.
 pub const POSEIDON_EVAL_REF_TIME_PS: u64 = pallet_zk_tree::POSEIDON_EVAL_REF_TIME_PS;
@@ -170,7 +224,7 @@ pub struct SubstrateWeight<T>(PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 	fn submit_private_batch(slots: u32, ciphertext_bytes: u32) -> Weight {
 		Weight::from_parts(
-			PRIVATE_BATCH_VERIFY_REF_TIME_PS.saturating_add(PRE_VALIDATE_REF_TIME_PS),
+			verify_ref_time(PRIVATE_BATCH_VERIFY_REF_TIME_PS, PRIVATE_BATCH_PI_FELTS),
 			0,
 		)
 		.saturating_add(settlement_weight::<T>(slots, ciphertext_bytes))
@@ -178,7 +232,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 
 	fn submit_public_batch(slots: u32, ciphertext_bytes: u32) -> Weight {
 		Weight::from_parts(
-			PUBLIC_BATCH_VERIFY_REF_TIME_PS.saturating_add(PRE_VALIDATE_REF_TIME_PS),
+			verify_ref_time(PUBLIC_BATCH_VERIFY_REF_TIME_PS, PUBLIC_BATCH_PI_FELTS),
 			0,
 		)
 		.saturating_add(settlement_weight::<T>(slots, ciphertext_bytes))
@@ -212,8 +266,7 @@ const SLOT_REF_TIME_PS: u64 = 200_000_000;
 impl WeightInfo for () {
 	fn submit_private_batch(slots: u32, ciphertext_bytes: u32) -> Weight {
 		Weight::from_parts(
-			PRIVATE_BATCH_VERIFY_REF_TIME_PS
-				.saturating_add(PRE_VALIDATE_REF_TIME_PS)
+			verify_ref_time(PRIVATE_BATCH_VERIFY_REF_TIME_PS, PRIVATE_BATCH_PI_FELTS)
 				.saturating_add(u64::from(slots).saturating_mul(SLOT_REF_TIME_PS))
 				.saturating_add(ct_digest_ref_time(u64::from(slots), u64::from(ciphertext_bytes))),
 			0,
@@ -222,8 +275,7 @@ impl WeightInfo for () {
 
 	fn submit_public_batch(slots: u32, ciphertext_bytes: u32) -> Weight {
 		Weight::from_parts(
-			PUBLIC_BATCH_VERIFY_REF_TIME_PS
-				.saturating_add(PRE_VALIDATE_REF_TIME_PS)
+			verify_ref_time(PUBLIC_BATCH_VERIFY_REF_TIME_PS, PUBLIC_BATCH_PI_FELTS)
 				.saturating_add(u64::from(slots).saturating_mul(SLOT_REF_TIME_PS))
 				.saturating_add(ct_digest_ref_time(u64::from(slots), u64::from(ciphertext_bytes))),
 			0,
@@ -251,14 +303,14 @@ mod tests {
 			assert!(public.ref_time() >= private.ref_time());
 			if slots > 0 {
 				assert!(
-					private.ref_time()
-						> <() as WeightInfo>::submit_private_batch(slots - 1, (slots - 1) * 3_500)
+					private.ref_time() >
+						<() as WeightInfo>::submit_private_batch(slots - 1, (slots - 1) * 3_500)
 							.ref_time()
 				);
 			}
 			assert!(
-				<() as WeightInfo>::submit_private_batch(slots, 8_192).ref_time()
-					>= <() as WeightInfo>::submit_private_batch(slots, 0).ref_time()
+				<() as WeightInfo>::submit_private_batch(slots, 8_192).ref_time() >=
+					<() as WeightInfo>::submit_private_batch(slots, 0).ref_time()
 			);
 		}
 	}
@@ -293,10 +345,43 @@ mod tests {
 	fn the_proof_verification_dominates_a_full_batch_at_a_realistic_payload() {
 		let realistic = 6 * 2 * 1_731;
 		let full = <() as WeightInfo>::submit_private_batch(6, realistic).ref_time();
-		let settlement = full - PRIVATE_BATCH_VERIFY_REF_TIME_PS - PRE_VALIDATE_REF_TIME_PS;
+		let settlement =
+			full - verify_ref_time(PRIVATE_BATCH_VERIFY_REF_TIME_PS, PRIVATE_BATCH_PI_FELTS);
 		assert!(
 			settlement < PRIVATE_BATCH_VERIFY_REF_TIME_PS,
 			"settling six slots costs {settlement} ps against a {PRIVATE_BATCH_VERIFY_REF_TIME_PS} ps verify"
+		);
+	}
+
+	/// Both gates are charged. `pre_dispatch` parses and verifies, and the
+	/// dispatch body parses and verifies again, because a general-format
+	/// extrinsic reaches a dispatch without `ValidateUnsigned` running.
+	#[test]
+	fn the_verify_and_the_parse_are_each_charged_twice() {
+		let private = <() as WeightInfo>::submit_private_batch(0, 0).ref_time();
+		assert_eq!(
+			private,
+			2 * (PRIVATE_BATCH_VERIFY_REF_TIME_PS +
+				PRE_VALIDATE_BASE_REF_TIME_PS +
+				PRIVATE_BATCH_PI_FELTS * PRE_VALIDATE_PER_FELT_REF_TIME_PS)
+		);
+	}
+
+	/// A public batch's public-input vector is `n` times a private batch's, and
+	/// the parse walks all of it, so the two cannot share one flat constant.
+	#[test]
+	fn the_public_batch_parse_costs_more_than_the_private_batch_parse() {
+		const { assert!(PUBLIC_BATCH_PI_FELTS > PRIVATE_BATCH_PI_FELTS * 10) };
+		assert!(
+			pre_validate_ref_time(PUBLIC_BATCH_PI_FELTS) >
+				pre_validate_ref_time(PRIVATE_BATCH_PI_FELTS)
+		);
+		// The blob round trip does not scale with the public inputs, so the
+		// public batch's parse stays within an order of magnitude of the
+		// private batch's. The felt ratio alone would be a factor of fifty.
+		assert!(
+			pre_validate_ref_time(PUBLIC_BATCH_PI_FELTS) <
+				pre_validate_ref_time(PRIVATE_BATCH_PI_FELTS) * 10
 		);
 	}
 }

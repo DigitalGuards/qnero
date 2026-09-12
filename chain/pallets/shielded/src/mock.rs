@@ -110,9 +110,11 @@ parameter_types! {
 	pub const FeeBurnRate: Permill = Permill::from_percent(50);
 	/// One quantum per real leaf slot, which is the runtime default.
 	pub static MinLeafFee: u64 = 1;
-	/// Deliberately generous: a `NoteCiphertext` at ML-KEM-1024 is an
-	/// encapsulation plus two AEAD payloads.
-	pub const MaxCiphertextBytes: u32 = 4096;
+	/// One quantum per started kilobyte of ciphertext, the runtime default.
+	pub static CiphertextBytesPerFeeQuantum: u32 = 1024;
+	/// The runtime's own cap, so a ciphertext the production runtime refuses at
+	/// its SCALE decode cannot pass a test here.
+	pub const MaxCiphertextBytes: u32 = 2048;
 }
 
 impl pallet_shielded::Config for Test {
@@ -125,6 +127,7 @@ impl pallet_shielded::Config for Test {
 	type MintingAccount = MintingAccount;
 	type BlockHashWindow = ConstU64<64>;
 	type MinLeafFee = MinLeafFee;
+	type CiphertextBytesPerFeeQuantum = CiphertextBytesPerFeeQuantum;
 	type FeeBurnRate = FeeBurnRate;
 	type MaxCiphertextBytes = MaxCiphertextBytes;
 	type WeightInfo = ();

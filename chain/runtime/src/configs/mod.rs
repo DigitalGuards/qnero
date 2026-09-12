@@ -859,22 +859,37 @@ parameter_types! {
 	/// extrinsics are unsigned and fee free, so the leaf's own fee is the only
 	/// cost there is.
 	pub const ShieldedMinLeafFee: u64 = 1;
+	/// Bytes of note ciphertext one quantum of fee buys: one kilobyte.
+	///
+	/// A real slot carries two ciphertexts of 1731 bytes, so it pays four
+	/// quanta of payload on top of `ShieldedMinLeafFee`, and a slot padded to
+	/// the cap pays eight. The flat floor alone would price either at one
+	/// quantum. The chain never parses these bytes and `Ciphertexts` is never
+	/// pruned, so the whole cap is usable by a settler and the payload is what
+	/// has to be priced.
+	pub const ShieldedCiphertextBytesPerFeeQuantum: u32 = 1024;
 	/// Half of a settled fee is burned, half is minted to the block author. The
 	/// same split `pallet-wormhole` applies to its volume fee.
 	pub const ShieldedFeeBurnRate: Permill = Permill::from_percent(50);
 	/// Size cap on one note ciphertext: 2048 bytes.
 	///
 	/// A `NoteCiphertext` at the chain's parameter set serializes to 1731 bytes
-	/// with an empty memo: 11 bytes of framing, an ML-KEM-1024 encapsulation
-	/// (1568), the 112-byte note payload under a ChaCha20-Poly1305 tag (128),
-	/// and the memo's own tag (16). The cap leaves 317 bytes of memo.
+	/// with an empty memo: 19 bytes of framing (a version byte, a two-byte
+	/// crypto suite, a four-byte diversifier index, and a `u32` length before
+	/// each of the three payloads), an ML-KEM-1024 encapsulation (1568), the
+	/// 112-byte note payload under a ChaCha20-Poly1305 tag (128), and the
+	/// memo's own tag (16). `an_empty_memo_ciphertext_serializes_to_1731_bytes`
+	/// in `qnero-pqcrypto` pins that total against the serializer. The cap
+	/// leaves 317 bytes of memo.
 	///
-	/// The slack is deliberately small. `Ciphertexts` is never pruned and the
-	/// chain never parses these bytes, so whatever slack the cap leaves is
-	/// permanent state a settler can pad into for the flat `MinLeafFee`. A
-	/// wallet reads this bound from the pallet's metadata, where a hardcoded
-	/// copy would drift: exceeding it fails the extrinsic's SCALE decode after
-	/// the proof that committed to those exact bytes has already been built.
+	/// The slack is deliberately small, and the whole cap is what a settler can
+	/// use: the chain never parses these bytes, so nothing holds a submission
+	/// to a real `NoteCiphertext` shape, and `Ciphertexts` is never pruned.
+	/// `ShieldedCiphertextBytesPerFeeQuantum` is what prices the payload; this
+	/// cap is what bounds one slot's worst case. A wallet reads this bound from
+	/// the pallet's metadata, where a hardcoded copy would drift: exceeding it
+	/// fails the extrinsic's SCALE decode after the proof that committed to
+	/// those exact bytes has already been built.
 	pub const ShieldedMaxCiphertextBytes: u32 = 2048;
 }
 
@@ -894,6 +909,7 @@ impl pallet_shielded::Config for Runtime {
 	type MintingAccount = MintingAccount;
 	type BlockHashWindow = ShieldedBlockHashWindow;
 	type MinLeafFee = ShieldedMinLeafFee;
+	type CiphertextBytesPerFeeQuantum = ShieldedCiphertextBytesPerFeeQuantum;
 	type FeeBurnRate = ShieldedFeeBurnRate;
 	type MaxCiphertextBytes = ShieldedMaxCiphertextBytes;
 	type WeightInfo = pallet_shielded::weights::SubstrateWeight<Runtime>;
