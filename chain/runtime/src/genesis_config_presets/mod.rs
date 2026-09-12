@@ -854,8 +854,18 @@ mod tests {
 		// shipped the bug was endowed with plenty and could sign for none of
 		// it. What makes an endowment reachable is that it came off a list of
 		// signers or collective members a human holds keys for, so the list is
-		// what this compares against, and a preset that grows a row has to say
-		// here which list the row came from.
+		// what this compares against.
+		//
+		// How much that catches differs by preset, and the difference is worth
+		// being exact about. `dev` and `heisenberg` endow through
+		// `genesis_template`'s `extra_balances`, which is a separate channel
+		// from the table named here, so for those two the equality is a real
+		// attribution: a row added anywhere else fails it. `planck` and
+		// `mainnet` build their balances from the very functions this reads,
+		// so for them both sides move together and what the equality catches
+		// is only a row `genesis_template` adds beyond the preset's own table.
+		// Those two rest on the SS58 tables themselves, which is where a new
+		// signer or collective member has to be justified.
 		let declared_endowed = |id: &PresetId| -> Vec<AccountId> {
 			let mut accounts = match id.as_ref() {
 				sp_genesis_builder::DEV_RUNTIME_PRESET | HEISENBERG_RUNTIME_PRESET =>
@@ -876,6 +886,38 @@ mod tests {
 			accounts.sort();
 			accounts.dedup();
 			accounts
+		};
+
+		// The vesting half of the same property, and the half the wormhole
+		// regression had: `dev` used to carry a fourth schedule paying the
+		// keyless test wormhole address, whose only spend path was the block-1
+		// wormhole leaf v1 removed. A schedule pays its stored beneficiary and
+		// nobody else, so a row naming an account with no key mints supply
+		// nobody can claim exactly as an endowment to one does, and the
+		// endowment check above says nothing about it: the pot's amount covers
+		// the schedule table whoever it pays.
+		//
+		// `planck` vests to nobody. `mainnet`'s payees are its own grant table
+		// plus the treasury multisig, which is the circularity noted above:
+		// what it pins there is that `genesis_template` adds no schedule of its
+		// own.
+		let declared_vested = |id: &PresetId| -> Vec<AccountId> {
+			match id.as_ref() {
+				sp_genesis_builder::DEV_RUNTIME_PRESET | HEISENBERG_RUNTIME_PRESET =>
+					dilithium_default_accounts(),
+				PLANCK_RUNTIME_PRESET => Vec::new(),
+				MAINNET_RUNTIME_PRESET => {
+					let mut payees: Vec<AccountId> = mainnet_vesting::schedules()
+						.into_iter()
+						.map(|(who, ..)| who)
+						.collect();
+					payees.push(mainnet_vesting::treasury_account());
+					payees
+				},
+				other => panic!(
+					"preset {other:?} has no declared beneficiary table here; add one before 					 shipping it, or a schedule paying an account with no key ships unchecked"
+				),
+			}
 		};
 
 		for id in preset_names() {
@@ -909,8 +951,13 @@ mod tests {
 				 so nothing here says a key exists for it"
 			);
 
+			let vested = declared_vested(&id);
 			for (who, _, _, _, _) in &config.vesting.schedules {
 				assert_ne!(*who, pot, "preset {id:?}: the pot cannot vest to itself");
+				assert!(
+					vested.contains(who),
+					"preset {id:?}: {who:?} is vested to and is on no list this preset 					 declares, so nothing here says a key exists for it"
+				);
 			}
 		}
 
