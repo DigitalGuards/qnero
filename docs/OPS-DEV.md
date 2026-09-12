@@ -224,3 +224,37 @@ the first second, `Imported #1` through `#17`. What this run checked:
   transaction version 6. The runtime identity issue above is unchanged and still
   open: this pass added a pallet constant, which is another metadata change
   behind the same version number.
+
+## The second review fix pass, 2026-09-12
+
+Same workstation. The pallet split its settlement check in two and the runtime
+moved one constant, so the node was rebuilt and re-smoked.
+
+```
+cd chain
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+```
+
+1 minute 6 seconds of wall clock against the warm tree, three crates recompiled
+(`pallet-shielded`, `quantus-runtime`, `quantus-node`). The circuit artifact set
+did not regenerate this time: the build script's inputs did not change, only the
+pallet's Rust sources. The binary is at `chain/target/release/quantus-node`.
+
+`--dev --tmp`, stopped after about two minutes at height 73, 75 blocks imported
+from the first second. What this run checked:
+
+- `chain_getHeader`'s `zkTreeRoot` equals the root `zkTree_getState` reports
+  (`0xf6ea283327bc24daff781f0b5cb380439f810ab3dd35cf680653e92cca751ac2` at
+  height 73, tree depth 4, 78 leaves, all of them the wormhole's).
+- `zkTree_getMerkleProof(0)` returns a proof whose `leaf_hash` and `leaf_data`
+  are the same 32 bytes.
+- `state_getMetadata` carries `Shielded` with its calls, its storage items
+  (`UsedNullifiers`, `Ciphertexts`, `LeafBlocks`, `PoolValue`, `EntryCount`),
+  its errors including `FeeBelowMinimum` and `CiphertextDigestMismatch`, and its
+  six constants. `CiphertextBytesPerFeeQuantum` reads `512` in the metadata
+  blob, which is the value this pass moved it to so that a slot padded to the
+  ciphertext cap costs strictly more than one carrying real ciphertexts.
+- `state_getRuntimeVersion` still reports `quantus-runtime` spec 152,
+  transaction version 6. The runtime identity issue above is unchanged and still
+  open: this pass changed a constant's value, which is another metadata change
+  behind the same version number.
