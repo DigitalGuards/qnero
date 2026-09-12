@@ -1,10 +1,18 @@
 # Qnero design (draft v0.1, 2026-09-11)
 
 Qnero is a post-quantum private coin with Monero's policy: every transfer is
-shielded, sender, recipient and amount are hidden, and there is no transparent
-option for users. It is built on the Quantus Network stack (MIT) so the
-post-quantum account layer, hash-based ZK proving and recursion, Merkle
+shielded, sender, recipient and amount are hidden, and no call moves value
+between transparent accounts. It is built on the Quantus Network stack (MIT) so
+the post-quantum account layer, hash-based ZK proving and recursion, Merkle
 commitment tree and nullifier set are reused as audited code.
+
+Two things a v1 block still publishes, stated here because the rest of this
+document is about what it hides. `shield`, the one door into the pool, is a
+signed extrinsic that names the payer, the amount and the leaf it created, so
+the entry is public and only what happens after it is not. A coinbase publishes
+its note's value and the block that minted it, with the recipient inside an
+`inner` the chain cannot open. `docs/CIRCUIT.md` section 10.7 is the full list
+of what one block reveals.
 
 ## 1. Why not port Monero's cryptography
 
@@ -280,11 +288,20 @@ inner = H(NOTE, pk, rho, r)                                    + author fee shar
                                                          total, ct) at its leaf
 ```
 
-The value is public and everything else is not. That is what the two-layer
-commitment is for (section 5): the chain hashes a value it decided itself into
-an `inner` it cannot open, so it can price the note without knowing whose it
-is. `Shielded::CoinbaseValues` is where the value is published, keyed by leaf
-index, and presence in that map is what marks a leaf a coinbase.
+The value is public, and so is the block that minted it. Who it belongs to is
+not. That is what the two-layer commitment is for (section 5): the chain hashes
+a value it decided itself into an `inner` it cannot open, so it can price the
+note without knowing whose it is. `Shielded::CoinbaseValues` is where the value
+is published, keyed by leaf index, and presence in that map is what marks a
+leaf a coinbase.
+
+Nothing beside the value names the miner. The header's `PreRuntime` item, which
+consensus needs and which the runtime hashes into the account it calls the
+block's author, is `H(cvk, parent_hash)` and therefore changes every block: a
+constant item would label every block one operator won, beside the public value
+of the coinbase note in it, which is more than a Monero coinbase reveals. The
+events say what was credited and never who to. `qnero_note_core::MinerKey::author_label`
+is the derivation and `sc_consensus_qpow::AuthorLabel` is the seam.
 
 Five rules the pallet holds:
 
@@ -325,11 +342,22 @@ Refused:
 |---|---|
 | `Balances::transfer_allow_death`, `transfer_keep_alive`, `transfer_all` | the transfers themselves |
 | `ReversibleTransfers::schedule_transfer`, `schedule_transfer_with_delay`, `execute_transfer`, `cancel`, `recover_funds` | transfers with a delay, and the guardian seizures of their holds |
-| `Vesting::claim`, `create_schedule`, `end_schedule`, `retarget_schedule` | pot to beneficiary, and back |
+| `ReversibleTransfers::set_high_security` | moves nothing, and is refused anyway: see below |
+| `Vesting::create_schedule`, `end_schedule`, `retarget_schedule` | funds the pot from the treasury, and moves a schedule's unpaid remainder |
 | `Utility::batch_all`, `Multisig::execute` carrying any of the above | a filter that stops a call and not the wrapper carrying it is decoration |
 
 Allowed, and load bearing:
 
+- `Vesting::claim`, the genesis distribution channel. Every preset endows a keyless vesting pot
+  against schedules written at genesis, and `create_schedule` above means no new schedule can
+  appear. A claim therefore pays a beneficiary fixed at genesis an amount fixed at genesis, and
+  that beneficiary can then only shield or burn what it receives. Refusing it would strand the
+  whole genesis allocation in an account with no key, permanently inside `total_issuance`, where
+  the emission schedule counts it as supply and under-mints by exactly that much forever.
+  `every_genesis_planck_is_reachable_under_the_call_filter` is the test, and it also holds the
+  other half of the decision: no preset may endow an account that cannot sign. The dev preset used
+  to endow a keyless wormhole test address, whose only spend path was the block-1 wormhole leaf v1
+  removed, and that endowment is gone.
 - `Shielded::shield`, the only door into the pool. It burns the caller's own balance, so it moves
   value out of the transparent layer rather than between accounts, and blocking it would lock every
   genesis balance out of the chain's own pool with no way in.
@@ -337,7 +365,13 @@ Allowed, and load bearing:
   `Shielded::coinbase`, which is an inherent. A filtered inherent is a mandatory dispatch failure,
   which is a dead chain rather than a dropped reward.
 - `Timestamp::set`, every `System` call, and the whole governance lane.
-- `Balances::burn`, which destroys the caller's own balance and moves nothing to anyone.
+- `Balances::burn`, which destroys the caller's own balance and moves nothing to anyone. It is also
+  on `HighSecurityConfig`'s whitelist beside `shield`, which is checked at validation rather than
+  at dispatch: an account enrolled in high security can sign only what is on that list, and v1
+  refuses every value-moving call on it, so without those two such an account could put nothing at
+  all in a block and its balance would be frozen forever. That is also why `set_high_security` is
+  refused above. The call is one way, the pallet has nothing that clears the flag, and enrolling
+  now buys a guarantee about calls that no longer work.
 - The fee path. `ChargeTransactionPayment` is a transaction extension and never reaches a `Contains`
   check, which is what lets a filtered runtime still charge for the calls it allows.
 
@@ -347,8 +381,12 @@ stated here so they are decisions rather than discoveries:
 - **Root bypasses it.** `dispatch_bypass_filter` is how a privileged origin dispatches, so a tech
   referendum can still move transparent value. The calls exist and the collective can enact them;
   the filter is what keeps them out of ordinary use.
-- **The scheduler bypasses it.** Its own extrinsics are disabled, and a call it enacts for governance
-  or for a reversible transfer runs privileged.
+- **The scheduler is not an exemption**, which is worth stating because it reads like one. Its own
+  extrinsics are disabled, and it dispatches a due task with the origin that task carries. Only
+  Root is exempt from `filter_call`, so a scheduled call under a signed or non-Root custom origin
+  meets this filter like any other. That is why a reversible transfer's own enactment is refused:
+  the pallet executes by dispatching `Balances::transfer_*` under the account's signed origin.
+  `runtime/tests/transactions/reversible_integration.rs` is the test.
 
 `pallet-wormhole` is gone from the runtime at M6, and with it the transparent
 exit and the transaction extension that scanned balance events into spendable
@@ -365,7 +403,7 @@ author derivation lives there and the runtime's one author seam calls it.
 | M3 | Private and public batch aggregators on the new PI layout | DONE 2026-09-11 (private batch 5 + 21N public inputs, ZK, N = 7; public batch forwards each inner verbatim under an aggregator address and refuses a repeated inner in circuit; see `docs/CIRCUIT.md` section 8) |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | DONE 2026-09-12 (chain forked as a git subtree at `chain/`; `pallet-shielded` settles private and public batches, `shield` is the only v0 entry, `pallet-zk-tree` stores raw `Hash256` leaves; N = 6, n = 53; see `docs/CIRCUIT.md` section 9 and `docs/OPS-DEV.md`) |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | DONE 2026-09-12 (`crates/qnero-wallet`, binary `qnero-wallet`: keygen, address, shield, sync, balance, send, status; hand-encoded extrinsics over JSON-RPC, storage layout and fee floor read from runtime metadata, Merkle paths rebuilt locally and the settled nullifier set paged whole so no request names a note as its own, notes in one JSON store beside the seed; memos padded to one size, at a pad chosen so the padded pair stays a fee bucket below a pair padded to `MaxCiphertextBytes`, and the payment's output slot drawn per spend, so the chain publishes neither a memo length nor which of a settlement's two leaves is the sender's change; one checkpoint-hash walk decides both whether a node is on the wallet's chain and whether it has reached everything the wallet has read, rewinding the leaf watermark to the newest checkpoint still canonical on a fork and refusing a node that is behind, with a leaf-count gate under it so the watermark never regresses outside the fork path, and spent status is derived from the settled set in both directions; see `docs/WALLET.md`, and `docs/BENCH.md` for the public batch at `n = 53`, which M4 left unmeasured); `sync --rescan` is the operator override on the node gates, runs add-only, and its known edges are docs/WALLET.md open issue 14) |
-| M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | DONE 2026-09-12 (every unit of value that enters circulation is a note: `pallet-shielded` mints one coinbase note per block from a required inherent, the author's share of settled fees rides in it, mining rewards to transparent accounts are off, and `BaseCallFilter` refuses every call that moves transparent value between accounts; `pallet-wormhole` is out of the runtime with its transaction extension, the runtime identifies as `qnero` at `spec_version` 100 and `transaction_version` 7, and the wallet finds its coinbase notes from a miner key the node is configured with; see section 7, `docs/CIRCUIT.md` section 10, `docs/WALLET.md` and `docs/OPS-DEV.md`) |
+| M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | DONE 2026-09-12 (every unit of value that enters circulation is a note: `pallet-shielded` mints one coinbase note per block from a required inherent, the author's share of settled fees rides in it, mining rewards to transparent accounts are off, and `BaseCallFilter` refuses every call that moves transparent value between accounts; `pallet-wormhole` is out of the runtime with its transaction extension, the runtime identifies as `qnero` at `spec_version` 100 and `transaction_version` 7, and the wallet finds its coinbase notes from a miner key the node is configured with; see section 7, `docs/CIRCUIT.md` section 10, `docs/WALLET.md` and `docs/OPS-DEV.md`. The review pass that closed it changed five things: the header's author item became per block so no coinbase leaf carries a mining identity, `set_high_security` joined the refused list and `shield` and `burn` joined the high-security whitelist so no account can be frozen by enrolling, `Vesting::claim` stays dispatchable so the genesis allocation is deliverable and no preset endows a keyless account, the coinbase inherent refuses the encrypted payload nothing builds, and a block with no emission still mints the author fee the pool already holds) |
 
 About 10 to 12 weeks to a private testnet. The measured risk to retire first
 is wallet-side proving time and memory for a 2-in/2-out leaf plus a
@@ -459,8 +497,10 @@ Concrete "beat it" targets for the first testnet:
 One line: Monero's principles, rebuilt without elliptic curves.
 
 Pillars, in this order:
-1. Private by default. There is no transparent pool. Every output is a
-   sealed note, every spend is a proof.
+1. Private by default. No call moves value between transparent accounts; every
+   output is a sealed note and every spend is a proof. The two public edges are
+   the entry and the mint: `shield` names its payer and amount, and a coinbase
+   publishes its value and its block with the recipient hidden.
 2. Proof of work. No stake, no validators, no foundation keys in consensus.
 3. Post-quantum from genesis. Hash-based proofs, lattice signatures and
    encapsulation, nothing for Shor to break.

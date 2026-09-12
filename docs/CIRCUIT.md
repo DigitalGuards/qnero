@@ -296,10 +296,14 @@ runtime: every existing entry would fail to decode as `[u8; 32]`, and
 fold would silently build a tree of empty hashes and publish a root that
 disagrees with every root already in the chain's headers. Carrying v0 state
 across needs a `MigrateV0ToV1` that rehashes each stored `ZkLeaf` through
-`tree::hash_leaf`, or that refuses the upgrade outright. The fork also still
-identifies as `quantus-runtime` at `spec_version` 152, which is an open issue
-in `docs/OPS-DEV.md`: two runtimes with different metadata and an incompatible
-storage layout currently answer the same version triple.
+`tree::hash_leaf`, or that refuses the upgrade outright.
+
+The identity half of that problem is closed. M6 renamed the runtime: it is
+`qnero` / `qnero-node` at `spec_version` 100 and `transaction_version` 7, so
+the two runtimes no longer answer the same version triple, and the `spec_name`
+change is itself what makes a `set_code` from a `quantus-runtime` chain
+impossible. For a storage layout that cannot be migrated in place that is the
+intended outcome rather than a limitation.
 
 The original list follows.
 
@@ -1666,9 +1670,17 @@ share of the fees settled so far, which the mint folds into the note's value and
 which only carries into the next block when a block mints no note at all.
 
 The event is `CoinbaseMinted { block_number, leaf_index, inner, value,
-ciphertext }`. It publishes `inner`, which the storage does not, so a wallet
+has_ciphertext }`. It publishes `inner`, which the storage does not, so a wallet
 that watches events can check a note without rebuilding the commitment from the
-leaf.
+leaf. The payload is a flag rather than the bytes: the bytes are already in
+`Ciphertexts` under the leaf index, and republishing them would put every
+author's payload in two places forever. Under v1 the flag is false on every
+block, because the inherent refuses a non-empty payload (section 10.4).
+
+No event and no storage item names the block's author. The header's
+`PreRuntime` item, which the runtime hashes into the account it calls the
+author, is `H(cvk, parent_hash)` and changes every block, so nothing groups the
+coinbase leaves one miner produced.
 
 ### 10.2 The two rules the note is built from
 
@@ -1703,9 +1715,9 @@ it, with the address, can pick that miner's coinbase notes out of the tree. It
 cannot spend them, which needs `ask`, and it says nothing about any other note.
 
 What it does not cover: a coinbase paid to an address whose `cvk` the author
-does not hold. The inherent still accepts an encrypted payload and the wallet
-still reads one (`qnero_notes::try_receive_coinbase`), and nothing in the node
-produces one today.
+does not hold. The wallet reads an encrypted payload
+(`qnero_notes::try_receive_coinbase`), nothing produces one, and the inherent
+refuses one until something does and its bytes are priced (section 10.3).
 
 ### 10.3 What the chain checks
 
@@ -1718,6 +1730,14 @@ produces one today.
 - The block has exactly one coinbase. A second inherent fails, and a mandatory dispatch that fails
   takes the block.
 - A block with no coinbase inherent at all is refused on import, because the inherent is required.
+- The ciphertext field is empty. Nothing builds an encrypted coinbase payload yet, an inherent pays
+  no fee, and a mandatory dispatch does not compete for block weight, so an accepted payload would
+  be the one place on the chain where permanent state is free. The settlement path charges
+  `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)` for the same `Ciphertexts` map, and an
+  author writing `MaxCiphertextBytes` of anything on every block it won would pay nothing for bytes
+  every full node keeps forever. A non-empty payload would also mark its own leaf, since a derived
+  coinbase publishes none. When the third-party path lands (section 10.6), the field's bytes get
+  priced against the author's own credit and the refusal is lifted.
 
 ### 10.4 What the chain does not check
 
@@ -1767,8 +1787,10 @@ in the pool, as a note. Nothing is minted into an account anywhere in this path.
   the only symptom is a wallet whose balance does not grow. The node's own smoke path is the check:
   build a payload, and have the wallet find it. `qnero-wallet sync` reporting
   `coinbase_received` below `coinbase_leaves` on a chain you are the only miner of is the signal.
-- **A coinbase for a third party has no builder.** The encrypted payload path is implemented on both
-  sides and nothing produces one; `docs/WALLET.md` open issue 16.
+- **A coinbase for a third party has no builder.** The wallet reads an encrypted payload and
+  nothing produces one, so the inherent refuses a non-empty ciphertext (section 10.3). Lifting the
+  refusal means pricing the bytes the way a settling slot's are priced, against the author's own
+  credit, in the same change that builds one; `docs/WALLET.md` open issue 16.
 - **The author is not bound to the payload.** Any block author can put any `inner` in its own block,
   which is correct, and nothing stops a node operator from paying its reward to an address it does
   not control. That is a configuration error rather than an attack: it costs the operator its own
@@ -1777,3 +1799,31 @@ in the pool, as a note. Nothing is minted into an account anywhere in this path.
   lives there between the settlement and the block's own `on_finalize`. A chain that stops between
   the two leaves it in state, counted by `ShieldedSupply` and backed by nothing that will ever mint
   it. It is at most one block's fees.
+
+### 10.7 What a v1 block reveals
+
+The rest of section 10 is about what the coinbase hides. This is the other
+half, in one place, because a reader deciding what Qnero is has to be able to
+find it.
+
+| Published | Where | What it ties together |
+|---|---|---|
+| A shield's payer, its value and the leaf it created | `Event::Shielded { who, value, commitment, leaf_index, entry_index, ciphertext }` | the account that paid, the exact amount, and the note it became |
+| A coinbase note's value and its block | `Shielded::CoinbaseValues`, `Shielded::LeafBlocks` | how much was minted, and when |
+| Every leaf's commitment, and the tree root in each header | `ZkTree::Leaves`, the header | the shape of the tree and its growth per block |
+| Every settled nullifier | `Shielded::UsedNullifiers` | that some note was spent, never which one |
+| Each settlement's slot count and fee | `Event::BatchSettled`, `Event::SlotSettled` | how many leaf slots a submission settled and what it paid |
+
+The entry is the sharp edge. `shield` is a signed extrinsic, so the payer's
+account, the amount and the leaf index are all on chain together, and value
+that enters the pool that way is linked to the account it came from at the
+moment it enters. What is not linked is anything after: the note's spends are
+proofs, and the commitment a shield publishes is the last time that value has a
+name. A wallet that wants the entry itself unlinked has to receive rather than
+shield, which under v1 means being paid from the pool.
+
+A coinbase is the opposite shape. Its value and block are public, and its
+recipient is inside an `inner` the chain cannot open. Nothing beside it names
+the miner: the header's author item changes every block (section 10.1), the
+events carry amounts and no accounts, and `pallet-mining-rewards` reads the
+seam only to ask whether a block has an author at all.

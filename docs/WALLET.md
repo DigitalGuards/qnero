@@ -256,7 +256,12 @@ rebuilt commitment is the leaf, the note is this wallet's and it is stored as
 spendable with origin `coinbase`. If it is not, and the leaf does carry a
 ciphertext, the wallet decrypts that instead and rebuilds the note against the
 chain's value, which is the shape a coinbase paid to an address whose coinbase
-viewing key the author does not hold takes. Either way the commitment check is
+viewing key the author does not hold takes. No leaf carries one today: the
+inherent refuses a non-empty payload while nothing builds one and its bytes are
+priced (`docs/CIRCUIT.md` section 10.3), so this branch is the reader half of a
+path whose writer half is still open issue 16. The wallet keeps it because the
+refusal is one `ensure!` and the reader is what makes lifting it a node change
+alone. Either way the commitment check is
 what decides: the value inside a payload is ignored, because a coinbase note's
 amount is the one field the chain has already decided, and an author cannot
 write a number into someone's balance by publishing one. `docs/CIRCUIT.md`
@@ -1154,9 +1159,13 @@ are cited at each site.
     the seed: it cannot spend, and what it reveals is which coinbase notes
     belong to this wallet.
 16. **A coinbase paid to someone else needs a tool that does not exist.** The
-    pallet accepts an encrypted payload and the wallet reads one
-    (`try_receive_coinbase`), so a miner can pay its reward to an address whose
-    coinbase viewing key it does not hold. Nothing builds that payload: the
-    node cannot link an ML-KEM implementation (`docs/OPS-DEV.md`), so the
-    builder would have to be a separate process the node calls per proposal.
-    Until then a node pays the wallet whose miner key it was given.
+    wallet reads an encrypted payload (`try_receive_coinbase`) and nothing
+    builds one: the node cannot link an ML-KEM implementation
+    (`docs/OPS-DEV.md`), so the builder would have to be a separate process the
+    node calls per proposal. The pallet refuses a non-empty payload for as long
+    as that is true, because an inherent pays no fee and a mandatory dispatch
+    does not compete for block weight, so the field would otherwise be free
+    permanent state and a mark on the leaf carrying it. Lifting the refusal
+    means pricing those bytes against the author's own credit in the same
+    change that builds one. Until then a node pays the wallet whose miner key
+    it was given.

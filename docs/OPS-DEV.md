@@ -142,10 +142,22 @@ Two properties of that string:
 - **It is not an address.** Its human-readable part is `qnm` rather than `qn`, so pasting one where
   the other belongs fails on the checksum rather than halfway through a decode.
 
-`--rewards-inner-hash` stays, and stays required of an authority: it is the
-QPoW inner hash the block's author digest carries, which is what the runtime
-derives the author account from. The two are independent. One says who authored
-the block and the other says which note the block's reward becomes.
+`--rewards-inner-hash` stays, and stays required of an authority, but it is no
+longer a payout address: under v1 no account is paid. It is the fallback author
+label for a node with no miner key, which cannot author a valid block anyway.
+The two flags are independent and only one of them decides where value goes.
+
+The startup log says which is which, and it is worth reading once:
+
+```
+⛏️ Consensus author fallback, paid nothing: qz...
+⛏️ Coinbase notes are minted for miner key qnm1abcdefgh…wxyz0123
+```
+
+The second line is the one to check against what `qnero-wallet miner-address`
+printed, both ends of the string. A stale or mistyped miner key mines correct
+blocks into notes the operator's wallet cannot open, block after block, and the
+only other symptom is a balance that never grows.
 
 ### The block-author seam
 
@@ -155,6 +167,19 @@ implements `frame_support::traits::FindAuthor<AccountId>`. It takes the first
 `PreRuntime` digest item under `POW_ENGINE_ID`, requires exactly 32 bytes, and
 derives the wormhole address from it (`qp_wormhole::derive_wormhole_address`).
 
+**What those 32 bytes are.** Not the operator's identity. An authoring node
+publishes `H(cvk, parent_hash)` there, computed by
+`qnero_note_core::MinerKey::author_label` and handed to the consensus client as
+`sc_consensus_qpow::AuthorLabel`, so the item changes every block. A constant
+item would label every block one operator won, and `Shielded::CoinbaseValues`
+publishes each coinbase note's value while `Shielded::LeafBlocks` dates it, so
+an observer could partition the tree by miner and read each miner's income
+block by block. The label must be four canonical Goldilocks limbs, which a
+Poseidon digest always is: the runtime treats an item it cannot derive an
+account from as a block with no author, and that fails the coinbase inherent,
+which fails the block. A new engine supplies its own label and owes the same two
+properties, per block and always canonical.
+
 Two pallets read it and nothing else in the runtime touches the proof of work:
 
 - `pallet-mining-rewards` asks whether the block has an author at all. A block without one retains
@@ -162,8 +187,10 @@ Two pallets read it and nothing else in the runtime touches the proof of work:
 - `pallet-shielded` asks the same question at the coinbase inherent. A block with no author has
   nobody the coinbase belongs to, and the inherent fails, which fails the block.
 
-Neither asks who, beyond the event label. The coinbase note's recipient is the
-miner key the author's own node holds, which the chain never sees.
+Neither asks who. No event carries the author either: the coinbase note's
+recipient is the miner key the author's own node holds, which the chain never
+sees, and an account published beside every block's credit would be a mining
+identity attached to every coinbase note.
 
 **This is the seam a later engine swap goes through.** `docs/DESIGN.md` section
 10 keeps RandomX open so Monero rigs can mine Qnero, and the evaluation is
@@ -2393,3 +2420,162 @@ the settling block's coinbase 45 against 41 to 42 elsewhere, an author share of
 4, and `0x0001030005000000` from the dry run. Only the heights differ, because
 the second chain was younger. The node was stopped by pidfile afterwards and
 port 9944 confirmed closed.
+
+## The M6 fix pass: what the review found, 2026-09-12
+
+Six defects in the milestone above, three of them things a chain would have
+lived with for a long time before anyone noticed. Same workstation, same rules.
+
+### What changed
+
+- **The header stopped naming the miner.** Every block carried `--rewards-inner-hash` verbatim in
+  its `PreRuntime` item and `CoinbaseCredited` named the account derived from it, so beside
+  `Shielded::CoinbaseValues` and `Shielded::LeafBlocks` an observer could partition the tree by
+  miner and read each miner's income block by block. An authoring node now publishes
+  `H(cvk, parent_hash)` and the events carry amounts and no accounts. See "The block-author seam"
+  above.
+- **`set_high_security` is refused.** It was a one-way door into a feature whose every call v1
+  refuses: from the block it succeeded in, the account's whitelisted calls died at dispatch on the
+  filter and everything else died at validation on the whitelist, `shield` included. Its whole
+  balance was then unreachable, and the guardian could not sweep it either. `shield` and `burn`
+  joined the whitelist so an account enrolled before v1 keeps a way out.
+- **`Vesting::claim` is dispatchable again.** Every preset endows a keyless vesting pot against
+  genesis schedules, so refusing the claim stranded the whole genesis allocation inside
+  `total_issuance`, where the emission counts it as supply forever. The other half of that decision
+  is that no preset may endow an account that cannot sign: the dev preset's keyless wormhole test
+  address lost its endowment and its schedule with it.
+- **The coinbase inherent refuses an encrypted payload.** Nothing builds one, an inherent pays no
+  fee and a mandatory dispatch does not compete for block weight, so the field was the only place
+  on the chain where an author could buy permanent state for nothing.
+- **A block with no emission still mints.** The author's share of a settled fee only leaves
+  `PendingCoinbaseFee` through a mint, so a zero credit now reaches the pool anyway. Without that,
+  every settled fee's author share would strand from the moment emission rounds to zero.
+- **The filter's regression guard covers what the filter covers**: every enumerated pallet's call
+  list, both wrappers, and the runtime's own pallet list.
+
+### The run
+
+Fresh chain, fresh miner wallet, the binary built from the committed tree
+(`1.0.1-338baebdcfb`).
+
+```
+$ QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6fix2/miner.seed miner-address) \
+    nice -n 19 ./target/release/quantus-node --dev --tmp
+2026-09-12 19:46:13 Qnero Node
+2026-09-12 19:46:13 📋 Chain specification: Qnero DevNet
+2026-09-12 19:46:13 ⛏️ Coinbase notes are minted for miner key qnm1q9y0s6gq…wcagpvwl
+```
+
+**Every block's author item is its own.** This is the finding, checked against
+the chain the way the review checked it: before the fix, blocks 3, 7, 11 and 19
+carried byte-identical payloads.
+
+```
+#   1  PreRuntime 0x06706f775f80af052f0951e9648908324e4cf00a162416ee75b7ba51c3231c3d3bd7cdeae15c
+#   2  PreRuntime 0x06706f775f809dc216521bf58ef0125f5f3b12c0d611bd0a8d65dc523bb9959f66d711473724
+#   3  PreRuntime 0x06706f775f8081a6b951c0874d4b1877bf4f9f9670db1c13c18d7c6672008898ac2f41ae568d
+#   5  PreRuntime 0x06706f775f80ea7c1166a56a3a9693aa2203ebb82d27dfe0f2cdb81b38cef146a70641405379
+#   8  PreRuntime 0x06706f775f80f636f15e6ed2e7855b93e4ba148de24333f5c3fe2afc6f180d6ca56c29a37482
+#  26  PreRuntime 0x06706f775f80a34d6e5a164f226f6019fe34592def2ae542037359bc61e3b6f92e7e73a4d2ab
+#  27  PreRuntime 0x06706f775f803c5a81f78cc9a89b6d843f670c9e885c8941b2bf23a4f91232a6c644623a707b
+distinct author labels: 7 over 7 blocks
+```
+
+The miner is still paid, and the notes are still found:
+
+```
+$ qnero-wallet --file /tmp/qnero-m6fix2/miner.seed sync
+scanned leaves 0..26 at block 26
+received 26 note(s) worth 1074 quanta
+
+$ qnero-wallet --file /tmp/qnero-m6fix2/miner.seed status
+runtime           spec 100, transaction 7
+chain head        26
+tree leaves       26
+tree depth        3
+```
+
+The end-to-end, with two dry runs added for the two calls this pass decided:
+
+```
+$ QNERO_DEV_NODE=http://127.0.0.1:9944 QNERO_MINER_SEED=/tmp/qnero-m6fix2/miner.seed \
+    RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --release -p qnero-wallet \
+    --features parallel --test dev_node_e2e -- --nocapture
+
+sync: 7 leaves, 7 coinbase leaves, 7 of them this wallet's, 1364 quanta
+shield of 1000 quanta included at block 34 (505.13ms), leaf 33
+5 quanta to B at fee 8: included at block 43, change 29
+coinbase of block 43: 45 quanta against 41 to 42 elsewhere, author share 4
+system_dryRun of a transparent transfer: 0x0001030005000000
+system_dryRun of set_high_security: 0x0001030005000000
+system_dryRun of a vesting claim: 0x0001031602000000
+test the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused ... ok
+300 quanta to B: proved in 3.91s, 150908 proof bytes, included at block 46
+100 quanta back to A: proved in 2.99s, included at block 49
+test a_shield_a_payment_and_a_payment_back_settle_end_to_end ... ok
+
+test result: ok. 2 passed; 0 failed
+```
+
+The three dry runs are the whole decision, in encoded form:
+
+- `0x0001030005000000` is `Ok(Err(Module { index: 0, error: [5, 0, 0, 0] }))`: `frame_system` is
+  pallet 0 and `CallFiltered` is its sixth error. A transparent transfer gets it, and now so does
+  `set_high_security`.
+- `0x0001031602000000` is the same shape at index 22, `pallet-vesting`, error 2, `NothingToClaim`:
+  the dev chain's genesis schedules are inside their 90-day cliff. The call reached the pallet,
+  which is the point. A filtered claim would have been `0x0001030005000000` like the other two, and
+  the genesis allocation would be unreachable forever.
+
+Everything the milestone measured measured the same: fee 8, change 29, the
+settling block's coinbase 45 against 41 to 42 elsewhere, an author share of 4,
+and the proof still 150908 bytes.
+
+```
+$ kill $(cat node.pid), then wait for 9944 to close
+port 9944 closed after 1s
+node stopped
+```
+
+### Gates
+
+```
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   38 suites ok, 0 failed
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+
+# the chain workspace
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
+  -p pallet-shielded -p pallet-mining-rewards --release
+   74 + 31 passed, 0 failed
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p quantus-runtime --release
+   42 lib + 8 call_filter + 60 integration passed, 0 failed
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p quantus-runtime --all-targets
+   no warnings
+LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p quantus-node -p sc-consensus-qpow --all-targets
+   no warnings
+```
+
+### Timings
+
+| Step | Wall | Peak RSS |
+|---|---|---|
+| `cargo build -j 4 --release -p quantus-node`, the one rebuild this pass owes | 10:06 | 5.4 GB |
+| chain pallet tests | 27 s | |
+| runtime tests, all three targets | under 1 s | |
+| root workspace tests | 2:20 | |
+| the end-to-end, both tests, three proofs | 14.1 s | |
+
+**One formatting trap, for the next pass.** The chain subtree's `.rustfmt.toml`
+sets nightly-only options (`wrap_comments`, `comment_width`,
+`imports_granularity`). Running stable `rustfmt` there silently drops them and
+reformats whatever it touches under the defaults, which rewrote binary operators
+in two files nobody had edited. Use `rustfmt +nightly` on the files you touched,
+and check `git status` afterwards: rustfmt formats a module's children too, so
+one file's format can move three.
