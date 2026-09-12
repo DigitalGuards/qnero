@@ -468,7 +468,7 @@ mod tests {
 			);
 			assert_eq!(member_count(), floor);
 			assert!(pallet_ranked_collective::Members::<Runtime, ()>::contains_key(
-				&TestCommons::account_id(1)
+				TestCommons::account_id(1)
 			));
 
 			// With one member above the floor, removal is allowed again (member replacement

@@ -777,19 +777,21 @@ mod tests {
 		assert_eq!(GENESIS_VESTING_START_MS, 1_785_888_000_000); // 2026-08-05 UTC
 	}
 
+	/// Every one of these is decidable at compile time, so they are asserted
+	/// there: a const block fails the build rather than a test run.
 	#[test]
 	fn genesis_vesting_times_are_sane() {
 		assert_eq!(GENESIS_VESTING_START_MS % MILLIS_PER_DAY, 0, "start must be midnight UTC");
-		assert!(GENESIS_VESTING_START_MS > YEAR_2020_MS);
-		assert!(GENESIS_VESTING_START_MS < YEAR_2100_MS);
-		assert!(GENESIS_VESTING_START_MS <= GENESIS_VESTING_CLIFF_MS);
-		assert!(GENESIS_VESTING_CLIFF_MS <= GENESIS_VESTING_END_MS);
-		assert!(GENESIS_VESTING_START_MS < GENESIS_VESTING_END_MS);
+		const { assert!(GENESIS_VESTING_START_MS > YEAR_2020_MS) };
+		const { assert!(GENESIS_VESTING_START_MS < YEAR_2100_MS) };
+		const { assert!(GENESIS_VESTING_START_MS <= GENESIS_VESTING_CLIFF_MS) };
+		const { assert!(GENESIS_VESTING_CLIFF_MS <= GENESIS_VESTING_END_MS) };
+		const { assert!(GENESIS_VESTING_START_MS < GENESIS_VESTING_END_MS) };
 	}
 
-	/// Every shipped preset must build genesis storage, including the vesting pallet's
-	/// pot-balance assertions. Wormhole transfer proofs need no preset entry: they are
-	/// derived from genesis balances at block 1.
+	/// Every shipped preset must build genesis storage, including the vesting
+	/// pallet's pot-balance assertions. Nothing derives a transfer proof from a
+	/// genesis balance any more: v1 removed the exit those leaves fed.
 	#[test]
 	fn all_presets_build_genesis_storage() {
 		for id in preset_names() {

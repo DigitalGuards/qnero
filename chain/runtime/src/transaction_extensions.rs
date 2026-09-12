@@ -338,20 +338,26 @@ impl pallet_transaction_payment::OnChargeTransaction<Runtime> for HighSecurityFu
 	}
 }
 
-/// `WormholeProofRecorderExtension` lived here until M6.
-///
-/// It scanned a signed call's balance events and wrote a wormhole transfer leaf
-/// for every credit that landed on a keyless account, which is what made a
-/// transparent credit spendable through the ZK exit. Qnero v1 removed the exit
-/// with `pallet-wormhole` and removed the transfers with the call filter, so
-/// there is nothing left for it to scan: the block reward and the author's
-/// share of a settled fee are notes now, minted by `pallet-shielded` from the
-/// coinbase inherent, and `docs/DESIGN.md` section 7 lists what a signed call
-/// may still do. Dropping it from `TxExtension` changed the signed extrinsic
-/// encoding, which is what `transaction_version` 7 records.
+// `WormholeProofRecorderExtension` lived here until M6.
+//
+// It scanned a signed call's balance events and wrote a wormhole transfer leaf
+// for every credit that landed on a keyless account, which is what made a
+// transparent credit spendable through the ZK exit. Qnero v1 removed the exit
+// with `pallet-wormhole` and removed the transfers with the call filter, so
+// there is nothing left for it to scan: the block reward and the author's
+// share of a settled fee are notes now, minted by `pallet-shielded` from the
+// coinbase inherent, and `docs/DESIGN.md` section 7 lists what a signed call
+// may still do. Dropping it from `TxExtension` changed the signed extrinsic
+// encoding, which is what `transaction_version` 7 records.
 
 #[cfg(test)]
 mod tests {
+	// The crate denies these at the top of `lib.rs`, which is the right default
+	// for a runtime: a panic in a dispatch is a dead block. A test that cannot
+	// build its own genesis has nothing to assert, so the deny is lifted here
+	// and nowhere else.
+	#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 	use super::*;
 	use frame_support::{assert_ok, pallet_prelude::TransactionValidityError};
 	use pallet_transaction_payment::WeightInfo;
