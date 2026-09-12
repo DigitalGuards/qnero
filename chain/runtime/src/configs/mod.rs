@@ -168,8 +168,12 @@ impl qp_wormhole::TransferProofRecorder<AccountId, AssetId, Balance> for NoTrans
 /// stops `Balances::transfer_allow_death` and lets
 /// `Utility::batch_all([transfer_allow_death])` through is decoration.
 ///
-/// Three things it deliberately does not do:
+/// Four things it deliberately does not do:
 ///
+/// - It does not stop `Vesting::claim`. The pot is keyless, it is funded at genesis, and with
+///   `create_schedule` refused no schedule can appear after genesis, so a claim pays a beneficiary
+///   fixed at genesis an amount fixed at genesis. Refusing it would strand the whole genesis
+///   allocation in an account with no key. `docs/DESIGN.md` section 7.2 carries the decision.
 /// - It does not stop `Shielded::shield`, which is the only door into the pool. A shield burns the
 ///   caller's own balance, so it moves value out of the transparent layer rather than between
 ///   accounts, and blocking it would lock every genesis balance out of the chain's own pool with no
@@ -177,20 +181,69 @@ impl qp_wormhole::TransferProofRecorder<AccountId, AssetId, Balance> for NoTrans
 /// - It does not stop a fee. `ChargeTransactionPayment` is a transaction extension and never
 ///   reaches a `Contains` check, which is what lets a filtered runtime still charge for the calls
 ///   it allows.
-/// - It does not reach a privileged dispatch. Root, the scheduler and an enacted referendum all
-///   dispatch with `dispatch_bypass_filter`, by design in `frame_system`. A tech referendum can
-///   still move transparent value, and that is a governance decision rather than an oversight: the
-///   calls exist, the collective can enact them, and the filter is what keeps them out of ordinary
-///   use.
+/// - It does not reach a Root dispatch. `frame_system`'s `filter_call` exempts the Root origin and
+///   nothing else, so a tech referendum enacting a call under Root can still move transparent
+///   value, and that is a governance decision rather than an oversight: the calls exist, the
+///   collective can enact them, and the filter is what keeps them out of ordinary use. The
+///   scheduler is not an exemption. It dispatches a due task with the origin the task carries, and
+///   every origin but Root meets this filter, which is why a reversible transfer's own enactment is
+///   refused (`runtime/tests/transactions/reversible_integration.rs`).
 pub struct QneroCallFilter;
 
 impl frame_support::traits::Contains<RuntimeCall> for QneroCallFilter {
 	fn contains(call: &RuntimeCall) -> bool {
-		!moves_transparent_value(call)
+		!refused_under_v1(call)
 	}
 }
 
+/// Everything v1 refuses, wrappers included.
+///
+/// Two reasons a call is refused, and the recursion is here rather than in
+/// either of them so a wrapper carrying either one is caught: it moves
+/// transparent value between accounts, or it enrols an account in a feature
+/// whose every call v1 refuses.
+fn refused_under_v1(call: &RuntimeCall) -> bool {
+	match call {
+		// The wrappers. Both carry the inner call in the submitted extrinsic,
+		// so the recursion is over data that is right here.
+		RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) =>
+			calls.iter().any(refused_under_v1),
+		// `execute` is the one that dispatches, and the executor resubmits the
+		// stored call there, verified byte-equal, so the inner call is in the
+		// extrinsic. `propose` carries its call as opaque bytes and dispatches
+		// nothing, so there is nothing to decode and nothing to stop.
+		RuntimeCall::Multisig(pallet_multisig::Call::execute { call, .. }) =>
+			refused_under_v1(call),
+		_ => moves_transparent_value(call) || enrols_in_a_feature_v1_refuses(call),
+	}
+}
+
+/// A call that is not a transfer and that v1 still has to refuse, because it
+/// puts an account somewhere v1 gives it nothing to do.
+///
+/// `set_high_security` is the whole list. It is one way: the pallet has no
+/// call that undoes it and refuses a second one with
+/// `AccountAlreadyHighSecurity`. From the block it succeeds in, the account's
+/// every call goes through `HighSecurityConfig::is_whitelisted`, which is a
+/// reversible-transfers list, and v1 refuses every call on that list. The
+/// account would keep `shield` and `burn`, which
+/// [`HighSecurityConfig::is_whitelisted_leaf`] carries for the accounts
+/// already enrolled, and it would gain nothing else until a milestone gives
+/// the feature something to guard. Refusing the enrolment is what keeps the
+/// answer to "what can this account still do" from depending on a block
+/// number.
+fn enrols_in_a_feature_v1_refuses(call: &RuntimeCall) -> bool {
+	matches!(
+		call,
+		RuntimeCall::ReversibleTransfers(
+			pallet_reversible_transfers::Call::set_high_security { .. }
+		)
+	)
+}
+
 /// Whether a call moves transparent value between accounts.
+///
+/// Leaves only: [`refused_under_v1`] is where the wrappers are unwrapped.
 ///
 /// Enumerated rather than derived: a new pallet with a transfer call is not
 /// caught by anything here, and `a_new_balance_moving_call_is_matched_here`
@@ -215,27 +268,26 @@ fn moves_transparent_value(call: &RuntimeCall) -> bool {
 			pallet_reversible_transfers::Call::recover_funds { .. },
 		) => true,
 
-		// Vesting pays out of the pot into a beneficiary's account, and
-		// `create_schedule` funds the pot from the caller's. Both are
-		// transparent transfers; `count_transfers` leaves them out because the
-		// pallet records its own proofs, which is a different question.
+		// Vesting moves the pot around: `create_schedule` funds it from the
+		// treasury, `end_schedule` and `retarget_schedule` move a schedule's
+		// unpaid remainder. `count_transfers` leaves the pallet out because it
+		// records its own proofs, which is a different question.
+		//
+		// `claim` is deliberately absent, and `docs/DESIGN.md` section 7.2
+		// carries the decision. It is the genesis distribution channel rather
+		// than a transfer: every preset endows a keyless pot that cannot sign,
+		// against schedules written at genesis, and with `create_schedule`
+		// refused no new one can appear. A claim pays a beneficiary fixed at
+		// genesis an amount fixed at genesis, and that beneficiary can then
+		// only shield or burn it. Refusing it would strand the whole genesis
+		// allocation in an account with no key, permanently inside
+		// `total_issuance`, where the emission schedule counts it as supply
+		// forever.
 		RuntimeCall::Vesting(
-			pallet_vesting::Call::claim { .. } |
 			pallet_vesting::Call::create_schedule { .. } |
 			pallet_vesting::Call::end_schedule { .. } |
 			pallet_vesting::Call::retarget_schedule { .. },
 		) => true,
-
-		// The wrappers. Both carry the inner call in the submitted extrinsic,
-		// so the recursion is over data that is right here.
-		RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) =>
-			calls.iter().any(moves_transparent_value),
-		// `execute` is the one that dispatches, and the executor resubmits the
-		// stored call there, verified byte-equal, so the inner call is in the
-		// extrinsic. `propose` carries its call as opaque bytes and dispatches
-		// nothing, so there is nothing to decode and nothing to stop.
-		RuntimeCall::Multisig(pallet_multisig::Call::execute { call, .. }) =>
-			moves_transparent_value(call),
 
 		_ => false,
 	}
@@ -856,15 +908,22 @@ parameter_types! {
 /// - Multisig pallet: validates calls in `propose()` extrinsic
 /// - Transaction extensions: validates calls for high-security EOAs
 ///
-/// Whitelist includes only delayed, reversible operations:
+/// Whitelist: the delayed, reversible operations, plus the two calls that move
+/// the signer's own balance out of the transparent layer.
 /// - `schedule_transfer`: delayed native transfer; dest must be `MultiAddress::Id` so a stolen key
 ///   cannot pad `MultiAddress::Raw` and exfiltrate via the length fee
 /// - `cancel`: Cancel pending delayed transfer
 /// - `recover_funds`: Guardian-initiated recovery
+/// - `Shielded::shield` and `Balances::burn`: v1 refuses the three above at dispatch, so without
+///   these an enrolled account could put nothing at all in a block. Neither names another account.
 /// - `Utility::batch_all`: a flat, non-empty batch of at most [`MaxHighSecurityBatchLen`] leaf
 ///   calls, each of which must itself be whitelisted. Nested `batch_all` is rejected so a packed
 ///   wrapper cannot inflate the inclusion fee. The pallet still re-checks each child at dispatch so
 ///   a same-tx enrollment cannot smuggle a later drain.
+///
+/// v1 also refuses `set_high_security` itself ([`QneroCallFilter`]), so this
+/// list is what the accounts already enrolled keep rather than a feature a new
+/// account can opt into.
 ///
 /// `Vesting::claim` is not listed: it is permissionless, so a third party can
 /// claim on behalf of a high-security beneficiary. The HS signer does not need
@@ -888,10 +947,23 @@ parameter_types! {
 pub struct HighSecurityConfig;
 
 impl HighSecurityConfig {
-	/// Leaf whitelist: reversible-transfer calls only. `batch_all` is a wrapper
-	/// and is never a valid child, so nesting cannot pad fees.
+	/// Leaf whitelist: the reversible-transfer calls, plus the two ways an
+	/// account moves its own balance out of the transparent layer. `batch_all`
+	/// is a wrapper and is never a valid child, so nesting cannot pad fees.
 	/// `schedule_transfer` dest must be `MultiAddress::Id` so a stolen key
 	/// cannot pad `Raw` and inflate the length fee.
+	///
+	/// `Shielded::shield` and `Balances::burn` are on the list because v1
+	/// refuses every reversible-transfer call above
+	/// ([`QneroCallFilter`]), and this list is checked at validation, before
+	/// the filter is reached. Without them an account already enrolled in high
+	/// security could not put a single extrinsic in a block: the three
+	/// whitelisted calls die at dispatch on the filter, and everything else
+	/// dies at validation on this list. Both move the account's own balance
+	/// and neither can name another account, so a stolen key gains nothing it
+	/// did not already have from `schedule_transfer`. `shield`'s ciphertext is
+	/// variable length, which the [`MAX_HIGH_SECURITY_EXTRINSIC_LEN`] and
+	/// [`MAX_HIGH_SECURITY_INCLUSION_FEE`] caps already bound.
 	fn is_whitelisted_leaf(call: &RuntimeCall) -> bool {
 		match call {
 			RuntimeCall::ReversibleTransfers(
@@ -901,6 +973,8 @@ impl HighSecurityConfig {
 				pallet_reversible_transfers::Call::cancel { .. } |
 				pallet_reversible_transfers::Call::recover_funds { .. },
 			) => true,
+			RuntimeCall::Shielded(pallet_shielded::Call::shield { .. }) |
+			RuntimeCall::Balances(pallet_balances::Call::burn { .. }) => true,
 			_ => false,
 		}
 	}

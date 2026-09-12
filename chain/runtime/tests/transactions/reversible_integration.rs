@@ -9,14 +9,16 @@
 //! `Balances::transfer_*` with the account's own signed origin, which meets the
 //! same filter. `docs/DESIGN.md` section 7.2 is the policy.
 //!
-//! What is asserted here is exactly that, plus the one call that survives
-//! because it moves nothing. The pallet's own logic is covered by its 48 unit
-//! tests in `pallets/reversible-transfers/src/tests`, whose mock runs an
-//! unfiltered runtime, so nothing was lost with the flows above: what changed
-//! is which origins can reach them on this chain.
+//! What is asserted here is exactly that, including the enrolment call, which
+//! moves nothing and is refused anyway: it is one way, and an account that
+//! took it would be held to a whitelist whose every value-moving call this
+//! filter refuses. The pallet's own logic is covered by its 48 unit tests in
+//! `pallets/reversible-transfers/src/tests`, whose mock runs an unfiltered
+//! runtime, so nothing was lost with the flows above: what changed is which
+//! origins can reach them on this chain.
 
 use crate::common::TestCommons;
-use frame_support::{assert_ok, traits::Currency};
+use frame_support::traits::Currency;
 use quantus_runtime::{
 	Balances, ReversibleTransfers, Runtime, RuntimeCall, RuntimeOrigin, System, EXISTENTIAL_DEPOSIT,
 };
@@ -36,10 +38,16 @@ fn refusal(call: RuntimeCall, who: sp_core::crypto::AccountId32) -> DispatchErro
 		.error
 }
 
-/// Declaring an account high security moves no value, so it is still a call a
-/// user can make. It is also the whole of what the pallet can still do.
+/// Declaring an account high security moves no value and is refused anyway.
+///
+/// The call has no inverse: the pallet has nothing that clears the flag and
+/// refuses a second enrolment with `AccountAlreadyHighSecurity`. An account
+/// that got in would be held to `HighSecurityConfig`'s whitelist at
+/// validation, and this filter refuses every value-moving call on that
+/// whitelist at dispatch, so the enrolment is a door into a room with no
+/// exits. It is closed until a milestone gives the feature something to guard.
 #[test]
-fn high_security_can_still_be_declared() {
+fn enrolling_in_high_security_is_refused() {
 	TestCommons::new_test_ext().execute_with(|| {
 		System::set_block_number(1);
 		let _ = Balances::deposit_creating(&acc(1), 1_000 * EXISTENTIAL_DEPOSIT);
@@ -51,12 +59,43 @@ fn high_security_can_still_be_declared() {
 				guardian: acc(2),
 			},
 		);
-		assert_ok!(declare.dispatch(RuntimeOrigin::signed(acc(1))));
-		assert_eq!(
-			ReversibleTransfers::is_high_security(&acc(1)).map(|data| data.guardian),
-			Some(acc(2))
-		);
+		assert_eq!(refusal(declare, acc(1)), call_filtered());
+		assert!(ReversibleTransfers::is_high_security(&acc(1)).is_none());
 	});
+}
+
+/// An account enrolled before v1 can still move its own balance out of the
+/// transparent layer.
+///
+/// The whitelist runs at validation, before the filter, so an enrolled account
+/// can sign only what is on it. `shield` and `burn` are on it for that reason,
+/// and both are allowed here, so the balance of an account that enrolled while
+/// the feature worked is not frozen.
+#[test]
+fn an_enrolled_account_can_still_shield_and_burn() {
+	use frame_support::traits::Contains;
+	use qp_high_security::HighSecurityInspector;
+
+	for call in [
+		RuntimeCall::Shielded(pallet_shielded::Call::shield {
+			value: EXISTENTIAL_DEPOSIT,
+			inner: [0u8; 32],
+			ciphertext: Vec::new(),
+		}),
+		RuntimeCall::Balances(pallet_balances::Call::burn {
+			value: EXISTENTIAL_DEPOSIT,
+			keep_alive: true,
+		}),
+	] {
+		assert!(
+			quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
+			"{call:?} must pass the high-security whitelist at validation"
+		);
+		assert!(
+			quantus_runtime::configs::QneroCallFilter::contains(&call),
+			"{call:?} must pass the base call filter at dispatch"
+		);
+	}
 }
 
 /// Every path that moves value, refused at the door.

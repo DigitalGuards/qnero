@@ -122,7 +122,6 @@ fn the_reversible_vesting_and_scheduled_transfer_paths_are_refused() {
 			RuntimeCall::ReversibleTransfers(pallet_reversible_transfers::Call::recover_funds {
 				account: account(2),
 			}),
-			RuntimeCall::Vesting(pallet_vesting::Call::claim { schedule_id: 0 }),
 			RuntimeCall::Vesting(pallet_vesting::Call::create_schedule {
 				beneficiary: account(2),
 				start: 0,
@@ -139,6 +138,73 @@ fn the_reversible_vesting_and_scheduled_transfer_paths_are_refused() {
 			);
 		}
 	});
+}
+
+/// Enrolling in high security is a one-way door into a feature v1 refuses.
+///
+/// The pallet has no call that undoes `set_high_security` and refuses a second
+/// one with `AccountAlreadyHighSecurity`. Once an account is in, every call on
+/// `HighSecurityConfig`'s whitelist that moves value is refused at dispatch by
+/// this filter, and every call off that whitelist is refused at validation by
+/// `ReversibleTransactionExtension`, before it can reach a block at all. What
+/// the account keeps is `shield` and `burn`, which the whitelist carries for
+/// the accounts already enrolled. Refusing the enrolment is what keeps a new
+/// account out of that state until a milestone gives the feature something to
+/// guard.
+#[test]
+fn enrolling_in_high_security_is_refused() {
+	new_test_ext().execute_with(|| {
+		let enrol = RuntimeCall::ReversibleTransfers(
+			pallet_reversible_transfers::Call::set_high_security {
+				delay: qp_scheduler::BlockNumberOrTimestamp::BlockNumber(10),
+				guardian: account(2),
+			},
+		);
+		assert!(!QneroCallFilter::contains(&enrol));
+		assert_eq!(
+			enrol.clone().dispatch(RuntimeOrigin::signed(account(1))).unwrap_err().error,
+			DispatchError::from(frame_system::Error::<Runtime>::CallFiltered),
+		);
+		assert!(
+			!pallet_reversible_transfers::Pallet::<Runtime>::is_high_security_account(&account(1)),
+			"the enrolment must not have taken effect"
+		);
+
+		// And not through a wrapper either.
+		let wrapped = RuntimeCall::Utility(pallet_utility::Call::batch_all { calls: vec![enrol] });
+		assert!(!QneroCallFilter::contains(&wrapped));
+	});
+}
+
+/// An account that is already in high security can still reach the pool.
+///
+/// The whitelist is checked at validation, before the filter, so a high
+/// security account can only sign what is on it. `shield` and `burn` are on it
+/// for that reason: without them the accounts enrolled before v1, and the
+/// benchmark genesis one, could sign nothing at all and their balance would be
+/// frozen forever.
+#[test]
+fn a_high_security_account_can_still_shield_and_burn() {
+	use frame_support::traits::Contains as _;
+	use qp_high_security::HighSecurityInspector;
+
+	for call in [
+		RuntimeCall::Shielded(pallet_shielded::Call::shield {
+			value: UNIT,
+			inner: [0u8; 32],
+			ciphertext: Vec::new(),
+		}),
+		RuntimeCall::Balances(pallet_balances::Call::burn { value: UNIT, keep_alive: true }),
+	] {
+		assert!(
+			quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
+			"{call:?} must pass the high-security whitelist at validation"
+		);
+		assert!(
+			QneroCallFilter::contains(&call),
+			"{call:?} must also pass the base call filter at dispatch"
+		);
+	}
 }
 
 /// The pool's own door stays open, and so does everything a chain needs to run.
@@ -172,6 +238,12 @@ fn the_pool_entry_the_settlements_and_the_coinbase_are_allowed() {
 		RuntimeCall::Timestamp(pallet_timestamp::Call::set { now: 0 }),
 		RuntimeCall::System(frame_system::Call::remark { remark: Vec::new() }),
 		RuntimeCall::Balances(pallet_balances::Call::burn { value: UNIT, keep_alive: true }),
+		// The genesis distribution channel. The pot is keyless and funded only
+		// at genesis, `create_schedule` is refused so no new schedule can
+		// appear, and a claim pays a beneficiary fixed at genesis an amount
+		// fixed at genesis. Refusing it would strand every genesis allocation
+		// in an account with no key.
+		RuntimeCall::Vesting(pallet_vesting::Call::claim { schedule_id: 0 }),
 	];
 	for call in allowed {
 		assert!(QneroCallFilter::contains(&call), "{call:?} must stay dispatchable");
@@ -223,5 +295,83 @@ fn a_new_balance_moving_call_is_matched_here() {
 		["submit_private_batch", "submit_public_batch", "shield", "coinbase"],
 		"the shielded pool grew or lost a call; every one of them must stay \
 		 dispatchable, and a new inherent must be claimed by `is_inherent`"
+	);
+
+	// The three pallets the filter enumerates beside `Balances`. Two of them
+	// move value through `T::Currency` directly rather than by dispatching a
+	// `Balances` call, so the enumeration here is the only thing standing
+	// between a new payout call and a transparent transfer on a v1 chain.
+	assert_eq!(
+		call_names::<pallet_vesting::Call<Runtime>>(),
+		["claim", "create_schedule", "end_schedule", "retarget_schedule"],
+		"pallet-vesting grew or lost a call; decide whether it moves transparent \
+		 value and update the filter and docs/DESIGN.md section 7"
+	);
+	assert_eq!(
+		call_names::<pallet_reversible_transfers::Call<Runtime>>(),
+		[
+			"set_high_security",
+			"cancel",
+			"execute_transfer",
+			"schedule_transfer",
+			"schedule_transfer_with_delay",
+			"recover_funds",
+		],
+		"pallet-reversible-transfers grew or lost a call; decide whether it moves \
+		 transparent value and update the filter and docs/DESIGN.md section 7"
+	);
+	assert_eq!(
+		call_names::<pallet_treasury::Call<Runtime>>(),
+		["set_treasury_account"],
+		"pallet-treasury grew or lost a call; decide whether it moves transparent \
+		 value and update the filter and docs/DESIGN.md section 7"
+	);
+
+	// The wrappers. A wrapper the filter does not unwrap is a way around every
+	// arm above, so a new one has to be added to `refused_under_v1`.
+	assert_eq!(
+		call_names::<pallet_utility::Call<Runtime>>(),
+		["batch_all"],
+		"pallet-utility grew a wrapper; `refused_under_v1` must unwrap it or the \
+		 filter is decoration"
+	);
+	assert_eq!(
+		call_names::<pallet_multisig::Call<Runtime>>(),
+		[
+			"create_multisig",
+			"propose",
+			"approve",
+			"cancel",
+			"remove_expired",
+			"claim_deposits",
+			"execute",
+		],
+		"pallet-multisig grew a call; `execute` is the one that dispatches an inner \
+		 call and `refused_under_v1` must unwrap every one that does"
+	);
+
+	// The runtime's own pallet list. A pallet added to `construct_runtime` with
+	// a transfer dispatchable is caught by nothing above, so the list itself is
+	// the tripwire. Pallets with no dispatchables of their own are absent:
+	// `QPoW`, `MiningRewards`, `ZkTree`, `TransactionPayment` and `Origins`
+	// have no calls, and `Scheduler` is `#[runtime::disable_call]`.
+	assert_eq!(
+		call_names::<RuntimeCall>(),
+		[
+			"System",
+			"Timestamp",
+			"Balances",
+			"Preimage",
+			"Utility",
+			"ReversibleTransfers",
+			"TechCollective",
+			"TechReferenda",
+			"TreasuryPallet",
+			"Multisig",
+			"Vesting",
+			"Shielded",
+		],
+		"the runtime gained or lost a pallet with calls; decide whether any of them \
+		 moves transparent value and update the filter and docs/DESIGN.md section 7"
 	);
 }

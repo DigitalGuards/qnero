@@ -45,20 +45,20 @@ mod tests {
 		ext
 	}
 
-	/// A beneficiary's own claim, dispatched past v1's call filter.
+	/// A beneficiary's own claim, dispatched the way a user makes it: a signed
+	/// origin through the v1 call filter.
 	///
-	/// `Vesting::claim` is one of the calls v1 refuses: it moves transparent
-	/// value from the pot to an account. What these tests cover is the
-	/// pallet's arithmetic underneath, so they dispatch the way a privileged
-	/// origin does. `a_signed_claim_is_refused_by_the_v1_call_filter` below is
-	/// the test for the refusal itself.
+	/// `Vesting::claim` is the one vesting call v1 leaves dispatchable. The pot
+	/// is keyless and funded at genesis, `create_schedule` is refused so no new
+	/// schedule can appear, and a claim pays a beneficiary fixed at genesis an
+	/// amount fixed at genesis. Refusing it would strand every genesis
+	/// allocation in an account with no key.
 	fn claim_as(who: AccountId, schedule_id: u64) -> sp_runtime::DispatchResult {
-		crate::common::dispatch_unfiltered(
-			RuntimeOrigin::signed(who),
-			RuntimeCall::Vesting(pallet_vesting::Call::claim { schedule_id }),
-		)
-		.map(|_| ())
-		.map_err(|error| error.error)
+		use sp_runtime::traits::Dispatchable;
+		RuntimeCall::Vesting(pallet_vesting::Call::claim { schedule_id })
+			.dispatch(RuntimeOrigin::signed(who))
+			.map(|_| ())
+			.map_err(|error| error.error)
 	}
 
 	fn set_time(now_ms: u64) {
@@ -76,14 +76,16 @@ mod tests {
 	}
 
 	/// The treasury multisig path into vesting is closed under v1, at both
-	/// layers, and so is a beneficiary's own claim.
+	/// layers. A beneficiary's own claim is not.
 	///
 	/// This replaces `treasury_multisig_creates_and_ends_schedules`, which
 	/// covered the flow when it worked. The inner call of a
 	/// `Multisig::execute` is dispatched with the multisig's own signed origin,
-	/// so it meets the filter on the way in whatever the outer call did, and a
-	/// vesting grant moves transparent value. Root remains the way to create
-	/// one, which `non_treasury_origins_are_rejected` still covers.
+	/// so it meets the filter on the way in whatever the outer call did, and
+	/// creating a vesting grant moves transparent value into the pot. Root
+	/// remains the way to create one, which `non_treasury_origins_are_rejected`
+	/// still covers. `claim` stays dispatchable because it is the only way the
+	/// keyless pot ever pays anybody.
 	#[test]
 	fn the_treasury_multisig_path_into_vesting_is_refused() {
 		use sp_runtime::traits::Dispatchable;
@@ -116,14 +118,17 @@ mod tests {
 					.error,
 				DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
 			);
-			// And a beneficiary's own claim, which is the call a user makes.
+			// A beneficiary's own claim is the call a user makes, and it goes
+			// through. There is no schedule 0 here, so the pallet's own error
+			// is what comes back, which is the proof that the filter was not
+			// what stopped it.
 			let claim = RuntimeCall::Vesting(pallet_vesting::Call::claim { schedule_id: 0 });
 			assert_eq!(
 				claim
 					.dispatch(RuntimeOrigin::signed(account(7)))
-					.expect_err("a claim moves transparent value")
+					.expect_err("there is no schedule to claim")
 					.error,
-				DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
+				DispatchError::from(pallet_vesting::Error::<Runtime>::NoSchedule)
 			);
 		});
 	}

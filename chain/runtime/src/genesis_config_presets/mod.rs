@@ -44,29 +44,12 @@ use sp_runtime::traits::IdentifyAccount;
 /// authorize Root, so [`seed_tech_collective`] rejects it (fail-early).
 pub const MIN_TECH_COLLECTIVE_MEMBERS: usize = 5;
 
-/// Well-known test secret for testing ZK proof spending.
-/// This is a simple pattern (`[42u8; 32]`) for easy testing.
-/// Use this secret with `quantus wormhole prove` to spend from the test address.
-pub const TEST_WORMHOLE_SECRET: [u8; 32] = [42u8; 32];
-
-/// Pre-computed address for TEST_WORMHOLE_SECRET.
-///
-/// This address was computed using: `quantus wormhole address --secret 0x2a2a...2a`
-/// The derivation is: H(H("wormhole" || secret)) using the circuit's Poseidon2Hash::hash_no_pad.
-/// SS58: qzokTZkdWXxMgSXyF86ECHxG8o8yRX5ibrX2Uw8YmqkHRdj1V
-///
-/// IMPORTANT: If you change TEST_WORMHOLE_SECRET, you must recompute this address using
-/// the quantus CLI to ensure it matches what the ZK circuit expects.
-const TEST_WORMHOLE_ADDRESS: [u8; 32] = [
-	0xbe, 0x13, 0xa1, 0x89, 0xf9, 0x9c, 0x44, 0xa9, 0x59, 0xe2, 0x66, 0x94, 0xff, 0xe5, 0xe4, 0xba,
-	0x22, 0x30, 0x92, 0xf3, 0xed, 0xbe, 0x82, 0x59, 0xc1, 0xd4, 0x5a, 0xd0, 0x8e, 0xdb, 0x40, 0x3d,
-];
-
-/// Get the test address derived from TEST_WORMHOLE_SECRET.
-/// This address is endowed at genesis in the dev profile for testing ZK spending.
-fn test_wormhole_account() -> AccountId {
-	AccountId::new(TEST_WORMHOLE_ADDRESS)
-}
+// The dev preset used to endow a keyless wormhole test address so a developer
+// could exercise the ZK spend path against it. v1 removed `pallet-wormhole`
+// and with it every way an account that cannot sign reaches its balance, so
+// the endowment became 100_000 UNIT of genesis supply nobody can shield,
+// burn or spend, counted against `MaxSupply` forever. The secret and the
+// address went with it.
 
 /// Milliseconds since the unix epoch, the time basis of vesting schedules.
 type VestingMoment = u64;
@@ -223,11 +206,12 @@ fn planck_tech_collective_seed() -> Vec<AccountId> {
 
 /// Returns the genesis config populated with given parameters. Treasury is per-profile.
 ///
-/// All endowed addresses automatically get transfer proofs recorded at block 1 (the
-/// wormhole pallet derives them from the genesis balances — there is no separate
-/// endowment list), enabling them to spend their funds via ZK proofs. The chain doesn't
-/// distinguish between "wormhole addresses" and regular addresses - any address can
-/// spend via ZK proofs if they know the corresponding secret.
+/// Every genesis balance is transparent and stays that way until its holder
+/// shields it. v1 removed `pallet-wormhole`, so nothing derives a spendable
+/// leaf from a genesis balance any more and an account that cannot sign cannot
+/// reach the pool. That is why an endowment goes to an account with a key, and
+/// why the vesting pot holds only what its schedules pay out:
+/// `every_genesis_planck_is_reachable_under_the_call_filter` is the test.
 fn genesis_template(
 	endowed_accounts: Vec<AccountId>,
 	treasury: TreasuryGenesis,
@@ -247,9 +231,10 @@ fn genesis_template(
 
 	// The pot must hold exactly the sum of all schedule totals plus its existential-
 	// deposit buffer (asserted by the vesting pallet's genesis build). It is endowed
-	// with at least the ED even when no schedules exist, so `create_schedule` works on
-	// every chain from day one. Wormhole transfer proofs at block 1 derive from these
-	// balances (including the pot); the pot is keyless so its leaf is unspendable.
+	// with at least the ED even when no schedules exist, so a later milestone can
+	// create schedules. The pot cannot sign, so `Vesting::claim` is the only way its
+	// balance moves, which is why v1's call filter leaves that one call dispatchable.
+	// The ED itself never moves: it is the pot's own floor, one MILLI_UNIT.
 	let mut vesting_total: u128 = 0;
 	for (_, _, _, _, total) in &vesting_schedules {
 		vesting_total = vesting_total
@@ -325,21 +310,6 @@ fn testnet_vesting_schedules() -> Vec<VestingScheduleTuple> {
 	]
 }
 
-/// Dev additionally vests the keyless test wormhole address: it can never sign, so its
-/// grants are claimable only via the permissionless third-party `claim` — exercising the
-/// exact path wormhole beneficiaries rely on.
-fn development_vesting_schedules() -> Vec<VestingScheduleTuple> {
-	let mut schedules = testnet_vesting_schedules();
-	schedules.push((
-		test_wormhole_account(),
-		GENESIS_VESTING_START_MS,
-		GENESIS_VESTING_CLIFF_MS,
-		GENESIS_VESTING_END_MS,
-		GENESIS_VESTING_TOTAL,
-	));
-	schedules
-}
-
 fn log_vesting_schedules(preset: &str, schedules: &[VestingScheduleTuple]) {
 	let ss58 = ss58_version();
 	let pot = pallet_vesting::Pallet::<crate::Runtime>::pot_account_id();
@@ -382,9 +352,7 @@ fn dev_initial_difficulty() -> U512 {
 
 /// Return the development genesis config.
 pub fn development_config_genesis() -> Value {
-	let mut endowed_accounts = dilithium_default_accounts();
-	let test_account = test_wormhole_account();
-	endowed_accounts.push(test_account.clone());
+	let endowed_accounts = dilithium_default_accounts();
 	let treasury_account = development_treasury_account();
 	let tech_collective = development_tech_collective_seed();
 	log_genesis_accounts(
@@ -394,8 +362,11 @@ pub fn development_config_genesis() -> Value {
 		&dilithium_default_accounts(),
 		&tech_collective,
 	);
-	log::info!("[dev] 🕳️  Test ZK: {:?}", test_account.to_ss58check_with_version(ss58_version()));
-	let vesting_schedules = development_vesting_schedules();
+	// The same table `heisenberg` ships. Dev used to add a fourth schedule for
+	// the keyless test wormhole address, whose only spend path was the block-1
+	// wormhole leaf; v1 removed that, so a payout to an account that cannot
+	// sign is value nobody can shield and nobody can move.
+	let vesting_schedules = testnet_vesting_schedules();
 	log_vesting_schedules("dev", &vesting_schedules);
 
 	#[cfg(feature = "runtime-benchmarks")]
@@ -822,6 +793,90 @@ mod tests {
 		}
 	}
 
+	/// Every planck a preset endows can still reach the pool under v1's call
+	/// filter.
+	///
+	/// v1 refuses every transfer between accounts and removed the wormhole exit
+	/// that used to give a keyless account a spend path, so a genesis balance is
+	/// reachable only if its holder can sign a `shield`, and a vesting
+	/// allocation is deliverable only if `Vesting::claim` stays dispatchable and
+	/// pays an account that can sign. A preset that endows a keyless account, or
+	/// vests to one, mints supply that nobody can ever move and that the
+	/// emission schedule counts against `MaxSupply` forever, which is what the
+	/// dev preset did with its wormhole test address until v1.
+	///
+	/// The two keyless accounts a preset can name are the vesting pot and the
+	/// treasury. The pot is allowed to hold exactly the schedule table plus its
+	/// own existential deposit, and nothing else, because `claim` is the one
+	/// call that moves it.
+	#[test]
+	fn every_genesis_planck_is_reachable_under_the_call_filter() {
+		use crate::configs::QneroCallFilter;
+		use frame_support::traits::Contains;
+
+		assert!(
+			QneroCallFilter::contains(&crate::RuntimeCall::Vesting(pallet_vesting::Call::claim {
+				schedule_id: 0
+			})),
+			"a genesis vesting allocation is deliverable only while `claim` is dispatchable"
+		);
+		assert!(
+			QneroCallFilter::contains(&crate::RuntimeCall::Shielded(
+				pallet_shielded::Call::shield {
+					value: crate::UNIT,
+					inner: [0u8; 32],
+					ciphertext: alloc::vec::Vec::new(),
+				}
+			)),
+			"a genesis balance reaches the pool through `shield` and nowhere else"
+		);
+
+		let pot = pallet_vesting::Pallet::<crate::Runtime>::pot_account_id();
+		for id in preset_names() {
+			let raw = get_preset(&id).expect("listed preset must resolve");
+			let (json, _) = prepare_genesis_build_input(raw).expect("well-formed");
+			let config: RuntimeGenesisConfig = serde_json::from_slice(&json).expect("deserializes");
+			let schedule_sum: u128 =
+				config.vesting.schedules.iter().map(|(_, _, _, _, total)| *total).sum();
+
+			for (who, amount) in &config.balances.balances {
+				if *who == pot {
+					assert_eq!(
+						*amount,
+						schedule_sum + EXISTENTIAL_DEPOSIT,
+						"preset {id:?}: the keyless vesting pot may hold only its schedule \
+						 table and its own existential deposit"
+					);
+					continue;
+				}
+				assert!(*amount > 0, "preset {id:?}: {who:?} is endowed with nothing");
+			}
+
+			for (who, _, _, _, _) in &config.vesting.schedules {
+				assert_ne!(*who, pot, "preset {id:?}: the pot cannot vest to itself");
+			}
+		}
+
+		// The dev preset, pinned account by account: it is the one that shipped
+		// an endowment to an address with no key, and a list is what catches
+		// the next one.
+		let raw = get_preset(&PresetId::from(sp_genesis_builder::DEV_RUNTIME_PRESET))
+			.expect("dev preset exists");
+		let (json, _) = prepare_genesis_build_input(raw).expect("well-formed");
+		let config: RuntimeGenesisConfig = serde_json::from_slice(&json).expect("deserializes");
+		let mut endowed: Vec<AccountId> =
+			config.balances.balances.iter().map(|(who, _)| who.clone()).collect();
+		endowed.sort();
+		let mut expected = dilithium_default_accounts();
+		expected.push(pot.clone());
+		expected.sort();
+		assert_eq!(
+			endowed, expected,
+			"the dev preset endows the three well-known signers and the vesting pot, and \
+			 every one of them can reach the pool"
+		);
+	}
+
 	/// The vesting pot's genesis endowment must exactly cover the schedule table.
 	#[test]
 	fn preset_pot_endowment_matches_schedules() {
@@ -846,15 +901,15 @@ mod tests {
 	/// start timestamp in its cliff field, so it accrued linearly from day 0 in both
 	/// `dev` and `heisenberg` instead of honoring the 90-day lock.
 	///
-	/// Counts are exact per preset: a `>= 4` floor would let a heisenberg drop slip
-	/// through because `dev` alone contributes 4. The 90-day pin applies only to
-	/// schedules that use [`GENESIS_VESTING_START_MS`]; a future allocation table
-	/// that ships a different start/cliff pair is checked only for structural
-	/// validity (`start <= cliff < end`).
+	/// Counts are exact per preset: a `>= 3` floor would let a heisenberg drop slip
+	/// through. The 90-day pin applies only to schedules that use
+	/// [`GENESIS_VESTING_START_MS`]; a future allocation table that ships a
+	/// different start/cliff pair is checked only for structural validity
+	/// (`start <= cliff < end`).
 	#[test]
 	fn preset_vesting_schedules_enforce_the_published_cliff() {
 		let mut expected: Vec<(&str, usize)> = vec![
-			(sp_genesis_builder::DEV_RUNTIME_PRESET, 4),
+			(sp_genesis_builder::DEV_RUNTIME_PRESET, 3),
 			(HEISENBERG_RUNTIME_PRESET, 3),
 			(PLANCK_RUNTIME_PRESET, 0),
 		];
