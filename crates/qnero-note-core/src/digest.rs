@@ -114,6 +114,28 @@ pub mod domain {
     /// immediately below it: that would put a padding slot's emitted
     /// nullifier and an entry note's `rho` in one image.
     pub const RHO_ENTRY: Felt = Felt::new(0x716e_0009);
+    /// `rho` of the coinbase note a block mints to its author.
+    ///
+    /// A coinbase is a note created outside a spend proof, like a shield, and
+    /// it needs the same thing a shield needs: a `rho` fixed by a unique
+    /// on-chain identifier, so that no two notes created this way share a
+    /// nullifier seed. It does not reuse [`RHO_ENTRY`] because its identifier
+    /// is a different tuple. A shield hashes `(block_number, entry_index)`
+    /// and a coinbase hashes the block number alone, since a block mints
+    /// exactly one coinbase; sharing the tag would put a coinbase of block
+    /// `n` and a shield of block `n` at entry index `0` on one preimage, and
+    /// [`super::coinbase_rho`] is the rule.
+    pub const RHO_COINBASE: Felt = Felt::new(0x716e_000a);
+    /// `r` of a coinbase note: the commitment randomness the block author's
+    /// node derives from its coinbase viewing key and the block number.
+    ///
+    /// A coinbase note is the one note whose recipient is decided before the
+    /// block exists, by an operator configuring a node, so it is derived rather
+    /// than encrypted: `r = H(R_COINBASE, cvk, block_number)`, and a wallet
+    /// holding `cvk` recomputes it for every block. Its own tag keeps that
+    /// value out of the image of [`RHO_COINBASE`], which hashes the same block
+    /// number, so a coinbase note's `rho` and its `r` can never be one value.
+    pub const R_COINBASE: Felt = Felt::new(0x716e_000b);
 }
 
 #[cfg(test)]
@@ -130,7 +152,7 @@ mod tests {
     /// commitment. So the list is checked as a list.
     #[test]
     fn domain_tags_are_pairwise_distinct() {
-        let tags: [(&str, Felt); 9] = [
+        let tags: [(&str, Felt); 11] = [
             ("AK", domain::AK),
             ("PK", domain::PK),
             ("NOTE", domain::NOTE),
@@ -140,6 +162,8 @@ mod tests {
             ("NF_DUMMY", domain::NF_DUMMY),
             ("NF_BATCH_PADDING", domain::NF_BATCH_PADDING),
             ("RHO_ENTRY", domain::RHO_ENTRY),
+            ("RHO_COINBASE", domain::RHO_COINBASE),
+            ("R_COINBASE", domain::R_COINBASE),
         ];
         for (i, (name_a, a)) in tags.iter().enumerate() {
             for (name_b, b) in tags.iter().skip(i + 1) {
@@ -154,7 +178,7 @@ mod tests {
     /// it displaced, so the range is pinned too.
     #[test]
     fn domain_tags_occupy_the_documented_range() {
-        let expected: [(&str, u64); 9] = [
+        let expected: [(&str, u64); 11] = [
             ("AK", 0x716e_0001),
             ("PK", 0x716e_0002),
             ("NOTE", 0x716e_0003),
@@ -164,6 +188,8 @@ mod tests {
             ("NF_DUMMY", 0x716e_0007),
             ("NF_BATCH_PADDING", 0x716e_0008),
             ("RHO_ENTRY", 0x716e_0009),
+            ("RHO_COINBASE", 0x716e_000a),
+            ("R_COINBASE", 0x716e_000b),
         ];
         let actual = [
             domain::AK,
@@ -175,6 +201,8 @@ mod tests {
             domain::NF_DUMMY,
             domain::NF_BATCH_PADDING,
             domain::RHO_ENTRY,
+            domain::RHO_COINBASE,
+            domain::R_COINBASE,
         ];
         for ((name, want), got) in expected.iter().zip(actual.iter()) {
             assert_eq!(

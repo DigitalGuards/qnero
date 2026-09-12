@@ -24,12 +24,14 @@
 pub mod digest;
 pub mod error;
 pub mod keys;
+pub mod miner;
 pub mod note;
 
 pub use digest::{Digest, Felt};
 pub use error::NoteError;
 pub use keys::{derive_ak, derive_pk, DerivedKeys};
+pub use miner::{MinerKey, MINER_KEY_HRP, MINER_KEY_VERSION};
 pub use note::{
-    commitment_from_inner, dummy_nullifier, entry_rho, note_inner, nullifier, output_rho, Note,
-    MAX_VALUE, VALUE_BITS,
+    coinbase_r, coinbase_rho, commitment_from_inner, dummy_nullifier, entry_rho, note_inner,
+    nullifier, output_rho, Note, MAX_VALUE, VALUE_BITS,
 };

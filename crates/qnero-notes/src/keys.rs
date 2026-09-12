@@ -6,13 +6,14 @@ use rand_core::{CryptoRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub use qnero_note_core::keys::{derive_ak, derive_pk, DerivedKeys};
-use qnero_note_core::Digest;
+use qnero_note_core::{Digest, MinerKey};
 
 use crate::address::Address;
 
 const DS_ASK: &[u8] = b"qnero/ask";
 const DS_NK: &[u8] = b"qnero/nk";
 const DS_KEM: &[u8] = b"qnero/kem";
+const DS_CVK: &[u8] = b"qnero/cvk";
 
 /// The 32-byte seed. Everything else derives from it.
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -65,6 +66,23 @@ impl SpendingKey {
     /// Note receiving key `pk = H(PK, ak, nk)`.
     pub fn pk(&self) -> Digest {
         derive_pk(&self.ask(), &self.nk())
+    }
+
+    /// Coinbase viewing key `cvk = H("qnero/cvk", sk)`.
+    ///
+    /// The randomness of every coinbase note this wallet is paid is derived
+    /// from it ([`qnero_note_core::coinbase_r`]), because the node that builds
+    /// those notes cannot encrypt to an ML-KEM key. It is a viewing-tier
+    /// secret for coinbase notes and confers nothing else: not the ability to
+    /// spend, and nothing at all about a note that arrived any other way.
+    pub fn cvk(&self) -> Digest {
+        Digest::hash_bytes(&[DS_CVK, &self.0])
+    }
+
+    /// What a block author's node is configured with: `pk` and `cvk`, and
+    /// nothing that can spend.
+    pub fn miner_key(&self) -> MinerKey {
+        MinerKey::new(self.pk(), self.cvk())
     }
 
     /// The two keys a spend proof needs, bundled so they cannot be swapped.

@@ -41,10 +41,13 @@ pub mod keys;
 pub use qnero_note_core::{digest, error as note_error, note, NoteError};
 
 pub use address::{Address, ADDRESS_HRP, ADDRESS_VERSION};
-pub use encrypt::{decrypt_note, encrypt_note, try_receive, NoteCiphertext, ReceivedNote};
+pub use encrypt::{
+    decrypt_note, encrypt_note, try_receive, try_receive_coinbase, NoteCiphertext, ReceivedNote,
+};
 pub use error::NotesError;
 pub use keys::{FullViewingKey, IncomingViewingKey, SpendingKey};
 pub use qnero_note_core::{
-    commitment_from_inner, derive_ak, derive_pk, dummy_nullifier, entry_rho, note_inner, nullifier,
-    output_rho, DerivedKeys, Digest, Felt, Note, MAX_VALUE, VALUE_BITS,
+    coinbase_r, coinbase_rho, commitment_from_inner, derive_ak, derive_pk, dummy_nullifier,
+    entry_rho, note_inner, nullifier, output_rho, DerivedKeys, Digest, Felt, MinerKey, Note,
+    MAX_VALUE, VALUE_BITS,
 };

@@ -185,3 +185,113 @@ pub fn entry_rho(block_number: u32, entry_index: u64) -> Digest {
         &[&[Felt::new(block_number as u64)], &index],
     )
 }
+
+/// `rho` of the coinbase note a block mints to its author.
+///
+/// ```text
+/// rho = H(RHO_COINBASE, block_number)
+/// ```
+///
+/// The same argument as [`entry_rho`], over a shorter identifier. A block
+/// mints exactly one coinbase note, so the block number alone names it, and no
+/// two coinbase notes can share a nullifier seed. The domain tag is what keeps
+/// a coinbase of block `n` off the preimage of a shield in block `n` at entry
+/// index `0`.
+///
+/// The node computes this before it proposes, which is the reason the rule is
+/// the block number and not the pool's entry counter: `inner = H(NOTE, pk,
+/// rho, r)` is built while the block is being proposed, and how many shields
+/// that block will carry is not known then. `r` is drawn fresh per block from
+/// the operating system, so two proposals at one height, which is what a
+/// re-proposed block or a fork looks like, produce different notes and only
+/// the canonical one is ever in a tree.
+///
+/// **The chain cannot check this**, for the reason [`entry_rho`] gives:
+/// `inner` is opaque. What the chain owes is the identifier, and it owes
+/// nothing extra here because the block number is already the key the record
+/// is stored under.
+pub fn coinbase_rho(block_number: u32) -> Digest {
+    Digest::hash_felts(domain::RHO_COINBASE, &[&[Felt::new(block_number as u64)]])
+}
+
+/// `r` of the coinbase note a block mints to its author.
+///
+/// ```text
+/// r = H(R_COINBASE, cvk, block_number)
+/// ```
+///
+/// Every other note reaches its recipient as an ML-KEM ciphertext carrying
+/// `(rho, r)`. A coinbase note cannot: the block author's node is what builds
+/// it, one per block, and that node cannot link an ML-KEM implementation. The
+/// chain's own post-quantum Noise transport pins a different, semver
+/// incompatible `ml-kem`, and the two cannot be in one binary (the split this
+/// crate exists for, `crate` docs). So the randomness is derived instead, from
+/// a coinbase viewing key the operator configures its node with and its wallet
+/// keeps.
+///
+/// What that buys and what it costs:
+///
+/// - The note stays private. `inner = H(NOTE, pk, rho, r)` is what the chain publishes, and
+///   recovering `pk` from it needs `r`, which needs `cvk`. Holding the miner's address is not
+///   enough, which is the property an encrypted payload would have given.
+/// - `cvk` is a viewing-tier secret for coinbase notes and nothing else. Whoever holds it, together
+///   with the address, can pick the miner's coinbase notes out of the tree. It confers no ability
+///   to spend: that needs `ask`. It says nothing about any other note the wallet holds.
+/// - It is only for a note the author pays to itself. Paying a coinbase to an address whose `cvk`
+///   the node does not hold needs the encrypted payload, which the pallet still accepts and the
+///   wallet still reads.
+pub fn coinbase_r(cvk: &Digest, block_number: u32) -> Digest {
+    Digest::hash_felts(
+        domain::R_COINBASE,
+        &[cvk.felts(), &[Felt::new(block_number as u64)]],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two rules for a note created outside a spend proof hash different
+    /// identifier tuples, and the whole point of the separate domain tag is
+    /// that a coinbase of block `n` and the first entry of block `n` cannot
+    /// land on one `rho`. A shared tag would have made those two preimages
+    /// `(n, 0, 0)` and `(n)`, which the sponge pads differently today and
+    /// which nothing would keep apart if the padding ever changed.
+    #[test]
+    fn a_coinbase_rho_is_never_an_entry_rho() {
+        for block in [0u32, 1, 2, 7, 4096, u32::MAX] {
+            assert_ne!(coinbase_rho(block), entry_rho(block, 0));
+            assert_ne!(coinbase_rho(block), entry_rho(block, 1));
+        }
+    }
+
+    /// The two halves of a coinbase note's randomness hash the same block
+    /// number, and the domain tags are the whole of what keeps them apart.
+    #[test]
+    fn a_coinbase_rho_and_its_r_are_never_one_value() {
+        let cvk = Digest::hash_bytes(&[b"cvk"]);
+        for block in [0u32, 1, 4096, u32::MAX] {
+            assert_ne!(coinbase_rho(block), coinbase_r(&cvk, block));
+        }
+    }
+
+    /// `r` is what an observer holding the miner's address still does not
+    /// have, so it has to move with the key and with the block.
+    #[test]
+    fn a_coinbase_r_follows_the_key_and_the_block() {
+        let mine = Digest::hash_bytes(&[b"mine"]);
+        let theirs = Digest::hash_bytes(&[b"theirs"]);
+        assert_ne!(coinbase_r(&mine, 7), coinbase_r(&theirs, 7));
+        assert_ne!(coinbase_r(&mine, 7), coinbase_r(&mine, 8));
+        assert_eq!(coinbase_r(&mine, 7), coinbase_r(&mine, 7));
+    }
+
+    /// One coinbase per block, so the block number alone has to separate them.
+    #[test]
+    fn a_coinbase_rho_is_unique_per_block() {
+        let a = coinbase_rho(10);
+        let b = coinbase_rho(11);
+        assert_ne!(a, b);
+        assert_eq!(a, coinbase_rho(10));
+    }
+}

@@ -6,6 +6,7 @@ license.workspace = true
 description = "Qnero note primitives that carry no lattice dependency: digests, domain tags, note commitments, nullifiers and the spend credential"
 
 [dependencies]
+bech32 = { workspace = true }
 qp-poseidon-core = { workspace = true }
 rand_core = { workspace = true }
 thiserror = { workspace = true }

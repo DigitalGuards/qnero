@@ -10,4 +10,6 @@ pub enum NoteError {
     ValueTooLarge(u64),
     #[error("digest limb is not a canonical Goldilocks element")]
     NonCanonicalDigest,
+    #[error("invalid miner key: {0}")]
+    InvalidMinerKey(String),
 }

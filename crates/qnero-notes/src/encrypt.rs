@@ -102,6 +102,40 @@ pub fn decrypt_note(
     })
 }
 
+/// Wallet scan step for a coinbase note whose payload was encrypted.
+///
+/// A coinbase note's value is public: the chain hashes it into the commitment
+/// over an `inner` it cannot open, and publishes it in
+/// `Shielded::CoinbaseValues`. So the value inside the ciphertext is ignored
+/// and the note is rebuilt from the chain's, which is the only one the
+/// commitment can be checked against. A payload claiming any other amount
+/// changes nothing: the check below is what decides.
+///
+/// Most coinbase notes carry no ciphertext at all. A block author's node
+/// derives the note from a miner key instead ([`qnero_note_core::coinbase_r`]),
+/// because it cannot link an ML-KEM implementation. This path is for a
+/// coinbase paid to an address whose viewing key the author does not hold,
+/// which is the only case that needs an encrypted payload.
+pub fn try_receive_coinbase(
+    ivk: &IncomingViewingKey,
+    ct: &NoteCiphertext,
+    value: u64,
+    on_chain_commitment: &Digest,
+) -> Result<ReceivedNote, NotesError> {
+    let received = decrypt_note(ivk, ct)?;
+    let note = Note::new(ivk.pk(), value, received.note.rho, received.note.r)
+        .map_err(|_| NotesError::NotOurs)?;
+    let commitment = note.commitment();
+    if &commitment != on_chain_commitment {
+        return Err(NotesError::CommitmentMismatch);
+    }
+    Ok(ReceivedNote {
+        note,
+        memo: received.memo,
+        commitment,
+    })
+}
+
 /// Wallet scan step: decrypt and check that the plaintext opens the
 /// commitment the chain published next to it. A ciphertext that decrypts but
 /// opens a different commitment is a malformed output and is rejected.
