@@ -910,8 +910,8 @@ Error: A.seed.store.json is readable or writable beyond its owner (mode 644). Fi
 === 10. the store on disk ===
 
 $ ls -l A.seed A.seed.store.json
--rw------- 1 waterfall waterfall   65 Sep 12 09:19 A.seed
--rw------- 1 waterfall waterfall 4591 Sep 12 09:20 A.seed.store.json
+-rw------- 1 user user   65 Sep 12 09:19 A.seed
+-rw------- 1 user user 4591 Sep 12 09:20 A.seed.store.json
 
 $ jq '{version, next_leaf, last_synced_block, used_nullifiers: (.used_nullifiers|length), notes: [.notes[] | {leaf_index, value, spent, memo}]}' A.seed.store.json
 {
@@ -1690,8 +1690,8 @@ Error: A.seed.store.json is readable or writable beyond its owner (mode 644). Fi
 === 9. the store on disk, version 4 ===
 
 $ ls -l A.seed A.seed.store.json
--rw------- 1 waterfall waterfall   65 Sep 12 12:11 A.seed
--rw------- 1 waterfall waterfall 5654 Sep 12 12:12 A.seed.store.json
+-rw------- 1 user user   65 Sep 12 12:11 A.seed
+-rw------- 1 user user 5654 Sep 12 12:12 A.seed.store.json
 
 $ jq '{version, next_leaf, last_synced_block, has_used_nullifiers: has("used_nullifiers"),
       checkpoints: (.checkpoints|length),
