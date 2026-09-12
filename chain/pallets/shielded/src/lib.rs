@@ -32,12 +32,12 @@
 //! - **Every slot and every byte a submission carries is paid for by the slots it settles.** A
 //!   skipped segment pays no fee, because it writes no permanent state, and it still costs every
 //!   node the admission walk over its slots, the weight the submission declares for them, and a
-//!   `ct_digest` sponge over whatever bytes they carry. So the settling slots owe
-//!   `(settling slots + skipped slots) * MinLeafFee + ceil(carried bytes /
+//!   `ct_digest` sponge over whatever bytes they carry. So the settling slots owe `MinLeafFee` for
+//!   every slot the submission walks, settling and skipped alike, and `ceil(carried bytes /
 //!   CiphertextBytesPerFeeQuantum)` over the whole submission, where the carried bytes are every
 //!   ciphertext in the extrinsic, a skipped segment's included. Emptying a skipped position to a
-//!   zero-length pair removes its bytes from the payload term; the slot itself is still charged
-//!   the flat minimum, because the walk and the weight it costs are the same either way. A griefed
+//!   zero-length pair removes its bytes from the payload term; the slot itself is still charged the
+//!   flat minimum, because the walk and the weight it costs are the same either way. A griefed
 //!   aggregator either pays that floor or recomposes a batch without the conflicted inners.
 //! - **`ct_digest`.** The circuit leaves it a free public input. The chain recomputes it over the
 //!   ciphertexts in the extrinsic, in output order, and rejects the slot when it differs.

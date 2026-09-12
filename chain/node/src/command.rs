@@ -662,8 +662,11 @@ pub fn run() -> sc_cli::Result<()> {
 							let treasury_account =
 								quantus_runtime::configs::TreasuryPalletId::get()
 									.into_account_truncating();
+							// Same reason as the branch above: v1 pays no
+							// account, so this is only the fallback author
+							// label a --dev node signs its blocks with.
 							log::info!(
-								"⛏️ Using treasury address for rewards: {:?}",
+								"⛏️ Consensus author fallback, paid nothing: {:?}",
 								treasury_account
 							);
 							treasury_account
