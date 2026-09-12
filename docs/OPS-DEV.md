@@ -2386,3 +2386,10 @@ The node was built three times over the milestone rather than once: the first
 build predated the vesting proof-recorder fix, and the second found the
 `pre_dispatch` bug through the end-to-end, which is what an end-to-end is for.
 Only the first paid the full wasm cost.
+
+The whole run above was repeated against the binary built from the committed
+tree, on a fresh `--tmp` chain, and reproduced every number: fee 8, change 29,
+the settling block's coinbase 45 against 41 to 42 elsewhere, an author share of
+4, and `0x0001030005000000` from the dry run. Only the heights differ, because
+the second chain was younger. The node was stopped by pidfile afterwards and
+port 9944 confirmed closed.
