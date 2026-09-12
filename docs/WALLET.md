@@ -117,6 +117,16 @@ all reads it.
   publish its own ciphertext length, which is the leak the pad exists to close.
   `fee::memo_pad_separation_warning` is the sentence and it names the pad that
   would restore the separation, as a coordinated move.
+- **A coinbase note's value and its block are public.** `Shielded::CoinbaseValues` holds each
+  coinbase note's value keyed by leaf index and `Shielded::LeafBlocks` dates it, both readable by
+  anyone with an RPC connection and no keys. What the chain hides about a coinbase is only whose it
+  is: the recipient sits inside an `inner` nothing on chain can open. So anyone can total the
+  chain's mining emission block by block, and for a wallet that mines, its own income is in there at
+  full value. The only thing keeping the blocks one operator won from being grouped into one
+  income stream is the header's author label, `H(cvk, parent_hash)`, which changes every block and
+  which only the holder of `cvk` can follow. This is the same shape Monero has, where a coinbase
+  output's amount is public, and it is why a miner wallet publishes more than a wallet that only
+  receives.
 - **Which output is the change is drawn per spend.** `ct_1` belongs to
   `cm_out_1` and `SlotSettled` names both leaf indices, so a payment fixed at
   output slot 0 splits the pool's outputs publicly into "went to a

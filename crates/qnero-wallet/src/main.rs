@@ -43,9 +43,12 @@ settlement that publishes the matching nullifiers.
 
 WHAT EVERY CHAIN READER LEARNS. Memos are padded to one size and the payment
 takes either output slot at random, so a settlement's two ciphertexts do not
-say which output is the sender's change or how long a memo was. The gap
-between a spend's anchor block and its inclusion block is still visible and
-still tracks this machine's speed; see docs/WALLET.md."
+say which output is the sender's change or how long a memo was. A coinbase
+note is the one amount this wallet holds that the chain publishes: its value
+is in Shielded::CoinbaseValues and its block in Shielded::LeafBlocks, so
+anyone can read a miner's income block by block and only who holds it is
+hidden. The gap between a spend's anchor block and its inclusion block is
+still visible and still tracks this machine's speed; see docs/WALLET.md."
 )]
 struct Cli {
     /// JSON-RPC endpoint of the node.

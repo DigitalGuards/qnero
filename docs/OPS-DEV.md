@@ -2579,3 +2579,186 @@ reformats whatever it touches under the defaults, which rewrote binary operators
 in two files nobody had edited. Use `rustfmt +nightly` on the files you touched,
 and check `git status` afterwards: rustfmt formats a module's children too, so
 one file's format can move three.
+
+## The second M6 review fix pass, 2026-09-12
+
+Seventeen findings against the first fix pass: one high, six medium, ten low.
+The high one reversed a decision the previous pass made, and most of the rest
+are documents that promised more than the code does.
+
+### What changed
+
+- **`Shielded::shield` and `Balances::burn` came back off the high-security whitelist.** The
+  previous pass put them there so an account enrolled before v1 could still move its own balance,
+  and that trade was the wrong way round. Every other call on that list is delayed and reversible,
+  which is the whole guarantee the feature sells: a stolen key can only schedule, and the owner's
+  `cancel` or the guardian's `recover_funds` beats the delay. A `shield` is immediate, commits to a
+  `pk` the thief chose, settles in the next block and leaves `recover_funds`, which walks
+  `PendingTransfersBySender` and releases holds, with nothing to find. `burn` is the same shape with
+  total loss. A measured shield is 9104 bytes at a 0.0118 UNIT inclusion fee, inside both blanket
+  caps, so one of the sixteen daily extrinsics empties the account. The freeze that trade was paying
+  for is unreachable on a v1-genesis chain: `QneroCallFilter` refuses `set_high_security` and no
+  non-benchmark preset seeds `HighSecurityAccounts`. An account enrolled before v1 stays frozen and
+  that is written down, in `chain/docs/RUNTIME_SURFACE.md` section 5 and in `docs/DESIGN.md` 7.2.
+- **`spec_version` is 101.** The previous pass changed runtime metadata and left the version at 100:
+  a new `pallet-shielded` error variant, `CoinbaseMinted`'s field layout, and two
+  `pallet-mining-rewards` event layouts. Every client that caches metadata keys the cache on
+  `spec_version`, so a stale decoder reads `has_ciphertext: false` as a compact-zero length and
+  renders an empty ciphertext, and reads an event that lost its leading `AccountId` by over-running
+  into the next one. Both succeed silently. `the_runtime_identity_is_pinned` fails whenever the pair
+  moves, so the next metadata change has to decide the version rather than inherit it. The rule now
+  sits above `VERSION`: `spec_version` moves for any metadata change, `transaction_version` only for
+  the signed extrinsic encoding, which is unchanged at 7.
+- **Every preset's endowed set is pinned, not just `dev`.** The guard checked `amount > 0` for
+  `heisenberg`, `planck` and `mainnet`, which the bug it exists to catch would have passed: the
+  keyless wormhole address was endowed with plenty. Each preset's endowed accounts are now compared
+  against the tables that preset builds them from. What it still cannot check is whether a key
+  exists behind an address a human typed into `mainnet`'s grant table, and the test says so.
+- **The `--dev` startup log no longer calls the treasury a reward recipient.** The explicit-flag
+  branch was relabelled last pass and this one was missed, so a `--dev` node printed "Using treasury
+  address for rewards" two lines above the miner key that is actually paid.
+- **The chain subtree is format-checked too.** Only the root workspace was, and the chain is where
+  every runtime and node change in this milestone lives. `cargo +nightly-2026-08-30 fmt --all --
+  --check` failed on one pre-existing doc paragraph in `pallets/shielded/src/lib.rs`, because the
+  pinned nightly rewrapped a fee formula onto a line starting with `+`, which markdown reads as a
+  list bullet and `clippy::doc_lazy_continuation` then flags five times. The paragraph says the same
+  thing in words now, so the formatter and the lint agree, and the gate is in the standing list
+  below.
+- **Five documents stopped overclaiming.** DESIGN's opening, its section 3 table, its M6 row, its
+  section 10 positioning bullet and pillar 1 all said no call moves transparent value between
+  accounts, while its own section 7.2 lists `Vesting::claim` as allowed and load bearing. All five
+  say what the code supports: no call moves value between accounts a user chooses, and the one
+  transparent payout is a genesis-fixed amount to a genesis-fixed payee out of a pot that cannot
+  sign. CIRCUIT 10.7, which DESIGN points at as the full list of what a block reveals, gained the
+  vesting row, and its `SlotSettled` row now says what that event actually publishes: two
+  nullifiers, two commitments, two leaf indices and two ciphertexts, so a payment and its change are
+  publicly siblings at consecutive indices. That is the linkage the wallet's per-spend output-slot
+  draw exists to blunt, which is also now cross-referenced.
+- **Three smaller document corrections.** DESIGN 7.1 rule 5 said the inherent accepts a third-party
+  encrypted payload; it refuses one, and a reader building that path would have had every block it
+  authors refused on a Mandatory dispatch. DESIGN section 7 item 6 said both the entry and the
+  absence of an exit go at v1; neither does, and `shield` is still the only entry. DESIGN section 4
+  was missing `cvk` from the key hierarchy while claiming parity with Monero's view-key split, which
+  is false for a mining wallet: a full viewing key is `(ivk, nk)` and neither half derives `cvk`, so
+  an auditor handed one sees every shielded receipt and no coinbase note at all.
+- **The wallet says that a coinbase note's value is public.** `docs/WALLET.md`'s "What every chain
+  reader learns" and the binary's own `--help` preamble listed three leaks and not the one a miner
+  cares about: `Shielded::CoinbaseValues` publishes each coinbase note's value and
+  `Shielded::LeafBlocks` dates it, so a whole mining income stream is readable with no keys and only
+  the per-block author label keeps the blocks one operator won from being grouped.
+- **Two tests stopped lying about themselves.** The mining-rewards test named for crediting the
+  author's derived address asserts that the address is paid nothing and that no event names it,
+  which is the opposite of its name, so it is now
+  `the_authors_derived_address_is_paid_nothing_and_named_nowhere`. The vesting dry run asserted only that the answer
+  was not `CallFiltered`, which a decode failure also satisfies; it decodes the `DispatchError` and
+  pins the module index against the constant the call was built with, so a drifted
+  `VESTING_PALLET_INDEX` fails instead of passing.
+
+### The run
+
+Fresh chain, fresh miner wallet, the rebuilt binary.
+
+```
+$ QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6fix3/miner.seed miner-address) \
+    nice -n 19 ./target/release/quantus-node --dev --tmp
+2026-09-12 20:45:05 Qnero Node
+2026-09-12 20:45:05 📋 Chain specification: Qnero DevNet
+2026-09-12 20:45:05 ⛏️ Consensus author fallback, paid nothing: 6d6f646c70792f74727372790000… (qzmviwoP…)
+2026-09-12 20:45:05 ⛏️ Coinbase notes are minted for miner key qnm1q9fgxslr…wzf88au6
+```
+
+The fallback line is the low finding: a `--dev` node with no `--rewards-inner-hash` used to call
+that account the reward recipient, and v1 pays it nothing.
+
+```
+$ qnero-wallet --file /tmp/qnero-m6fix3/miner.seed sync
+scanned leaves 0..38 at block 38
+received 38 note(s) worth 1570 quanta
+
+$ qnero-wallet --file /tmp/qnero-m6fix3/miner.seed status
+runtime           spec 101, transaction 7
+chain head        38
+tree leaves       38
+tree depth        3
+```
+
+`spec 101` is the metadata bump reaching the wire. The end-to-end is unchanged
+in shape, and the vesting dry run is now decoded rather than compared against
+one string:
+
+```
+$ QNERO_DEV_NODE=http://127.0.0.1:9944 QNERO_MINER_SEED=/tmp/qnero-m6fix3/miner.seed \
+    RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --release -p qnero-wallet \
+    --features parallel --test dev_node_e2e -- --nocapture
+
+sync: 8 leaves, 8 coinbase leaves, 8 of them this wallet's, 1901 quanta
+shield of 1000 quanta included at block 47 (1.01s), leaf 46
+5 quanta to B at fee 8: included at block 59, change 29
+coinbase of block 59: 46 quanta against 41 to 43 elsewhere, author share 4
+system_dryRun of a transparent transfer: 0x0001030005000000
+system_dryRun of set_high_security: 0x0001030005000000
+system_dryRun of a vesting claim: 0x0001031602000000
+pallet-vesting answered with error 2
+test the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused ... ok
+300 quanta to B: proved in 5.94s, 150908 proof bytes, included at block 60
+100 quanta back to A: proved in 3.18s, included at block 64
+test a_shield_a_payment_and_a_payment_back_settle_end_to_end ... ok
+
+test result: ok. 2 passed; 0 failed
+```
+
+The settling block's coinbase is 46 quanta against 41 to 43 elsewhere, so the
+author's share of the fee 8 is 4 and the other 4 burned, which is what the
+milestone measured every time.
+
+```
+$ kill $(cat node.pid), then wait for 9944 to close
+port 9944 closed
+```
+
+### Gates
+
+```
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   38 suites ok, 0 failed
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+
+# the chain workspace
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
+  -p pallet-shielded -p pallet-mining-rewards --release
+   74 + 31 passed, 0 failed
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p quantus-runtime --release
+   42 lib + 9 call_filter + 60 integration passed, 0 failed
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p quantus-runtime --all-targets
+   no warnings
+LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p quantus-node -p sc-consensus-qpow --all-targets
+   no warnings
+cargo +nightly-2026-08-30 fmt --all -- --check
+   clean
+```
+
+The last one is new and belongs in the standing list. The chain subtree pins its
+own nightly in `chain/rustfmt-toolchain` and its `.rustfmt.toml` sets
+nightly-only options, so stable `rustfmt` silently drops them and reformats
+whatever it touches under the defaults. Checking only the root workspace left
+the subtree carrying every runtime and node change in this milestone unchecked.
+
+### Timings
+
+| Step | Wall | Peak RSS |
+|---|---|---|
+| `cargo build -j 4 --release -p quantus-node`, the one rebuild this pass owes | 1:04 | 1.7 GB |
+| chain pallet tests | 26 s | |
+| runtime tests, all three targets | under 1 s | |
+| root workspace tests | 2:12 | |
+| the end-to-end, both tests, three proofs | 14.8 s | |
+
+The rebuild is a minute rather than the ten the milestone's first one took,
+because only the runtime and the node changed and every dependency below them
+was already built.

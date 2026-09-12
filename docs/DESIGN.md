@@ -2,17 +2,20 @@
 
 Qnero is a post-quantum private coin with Monero's policy: every transfer is
 shielded, sender, recipient and amount are hidden, and no call moves value
-between transparent accounts. It is built on the Quantus Network stack (MIT) so
-the post-quantum account layer, hash-based ZK proving and recursion, Merkle
-commitment tree and nullifier set are reused as audited code.
+between accounts a user chooses. The single transparent payout is
+`Vesting::claim`, whose payee and amount are both fixed at genesis and whose
+pot cannot sign (section 7.2). Qnero is built on the Quantus Network stack
+(MIT) so the post-quantum account layer, hash-based ZK proving and recursion,
+Merkle commitment tree and nullifier set are reused as audited code.
 
-Two things a v1 block still publishes, stated here because the rest of this
+Three things a v1 block publishes, stated here because the rest of this
 document is about what it hides. `shield`, the one door into the pool, is a
 signed extrinsic that names the payer, the amount and the leaf it created, so
 the entry is public and only what happens after it is not. A coinbase publishes
 its note's value and the block that minted it, with the recipient inside an
-`inner` the chain cannot open. `docs/CIRCUIT.md` section 10.7 is the full list
-of what one block reveals.
+`inner` the chain cannot open. A vesting claim publishes a genesis-fixed
+allocation, the account it went to and when. `docs/CIRCUIT.md` section 10.7 is
+the full list of what one block reveals.
 
 ## 1. Why not port Monero's cryptography
 
@@ -66,7 +69,7 @@ Verified on this machine 2026-09-11: `cargo test -p qp-wormhole-circuit
 | `pallet-wormhole` verify flow: PI parse, block hash check, nullifier dedupe, plonky2 verify, tx-pool tags | fork as `pallet-shielded` | Exit-account minting becomes commitment append + ciphertext event |
 | `pallet-zk-tree` 4-ary Poseidon tree | small fork | Node hashing unchanged; `Leaves` holds a raw `Hash256`, the note commitment, see `docs/CIRCUIT.md` section 4 |
 | `UsedNullifiers` storage | as is | |
-| ML-DSA-87 accounts, hdwallet | as is | Transparent layer. At v0 it carried miner rewards and fees; at v1 it carries fees and the shield entry, and no transfer between accounts (section 7.2) |
+| ML-DSA-87 accounts, hdwallet | as is | Transparent layer. At v0 it carried miner rewards and fees; at v1 it carries fees, the shield entry and the genesis vesting payout, and no transfer between accounts a user chooses (section 7.2) |
 | Audits | as is | Eiger Wormhole audit 2026-03-20, Substrate audit 2026-05-13, PoW + Poseidon review |
 
 ## 4. Keys and addresses
@@ -78,8 +81,15 @@ nk        = H("qnero/nk",  sk)                  nullifier key, private
 ak        = H(AK, ask)                          public spend commitment
 pk        = H(PK, ak, nk)                       note-receiving key, 32 bytes
 (ek, dk)  = ML-KEM.KeyGen(H("qnero/kem", sk))   view key pair
+cvk       = H("qnero/cvk", sk)                  coinbase viewing key, private
 address   = bech32m("qn", pk || ek)
 ```
+
+`cvk` is the one key an operator copies out of a wallet and into a node.
+`qnero-wallet miner-address` prints `pk || cvk` as a single bech32m string and
+the node is configured with that, so every coinbase note the node mints is one
+the wallet can find. Section 7.1 rule 5 is why a coinbase note is derived from
+`cvk` rather than encrypted to `ek`.
 
 Two hash forms appear here and they are not interchangeable. `H("qnero/...",
 ...)` is Poseidon2 over bytes with that ASCII string as a literal prefix, and
@@ -116,7 +126,13 @@ already made.
 Viewing: `dk` alone lets a wallet detect and decrypt incoming notes and see
 outgoing note contents it authored. `nk` tells the holder of a note whether it
 has been spent. `ask` is needed to spend. This matches Monero's view-key /
-spend-key split.
+spend-key split for notes that arrive as payments, and it stops one step short
+of Monero for a mining wallet: a coinbase note is derived from `cvk`, which
+neither `dk` nor `nk` produces, so a holder of the full viewing key sees every
+shielded receipt and no coinbase note at all. A full disclosure of a mining
+wallet is `(ivk, nk, cvk)`. Monero's view key does cover coinbase outputs,
+which is what makes the gap worth stating. `docs/WALLET.md` carries the same
+rule where the miner key is printed.
 
 `nk` is a viewing-tier secret and confers nothing beyond detection. Two
 properties of the spend circuit keep it that way, both in `docs/CIRCUIT.md`
@@ -260,8 +276,10 @@ shape.
    `docs/CIRCUIT.md` section 9.5 carries the reasoning.
 6. Entry in v0: `shield(value, inner, ciphertext)`, a signed extrinsic that
    burns transparent value and appends `cm = H(CM, inner, value)`. There is no
-   exit in v0: value that enters the pool moves only between notes. Both go at
-   v1, when a coinbase mints straight into a note.
+   exit in v0: value that enters the pool moves only between notes. At v1 the
+   coinbase adds a second creation path. `shield` is still the only entry and
+   there is still no exit; what goes at v1 is the transparent mining reward and
+   the wormhole exit (section 7.2).
 
 Built at M4, in `chain/pallets/shielded`. Two rules the pallet owns that this
 section did not spell out: a minimum fee per real leaf slot, which is the only
@@ -327,14 +345,18 @@ Five rules the pallet holds:
    a semver-incompatible `ml-kem` and a binary cannot hold both. The note stays private against
    anyone holding only the miner's address, `cvk` is a viewing-tier secret for coinbase notes alone,
    and a coinbase paid to an address whose `cvk` the author does not hold still needs an encrypted
-   payload, which the inherent accepts and the wallet reads.
+   payload, which the wallet reads (`qnero_notes::try_receive_coinbase`) and the inherent refuses
+   until its bytes are priced against the author's own credit; `docs/CIRCUIT.md` section 10.3.
    `qnero_note_core::coinbase_r` carries the full argument.
 
 ### 7.2 The call filter (M6)
 
-`BaseCallFilter` refuses every call that moves transparent value from one
-account to another. This is the allowlist as a rule: everything is allowed
-except the calls below, and `runtime/tests/call_filter.rs` is the test.
+`BaseCallFilter` refuses every call that moves transparent value between
+accounts a user chooses. One transparent payout survives it, `Vesting::claim`,
+whose payee and amount are both fixed at genesis and whose pot cannot sign; the
+Allowed list below carries the reasoning. This is the allowlist as a rule:
+everything is allowed except the calls below, and `runtime/tests/call_filter.rs`
+is the test.
 
 Refused:
 
@@ -342,7 +364,7 @@ Refused:
 |---|---|
 | `Balances::transfer_allow_death`, `transfer_keep_alive`, `transfer_all` | the transfers themselves |
 | `ReversibleTransfers::schedule_transfer`, `schedule_transfer_with_delay`, `execute_transfer`, `cancel`, `recover_funds` | transfers with a delay, and the guardian seizures of their holds |
-| `ReversibleTransfers::set_high_security` | moves nothing, and is refused anyway: see below |
+| `ReversibleTransfers::set_high_security` | moves nothing, and is refused anyway: it is a one-way door into a feature whose every call v1 refuses, see below |
 | `Vesting::create_schedule`, `end_schedule`, `retarget_schedule` | funds the pot from the treasury, and moves a schedule's unpaid remainder |
 | `Utility::batch_all`, `Multisig::execute` carrying any of the above | a filter that stops a call and not the wrapper carrying it is decoration |
 
@@ -365,16 +387,29 @@ Allowed, and load bearing:
   `Shielded::coinbase`, which is an inherent. A filtered inherent is a mandatory dispatch failure,
   which is a dead chain rather than a dropped reward.
 - `Timestamp::set`, every `System` call, and the whole governance lane.
-- `Balances::burn`, which destroys the caller's own balance and moves nothing to anyone. It is also
-  on `HighSecurityConfig`'s whitelist beside `shield`, which is checked at validation rather than
-  at dispatch: an account enrolled in high security can sign only what is on that list, and v1
-  refuses every value-moving call on it, so without those two such an account could put nothing at
-  all in a block and its balance would be frozen forever. That is also why `set_high_security` is
-  refused above. The call is one way, the pallet has nothing that clears the flag, and enrolling
-  now buys a guarantee about calls that no longer work.
+- `Balances::burn`, which destroys the caller's own balance and moves nothing to anyone.
 - The fee path. `ChargeTransactionPayment` is a transaction extension and never reaches a `Contains`
   check, which is what lets a filtered runtime still charge for the calls it allows.
 
+`set_high_security` is on the refused list for a reason of a different kind,
+and the reason is worth writing down because it looks like an omission. The
+call is one way: the pallet has nothing that clears the flag and refuses a
+second enrolment. From the block it succeeds in, the account can sign only what
+is on `HighSecurityConfig`'s whitelist, which is checked at validation rather
+than at dispatch, and v1 refuses every value-moving call on that list at
+dispatch, so the account can sign nothing at all. The whitelist stays as it is
+anyway. Every call on it is delayed and reversible, which is the whole of the
+guarantee the feature sells: a stolen key can only schedule, and the
+owner's `cancel` or the guardian's `recover_funds` beats the delay.
+`Shielded::shield` and `Balances::burn` would each break that, because both are
+immediate, both are irreversible and neither is reachable by `recover_funds`,
+which walks `PendingTransfersBySender` and releases holds. A `shield` whose
+`inner` commits to a `pk` only a thief holds settles in the next block with the
+value inside the pool and nothing left to cancel. So the whitelist stays as it
+is, the enrolment is refused, and no v1-genesis chain reaches the freeze: no
+non-benchmark preset seeds `HighSecurityAccounts` either.
+`the_high_security_whitelist_admits_only_reversible_calls` is the test and
+`chain/docs/RUNTIME_SURFACE.md` section 5 is the surface.
 Two things the filter does not reach, both by design in `frame_system` and both
 stated here so they are decisions rather than discoveries:
 
@@ -403,7 +438,7 @@ author derivation lives there and the runtime's one author seam calls it.
 | M3 | Private and public batch aggregators on the new PI layout | DONE 2026-09-11 (private batch 5 + 21N public inputs, ZK, N = 7; public batch forwards each inner verbatim under an aggregator address and refuses a repeated inner in circuit; see `docs/CIRCUIT.md` section 8) |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | DONE 2026-09-12 (chain forked as a git subtree at `chain/`; `pallet-shielded` settles private and public batches, `shield` is the only v0 entry, `pallet-zk-tree` stores raw `Hash256` leaves; N = 6, n = 53; see `docs/CIRCUIT.md` section 9 and `docs/OPS-DEV.md`) |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | DONE 2026-09-12 (`crates/qnero-wallet`, binary `qnero-wallet`: keygen, address, shield, sync, balance, send, status; hand-encoded extrinsics over JSON-RPC, storage layout and fee floor read from runtime metadata, Merkle paths rebuilt locally and the settled nullifier set paged whole so no request names a note as its own, notes in one JSON store beside the seed; memos padded to one size, at a pad chosen so the padded pair stays a fee bucket below a pair padded to `MaxCiphertextBytes`, and the payment's output slot drawn per spend, so the chain publishes neither a memo length nor which of a settlement's two leaves is the sender's change; one checkpoint-hash walk decides both whether a node is on the wallet's chain and whether it has reached everything the wallet has read, rewinding the leaf watermark to the newest checkpoint still canonical on a fork and refusing a node that is behind, with a leaf-count gate under it so the watermark never regresses outside the fork path, and spent status is derived from the settled set in both directions; see `docs/WALLET.md`, and `docs/BENCH.md` for the public batch at `n = 53`, which M4 left unmeasured); `sync --rescan` is the operator override on the node gates, runs add-only, and its known edges are docs/WALLET.md open issue 14) |
-| M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | DONE 2026-09-12 (every unit of value that enters circulation is a note: `pallet-shielded` mints one coinbase note per block from a required inherent, the author's share of settled fees rides in it, mining rewards to transparent accounts are off, and `BaseCallFilter` refuses every call that moves transparent value between accounts; `pallet-wormhole` is out of the runtime with its transaction extension, the runtime identifies as `qnero` at `spec_version` 100 and `transaction_version` 7, and the wallet finds its coinbase notes from a miner key the node is configured with; see section 7, `docs/CIRCUIT.md` section 10, `docs/WALLET.md` and `docs/OPS-DEV.md`. The review pass that closed it changed five things: the header's author item became per block so no coinbase leaf carries a mining identity, `set_high_security` joined the refused list and `shield` and `burn` joined the high-security whitelist so no account can be frozen by enrolling, `Vesting::claim` stays dispatchable so the genesis allocation is deliverable and no preset endows a keyless account, the coinbase inherent refuses the encrypted payload nothing builds, and a block with no emission still mints the author fee the pool already holds) |
+| M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | DONE 2026-09-12 (every unit of value that enters circulation is a note: `pallet-shielded` mints one coinbase note per block from a required inherent, the author's share of settled fees rides in it, mining rewards to transparent accounts are off, and `BaseCallFilter` refuses every call that moves transparent value between accounts a user chooses, leaving `Vesting::claim`, a genesis-fixed payout from a keyless pot, as the one transparent payout; `pallet-wormhole` is out of the runtime with its transaction extension, the runtime identifies as `qnero` at `spec_version` 100 and `transaction_version` 7, and the wallet finds its coinbase notes from a miner key the node is configured with; see section 7, `docs/CIRCUIT.md` section 10, `docs/WALLET.md` and `docs/OPS-DEV.md`. The review pass that closed it changed five things: the header's author item became per block so no coinbase leaf carries a mining identity, `set_high_security` joined the refused list so no account can enrol into a feature whose every call v1 refuses, and the high-security whitelist stayed as it is because every call on it is delayed and a guardian can reverse it, `Vesting::claim` stays dispatchable so the genesis allocation is deliverable and no preset endows a keyless account, the coinbase inherent refuses the encrypted payload nothing builds, and a block with no emission still mints the author fee the pool already holds. A second review pass reversed one of those: `shield` and `burn` came back off the high-security whitelist, because every other call on it is delayed and a guardian can reverse it, and the freeze they were paying for is unreachable while the enrolment itself is refused. It also moved `spec_version` to 101 for the metadata the first pass changed without it) |
 
 About 10 to 12 weeks to a private testnet. The measured risk to retire first
 is wallet-side proving time and memory for a 2-in/2-out leaf plus a
@@ -465,8 +500,8 @@ Where Qnero beats it, if we execute:
    this is the whole argument.
 2. Narrative. Monero has the largest privacy community in crypto and no
    post-quantum path. Qnero speaks Monero: spend key and view key, private by
-   default, no transparent pool, proof of work, the anonymity set is the
-   whole chain. Hegemon speaks protocol governance.
+   default, no call moving value between accounts a user chooses, every output
+   a sealed note, proof of work, the anonymity set is the whole chain. Hegemon speaks protocol governance.
 3. Ecosystem. Explorer, web wallet, mobile wallet, desktop wallet, connect
    SDK and dApp tooling already exist in the QRL stack and can be pointed at
    Qnero. Hegemon has one Electron app.
@@ -497,10 +532,12 @@ Concrete "beat it" targets for the first testnet:
 One line: Monero's principles, rebuilt without elliptic curves.
 
 Pillars, in this order:
-1. Private by default. No call moves value between transparent accounts; every
-   output is a sealed note and every spend is a proof. The two public edges are
-   the entry and the mint: `shield` names its payer and amount, and a coinbase
-   publishes its value and its block with the recipient hidden.
+1. Private by default. No call moves value between accounts a user chooses;
+   every output is a sealed note and every spend is a proof. The public edges
+   are the entry, the mint and the genesis payout: `shield` names its payer and
+   amount, a coinbase publishes its value and its block with the recipient
+   hidden, and `Vesting::claim` pays a beneficiary fixed at genesis an amount
+   fixed at genesis out of a pot that cannot sign.
 2. Proof of work. No stake, no validators, no foundation keys in consensus.
 3. Post-quantum from genesis. Hash-based proofs, lattice signatures and
    encapsulation, nothing for Shor to break.

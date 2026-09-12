@@ -1812,7 +1812,17 @@ find it.
 | A coinbase note's value and its block | `Shielded::CoinbaseValues`, `Shielded::LeafBlocks` | how much was minted, and when |
 | Every leaf's commitment, and the tree root in each header | `ZkTree::Leaves`, the header | the shape of the tree and its growth per block |
 | Every settled nullifier | `Shielded::UsedNullifiers` | that some note was spent, never which one |
-| Each settlement's slot count and fee | `Event::BatchSettled`, `Event::SlotSettled` | how many leaf slots a submission settled and what it paid |
+| Each settlement's slot count and fee | `Event::BatchSettled` | how many leaf slots a submission settled and what it paid |
+| Each settled slot's two nullifiers, its two commitments, both leaf indices and both ciphertexts | `Event::SlotSettled` | the two notes one spend created, at consecutive leaf indices, publicly siblings and publicly tied to the two nullifiers spent alongside them |
+| A vesting payout's beneficiary and amount | `Event::Claimed { schedule_id, beneficiary, amount }` | a genesis-fixed allocation, the account it went to, and when |
+
+`SlotSettled` is the strongest linkage a settlement publishes, and it is what
+makes the nullifier row above weaker than it reads: the set alone says only
+that some note was spent, while the event names which two nullifiers were
+spent together and which two leaves that spend created. A payment and its
+change are therefore publicly a pair. Which of the two is which is the part the
+wallet hides, by drawing the payment's output slot per spend; `docs/WALLET.md`
+carries that rule and the reason it is needed.
 
 The entry is the sharp edge. `shield` is a signed extrinsic, so the payer's
 account, the amount and the leaf index are all on chain together, and value

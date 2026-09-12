@@ -2,11 +2,14 @@
 //!
 //! Nothing here is a compiled-in copy of a chain value. The runtime moved
 //! `CiphertextBytesPerFeeQuantum` and added and removed a payload-ratio bound
-//! inside one `spec_version` during M4 (`docs/OPS-DEV.md`), and this chain
-//! still answers `spec_version` 152 whatever it carries, so a pinned copy of a
-//! constant or a call index is a wallet that builds a proof against the wrong
-//! rule and finds out after paying for it. The pallet index, the three call
-//! indices and the fee constants all come from `state_getMetadata`.
+//! inside one `spec_version` during M4 (`docs/OPS-DEV.md`), so a pinned copy
+//! of a constant or a call index is a wallet that builds a proof against the
+//! wrong rule and finds out after paying for it. M6 reinforced it: the runtime
+//! shipped a new error variant and three changed event layouts before its
+//! version moved. The chain identifies as `qnero` at `spec_version` 101 and
+//! `transaction_version` 7 as of that milestone, and the wallet reads the
+//! pallet index, the three call indices and the fee constants out of
+//! `state_getMetadata` on every run regardless.
 //!
 //! The one number that has no metadata surface is `POOL_QUANTUM`; see
 //! [`crate::POOL_QUANTUM`].
