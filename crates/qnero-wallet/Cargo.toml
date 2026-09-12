@@ -30,6 +30,10 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
+# One call: `TIOCGWINSZ` on standard output, so the `balance` table sizes its
+# memo column from the terminal it is printed into. `COLUMNS` cannot answer
+# that question, because bash and zsh maintain it without exporting it.
+libc = { workspace = true }
 
 [dev-dependencies]
 # The public-batch measurement builds an aggregator's circuit over the wallet's

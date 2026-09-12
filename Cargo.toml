@@ -54,6 +54,7 @@ codec = { package = "parity-scale-codec", version = "3.7", features = ["derive"]
 frame-metadata = { version = "23", features = ["std", "decode", "current"] }
 scale-info = { version = "2.11", features = ["std"] }
 blake2 = "0.10"
+libc = "0.2"
 twox-hash = "1.6"
 ureq = { version = "2.12", default-features = false }
 qp-rusty-crystals-dilithium = { version = "4.1.1", default-features = false, features = ["ml-dsa-87"] }

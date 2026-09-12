@@ -331,7 +331,7 @@ fn a_settlement_that_is_orphaned_out_puts_the_note_back_in_the_balance() {
     // The nullifier of the wallet's own note, as the chain would publish it.
     // Only the nullifier key computes this at all, and the wallet computed it
     // on the sync above.
-    let nullifier = hex::decode(&wallet.store.notes[0].nullifier).expect("hex");
+    let nullifier = hex::decode(wallet.store.notes[0].nullifier.as_str()).expect("hex");
     let key = blake2_128_concat_map_key("Shielded", "UsedNullifiers", &nullifier);
 
     // The spend settles.
@@ -363,4 +363,376 @@ fn a_settlement_that_is_orphaned_out_puts_the_note_back_in_the_balance() {
     assert_eq!(wallet.store.unspent_total(), 1_000);
     assert!(!wallet.store.notes[0].spent);
     assert_eq!(wallet.store.notes[0].spent_seen_at_block, None);
+}
+
+/// Helpers for the reorg cases below: a leaf is a commitment, a ciphertext and
+/// the block it landed in, and an orphaned block takes all three away.
+fn note_for(pk: Digest, value: u64, tag: &str) -> Note {
+    Note::new(
+        pk,
+        value,
+        Digest::hash_bytes(&[b"rho", tag.as_bytes()]),
+        Digest::hash_bytes(&[b"r", tag.as_bytes()]),
+    )
+    .expect("a note")
+}
+
+fn ct_for(address: &qnero_notes::Address, note: &Note, tag: u8) -> Vec<u8> {
+    encrypt_note(&address.ek, note, &pad_memo("").expect("fits"), &[tag; 32])
+        .expect("encrypts")
+        .to_bytes()
+}
+
+fn put_leaf(state: &mut NodeState, index: u64, block: u32, cm: Digest, ct: &[u8]) {
+    state.put_storage(&identity_map_key("ZkTree", "Leaves", index), &cm.to_bytes());
+    state.put_storage(
+        &identity_map_key("Shielded", "Ciphertexts", index),
+        &codec::Encode::encode(&ct.to_vec()),
+    );
+    state.put_storage(
+        &identity_map_key("Shielded", "LeafBlocks", index),
+        &codec::Encode::encode(&block),
+    );
+}
+
+fn drop_leaf(state: &mut NodeState, index: u64) {
+    for key in [
+        identity_map_key("ZkTree", "Leaves", index),
+        identity_map_key("Shielded", "Ciphertexts", index),
+        identity_map_key("Shielded", "LeafBlocks", index),
+    ] {
+        state.remove_storage(&key);
+    }
+}
+
+fn nullifier_key(store: &qnero_wallet::store::WalletStore, commitment: &str) -> Vec<u8> {
+    let note = store
+        .notes
+        .iter()
+        .find(|note| note.commitment == commitment)
+        .expect("the wallet holds that note");
+    let raw = hex::decode(note.nullifier.as_str()).expect("hex");
+    blake2_128_concat_map_key("Shielded", "UsedNullifiers", &raw)
+}
+
+/// The regression: a note the fork rescan proved is not on the chain stayed in
+/// the balance.
+///
+/// The rescan already computed the fact and reported it as a count, and then
+/// nothing was written down. The note kept `spent: false` in the store, so
+/// `unspent_total` and the `balance` table reported value the chain does not
+/// back, permanently and with no marker; `balance` does not sync, so the
+/// one-off line the sync printed was never seen again. `select_notes` picks
+/// largest first, so a phantom larger than every real note also made every
+/// subsequent `send` fail on the path rebuild, with no documented remedy but
+/// editing the JSON by hand.
+#[test]
+fn an_orphaned_settlement_leaves_the_balance_backed_by_the_chain() {
+    let dir = support::scratch_dir("orphaned-settlement");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    let address = wallet.address();
+
+    let input = note_for(address.pk, 1_000, "input");
+    let input_ct = ct_for(&address, &input, 1);
+    let change = note_for(address.pk, 692, "change");
+    let change_ct = ct_for(&address, &change, 2);
+
+    let mut state = NodeState {
+        head_number: 10,
+        ..Default::default()
+    };
+    put_leaf(&mut state, 5, 10, input.commitment(), &input_ct);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(6));
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let metadata = test_metadata();
+
+    let report = wallet.sync(&chain, &metadata).expect("the first sync runs");
+    assert_eq!(report.received, 1);
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+
+    // Block 11 settles a spend of the input note and appends the change note.
+    let used_key = nullifier_key(&wallet.store, &input.commitment().to_hex());
+    {
+        let mut state = node.state();
+        put_leaf(&mut state, 6, 11, change.commitment(), &change_ct);
+        state.put_storage(&used_key, &[]);
+        state.head_number = 11;
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(7));
+    }
+    let report = wallet
+        .sync(&chain, &metadata)
+        .expect("the second sync runs");
+    assert_eq!(report.received, 1);
+    assert_eq!(report.newly_spent, 1);
+    assert_eq!(wallet.store.unspent_total(), 692);
+
+    // Block 11 is orphaned and the settlement does not re-land. The chain
+    // carries the input note at leaf 5 and nothing else.
+    {
+        let mut state = node.state();
+        drop_leaf(&mut state, 6);
+        state.remove_storage(&used_key);
+        state.fork_from = 11;
+        state.fork_tag = 1;
+        state.head_number = 13;
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(6));
+    }
+    let report = wallet.sync(&chain, &metadata).expect("the third sync runs");
+    assert_eq!(report.rewound_from, Some(7), "the fork was detected");
+    assert_eq!(report.rewound_to, Some(6));
+    assert_eq!(report.newly_unspent, 1, "the input note came back");
+    assert_eq!(report.vanished, 1, "the change note is not on the chain");
+
+    assert_eq!(
+        wallet.store.unspent_total(),
+        1_000,
+        "the chain backs 1000 quanta and that is what the wallet may report"
+    );
+    assert_eq!(wallet.store.off_chain_total(), 692);
+    let phantom = wallet
+        .store
+        .off_chain()
+        .next()
+        .expect("the change note is listed under its own heading");
+    assert_eq!(phantom.commitment, change.commitment().to_hex());
+    // Still held: its secrets are the only copy the wallet has, and the
+    // extrinsic can still be re-included.
+    assert_eq!(wallet.store.notes.len(), 2);
+    // And a spend cannot select it, which is what stops a phantom larger than
+    // every real note from failing every send on the path rebuild.
+    assert!(!wallet
+        .store
+        .unspent()
+        .any(|note| note.commitment == phantom.commitment));
+
+    // `balance` does not sync, so the marker has to survive the file.
+    wallet.save().expect("saved");
+    let reopened = Wallet::open(&seed).expect("the store reopens");
+    assert_eq!(reopened.store.unspent_total(), 1_000);
+    assert_eq!(reopened.store.off_chain().count(), 1);
+
+    // The settlement is re-included at a later block, one leaf further along.
+    {
+        let mut state = node.state();
+        put_leaf(&mut state, 6, 14, change.commitment(), &change_ct);
+        state.put_storage(&used_key, &[]);
+        state.head_number = 14;
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(7));
+    }
+    let report = wallet
+        .sync(&chain, &metadata)
+        .expect("the fourth sync runs");
+    assert_eq!(report.received, 0, "the same note came back as one note");
+    assert_eq!(report.newly_spent, 1);
+    assert_eq!(wallet.store.off_chain().count(), 0);
+    assert_eq!(wallet.store.unspent_total(), 692);
+}
+
+/// The regression: `vanished` was counted before the spent flags were derived,
+/// so it read the flags the reconciliation was about to flip.
+///
+/// A note that was spent and whose own creating leaf was orphaned in the same
+/// reorg was skipped by the `!note.spent` filter, and four lines later
+/// `reconcile_spent` flipped it to unspent and let it back into the balance as
+/// a phantom nobody had been told about. The operator was told one note was
+/// missing while two were. The ordering was an artifact of the fix pass: the
+/// `vanished` block was written into the slot the old latching `newly_spent`
+/// loop had occupied.
+#[test]
+fn a_spent_note_whose_own_leaf_was_orphaned_is_reported_too() {
+    let dir = support::scratch_dir("orphaned-chain");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    let address = wallet.address();
+
+    let first = note_for(address.pk, 1_000, "first");
+    let first_ct = ct_for(&address, &first, 1);
+    let second = note_for(address.pk, 692, "second");
+    let second_ct = ct_for(&address, &second, 2);
+    let third = note_for(address.pk, 400, "third");
+    let third_ct = ct_for(&address, &third, 3);
+
+    let mut state = NodeState {
+        head_number: 10,
+        ..Default::default()
+    };
+    put_leaf(&mut state, 5, 10, first.commitment(), &first_ct);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(6));
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let metadata = test_metadata();
+
+    wallet.sync(&chain, &metadata).expect("the first sync runs");
+    let first_key = nullifier_key(&wallet.store, &first.commitment().to_hex());
+
+    // Block 11 settles a spend of `first`, with `second` as its change.
+    {
+        let mut state = node.state();
+        put_leaf(&mut state, 6, 11, second.commitment(), &second_ct);
+        state.put_storage(&first_key, &[]);
+        state.head_number = 11;
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(7));
+    }
+    wallet
+        .sync(&chain, &metadata)
+        .expect("the second sync runs");
+    let second_key = nullifier_key(&wallet.store, &second.commitment().to_hex());
+
+    // Block 12 settles a spend of `second`, with `third` as its change.
+    {
+        let mut state = node.state();
+        put_leaf(&mut state, 7, 12, third.commitment(), &third_ct);
+        state.put_storage(&second_key, &[]);
+        state.head_number = 12;
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(8));
+    }
+    let report = wallet.sync(&chain, &metadata).expect("the third sync runs");
+    assert_eq!(report.newly_spent, 1);
+    assert_eq!(wallet.store.unspent_total(), 400);
+
+    // Blocks 11 and 12 are orphaned together and neither settlement re-lands.
+    // The chain is back to carrying `first` at leaf 5 and nothing else.
+    {
+        let mut state = node.state();
+        drop_leaf(&mut state, 6);
+        drop_leaf(&mut state, 7);
+        state.remove_storage(&first_key);
+        state.remove_storage(&second_key);
+        state.fork_from = 11;
+        state.fork_tag = 1;
+        state.head_number = 15;
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(6));
+    }
+    let report = wallet
+        .sync(&chain, &metadata)
+        .expect("the fourth sync runs");
+    assert_eq!(report.rewound_to, Some(6));
+    assert_eq!(
+        report.newly_unspent, 2,
+        "both settlements left the chain, so both notes they spent come back"
+    );
+    assert_eq!(
+        report.vanished, 2,
+        "two held notes sit inside the rescanned range and the chain carries \
+         neither, whatever their spent flag said before the reconciliation"
+    );
+    assert_eq!(
+        wallet.store.unspent_total(),
+        1_000,
+        "the chain backs `first` alone"
+    );
+    assert_eq!(wallet.store.off_chain_total(), 692 + 400);
+    assert_eq!(wallet.store.off_chain().count(), 2);
+    // `first` is below the rewind point, so it was folded at or before a block
+    // that is still canonical and cannot have moved.
+    let held = wallet
+        .store
+        .unspent()
+        .map(|note| note.commitment.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(held, vec![first.commitment().to_hex()]);
+}
+
+/// The regression: a fork rescan appended a second identical `RejectedNote`
+/// for every refused leaf inside the rewound range.
+///
+/// A refused note is never added to `store.notes`, so `has_commitment` does
+/// not see it, the rescan decrypts it and refuses it again, and neither
+/// refusal branch asked whether `store.rejected` already held that
+/// commitment. Each fork touching that range added another copy, and `balance`
+/// prints one line per copy. It is new with the rewind: before it a leaf was
+/// never scanned twice.
+#[test]
+fn a_fork_rescan_records_one_refusal_per_refused_output() {
+    let dir = support::scratch_dir("refusal-dedupe");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    let address = wallet.address();
+
+    // A sender that reused one `(rho, r)` pair across two notes to this
+    // wallet: the second shares the first's nullifier, so exactly one of the
+    // two can ever be spent and the wallet refuses the second.
+    let held = note_for(address.pk, 1_000, "held");
+    let held_ct = ct_for(&address, &held, 1);
+    let duplicate = Note::new(
+        address.pk,
+        7,
+        Digest::hash_bytes(&[b"rho", b"held".as_slice()]),
+        Digest::hash_bytes(&[b"r", b"held".as_slice()]),
+    )
+    .expect("a note sharing the nullifier");
+    let duplicate_ct = ct_for(&address, &duplicate, 2);
+    assert_ne!(held.commitment(), duplicate.commitment());
+
+    // A sync that finishes before either leaf lands, so its checkpoint is the
+    // ancestor the fork check rewinds to.
+    let mut state = NodeState {
+        head_number: 10,
+        ..Default::default()
+    };
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(5));
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let metadata = test_metadata();
+    wallet.sync(&chain, &metadata).expect("the first sync runs");
+
+    {
+        let mut state = node.state();
+        put_leaf(&mut state, 5, 11, held.commitment(), &held_ct);
+        put_leaf(&mut state, 6, 11, duplicate.commitment(), &duplicate_ct);
+        state.head_number = 11;
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(7));
+    }
+    let report = wallet
+        .sync(&chain, &metadata)
+        .expect("the second sync runs");
+    assert_eq!(report.received, 1);
+    assert_eq!(report.rejected, 1);
+    assert_eq!(wallet.store.rejected.len(), 1);
+    assert_eq!(wallet.store.rejected[0].leaf_index, 6);
+
+    // A fork below both leaves. The replacement branch carries the same two
+    // outputs, so the rescan walks leaf 6 and refuses the same output again.
+    {
+        let mut state = node.state();
+        state.fork_from = 11;
+        state.fork_tag = 1;
+        state.head_number = 13;
+    }
+    let report = wallet.sync(&chain, &metadata).expect("the third sync runs");
+    assert_eq!(report.rewound_to, Some(5), "the fork was detected");
+    assert_eq!(
+        report.rejected, 0,
+        "the rescan refused nothing the store had not already recorded"
+    );
+    assert_eq!(
+        wallet.store.rejected.len(),
+        1,
+        "one output on chain is one refusal in the store, however many forks \
+         walk past it"
+    );
+    assert_eq!(
+        report.vanished, 0,
+        "the held note came back at its own leaf"
+    );
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+
+    // A second fork over the same range, and a third: still one entry.
+    {
+        let mut state = node.state();
+        state.fork_tag = 2;
+        state.head_number = 15;
+    }
+    wallet
+        .sync(&chain, &metadata)
+        .expect("the fourth sync runs");
+    assert_eq!(wallet.store.rejected.len(), 1);
 }

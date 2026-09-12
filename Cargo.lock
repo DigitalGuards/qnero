@@ -1239,6 +1239,7 @@ dependencies = [
  "clap",
  "frame-metadata",
  "hex",
+ "libc",
  "parity-scale-codec",
  "qnero-aggregator",
  "qnero-circuit",

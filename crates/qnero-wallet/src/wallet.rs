@@ -232,26 +232,34 @@ impl Wallet {
                 // exactly one can ever be spent. The recipient is the last
                 // line, so the duplicate is refused. Carrying it would be a
                 // balance that cannot move.
-                if self.store.known_nullifiers().contains(&nullifier_hex) {
-                    self.store.rejected.push(RejectedNote {
+                //
+                // Recorded through `record_rejected`, which dedupes on the
+                // commitment: a refused note is never added to `notes`, so
+                // `has_commitment` does not see it and the rescan a fork
+                // triggers walks the same leaf, decrypts it and refuses it
+                // again.
+                if self.store.holds_nullifier(&nullifier_hex) {
+                    if self.store.record_rejected(RejectedNote {
                         leaf_index: record.index,
                         commitment: commitment_hex,
-                        nullifier: nullifier_hex,
+                        nullifier: nullifier_hex.into(),
                         value: received.note.value,
                         reason: "its nullifier duplicates a note this wallet already holds".into(),
-                    });
-                    report.rejected += 1;
+                    }) {
+                        report.rejected += 1;
+                    }
                     continue;
                 }
                 if self.store.nullifier_settled(&nullifier_hex) {
-                    self.store.rejected.push(RejectedNote {
+                    if self.store.record_rejected(RejectedNote {
                         leaf_index: record.index,
                         commitment: commitment_hex,
-                        nullifier: nullifier_hex,
+                        nullifier: nullifier_hex.into(),
                         value: received.note.value,
                         reason: "its nullifier is already settled on chain".into(),
-                    });
-                    report.rejected += 1;
+                    }) {
+                        report.rejected += 1;
+                    }
                     continue;
                 }
 
@@ -274,34 +282,21 @@ impl Wallet {
                     block_number: record.block_number,
                     value: received.note.value,
                     commitment: commitment_hex.clone(),
-                    nullifier: nullifier_hex,
+                    nullifier: nullifier_hex.into(),
                     rho: received.note.rho.to_hex().into(),
                     r: received.note.r.to_hex().into(),
                     memo: String::from_utf8_lossy(unpad_memo(&received.memo)).into_owned(),
                     origin,
                     spent: false,
                     spent_seen_at_block: None,
+                    // Recorded by this scan, from the chain the scan is
+                    // pinned to.
+                    on_chain: true,
                 });
                 self.store
                     .pending
                     .retain(|pending| pending.commitment != commitment_hex);
             }
-        }
-
-        // A rescanned range that did not carry a note back is a note the
-        // current chain does not have: its settlement was orphaned and never
-        // re-included. Nothing here edits it, because the leaf index it holds
-        // is the only handle on where it was and because a later block can
-        // still re-include the extrinsic. It is reported, and a spend that
-        // selects it fails loudly on the path rebuild.
-        if rewind.is_some() {
-            report.vanished = self
-                .store
-                .notes
-                .iter()
-                .filter(|note| !note.spent && note.leaf_index >= start)
-                .filter(|note| !seen_again.contains(&note.commitment))
-                .count() as u64;
         }
 
         // Spent status, derived against the local copy of the settled set that
@@ -317,6 +312,27 @@ impl Wallet {
         let (newly_spent, newly_unspent) = self.store.reconcile_spent(head.number);
         report.newly_spent = newly_spent;
         report.newly_unspent = newly_unspent;
+
+        // A rescanned range that did not carry a note back is a note the
+        // current chain does not have: its settlement was orphaned and never
+        // re-included. The note stays in the store, because its secrets are
+        // the only copy this wallet has and a later block can still re-include
+        // the extrinsic, and it is marked off chain, so `unspent_total`,
+        // `select_notes` and the `balance` table agree with the chain instead
+        // of reporting value nothing backs. `relocate_note` puts it back the
+        // moment a scan sees the commitment again.
+        //
+        // Counted after the reconciliation above, and that ordering is the
+        // whole of it. The flags this reads have to be the ones derived from
+        // the set that was just repaged: a note that was spent and whose own
+        // creating leaf was orphaned in the same reorg still carried
+        // `spent: true` a few lines earlier, so a filter on `!note.spent`
+        // skipped it, and the reconciliation then flipped it to unspent and
+        // let it back into the balance as a phantom nobody had been told
+        // about.
+        if rewind.is_some() {
+            report.vanished = self.store.mark_vanished(start, &seen_again);
+        }
 
         self.store.next_leaf = leaf_count;
         self.store.last_synced_block = head.number;
@@ -840,7 +856,10 @@ impl Wallet {
                 submitted_at_block: head.number,
                 extrinsic: String::new(),
             },
-            spent_nullifiers: selected.iter().map(|note| note.nullifier.clone()).collect(),
+            spent_nullifiers: selected
+                .iter()
+                .map(|note| note.nullifier.as_str().to_string())
+                .collect(),
             input_leaves: selected.iter().map(|note| note.leaf_index).collect(),
             amount,
             fee,

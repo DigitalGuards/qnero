@@ -178,14 +178,15 @@ before it is copied or parsed.
 
 | proof | serialized bytes | source |
 |---|---:|---|
-| private batch, `N = 6` | 157476 | measured at M3, asserted against the cap by `a_real_private_batch_settles_end_to_end` |
+| private batch, `N = 6` | 150908 | measured at M5, asserted against the cap by `a_real_private_batch_settles_end_to_end` |
+| private batch, `N = 7` | 157476 | measured at M3, which is where the aggregator was timed |
 | public batch, `n = 53`, `N = 6` | 237544 | measured at M5, see below |
 
 The private batch is the half a test covers: the end-to-end test proves one at
 the chain's `N` and asserts its length against the cap, so a circuit change that
 pushed it past 512 KiB fails in the test suite first. The public batch figure
 was an estimate at M4 and is a measurement at M5: 237544 bytes, against an
-estimate of about 213000 built from a 157 KB recursive proof plus
+estimate of about 213000 built from the 157 KB `N = 7` recursive proof plus
 `public_batch_pi_len(53, 6) = 6947` public-input felts at eight bytes. The
 estimate was 10 percent low and the margin against the cap is 2.2x. Nothing
 enforces it in a test that runs by default: producing the proof is a minute of

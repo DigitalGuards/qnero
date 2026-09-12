@@ -28,12 +28,18 @@ use crate::keys::{refuse_if_readable_beyond_owner, sync_parent_dir};
 ///
 /// Version 2 added `used_nullifiers`, the local copy of the chain's settled
 /// set. Version 3 added `checkpoints`, the block hashes a sync finished at,
-/// which is how a fork is detected. A version-2 store is upgraded in place on
-/// load, with an empty checkpoint list: the first sync after the upgrade
-/// records one and has nothing older to compare against. A version-1 store is
-/// refused; deleting it and re-syncing recovers every unspent note, because
-/// every note's plaintext is on chain inside its ciphertext.
-pub const STORE_VERSION: u32 = 3;
+/// which is how a fork is detected. Version 4 added `on_chain`, which is what
+/// a fork rescan writes down when it proves a held note is not on the chain
+/// any more, and dropped `used_nullifiers` from the file.
+///
+/// Both older shapes are upgraded in place on load. A version-2 store gets an
+/// empty checkpoint list: the first sync after the upgrade records one and has
+/// nothing older to compare against. A version-3 store's notes load as
+/// `on_chain: true`, which is what every note in one is: the version that
+/// wrote it had no way to mark a note otherwise. A version-1 store is refused;
+/// deleting it and re-syncing recovers every unspent note, because every
+/// note's plaintext is on chain inside its ciphertext.
+pub const STORE_VERSION: u32 = 4;
 
 /// The oldest store shape this wallet still upgrades. Anything older is
 /// refused.
@@ -72,7 +78,15 @@ pub struct WalletStore {
     /// settled hands it the nullifier of a note this wallet holds, which is
     /// the one value the pool's unlinkability rests on, before that value is
     /// published anywhere. See `docs/WALLET.md`.
-    #[serde(default)]
+    ///
+    /// In memory only. `Wallet::sync` overwrites it wholesale from the chain
+    /// before either of its two readers runs, the scan's `nullifier_settled`
+    /// check and [`WalletStore::reconcile_spent`], and no other command reads
+    /// it at all, so a persisted copy never produced a cache hit. What it did
+    /// do is grow the file with the whole chain's activity instead of this
+    /// wallet's, at about sixty-eight bytes an entry in pretty-printed JSON,
+    /// and a single `send` writes the store three times.
+    #[serde(skip)]
     pub used_nullifiers: BTreeSet<String>,
     /// The blocks this wallet finished a sync at, and the leaf watermark each
     /// one left, oldest first.
@@ -199,6 +213,14 @@ impl core::fmt::Debug for SecretHex {
     }
 }
 
+/// What `on_chain` reads as in a store written before the field existed.
+///
+/// A version-3 store could not mark a note off chain at all, so every note in
+/// one is on the chain as far as that version could tell.
+fn on_chain_default() -> bool {
+    true
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredNote {
     pub leaf_index: u64,
@@ -206,13 +228,31 @@ pub struct StoredNote {
     /// Pool quanta.
     pub value: u64,
     pub commitment: String,
-    pub nullifier: String,
+    /// Redacted in `Debug` and zeroized on drop, like `rho` and `r` beside it,
+    /// and on a stronger argument than either: for a note that has not been
+    /// spent this value has never appeared anywhere, so whoever reads a core
+    /// dump or a swap page later can watch the chain and attribute the
+    /// settlement that publishes it to this wallet with certainty.
+    pub nullifier: SecretHex,
     pub rho: SecretHex,
     pub r: SecretHex,
     #[serde(default)]
     pub memo: String,
     pub origin: NoteOrigin,
     pub spent: bool,
+    /// Whether the chain still carries this note's commitment.
+    ///
+    /// False for exactly the notes a fork rescan walked past without finding:
+    /// their settlement was orphaned and has not been re-included, so the
+    /// chain does not back their value. Such a note stays in the store,
+    /// because its secrets are the only copy this wallet has and a later block
+    /// can still re-include the extrinsic, and it stays out of
+    /// [`WalletStore::unspent`], because `unspent_total`, `select_notes` and
+    /// the `balance` table have to agree with the chain. A rescan that finds
+    /// the commitment again puts it back
+    /// ([`WalletStore::relocate_note`]).
+    #[serde(default = "on_chain_default")]
+    pub on_chain: bool,
     /// The block at which this wallet first saw the nullifier settled.
     ///
     /// Not the block that settled it. Spent status is decided locally against
@@ -252,6 +292,7 @@ impl core::fmt::Debug for StoredNote {
             .field("origin", &self.origin)
             .field("spent", &self.spent)
             .field("spent_seen_at_block", &self.spent_seen_at_block)
+            .field("on_chain", &self.on_chain)
             .finish()
     }
 }
@@ -322,7 +363,10 @@ pub enum PendingKind {
 pub struct RejectedNote {
     pub leaf_index: u64,
     pub commitment: String,
-    pub nullifier: String,
+    /// Redacted and zeroized for the reason [`StoredNote::nullifier`] is: one
+    /// of the two refusals that produce a `RejectedNote` is a nullifier that
+    /// duplicates a note this wallet still holds and still intends to spend.
+    pub nullifier: SecretHex,
     pub value: u64,
     pub reason: String,
 }
@@ -396,8 +440,15 @@ impl WalletStore {
             // first sync after the upgrade records one; until then there is no
             // stored hash to compare against, so a fork that happened before
             // the upgrade is invisible, which is what it already was.
+            //
+            // Version 3 to 4 adds `on_chain`, which serde defaults to true for
+            // every note already in the file, and drops `used_nullifiers` from
+            // the format: the field is `#[serde(skip)]` now, so a version-3
+            // file's copy is ignored on load and the first sync repages it.
+            if store.version < 3 {
+                store.checkpoints.clear();
+            }
             store.version = STORE_VERSION;
-            store.checkpoints.clear();
         }
         if store.address != address {
             bail!(
@@ -454,24 +505,80 @@ impl WalletStore {
         sync_parent_dir(path)
     }
 
+    /// Notes this wallet can spend: not settled, and still on the chain.
+    ///
+    /// The second half is what a fork rescan writes down. A note whose
+    /// settlement was orphaned and never re-included is not backed by the
+    /// chain, so counting it in `unspent_total` reports value that does not
+    /// exist, and `select_notes` picks largest first, so a phantom larger than
+    /// every real note also makes every subsequent `send` fail on the path
+    /// rebuild. [`WalletStore::off_chain`] is where those notes are listed
+    /// instead.
     pub fn unspent(&self) -> impl Iterator<Item = &StoredNote> {
-        self.notes.iter().filter(|note| !note.spent)
+        self.notes
+            .iter()
+            .filter(|note| !note.spent && note.on_chain)
+    }
+
+    /// Notes a fork rescan proved the chain no longer carries.
+    pub fn off_chain(&self) -> impl Iterator<Item = &StoredNote> {
+        self.notes.iter().filter(|note| !note.on_chain)
     }
 
     pub fn unspent_total(&self) -> u64 {
         self.unspent().map(|note| note.value).sum()
     }
 
+    /// Value the chain does not back, held for the case its settlement
+    /// re-lands.
+    pub fn off_chain_total(&self) -> u64 {
+        self.off_chain().map(|note| note.value).sum()
+    }
+
+    /// Mark every note inside a rescanned range that the rescan did not find.
+    /// Returns how many changed.
+    ///
+    /// `seen` is the set of commitments the rescan walked, so a note above
+    /// `from` whose commitment is not in it is one the current chain does not
+    /// carry.
+    ///
+    /// A note the settled set says is spent is skipped, and the caller has to
+    /// run [`WalletStore::reconcile_spent`] before this so that flag is the
+    /// one derived from the set the sync just repaged. A spent note's value is
+    /// gone whether or not its leaf is still there, so the marker would buy
+    /// nothing; a note whose settlement was orphaned in the same reorg that
+    /// took its leaf is exactly the case this has to catch, and it only reads
+    /// as unspent once the reconciliation has run.
+    pub fn mark_vanished(&mut self, from: u64, seen: &BTreeSet<String>) -> u64 {
+        let mut marked = 0;
+        for note in self.notes.iter_mut() {
+            if note.spent || !note.on_chain {
+                continue;
+            }
+            if note.leaf_index >= from && !seen.contains(&note.commitment) {
+                note.on_chain = false;
+                marked += 1;
+            }
+        }
+        marked
+    }
+
     pub fn pending_total(&self) -> u64 {
         self.pending.iter().map(|note| note.value).sum()
     }
 
-    /// Every nullifier this wallet already holds, spent or not.
-    pub fn known_nullifiers(&self) -> BTreeSet<String> {
+    /// Whether this wallet already holds a note with this nullifier, spent or
+    /// not.
+    ///
+    /// A scan asks this once per received note. It used to clone every held
+    /// nullifier into a fresh set to answer it, and every one of those copies
+    /// dropped without being wiped, so a scan that received `k` notes left `k`
+    /// unwiped copies of every held nullifier on the heap. That is the one
+    /// value `SecretHex` and the `Debug` redactions exist for.
+    pub fn holds_nullifier(&self, nullifier: &str) -> bool {
         self.notes
             .iter()
-            .map(|note| note.nullifier.clone())
-            .collect()
+            .any(|note| note.nullifier.as_str() == nullifier)
     }
 
     pub fn has_commitment(&self, commitment: &str) -> bool {
@@ -495,6 +602,11 @@ impl WalletStore {
     /// and `--merkle-rpc` refuses the same way. The balance would read as
     /// spendable and every spend would fail until the JSON was edited by hand.
     ///
+    /// Seeing the commitment at all is also what puts a note the previous
+    /// rescan wrote off back into the balance: `on_chain` is set here, whether
+    /// or not the leaf moved, because the chain is carrying the commitment
+    /// again.
+    ///
     /// Returns whether anything moved.
     pub fn relocate_note(
         &mut self,
@@ -507,6 +619,7 @@ impl WalletStore {
             if note.commitment != commitment {
                 continue;
             }
+            note.on_chain = true;
             if note.leaf_index != leaf_index || note.block_number != block_number {
                 note.leaf_index = leaf_index;
                 note.block_number = block_number;
@@ -514,6 +627,35 @@ impl WalletStore {
             }
         }
         moved
+    }
+
+    /// Record a decryptable output this wallet refused, once per commitment.
+    ///
+    /// Returns whether this is a refusal the store had not already recorded.
+    ///
+    /// A refused note is never added to `notes`, so `has_commitment` does not
+    /// see it and a rescan of the same range decrypts it, refuses it and
+    /// reaches this line again. Before the fork rewind a leaf was never
+    /// scanned twice; with it, every fork touching that range used to append
+    /// another identical entry, and `balance` prints one line per entry, so an
+    /// operator reading that list to answer "why is the payment someone says
+    /// they sent not in my balance?" saw N refusals where the chain carried
+    /// one output.
+    pub fn record_rejected(&mut self, rejected: RejectedNote) -> bool {
+        if let Some(existing) = self
+            .rejected
+            .iter_mut()
+            .find(|entry| entry.commitment == rejected.commitment)
+        {
+            // The leaf a refused output sits at is provisional in exactly the
+            // way a held note's is, and for the same reason, so the newest
+            // position wins. `relocate_note` does this for notes the wallet
+            // kept.
+            existing.leaf_index = rejected.leaf_index;
+            return false;
+        }
+        self.rejected.push(rejected);
+        true
     }
 
     /// Whether the chain had settled this nullifier as of the last sync.
@@ -533,7 +675,7 @@ impl WalletStore {
     /// same input twice.
     pub fn mark_spent(&mut self, nullifier: &str, seen_at: u32) {
         for note in self.notes.iter_mut() {
-            if note.nullifier == nullifier && !note.spent {
+            if note.nullifier.as_str() == nullifier && !note.spent {
                 note.spent = true;
                 note.spent_seen_at_block = Some(seen_at);
             }
@@ -546,7 +688,7 @@ impl WalletStore {
     /// [`WalletStore::reconcile_spent`] can exist.
     pub fn mark_unspent(&mut self, nullifier: &str) {
         for note in self.notes.iter_mut() {
-            if note.nullifier == nullifier && note.spent {
+            if note.nullifier.as_str() == nullifier && note.spent {
                 note.spent = false;
                 note.spent_seen_at_block = None;
             }
@@ -578,7 +720,7 @@ impl WalletStore {
         let mut newly_spent = 0;
         let mut newly_unspent = 0;
         for note in self.notes.iter_mut() {
-            match (settled.contains(&note.nullifier), note.spent) {
+            match (settled.contains(note.nullifier.as_str()), note.spent) {
                 (true, false) => {
                     note.spent = true;
                     note.spent_seen_at_block = Some(seen_at);
@@ -655,13 +797,14 @@ mod tests {
             block_number: Some(3),
             value,
             commitment: Digest::hash_bytes(&[b"cm", tag.as_bytes()]).to_hex(),
-            nullifier: Digest::hash_bytes(&[b"nf", tag.as_bytes()]).to_hex(),
+            nullifier: Digest::hash_bytes(&[b"nf", tag.as_bytes()]).to_hex().into(),
             rho: rho.to_hex().into(),
             r: r.to_hex().into(),
             memo: "a memo".into(),
             origin: NoteOrigin::Shield,
             spent: false,
             spent_seen_at_block: None,
+            on_chain: true,
         }
     }
 
@@ -693,7 +836,7 @@ mod tests {
         store.rejected.push(RejectedNote {
             leaf_index: 4,
             commitment: "bb".repeat(32),
-            nullifier: "cc".repeat(32),
+            nullifier: "cc".repeat(32).into(),
             value: 5,
             reason: "duplicate nullifier".into(),
         });
@@ -706,8 +849,22 @@ mod tests {
         );
         assert_eq!(loaded.unspent_total(), 1_400);
         assert_eq!(loaded.pending_total(), 700);
-        assert!(loaded.nullifier_settled(&"dd".repeat(32)));
-        assert!(!loaded.nullifier_settled(&"ee".repeat(32)));
+        assert!(loaded.notes[0].on_chain);
+
+        // `used_nullifiers` is an in-memory working set. Every reader runs
+        // inside the sync that just repaged it from the chain, so persisting
+        // it never produced a cache hit; what it did produce was a file that
+        // grew with the whole chain's settled spends, at about sixty-eight
+        // bytes an entry in pretty-printed JSON, rewritten three times by a
+        // single `send`.
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("used_nullifiers"),
+            "the settled set is on disk again: {text}"
+        );
+        assert!(!text.contains(&"dd".repeat(32)), "{text}");
+        assert!(loaded.used_nullifiers.is_empty());
+        assert!(!loaded.nullifier_settled(&"dd".repeat(32)));
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
@@ -765,7 +922,7 @@ mod tests {
         // value `PreparedSpend` redacts and the same value
         // `used_nullifiers_at` pages a whole map to avoid naming.
         assert!(
-            !printed.contains(&note.nullifier),
+            !printed.contains(note.nullifier.as_str()),
             "the nullifier leaked: {printed}"
         );
         assert!(printed.contains(&note.commitment));
@@ -774,13 +931,13 @@ mod tests {
         let rejected = RejectedNote {
             leaf_index: 4,
             commitment: "bb".repeat(32),
-            nullifier: "cc".repeat(32),
+            nullifier: "cc".repeat(32).into(),
             value: 5,
             reason: "duplicate nullifier".into(),
         };
         let printed = format!("{rejected:?}");
         assert!(
-            !printed.contains(&rejected.nullifier),
+            !printed.contains(rejected.nullifier.as_str()),
             "a refused note's nullifier leaked: {printed}"
         );
         assert!(printed.contains("duplicate nullifier"), "{printed}");
@@ -859,7 +1016,7 @@ mod tests {
         let mut store = WalletStore::new("qn1example".into());
         store.notes.push(sample_note(1_000, "one"));
         store.notes.push(sample_note(400, "two"));
-        let first = store.notes[0].nullifier.clone();
+        let first = store.notes[0].nullifier.as_str().to_string();
 
         store.used_nullifiers.insert(first.clone());
         assert_eq!(store.reconcile_spent(42), (1, 0));
@@ -879,6 +1036,116 @@ mod tests {
 
         store.mark_unspent(&first);
         assert_eq!(store.unspent_total(), 1_400);
+    }
+
+    /// The regression: a note the fork rescan proved is no longer on the chain
+    /// stayed in `unspent()`.
+    ///
+    /// `unspent_total` and the `balance` table then reported value the chain
+    /// does not back, permanently and with no marker in the store, and
+    /// `select_notes` picks largest first, so a phantom larger than every real
+    /// note also made every subsequent `send` fail on the path rebuild with no
+    /// remedy but editing the JSON by hand.
+    #[test]
+    fn a_note_the_chain_no_longer_carries_leaves_the_unspent_total() {
+        let mut store = WalletStore::new("qn1example".into());
+        store.notes.push(sample_note(1_000, "held"));
+        store.notes.push(sample_note(692, "orphaned"));
+        store.notes[0].leaf_index = 5;
+        store.notes[1].leaf_index = 6;
+        let orphaned = store.notes[1].commitment.clone();
+        assert_eq!(store.unspent_total(), 1_692);
+
+        // The rescan walked leaves 6 and up and found the first commitment
+        // again and not the second.
+        let seen: BTreeSet<String> = [store.notes[0].commitment.clone()].into_iter().collect();
+        assert_eq!(store.mark_vanished(6, &seen), 1);
+        assert!(!store.notes[1].on_chain);
+        assert_eq!(
+            store.unspent_total(),
+            1_000,
+            "the balance has to be what the chain backs"
+        );
+        assert_eq!(store.off_chain_total(), 692);
+        assert_eq!(store.off_chain().count(), 1);
+        // Still held, because its secrets are the only copy and the extrinsic
+        // can still be re-included.
+        assert_eq!(store.notes.len(), 2);
+        // Idempotent: a second rescan that finds it no better marks nothing
+        // new.
+        assert_eq!(store.mark_vanished(6, &seen), 0);
+        // And a note below the rescanned range is untouched, whatever the
+        // rescan saw: the leaves below the rewind point were folded at or
+        // before a block that is still canonical.
+        assert_eq!(store.mark_vanished(9, &BTreeSet::new()), 0);
+        assert!(store.notes[0].on_chain);
+
+        // The settlement re-lands and the scan sees the commitment again.
+        assert!(store.relocate_note(&orphaned, 8, Some(14)));
+        assert!(store.notes[1].on_chain);
+        assert_eq!(store.unspent_total(), 1_692);
+        assert_eq!(store.off_chain_total(), 0);
+
+        // Even at the leaf it already held: seeing the commitment at all is
+        // the chain carrying it.
+        assert_eq!(store.mark_vanished(6, &BTreeSet::new()), 1);
+        assert!(!store.relocate_note(&orphaned, 8, Some(14)));
+        assert!(store.notes[1].on_chain);
+    }
+
+    /// The regression: a fork rescan walked a refused leaf again and appended
+    /// a second identical `RejectedNote`.
+    ///
+    /// A refused note is never added to `notes`, so `has_commitment` does not
+    /// see it and the rescan decrypts it, refuses it and reaches the push
+    /// again. Each fork touching that range added another copy, and `balance`
+    /// prints one line per copy, so an operator reading that list to answer
+    /// "why is the payment someone says they sent not in my balance?" saw N
+    /// refusals where the chain carried one output.
+    #[test]
+    fn a_refusal_is_recorded_once_per_commitment() {
+        let mut store = WalletStore::new("qn1example".into());
+        let refusal = |leaf_index: u64| RejectedNote {
+            leaf_index,
+            commitment: "bb".repeat(32),
+            nullifier: "cc".repeat(32).into(),
+            value: 7,
+            reason: "its nullifier duplicates a note this wallet already holds".into(),
+        };
+
+        assert!(store.record_rejected(refusal(6)));
+        assert_eq!(store.rejected.len(), 1);
+        // The same output, walked again by the rescan a fork triggered.
+        assert!(!store.record_rejected(refusal(6)));
+        assert!(!store.record_rejected(refusal(6)));
+        assert_eq!(store.rejected.len(), 1);
+        // The chain moved it, the way it moves a held note's leaf. The entry
+        // follows rather than doubling.
+        assert!(!store.record_rejected(refusal(4)));
+        assert_eq!(store.rejected.len(), 1);
+        assert_eq!(store.rejected[0].leaf_index, 4);
+
+        // A different output is a different refusal.
+        let mut other = refusal(9);
+        other.commitment = "dd".repeat(32);
+        assert!(store.record_rejected(other));
+        assert_eq!(store.rejected.len(), 2);
+    }
+
+    /// Answered by a scan over the notes, so a scan that receives `k` notes no
+    /// longer leaves `k` unwiped copies of every held nullifier on the heap.
+    #[test]
+    fn a_held_nullifier_is_recognised_without_copying_the_set() {
+        let mut store = WalletStore::new("qn1example".into());
+        store.notes.push(sample_note(1_000, "one"));
+        store.notes.push(sample_note(400, "two"));
+        store.notes[1].spent = true;
+        let held = store.notes[0].nullifier.as_str().to_string();
+        let spent = store.notes[1].nullifier.as_str().to_string();
+        assert!(store.holds_nullifier(&held));
+        // Spent or not: a duplicate is a duplicate.
+        assert!(store.holds_nullifier(&spent));
+        assert!(!store.holds_nullifier(&"ff".repeat(32)));
     }
 
     /// Checkpoints are the fork detector's memory: one per sync, newest last,
@@ -913,30 +1180,60 @@ mod tests {
         assert_eq!(store.checkpoints.len(), 1);
     }
 
-    /// A version-2 store upgrades in place: it holds every note secret and the
-    /// only thing version 3 adds defaults to empty.
+    /// An older store upgrades in place: it holds every note secret, and the
+    /// two fields the newer versions add both have a defined reading for a
+    /// file written before they existed.
     #[test]
-    fn a_version_two_store_upgrades_rather_than_being_refused() {
+    fn an_older_store_upgrades_rather_than_being_refused() {
         let dir = std::env::temp_dir().join(format!("qnero-store-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("v2.store.json");
+        let path = dir.join("old.store.json");
         let _ = fs::remove_file(&path);
 
-        let mut store = WalletStore::new("qn1example".into());
-        store.notes.push(sample_note(1_000, "one"));
-        store.save(&path).unwrap();
-        let text = fs::read_to_string(&path).unwrap();
-        fs::write(&path, text.replace("\"version\": 3", "\"version\": 2")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let write_as = |version: u32| {
+            let mut store = WalletStore::new("qn1example".into());
+            store.notes.push(sample_note(1_000, "one"));
+            store.record_checkpoint(9, "ab".repeat(32), 4);
+            store.save(&path).unwrap();
+            let text = fs::read_to_string(&path).unwrap();
+            let mut text = text.replace(
+                &format!("\"version\": {STORE_VERSION}"),
+                &format!("\"version\": {version}"),
+            );
+            if version < 4 {
+                // A file written by a version that had no such field.
+                text = text.replace("      \"on_chain\": true\n", "");
+                text = text.replace(",\n      \"on_chain\": true", "");
+            }
+            fs::write(&path, text).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        };
 
+        // Version 3 to 4. `on_chain` is absent from the file, and every note
+        // in a version-3 store is on the chain as far as that version could
+        // tell: it had no way to mark one otherwise.
+        write_as(3);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("on_chain"), "{text}");
         let loaded = WalletStore::load_or_new(&path, "qn1example").expect("it upgrades");
         assert_eq!(loaded.version, STORE_VERSION);
         assert_eq!(loaded.unspent_total(), 1_000);
+        assert!(loaded.notes[0].on_chain);
+        // The checkpoints a version-3 store carries are still good: its block
+        // hashes came from the same chain.
+        assert_eq!(loaded.checkpoints.len(), 1);
+
+        // Version 2 to 4. `checkpoints` did not exist, so whatever is in the
+        // file is dropped: the first sync after the upgrade records one and
+        // has nothing older to compare against.
+        write_as(2);
+        let loaded = WalletStore::load_or_new(&path, "qn1example").expect("it upgrades");
+        assert_eq!(loaded.version, STORE_VERSION);
+        assert_eq!(loaded.unspent_total(), 1_000);
+        assert!(loaded.notes[0].on_chain);
         assert!(loaded.checkpoints.is_empty());
 
-        let text = fs::read_to_string(&path).unwrap();
-        fs::write(&path, text.replace("\"version\": 2", "\"version\": 1")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_as(1);
         assert!(WalletStore::load_or_new(&path, "qn1example").is_err());
         fs::remove_file(&path).unwrap();
     }

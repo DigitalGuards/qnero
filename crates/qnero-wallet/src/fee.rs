@@ -89,9 +89,30 @@ pub fn ensure_ciphertext_fits(
 /// included, and the only message the operator saw would be
 /// `ensure_ciphertext_fits` telling them about a size no memo of theirs
 /// controls.
+///
+/// The cap is the looser of the two bounds, so the tighter one is checked
+/// here as well: the fee.
+///
+/// `memo::MEMO_BYTES` is decided by two bounds and the tighter one wins. The
+/// tighter one is the fee. A slot's payload term is
+/// `ceil((len(ct_1) + len(ct_2)) / CiphertextBytesPerFeeQuantum)`, and the
+/// runtime sizes that divisor so an honest pair and a pair padded to
+/// `MaxCiphertextBytes` land in different buckets. The chain never parses
+/// these bytes and `Shielded::Ciphertexts` is never pruned, so once the two
+/// buckets merge a settler pads both ciphertexts to the cap, writes the extra
+/// bytes of permanent state and pays exactly what an honest spend pays.
+///
+/// Checking only the cap left that open. A runtime that widened the divisor,
+/// with the cap untouched, passed the guard while the separation the pad was
+/// chosen for was gone, and neither this wallet's own fee test nor the
+/// pallet's byte-floor test would have said so: each builds its own fixture
+/// and pins 61 against that, so both stay green against any runtime at all.
+/// Both values reach `ChainMetadata` from `state_getMetadata`, so the
+/// comparison is against the runtime the wallet is actually talking to.
 pub fn ensure_memo_pad_fits(metadata: &ChainMetadata) -> anyhow::Result<()> {
     let padded = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
-    if padded > metadata.max_ciphertext_bytes as usize {
+    let cap = metadata.max_ciphertext_bytes as usize;
+    if padded > cap {
         anyhow::bail!(
             "this wallet pads every memo to memo::MEMO_BYTES ({}), so each output ciphertext is \
              {padded} bytes, and this runtime caps one at {}. MEMO_BYTES is the constant that has \
@@ -99,11 +120,54 @@ pub fn ensure_memo_pad_fits(metadata: &ChainMetadata) -> anyhow::Result<()> {
              the padding buys nothing.",
             crate::memo::MEMO_BYTES,
             metadata.max_ciphertext_bytes,
-            (metadata.max_ciphertext_bytes as usize)
-                .saturating_sub(crate::memo::CIPHERTEXT_FIXED_BYTES)
+            cap.saturating_sub(crate::memo::CIPHERTEXT_FIXED_BYTES)
+        );
+    }
+    if slot_fee_floor(metadata, padded, padded) >= slot_fee_floor(metadata, cap, cap) {
+        let advice = match largest_separating_pad(metadata) {
+            Some(pad) => format!("MEMO_BYTES has to come down to at most {pad}"),
+            None => format!(
+                "no pad restores it under this runtime: even an unpadded pair of {} bytes each \
+                 pays what a pair padded to the cap pays, so the divisor is what has to come down",
+                crate::memo::CIPHERTEXT_FIXED_BYTES
+            ),
+        };
+        anyhow::bail!(
+            "this wallet pads every memo to memo::MEMO_BYTES ({}), so the pair of ciphertexts a \
+             spend publishes is {} bytes and pays {} quanta of payload fee, and a pair padded to \
+             this runtime's cap of {cap} bytes each pays {}. The payload term prices nothing: a \
+             settler can pad both outputs to the cap and write {} bytes of permanent state per \
+             slot for what an honest spend pays. This runtime charges one quantum per {} \
+             ciphertext bytes; {advice}.",
+            crate::memo::MEMO_BYTES,
+            2 * padded,
+            slot_fee_floor(metadata, padded, padded),
+            slot_fee_floor(metadata, cap, cap),
+            2 * cap.saturating_sub(padded),
+            bytes_per_fee_quantum(metadata)
         );
     }
     Ok(())
+}
+
+/// The largest memo pad that keeps this wallet's own pair a fee bucket below a
+/// pair padded to the runtime's cap, or `None` when no pad does.
+///
+/// A pair of `total` bytes pays `ceil(total / q)`. The cap's pair pays
+/// `ceil(2 * cap / q)`, so the largest total strictly below that bucket is
+/// `(ceil(2 * cap / q) - 1) * q`, and half of it less the fixed part of a
+/// ciphertext is the pad. At the M4 runtime's 512 and 2048 that is
+/// `(8 - 1) * 512 / 2 - 1731 = 61`, which is where `memo::MEMO_BYTES` comes
+/// from.
+pub fn largest_separating_pad(metadata: &ChainMetadata) -> Option<usize> {
+    let quantum = bytes_per_fee_quantum(metadata);
+    let cap = metadata.max_ciphertext_bytes as u64;
+    let cap_bucket = cap.checked_mul(2)?.div_ceil(quantum);
+    let largest_total = cap_bucket.checked_sub(1)?.checked_mul(quantum)?;
+    let each = largest_total / 2;
+    usize::try_from(each)
+        .ok()?
+        .checked_sub(crate::memo::CIPHERTEXT_FIXED_BYTES)
 }
 
 #[cfg(test)]
@@ -188,6 +252,92 @@ mod tests {
         assert!(message.contains("1780"), "{message}");
         // The advice is the pad, because no memo length reaches this.
         assert!(!message.contains("Shorten"), "{message}");
+    }
+
+    /// The regression: the guard the pad got checked only the looser of the
+    /// two bounds that pick it.
+    ///
+    /// `memo.rs` states that two bounds decide `MEMO_BYTES` and the tighter
+    /// one wins, and the tighter one is the fee: `2 * (1731 + 61) = 3584` has
+    /// to sit a bucket below `2 * 2048 = 4096`. The guard compared
+    /// `1731 + 61` against `MaxCiphertextBytes` and nothing else, so a runtime
+    /// that widened `CiphertextBytesPerFeeQuantum` with the cap untouched
+    /// passed it while the separation was gone, and a settler could again pad
+    /// both outputs to the cap, write 512 bytes of permanent state per slot
+    /// and pay what an honest spend pays.
+    ///
+    /// Neither existing gate sees it: this module's own separation test and
+    /// the pallet's byte-floor test each build a fixture and pin 61 against
+    /// that fixture, so both stay green against any runtime at all. This one
+    /// is against `ChainMetadata`, which is what `state_getMetadata` fills in.
+    #[test]
+    fn a_runtime_whose_divisor_merges_the_fee_buckets_is_refused() {
+        let sent = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
+
+        // The runtime the pad was tuned against: both bounds hold.
+        assert!(ensure_memo_pad_fits(&runtime()).is_ok());
+
+        // The divisor doubled, nothing else changed. The cap check still
+        // passes, because 1792 is under 2048.
+        let mut widened = runtime();
+        widened.ciphertext_bytes_per_fee_quantum = 1_024;
+        let cap = widened.max_ciphertext_bytes as usize;
+        assert!(
+            sent <= cap,
+            "the cap check is not what is supposed to catch this"
+        );
+        assert_eq!(
+            slot_fee_floor(&widened, sent, sent),
+            slot_fee_floor(&widened, cap, cap),
+            "the fixture has to be one where the buckets actually merge"
+        );
+        let refused = ensure_memo_pad_fits(&widened)
+            .expect_err("a runtime where the payload term prices nothing is refused");
+        let message = refused.to_string();
+        assert!(message.contains("prices nothing"), "{message}");
+        assert!(message.contains("1024"), "{message}");
+        // At 1024 bytes per quantum against a 2048-byte cap, no pad at all
+        // restores the separation: an unpadded pair is 3462 bytes and a capped
+        // one 4096, and both are the fourth bucket.
+        assert_eq!(largest_separating_pad(&widened), None);
+        assert!(
+            message.contains("the divisor is what has to come down"),
+            "{message}"
+        );
+
+        // A runtime that widened the divisor by less still separates the two,
+        // at a smaller pad, and the message names that pad rather than sending
+        // an operator to guess. At 1160 bytes per quantum a pair may reach
+        // 3480 bytes, so each ciphertext may reach 1740 and the pad is 9.
+        let mut slightly = runtime();
+        slightly.ciphertext_bytes_per_fee_quantum = 1_160;
+        assert_eq!(largest_separating_pad(&slightly), Some(9));
+        let refused =
+            ensure_memo_pad_fits(&slightly).expect_err("61 does not separate under that divisor");
+        assert!(refused.to_string().contains("at most 9"), "{refused}");
+    }
+
+    /// Where `memo::MEMO_BYTES` comes from, computed rather than asserted.
+    ///
+    /// The pad is the largest that keeps this wallet's pair a fee bucket below
+    /// a pair padded to the cap, and at the M4 runtime's 512-byte quantum and
+    /// 2048-byte cap that is exactly 61.
+    #[test]
+    fn the_pad_is_the_largest_one_the_m4_runtime_separates() {
+        assert_eq!(
+            largest_separating_pad(&runtime()),
+            Some(crate::memo::MEMO_BYTES)
+        );
+        let metadata = runtime();
+        let sent = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
+        let cap = metadata.max_ciphertext_bytes as usize;
+        assert!(slot_fee_floor(&metadata, sent, sent) < slot_fee_floor(&metadata, cap, cap));
+        // One byte more and the separation is gone, which is what "largest"
+        // means.
+        assert_eq!(
+            slot_fee_floor(&metadata, sent + 1, sent + 1),
+            slot_fee_floor(&metadata, cap, cap)
+        );
     }
 
     /// A started quantum is a whole quantum.

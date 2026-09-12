@@ -96,20 +96,22 @@ pub const UNSIGNED_SETTLEMENT_PRIORITY: u64 = 1;
 /// every gossiped candidate, so without this the only bound on the bytes every
 /// node copies and feeds to the plonky2 parser is the block length limit. Proof
 /// sizes are fixed by the compiled dimensions: a private batch serializes to
-/// about 157 KB at the chain default, and a public batch is the same shape with
-/// a wider forwarded region.
+/// 150908 bytes at the chain default, and a public batch is the same shape with
+/// a wider forwarded region, 237544 bytes at `n = 53`. Both are measurements,
+/// taken at M5 on the development workstation, and the margin against this cap
+/// is 2.2x for the larger of the two. `docs/BENCH.md` carries both, and
+/// `crates/qnero-wallet/tests/public_batch_bench.rs` is where the public-batch
+/// figure comes from.
 ///
-/// **One of the two proof kinds is covered by a test.**
+/// **Only one of the two proof kinds is covered by a test that runs by
+/// default**, and that is still the thing to watch.
 /// `a_real_private_batch_settles_end_to_end` proves a private batch at the
 /// chain's `N` and asserts its serialized length against this cap, so a circuit
-/// change that pushed the private batch past it fails there. The public batch
-/// has never been produced at `n = 53` at all, at any speed: the build script
-/// writes a verifier, which needs the circuit built and no proof. Its size is
-/// an estimate, about 157 KB of recursive proof plus 6947 public-input felts at
-/// eight bytes, roughly 213 KB, and nothing enforces it. If that estimate is
-/// wrong, `pre_validate_public_batch` refuses every public-batch settlement
-/// with `ProofTooLarge` on a live chain and no test says so first.
-/// `docs/BENCH.md` carries the figures and M5 owes the measurement.
+/// change that pushed the private batch past it fails there. Producing a public
+/// batch is a minute of CPU and about ten gigabytes of peak memory, so its
+/// measurement is an ignored test and a circuit change that grew a public batch
+/// past this cap would refuse every public-batch settlement with
+/// `ProofTooLarge` on a live chain with no default test saying so first.
 pub const MAX_PROOF_BYTES: usize = 512 * 1024;
 
 /// One pool quantum in planck: the unit a note value is counted in.

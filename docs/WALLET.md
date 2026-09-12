@@ -250,10 +250,31 @@ leaves to the node, which is the property the local tree rebuild pays for.
 
 A held note inside a rescanned range that the scan did not meet again is a note
 the current chain does not have: its settlement was orphaned and has not been
-re-included. The sync reports the count and changes nothing, because a later
-block can still re-include the extrinsic and the recorded leaf index is the
-only handle on where the note was. A spend that selects it fails loudly on the
-path rebuild.
+re-included. The note is marked `on_chain: false` and stays in the store, with
+its secrets and its recorded leaf index, because a later block can still
+re-include the extrinsic and that index is the only handle on where the note
+was. What it does not stay in is the balance: `unspent_total`, the note
+selection a spend runs and the `balance` table all skip it, and `balance` lists
+it under a heading of its own with the reason.
+
+Marking it is the point. The sync used to report a count and write nothing
+down, so `unspent_total` went on reporting value the chain does not back,
+permanently and with no marker in the file; `balance` does not sync, so the
+one-off line was never seen again. The note selection picks largest first, so a
+phantom larger than every real note also failed every later `send` on the path
+rebuild, with no remedy but editing the JSON by hand.
+
+The marking runs after the spent flags are derived, and that ordering carries
+weight. A note that was spent and whose own creating leaf was orphaned in the
+same reorg still reads as spent until the reconciliation below has run against
+the repaged set; counted before it, such a note was skipped and then let back
+into the balance a moment later as a phantom nobody had been told about.
+
+A refusal is recorded once per output, not once per rescan. A refused note is
+never added to the note list, so nothing stops the scan decrypting and refusing
+it again, and before the rewind existed no leaf was ever scanned twice. The
+`rejected` list is keyed on the commitment now, and a later rescan moves the
+entry's leaf index the way a held note's is moved.
 
 Every ciphertext that decrypts goes through `qnero_notes::try_receive`, which
 also checks the plaintext opens the commitment the chain published beside it.
@@ -297,8 +318,11 @@ is a zero balance or a settled note reported unspent.
 ### `balance`
 
 Unspent total, pending total, and the note list with leaf indices, block
-numbers, spent state and memos. Pending and refused entries are listed under
-it.
+numbers, state and memos. A note's state is `unspent`, `spent`, or `orphan` for
+one the current chain no longer carries. Orphans are listed again under their
+own heading with their total, since they are out of the unspent total and no
+spend selects them; `sync` above says how a note gets there and what puts it
+back. Pending and refused entries are listed under that.
 
 A memo is remote input. Anyone holding this wallet's address can send it a note
 and choose the memo's bytes, and printed byte for byte that is an escape
@@ -307,8 +331,8 @@ just written and lets the sender redraw the table with leaf indices, values and
 spent flags of their choosing, and OSC 52 writes the sender's own address into
 the clipboard the operator then pastes into `send --to`. So everything outside
 printable ASCII is escaped as `\u{..}` on the way to the terminal, and the
-rendering is truncated to the terminal's width less the 44 columns of table
-prefix, so one note is always one row.
+rendering is truncated to the terminal's width less the table prefix, so one
+note is always one row.
 
 The escaping is wider than the set of characters that can drive a terminal, and
 that is what makes the truncation hold. Counting characters is only counting
@@ -319,8 +343,25 @@ shape the continuation line into a forged balance row without using one control
 byte. U+200B, U+200D, U+2028 and U+2029 are none of them control characters
 either, and the first two make two different memos render identically. Escaping
 everything outside printable ASCII makes character count and column count the
-same number by construction. The budget comes from `COLUMNS` when the
-environment exports one and from 80 otherwise.
+same number by construction.
+
+The width comes from the terminal itself, through `TIOCGWINSZ` on standard
+output, with `COLUMNS` as the fallback and 80 as the fallback after that. It
+used to come from `COLUMNS` alone, which is a shell parameter bash and zsh
+maintain without exporting, so no child process ever sees one and every row was
+drawn at 80 columns whatever terminal it was printed into. On a 64-column
+terminal the last sixteen of those columns opened a fresh line at column 1 made
+entirely of printable ASCII the sender chose, which is the forged row the
+escaping exists to close, reached with no control character at all.
+
+The prefix is measured from the fields the table is about to print rather than
+assumed: a leaf index past ten digits or a value past twelve widens its own
+column. There is no floor under the memo column, because a floor is a budget
+that overrides the terminal, which is the same failure in the other direction:
+the old one held the column at sixteen, so a 40-column terminal was handed a
+60-column row. A terminal that cannot hold the prefix and a memo column of at
+least sixteen columns gets the memo on a line of its own, indented and budgeted
+against the same width.
 
 The store keeps the raw bytes: serde_json escapes control characters on the way
 to the file, and a wallet that rewrote what it received could not show an
@@ -438,7 +479,7 @@ copied between machines under a permissive umask.
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "address": "qn1...",
   "last_synced_block": 1062,
   "next_leaf": 1069,
@@ -454,7 +495,8 @@ copied between machines under a permissive umask.
       "memo": "",
       "origin": "spend",
       "spent": false,
-      "spent_seen_at_block": null
+      "spent_seen_at_block": null,
+      "on_chain": true
     }
   ],
   "pending": [
@@ -478,7 +520,6 @@ copied between machines under a permissive umask.
       "reason": "its nullifier duplicates a note this wallet already holds"
     }
   ],
-  "used_nullifiers": ["<64 hex chars>", "..."],
   "checkpoints": [
     {
       "block_number": 1062,
@@ -509,19 +550,31 @@ Field notes:
   hand; it carries the block it was submitted at and the extrinsic it was
   submitted as, which is enough to tell the two apart.
 - `rejected` holds decryptable outputs that were refused, with the reason.
-- `used_nullifiers` is a local copy of the chain's `UsedNullifiers` map as of
-  `last_synced_block`, paged whole on every sync. It is public data, and it is
-  here so that spent status is decided locally: see "What the node learns".
-  Deleting it costs nothing; the next sync repages it.
+- `on_chain` is false for a note a fork rescan walked past without finding: its
+  settlement was orphaned and has not been re-included, so the chain does not
+  back its value. Such a note keeps its secrets and its leaf index and stays out
+  of the unspent total and out of every note selection until a scan sees the
+  commitment again. `sync` above has the whole rule.
+- The chain's settled nullifier set is **not** on disk. It is paged whole on
+  every sync and held in memory for that sync alone, because both of its
+  readers, the scan's duplicate check and the spent reconciliation, run inside
+  the sync that just repaged it, and no other command reads it at all. A
+  persisted copy therefore never produced a cache hit, while it grew the file
+  with the whole chain's activity instead of this wallet's and a single `send`
+  rewrote the file three times. Version 3 wrote it as `used_nullifiers`; a
+  version-3 file still loads and that field is ignored.
 - `checkpoints` is one entry per sync, oldest first, at most sixteen: the block
   that sync finished at, its hash, and the leaf watermark it left. It is the
   fork detector's memory, and `sync` above says what it is for. Deleting it
   costs nothing except the ability to notice a fork that happened before the
   next sync.
-- `version` is 3. A version-2 store, written before `checkpoints` existed, is
-  upgraded in place on load with an empty checkpoint list. A version-1 store,
-  written before `used_nullifiers` existed, is refused. Deleting a store and
-  re-syncing recovers every unspent note, which is the same recovery the
+- `version` is 4. A version-3 store, written before `on_chain` existed, is
+  upgraded in place on load: every note in one reads as on chain, which is what
+  every note in one is, since that version had no way to mark a note otherwise.
+  Its checkpoints are kept, because their block hashes came from the same
+  chain. A version-2 store, written before `checkpoints` existed, is upgraded
+  with an empty checkpoint list. A version-1 store is refused. Deleting a store
+  and re-syncing recovers every unspent note, which is the same recovery the
   paragraph below describes.
 
 Note secrets never reach a `Debug` format. `StoredNote`, `PendingNote`,
@@ -546,10 +599,17 @@ the leaf. `store.rs::debug_output_carries_no_note_secrets` and
 `wallet.rs::a_prepared_spend_prints_no_nullifier_and_no_leaf_index` are the
 gates behind all of it.
 
-Note secrets are wiped when they are dropped. `rho` and `r` are held in
-`SecretHex`, a transparent newtype over `String` that zeroizes on drop, so the
-copies the wallet keeps longest, the ones `serde_json` allocates while parsing
-and the clones `prepare_spend` takes, are wiped on the way out. The
+Note secrets are wiped when they are dropped. `rho`, `r` and the nullifier are
+held in `SecretHex`, a transparent newtype over `String` that zeroizes on drop,
+so the copies the wallet keeps longest, the ones `serde_json` allocates while
+parsing and the clones `prepare_spend` takes, are wiped on the way out. The
+nullifier is in there on the argument the `Debug` redaction already made: for a
+note that has not been spent it has never appeared anywhere, so it is the more
+predictive of the three, and a plain `String` freed without wiping sits in
+exactly the memory a core dump or a swap page reaches. The duplicate check a
+scan runs is a scan over the notes for the same reason, since the set it used
+to build cloned every held nullifier once per received note and every one of
+those copies dropped unwiped. The
 store's own JSON text is read and written inside `Zeroizing` as well, and the
 seed one file over gets the same treatment. What is not covered: serde_json's
 internal buffers, and any `String` that reallocated while growing, which leaves

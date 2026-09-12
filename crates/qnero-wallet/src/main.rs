@@ -9,10 +9,10 @@ use qnero_prover::WalletProver;
 use qnero_wallet::chain::Chain;
 use qnero_wallet::dev_account::TransparentKey;
 use qnero_wallet::keys::{create_seed, default_seed_path, store_path_for};
-use qnero_wallet::memo::{memo_budget, render_memo_within, MEMO_BYTES};
+use qnero_wallet::memo::{memo_budget_within, render_memo_within, terminal_columns, MEMO_BYTES};
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{RpcClient, DEFAULT_NODE_URL};
-use qnero_wallet::store::PendingKind;
+use qnero_wallet::store::{PendingKind, StoredNote};
 use qnero_wallet::wallet::{EntryRhoCheck, MerkleSource, Wallet, NUM_LEAF_PROOFS};
 use qnero_wallet::POOL_QUANTUM;
 
@@ -127,6 +127,94 @@ fn ensure_memo_fits(memo: &str) -> Result<()> {
     Ok(())
 }
 
+/// The `balance` note table.
+///
+/// The four fields are measured before anything is printed, so the memo column
+/// is budgeted against the prefix this table actually draws rather than the
+/// narrowest one it could: a leaf index past 9,999,999,999 or a value past
+/// 999,999,999,999 widens its own field, and a budget computed from the
+/// constant would then hand the memo the columns that field took.
+fn print_notes<'a>(notes: impl Iterator<Item = &'a StoredNote>) {
+    fn state(note: &StoredNote) -> &'static str {
+        if note.spent {
+            "spent"
+        } else if !note.on_chain {
+            "orphan"
+        } else {
+            "unspent"
+        }
+    }
+    fn block(note: &StoredNote) -> String {
+        note.block_number
+            .map(|number| number.to_string())
+            .unwrap_or_else(|| "-".into())
+    }
+
+    /// One row, already stringified, so the widths can be measured before
+    /// anything is printed.
+    struct Row<'a> {
+        leaf: String,
+        value: String,
+        block: String,
+        state: &'static str,
+        memo: &'a str,
+    }
+
+    let rows: Vec<Row<'a>> = notes
+        .map(|note| Row {
+            leaf: note.leaf_index.to_string(),
+            value: note.value.to_string(),
+            block: block(note),
+            state: state(note),
+            memo: note.memo.as_str(),
+        })
+        .collect();
+    let width = |header: usize, measure: &dyn Fn(&Row<'a>) -> usize| {
+        rows.iter().map(measure).max().unwrap_or(0).max(header)
+    };
+    let leaf = width(10, &|row| row.leaf.len());
+    let value = width(12, &|row| row.value.len());
+    let block_width = width(7, &|row| row.block.len());
+    let state_width = width(7, &|row| row.state.len());
+    // Four fields and the two spaces after each.
+    let prefix = leaf + value + block_width + state_width + 8;
+    let budget = memo_budget_within(prefix);
+
+    println!(
+        "{:>leaf$}  {:>value$}  {:>block_width$}  {:>state_width$}  memo",
+        "leaf", "quanta", "block", "state"
+    );
+    for row in &rows {
+        let fields = format!(
+            "{:>leaf$}  {:>value$}  {:>block_width$}  {:>state_width$}",
+            row.leaf, row.value, row.block, row.state
+        );
+        // A memo is remote input: anyone holding this address can send a note
+        // and choose its bytes. Printed raw it is an escape sequence injection
+        // into this terminal. See `qnero_wallet::memo::render_memo_within`.
+        // The budget is this terminal's own width less the prefix measured
+        // above, so the row cannot wrap and a sender cannot draw a second one.
+        match budget {
+            Some(budget) => println!("{fields}  {}", render_memo_within(row.memo, budget)),
+            // Too narrow to hold the table and a usable memo column both.
+            // Letting it wrap is what would open a line at column 1 drawn from
+            // bytes the sender chose, so the memo takes a line of its own
+            // deliberately, indented and budgeted the same way.
+            None => {
+                println!("{fields}");
+                if !row.memo.is_empty() {
+                    const INDENT: usize = 4;
+                    println!(
+                        "{:INDENT$}{}",
+                        "",
+                        render_memo_within(row.memo, terminal_columns().saturating_sub(INDENT))
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let seed_path = cli.file.clone().unwrap_or_else(default_seed_path);
@@ -212,8 +300,9 @@ fn main() -> Result<()> {
             if report.vanished > 0 {
                 println!(
                     "{} note(s) this wallet holds are not on the current chain: their settlement \
-                     was orphaned and has not been re-included. They are still listed, and a \
-                     spend that selects one fails on the path rebuild.",
+                     was orphaned and has not been re-included. They are out of the unspent \
+                     total and no spend selects them; `balance` lists them under their own \
+                     heading. A sync that finds the commitment again puts them back.",
                     report.vanished
                 );
             }
@@ -232,34 +321,26 @@ fn main() -> Result<()> {
             println!("address        {}", store.address);
             println!("unspent        {} quanta", store.unspent_total());
             println!("pending        {} quanta", store.pending_total());
+            if store.off_chain().next().is_some() {
+                println!("not on chain   {} quanta", store.off_chain_total());
+            }
             println!("synced through block {}", store.last_synced_block);
             println!();
             if store.notes.is_empty() {
                 println!("no notes");
             } else {
+                print_notes(store.notes.iter());
+            }
+            if store.off_chain().next().is_some() {
+                println!();
                 println!(
-                    "{:>10}  {:>12}  {:>7}  {:>7}  memo",
-                    "leaf", "quanta", "block", "state"
+                    "not on the current chain, {} quanta. The block that settled these was \
+                     orphaned and the settlement has not been re-included, so the chain does not \
+                     back their value and they are out of the unspent total. A sync that finds \
+                     the commitment again puts them back.",
+                    store.off_chain_total()
                 );
-                for note in &store.notes {
-                    println!(
-                        "{:>10}  {:>12}  {:>7}  {:>7}  {}",
-                        note.leaf_index,
-                        note.value,
-                        note.block_number
-                            .map(|b| b.to_string())
-                            .unwrap_or_else(|| "-".into()),
-                        if note.spent { "spent" } else { "unspent" },
-                        // A memo is remote input: anyone holding this address
-                        // can send a note and choose its bytes. Printed raw it
-                        // is an escape sequence injection into this terminal.
-                        // See `qnero_wallet::memo::render_memo_within`. The
-                        // budget is this terminal's width less the 44 columns
-                        // of prefix above, so the row cannot wrap and a
-                        // sender cannot draw a second one.
-                        render_memo_within(&note.memo, memo_budget())
-                    );
-                }
+                print_notes(store.off_chain());
             }
             for pending in &store.pending {
                 println!(

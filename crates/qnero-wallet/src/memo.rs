@@ -54,39 +54,111 @@ pub const CIPHERTEXT_FIXED_BYTES: usize = 1731;
 /// 61 is the largest pad that does.
 ///
 /// `fee::the_wallets_own_pair_stays_a_bucket_below_a_padded_one` is the gate,
-/// and `fee::ensure_memo_pad_fits` checks the loose bound against the runtime
-/// the wallet is actually talking to, since this constant is compiled in and
-/// `MaxCiphertextBytes` is read from metadata.
+/// and `fee::ensure_memo_pad_fits` checks **both** bounds against the runtime
+/// the wallet is actually talking to, since this constant is compiled in while
+/// `MaxCiphertextBytes` and `CiphertextBytesPerFeeQuantum` are both read from
+/// metadata. `fee::largest_separating_pad` is where the 61 comes from, and a
+/// runtime that moves either value is refused by name rather than settling at
+/// a merged endpoint.
 ///
 /// Zcash's 512-byte memo field is the precedent for padding at all. The size
 /// differs because this ciphertext's fixed part is larger and because the
 /// chain prices payload bytes.
 pub const MEMO_BYTES: usize = 61;
 
-/// Columns the `balance` table spends before the memo column starts.
+/// The narrowest `balance` table prefix: `{:>10}  {:>12}  {:>7}  {:>7}  ` in
+/// `main.rs`, four right-aligned fields at their minimum widths and the two
+/// spaces after each.
 ///
-/// `{:>10}  {:>12}  {:>7}  {:>7}  ` in `main.rs`: four right-aligned fields
-/// and the two spaces after each.
+/// It is a floor and not the number to budget against. A leaf index past
+/// 9,999,999,999 or a value past 999,999,999,999 widens its own field, so
+/// `main.rs` measures the rows it is about to print and passes the width it
+/// actually used to [`memo_budget_within`].
 pub const BALANCE_PREFIX_COLUMNS: usize = 44;
 
 /// The terminal width assumed when nothing says otherwise.
 pub const DEFAULT_TERMINAL_COLUMNS: usize = 80;
 
 /// Columns of memo `balance` prints before it truncates, at the default
-/// terminal width.
+/// terminal width and the narrowest prefix.
 pub const MEMO_DISPLAY_COLUMNS: usize = DEFAULT_TERMINAL_COLUMNS - BALANCE_PREFIX_COLUMNS;
 
-/// The memo budget for this terminal.
+/// The narrowest memo column worth drawing. Below it the memo moves to a line
+/// of its own.
+pub const MIN_MEMO_COLUMNS: usize = 16;
+
+/// This terminal's width in columns.
 ///
-/// `COLUMNS` when the environment exports one, the 80-column default
-/// otherwise, minus the table's fixed prefix. The floor keeps a very narrow
-/// terminal from reducing the column to the ellipsis alone.
-pub fn memo_budget() -> usize {
-    let columns = std::env::var("COLUMNS")
-        .ok()
+/// Asked of the terminal itself, through `TIOCGWINSZ` on standard output.
+/// `COLUMNS` is the fallback and 80 is the fallback after that.
+///
+/// The regression: this used to read `COLUMNS` and nothing else. `COLUMNS` is
+/// a shell parameter that bash and zsh maintain without exporting, so a child
+/// process sees no such variable and every run took the 80-column default,
+/// whatever terminal it was printed into. The budget the table sized its memo
+/// column from was therefore a constant, the row was always drawn at 80
+/// columns, and on any narrower terminal the tail of a memo the sender chose
+/// opened a fresh line at column 1: the forged balance row the escaping in
+/// [`render_memo_within`] exists to close, reached without one control
+/// character.
+///
+/// A zero width is what the call answers with when standard output is a pipe
+/// or a file on some systems, so it is treated as no answer.
+pub fn terminal_columns() -> usize {
+    resolve_columns(ioctl_columns(), std::env::var("COLUMNS").ok().as_deref())
+}
+
+/// The width decision, with both sources handed in.
+///
+/// Split out from [`terminal_columns`] because neither source is settable from
+/// a test: `cargo test` leaves the process's own standard output attached to
+/// whatever the developer ran it from, so the `ioctl` answers a real width on
+/// one machine and fails on another.
+pub fn resolve_columns(from_terminal: Option<usize>, from_env: Option<&str>) -> usize {
+    if let Some(columns) = from_terminal.filter(|columns| *columns > 0) {
+        return columns;
+    }
+    from_env
         .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(DEFAULT_TERMINAL_COLUMNS);
-    columns.saturating_sub(BALANCE_PREFIX_COLUMNS).max(16)
+        .filter(|columns| *columns > 0)
+        .unwrap_or(DEFAULT_TERMINAL_COLUMNS)
+}
+
+/// `TIOCGWINSZ` on standard output, or `None` when it is not a terminal.
+fn ioctl_columns() -> Option<usize> {
+    // SAFETY: `winsize` is written by the kernel on success and read only
+    // then. The file descriptor is the process's own standard output, and a
+    // failed call leaves the structure zeroed by this initializer.
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let answered = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) };
+    if answered != 0 || size.ws_col == 0 {
+        return None;
+    }
+    Some(size.ws_col as usize)
+}
+
+/// The memo column for a row whose fields occupy `prefix_columns`, or `None`
+/// when this terminal cannot hold the prefix and a usable memo column both.
+///
+/// There is no floor. A floor is a budget that overrides the terminal, which
+/// is the same failure as never reading the terminal at all: the old one held
+/// the column at sixteen columns, so a 40-column terminal was handed a
+/// 60-column row. `None` is what a terminal too narrow for the table says, and
+/// `main.rs` answers it by putting the memo on a line of its own rather than
+/// letting the row wrap.
+pub fn memo_budget_within(prefix_columns: usize) -> Option<usize> {
+    budget_within(terminal_columns(), prefix_columns)
+}
+
+/// The budget decision, with the width handed in. See [`resolve_columns`].
+pub fn budget_within(columns: usize, prefix_columns: usize) -> Option<usize> {
+    let budget = columns.saturating_sub(prefix_columns);
+    (budget >= MIN_MEMO_COLUMNS).then_some(budget)
 }
 
 /// Pad a memo to [`MEMO_BYTES`] with trailing zeros.
@@ -339,6 +411,73 @@ mod tests {
 
         assert_eq!(render_memo("short"), "short");
         assert_eq!(render_memo(""), "");
+    }
+
+    /// The regression: the budget was sized from `COLUMNS` alone.
+    ///
+    /// `COLUMNS` is a shell parameter that bash and zsh maintain without
+    /// exporting, so `std::env::var` fails in every child process and the
+    /// budget was the 80-column default whatever terminal `balance` was
+    /// printed into. A row was therefore always drawn at 80 columns, and on a
+    /// 64-column terminal the last sixteen of them opened a fresh line at
+    /// column 1 made entirely of printable ASCII the sender chose: the forged
+    /// balance row the escaping exists to close, reached with no control
+    /// character at all.
+    ///
+    /// The terminal is asked first now, and it wins: an exported `COLUMNS`
+    /// left behind by a resized window cannot override the real width either.
+    #[test]
+    fn the_width_comes_from_the_terminal_before_the_environment() {
+        assert_eq!(resolve_columns(Some(64), Some("80")), 64);
+        assert_eq!(resolve_columns(Some(200), None), 200);
+        // No terminal: a pipe, a file, or a `COLUMNS` a shell did export.
+        assert_eq!(resolve_columns(None, Some("64")), 64);
+        assert_eq!(resolve_columns(None, Some(" 132 ")), 132);
+        assert_eq!(resolve_columns(None, None), DEFAULT_TERMINAL_COLUMNS);
+        // A width of zero is what the call answers with for a pipe on some
+        // systems, and neither source is trusted to be a number.
+        assert_eq!(resolve_columns(Some(0), None), DEFAULT_TERMINAL_COLUMNS);
+        assert_eq!(resolve_columns(None, Some("0")), DEFAULT_TERMINAL_COLUMNS);
+        assert_eq!(
+            resolve_columns(None, Some("wide")),
+            DEFAULT_TERMINAL_COLUMNS
+        );
+    }
+
+    /// The other half of the same regression: a floor is a budget that
+    /// overrides the terminal.
+    ///
+    /// The old budget was `columns - prefix`, floored at sixteen, so a
+    /// 40-column terminal was handed a 16-column memo column and a 60-column
+    /// row. Nothing is floored now: a terminal that cannot hold the table and
+    /// a usable memo column both says so, and `main.rs` puts the memo on a
+    /// line of its own rather than letting the row wrap into one.
+    #[test]
+    fn a_terminal_too_narrow_for_the_table_gets_no_memo_column() {
+        assert_eq!(budget_within(80, BALANCE_PREFIX_COLUMNS), Some(36));
+        assert_eq!(budget_within(64, BALANCE_PREFIX_COLUMNS), Some(20));
+        // Exactly the narrowest column worth drawing.
+        assert_eq!(
+            budget_within(
+                BALANCE_PREFIX_COLUMNS + MIN_MEMO_COLUMNS,
+                BALANCE_PREFIX_COLUMNS
+            ),
+            Some(MIN_MEMO_COLUMNS)
+        );
+        // One column narrower, and with the old floor this was `Some(16)`.
+        assert_eq!(
+            budget_within(
+                BALANCE_PREFIX_COLUMNS + MIN_MEMO_COLUMNS - 1,
+                BALANCE_PREFIX_COLUMNS
+            ),
+            None
+        );
+        assert_eq!(budget_within(40, BALANCE_PREFIX_COLUMNS), None);
+        assert_eq!(budget_within(10, BALANCE_PREFIX_COLUMNS), None);
+        // A wider prefix, which is what a leaf index past ten digits or a
+        // value past twelve draws, takes its columns from the memo and not
+        // from the terminal.
+        assert_eq!(budget_within(80, BALANCE_PREFIX_COLUMNS + 4), Some(32));
     }
 
     /// The budget is the terminal's width less the table's own prefix, so the

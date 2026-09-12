@@ -153,7 +153,7 @@ fn note(value: u64, leaf_index: u64, nullifier: Digest) -> StoredNote {
         block_number: Some(3),
         value,
         commitment: Digest::hash_bytes(&[b"cm", &leaf_index.to_le_bytes()]).to_hex(),
-        nullifier: nullifier.to_hex(),
+        nullifier: nullifier.to_hex().into(),
         rho: Digest::hash_bytes(&[b"rho", &leaf_index.to_le_bytes()])
             .to_hex()
             .into(),
@@ -164,5 +164,6 @@ fn note(value: u64, leaf_index: u64, nullifier: Digest) -> StoredNote {
         origin: NoteOrigin::Spend,
         spent: false,
         spent_seen_at_block: None,
+        on_chain: true,
     }
 }

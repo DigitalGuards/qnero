@@ -1547,9 +1547,12 @@ fn a_real_private_batch_settles_end_to_end() {
 		// The size gate is a real bound and this is the proof kind a test
 		// covers: `MAX_PROOF_BYTES` is applied before the blob is copied or
 		// parsed, so a circuit change that pushed a private batch past it
-		// would refuse every settlement. The public batch has never been
-		// produced at `n = 53`, which is the open half, recorded at the
-		// constant and in `docs/BENCH.md`.
+		// would refuse every settlement. The public batch is measured at
+		// `n = 53` (237544 bytes, M5) and verified through the embedded
+		// verifier by `a_real_public_batch_verifies_through_the_embedded_verifier`,
+		// but producing one costs a minute of CPU and about ten gigabytes, so
+		// no default test holds it to the cap. That is the open half, recorded
+		// at the constant and in `docs/BENCH.md`.
 		assert!(
 			spend.proof.len() <= crate::MAX_PROOF_BYTES,
 			"a private batch serializes to {} bytes against a {} byte cap",

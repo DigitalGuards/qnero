@@ -67,7 +67,9 @@ mod tests {
             block_number: Some(1),
             value,
             commitment: Digest::hash_bytes(&[b"cm", &leaf_index.to_le_bytes()]).to_hex(),
-            nullifier: Digest::hash_bytes(&[b"nf", &leaf_index.to_le_bytes()]).to_hex(),
+            nullifier: Digest::hash_bytes(&[b"nf", &leaf_index.to_le_bytes()])
+                .to_hex()
+                .into(),
             rho: Digest::hash_bytes(&[b"rho", &leaf_index.to_le_bytes()])
                 .to_hex()
                 .into(),
@@ -78,6 +80,7 @@ mod tests {
             origin: NoteOrigin::Shield,
             spent: false,
             spent_seen_at_block: None,
+            on_chain: true,
         }
     }
 

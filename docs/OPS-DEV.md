@@ -1354,3 +1354,304 @@ One quantum of fee back per spend, and 195 bytes of memo. The floor is
 `MinLeafFee(1) + ceil(3974 / 512) = 9`, and a memo is 61 bytes where it was
 256. Nothing else moved: the proof is the same 150908 bytes, proving is the
 same 3.4 s, and every ciphertext the chain carries is still one length.
+
+## The third M5 review fix pass, 2026-09-12
+
+Ten review findings against the fork-rewind commit: one high, four medium, five
+low. The high one and two of the mediums are on the sync path, one medium is
+the fee bound the memo pad is chosen against, one is the `balance` table's memo
+column, and the lows are the store file, note-secret wiping and three stale
+figures in the docs and the pallet.
+
+The whole end-to-end flow was re-run against a fresh `--dev --tmp` node,
+because the store format moved to version 4.
+
+### What changed
+
+- **A note the chain no longer carries leaves the balance.** The rescan already
+  computed the fact and reported a count, and then wrote nothing down. The note
+  kept `spent: false`, so `unspent_total` and the `balance` table reported value
+  the chain does not back, permanently and with no marker in the file; `balance`
+  does not sync, so the one-off line was never seen again. The selection picks
+  largest first, so a phantom larger than every real note also failed every
+  later `send` on the path rebuild. `StoredNote` carries `on_chain` now, the
+  rescan sets it false for exactly the notes it walked past without finding,
+  `relocate_note` sets it true the moment a scan sees the commitment again, and
+  `unspent()` skips it so the total, the selection and the table agree with the
+  chain. `balance` lists such notes under a heading of their own with the
+  reason.
+- **The vanished count is taken after the spent flags are derived.** It read
+  `!note.spent` against the flags the reconciliation four lines later was about
+  to flip, so a note that was spent and whose own creating leaf was orphaned in
+  the same reorg was skipped, and then came back into the balance as a phantom
+  nobody had been told about. The operator was told one note was missing while
+  two were.
+- **The memo pad is checked against the bound that chose it.** The guard added
+  last pass compared `CIPHERTEXT_FIXED_BYTES + MEMO_BYTES` against
+  `MaxCiphertextBytes`, which is the looser of the two bounds. The tighter one
+  is the fee, and nothing compared the compiled-in pad against the runtime's own
+  `CiphertextBytesPerFeeQuantum`, so a runtime that widened the divisor with the
+  cap untouched re-opened the free-padding hole the previous pass closed and
+  both existing gates stayed green, each pinning 61 against a fixture of its
+  own. `ensure_memo_pad_fits` now evaluates both bounds against the metadata the
+  wallet actually fetched, and names the largest pad that restores the
+  separation, or says no pad does.
+- **A fork rescan records one refusal per refused output.** A refused note is
+  never added to the note list, so `has_commitment` does not see it and the
+  rescan decrypts and refuses it again. Neither branch asked whether the
+  `rejected` list already held that commitment, so every fork touching the range
+  appended another identical entry and `balance` printed one line per copy. It
+  is keyed on the commitment now and a later rescan moves the entry's leaf
+  index.
+- **The `balance` table asks the terminal for its width.** It read `COLUMNS`,
+  which bash and zsh maintain without exporting, so no child process ever saw
+  one and every row was drawn at 80 columns whatever terminal it was printed
+  into. On a 64-column terminal the last sixteen of those columns opened a fresh
+  line at column 1 made entirely of printable ASCII the sender chose, which is
+  the forged row the escaping exists to close, reached without one control
+  character. The width comes from `TIOCGWINSZ` on standard output now, with
+  `COLUMNS` and then 80 as fallbacks; the table prefix is measured from the
+  fields it is about to print rather than assumed at 44; and the sixteen-column
+  floor is gone, since a floor is a budget that overrides the terminal in the
+  other direction. A terminal too narrow for the prefix and a usable memo column
+  puts the memo on a line of its own, indented and budgeted the same way.
+- **The settled nullifier set is no longer written to disk.** Every reader runs
+  inside the sync that just repaged it, so the persisted copy never produced a
+  cache hit while it grew the file with the whole chain's activity instead of
+  this wallet's. It is `#[serde(skip)]`.
+- **A note's nullifier is wiped when it drops.** It sat in a plain `String`
+  beside `rho` and `r` in `SecretHex`, on the weaker half of the argument: for a
+  note that has not been spent the nullifier has never appeared anywhere, which
+  is why the `Debug` impls already redact it. The duplicate check a scan runs is
+  a scan over the notes now, where it used to clone every held nullifier into a
+  fresh set once per received note and drop each copy unwiped.
+- **Three stale figures.** `docs/BENCH.md`'s proof-size table labelled 157476
+  bytes as the `N = 6` private batch, which is the M3 `N = 7` measurement; the
+  chain default produces 150908. `MAX_PROOF_BYTES`' own documentation still said
+  the public batch had never been produced at `n = 53` and that its size was a
+  213 KB estimate M5 owed, which M5 measured at 237544. The same claim was
+  repeated in the pallet's tests.
+
+### The store format
+
+Version 4. `on_chain` is new on every note, and `used_nullifiers` is gone from
+the file. A version-3 store upgrades in place: its notes read as on chain, which
+is what every note in one is, and its checkpoints are kept because their block
+hashes came from the same chain. A version-2 store upgrades with an empty
+checkpoint list. A version-1 store is still refused.
+
+### The run
+
+Fresh seed files, a fresh `--dev --tmp` node, addresses truncated in the middle.
+
+```text
+=== 1. start a fresh dev node ===
+
+$ nice -n 19 ./chain/target/release/quantus-node --dev --tmp   (backgrounded, pidfile)
+
+$ ss -ltn | grep 9944
+LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*
+LISTEN 0      1024            [::1]:9944          [::]:*
+
+=== 2. two wallets ===
+
+$ qnero-wallet --file A.seed keygen
+seed    A.seed
+store   A.seed.store.json
+address qn1q9r6ynpyvvjl0tym0c2u...gsm44a9v
+
+$ qnero-wallet --file A.seed status
+node              http://127.0.0.1:9944
+runtime           spec 152, transaction 6
+chain head        9 (41ce10945df88e4ff24f7daec47edb409db65014e1923f920b2b938a5345cfc0)
+tree leaves       14
+tree depth        2
+tree root         ae442fdfc28b12f42070bed89ad069dbc198a545fe9a7b4b33db26146d4a9671
+last synced block 0
+next leaf to scan 0
+
+$ qnero-wallet --file B.seed keygen
+address qn1qx5cyal7ea3984tfsute...dsc9szhe
+
+=== 3. shield 1000 quanta from the dev account alice into A ===
+
+$ qnero-wallet --file A.seed shield --from-dev-account alice --amount 1000 --memo 'first shield'
+shielding 1000 quanta (10000000000000 planck) from alice
+commitment  07693db050f97ba4523eed7c17a427e085212ef7d5c15d3e70e1fbb64377e40f
+leaf        24
+included    block 20 after 1.01s
+synced      1 new note(s), unspent total 1000 quanta
+
+=== 4. a fee below the floor is refused ===
+
+$ qnero-wallet --file A.seed send --to <B> --amount 300 --fee 1 --memo 'payment to B'
+Error: a fee of 1 quanta is below this submission's floor of 8. The pallet asks MinLeafFee (1) plus one quantum per started 512 bytes of ciphertext, and the two outputs here are 3584 bytes. The fee is a public input of the proof, so it cannot be raised afterwards: the settlement would be refused with PayloadUnderpaid.
+
+=== 5. A sends 300 quanta to B at the floor ===
+
+$ time qnero-wallet --file A.seed send --to <B> --amount 300 --memo 'payment to B'
+fee         8 quanta
+circuits    built in 2.48s (6 leaf slots per batch)
+anchor      block 31
+inputs      leaves [24] for 300 quanta plus 8 fee
+change      692 quanta
+proof       150908 bytes
+proving     3.40s
+inclusion   block 34 after 535.02ms
+synced      1 new note(s), unspent total 692 quanta
+wall clock  6.61 s
+
+=== 6. B sees the note; A sees the input spent and its change ===
+
+$ qnero-wallet --file B.seed sync
+scanned leaves 0..43 at block 34
+received 1 note(s) worth 300 quanta
+newly spent 0
+unspent total 300 quanta
+
+$ qnero-wallet --file B.seed balance
+address        qn1qx5cyal7ea3984tfsute...dsc9szhe
+unspent        300 quanta
+pending        0 quanta
+synced through block 34
+
+      leaf        quanta    block    state  memo
+        40           300       34  unspent  payment to B
+
+$ qnero-wallet --file A.seed balance
+address        qn1q9r6ynpyvvjl0tym0c2u...gsm44a9v
+unspent        692 quanta
+pending        0 quanta
+synced through block 34
+
+      leaf        quanta    block    state  memo
+        24          1000       20    spent  first shield
+        39           692       34  unspent
+
+=== 7. B spends the note it received, back to A ===
+
+$ time qnero-wallet --file B.seed send --to <A> --amount 100 --memo 'back to A'
+fee         8 quanta
+circuits    built in 2.41s (6 leaf slots per batch)
+anchor      block 41
+inputs      leaves [40] for 100 quanta plus 8 fee
+change      192 quanta
+proof       150908 bytes
+proving     3.57s
+inclusion   block 45 after 534.19ms
+synced      1 new note(s), unspent total 192 quanta
+wall clock  6.71 s
+
+$ qnero-wallet --file A.seed sync
+scanned leaves 43..63 at block 51
+received 1 note(s) worth 100 quanta
+newly spent 0
+unspent total 792 quanta
+
+=== 8. the opt-in RPC path, and the store permission check ===
+
+$ qnero-wallet --file A.seed send --to <B> --amount 50 --memo 'via merkle rpc' --merkle-rpc
+merkle      zkTree_getMerkleProof (this names the leaves being spent to the node)
+fee         8 quanta
+circuits    built in 2.38s (6 leaf slots per batch)
+anchor      block 53
+inputs      leaves [39] for 50 quanta plus 8 fee
+change      634 quanta
+proof       150908 bytes
+proving     3.57s
+inclusion   block 57 after 1.04s
+synced      1 new note(s), unspent total 734 quanta
+
+$ chmod 644 A.seed.store.json && qnero-wallet --file A.seed balance
+Error: A.seed.store.json is readable or writable beyond its owner (mode 644). Fix it with `chmod 600 A.seed.store.json`.
+
+=== 9. the store on disk, version 4 ===
+
+$ ls -l A.seed A.seed.store.json
+-rw------- 1 waterfall waterfall   65 Sep 12 12:11 A.seed
+-rw------- 1 waterfall waterfall 5654 Sep 12 12:12 A.seed.store.json
+
+$ jq '{version, next_leaf, last_synced_block, has_used_nullifiers: has("used_nullifiers"),
+      checkpoints: (.checkpoints|length),
+      notes: [.notes[] | {leaf_index, value, spent, on_chain, memo}]}' A.seed.store.json
+{
+  "version": 4,
+  "next_leaf": 72,
+  "last_synced_block": 57,
+  "has_used_nullifiers": false,
+  "checkpoints": 5,
+  "notes": [
+    { "leaf_index": 24, "value": 1000, "spent": true,  "on_chain": true, "memo": "first shield" },
+    { "leaf_index": 39, "value": 692,  "spent": true,  "on_chain": true, "memo": "" },
+    { "leaf_index": 54, "value": 100,  "spent": false, "on_chain": true, "memo": "back to A" },
+    { "leaf_index": 68, "value": 634,  "spent": false, "on_chain": true, "memo": "" }
+  ]
+}
+
+=== 10. the memo column, against a memo a sender chose ===
+
+B paid A 20 quanta with the 36-byte printable-ASCII memo
+`....................unspent 99999 qu`, which is the shape the review's probe
+used: nothing in it is escaped, so every character costs a column, and its tail
+reads as a balance row of its own. Row widths measured with `awk`, the table
+header and earlier rows elided:
+
+COLUMNS=80   80  |       115            20       93  unspent  ....................unspent 99999 qu
+COLUMNS=64   64  |       115            20       93  unspent  ....................
+COLUMNS=50   42  |       115            20       93  unspent
+             40  |    ....................unspent 99999 qu
+
+At 64 the memo is truncated to the 20 columns left over, ellipsis included, and
+the row is exactly 64. At 50 there are six columns left over, which is under the
+sixteen-column minimum, so the memo takes an indented line of its own at 40
+columns. Before this pass every one of these three ran at 80 columns.
+
+=== 11. the same flow as an integration test, then stop the node ===
+
+$ QNERO_DEV_NODE=http://127.0.0.1:9944 RAYON_NUM_THREADS=4 nice -n 19 cargo test \
+    -j 2 --release -p qnero-wallet --features parallel --test dev_node_e2e -- --nocapture
+shield of 1000 quanta included at block 72 (1.01s), leaf 86
+300 quanta to B: proved in 3.55s, 150908 proof bytes, included at block 76
+100 quanta back to A: proved in 3.45s, included at block 79
+test a_shield_a_payment_and_a_payment_back_settle_end_to_end ... ok
+test result: ok. 1 passed; 0 failed
+
+$ kill $(cat node.pid), then wait for 9944 to close
+9944 has no listener
+```
+
+A dev chain does not reorg, so every fork path above is covered against the
+scriptable node in `tests/sync_reorg.rs`: a commitment re-included below the
+watermark, one re-included at it, a settlement orphaned out of
+`UsedNullifiers`, an orphaned settlement whose note leaves the balance and
+comes back when the extrinsic re-lands, a spend and its own creating leaf
+orphaned together, and a refused output walked by three successive rescans.
+
+### Gates
+
+```
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   36 suites ok, 0 failed, 4 ignored
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+QNERO_DEV_NODE=http://127.0.0.1:9944 RAYON_NUM_THREADS=4 nice -n 19 cargo test \
+  -j 2 --release -p qnero-wallet --features parallel --test dev_node_e2e -- --nocapture
+   1 passed, 0 failed
+```
+
+### Timings
+
+Two payments plus one over the RPC path, on the same workstation with
+`RAYON_NUM_THREADS=4` and the crate's `parallel` feature on. Nothing in the
+proving path moved: the changes are the store, the scan's bookkeeping and one
+comparison per command.
+
+| | |
+|---|---:|
+| `send` wall clock, whole command | 6.61 s and 6.71 s |
+| of which circuit build, once per process | 2.41 s and 2.48 s |
+| of which private batch proving | 3.40 s and 3.57 s |
+| private batch proof | 150908 bytes, unchanged |
+| submit to inclusion | 0.53 s both times |
