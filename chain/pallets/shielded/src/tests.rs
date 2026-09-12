@@ -2407,7 +2407,7 @@ fn the_coinbase_passes_pre_dispatch_and_never_enters_the_pool() {
 		assert_eq!(
 			<Shielded as ValidateUnsigned>::validate_unsigned(TransactionSource::External, &call),
 			Err(InvalidTransaction::Call.into()),
-			"a coinbase belongs to the block its author is building, not to a pool"
+			"a coinbase belongs to the block its author is building"
 		);
 	});
 }

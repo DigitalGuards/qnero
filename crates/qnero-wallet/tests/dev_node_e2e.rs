@@ -236,24 +236,37 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
         report.coinbase_received, report.coinbase_leaves,
         "every block on a one-miner dev chain is this wallet's"
     );
-    let coinbase_value = miner
-        .store
-        .notes
-        .iter()
-        .map(|note| note.value)
-        .next()
-        .expect("a coinbase note");
     for note in &miner.store.notes {
         assert_eq!(
             note.origin,
             qnero_wallet::store::NoteOrigin::Coinbase,
             "the only notes a miner holds before it spends are its coinbases"
         );
-        assert_eq!(
-            note.value, coinbase_value,
-            "the emission is flat over a few blocks"
-        );
     }
+    // The emission is flat over a few blocks, to within the one quantum the
+    // sub-quantum carry adds: a block's credit is not a whole number of pool
+    // quanta, so the remainder waits and occasionally completes one.
+    let ordinary = |wallet: &Wallet, except: Option<u32>| -> (u64, u64) {
+        let values: Vec<u64> = wallet
+            .store
+            .notes
+            .iter()
+            .filter(|note| {
+                note.origin == qnero_wallet::store::NoteOrigin::Coinbase
+                    && note.block_number != except
+            })
+            .map(|note| note.value)
+            .collect();
+        (
+            *values.iter().min().expect("a coinbase note"),
+            *values.iter().max().expect("a coinbase note"),
+        )
+    };
+    let (low, high) = ordinary(&miner, None);
+    assert!(
+        high - low <= 1,
+        "the emission moves by at most the carry: {low} to {high}"
+    );
 
     // A payment out of a mined note, to a wallet that has never been paid.
     let recipient_seed = scratch("m6-recipient.seed");
@@ -303,14 +316,20 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
                 && note.block_number == Some(payment.included_at)
         })
         .expect("the settling block minted a coinbase note");
+    let (low, high) = ordinary(&miner, Some(payment.included_at));
     println!(
-        "coinbase of block {}: {} quanta against {} elsewhere, author share {}",
-        payment.included_at, settling.value, coinbase_value, author_share
+        "coinbase of block {}: {} quanta against {low} to {high} elsewhere, author share {}",
+        payment.included_at, settling.value, author_share
     );
-    assert_eq!(
-        settling.value,
-        coinbase_value + author_share,
-        "the settling block's coinbase carries the author's share of the fee"
+    assert!(
+        settling.value >= low + author_share && settling.value <= high + author_share,
+        "the settling block's coinbase carries the author's share of the fee: {} against \
+         {low}..={high} plus {author_share}",
+        settling.value
+    );
+    assert!(
+        author_share > 1,
+        "the fee must be large enough to tell from the carry"
     );
 
     // A transparent transfer between two dev accounts, signed properly and

@@ -398,7 +398,7 @@ fn fees_and_rewards_are_credited_under_the_authors_derived_address() {
 		assert_eq!(
 			Balances::free_balance(&miner_wormhole_address),
 			0,
-			"the derived address is a label on the event, not a payee"
+			"the derived address labels the event and is paid nothing"
 		);
 		System::assert_has_event(
 			Event::CoinbaseCredited { author: miner_wormhole_address, amount: miner_reward }.into(),

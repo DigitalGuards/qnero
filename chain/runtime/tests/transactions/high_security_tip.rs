@@ -490,7 +490,7 @@ fn high_security_tip_is_not_reminted_to_the_block_author() {
 				.expect("collected fees must be paid into the block's coinbase");
 			assert_eq!(
 				credited, collected,
-				"the coinbase credit must equal CollectedFees, not a high-security tip"
+				"the coinbase credit must be CollectedFees and no more"
 			);
 			assert!(
 				credited <= fee_ceiling,

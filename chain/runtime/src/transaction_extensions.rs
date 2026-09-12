@@ -1005,56 +1005,14 @@ mod tests {
 		});
 	}
 
-	// =========================================================================
-	// =========================================================================
-	//
-	// Note: The event-based approach records proofs by scanning Transfer events
-	// in post_dispatch. The actual integration testing happens in the wormhole
-	// pallet tests. Here we just verify the extension structure is correct.
-
-	/// The call-carrying execute interface is transparent to static accounting:
-	/// the matcher sees the resubmitted inner call, not an opaque proposal id.
-	/// A 10 KiB no-transfer inner call plus a non-signer execute used to
-	/// reserve zero extension weight, then refund that zero after the pallet
-	/// rejected on the `Multisigs` read. The two inner-call walks must stay
-	/// charged.
-	/// A one-transfer resubmitted call is charged exactly one transfer.
-	/// The old `MaxCallSize / 36` execute bound under-counted a stored
-	/// `batch_all` of `recover_funds` (17 credits in 34 bytes) plus transfers.
-	/// Recursing into the resubmitted call must charge the composition so
-	/// recorded <= charged.
-	/// Pins the multiplier behind the modeled event-deposit charge: one recorded proof
-	/// deposits exactly `EVENTS_PER_RECORDED_PROOF` events. If recording ever starts
-	/// emitting more, the static reservation must be updated with it. (Capacity-boundary
-	/// inserts additionally emit `TreeGrew`, deliberately unmodeled: it happens at most
-	/// `MAX_TREE_DEPTH` times over the chain's whole life — the warm-up insert below
-	/// steps the fresh test tree past the first boundary.)
-	/// The post-dispatch scan streams `System::Events` through a decoding iterator —
-	/// and `skip()` still decodes the records it discards — so every event record
-	/// present at scan time costs decode work even when nothing is recorded. A signed
-	/// caller can emit arbitrarily many events with zero-transfer calls (e.g. batched
-	/// `remark_with_event`), so that work must be registered against the block.
-	/// `weight()` reserves the static worst case, so a dispatch that performs fewer
-	/// proof inserts than charged (`batch_all` of two transfers that only records one,
-	/// `recover_funds` with fewer pending holds than `MaxPendingPerAccount`) must have
-	/// the difference refunded via `post_dispatch_details`, not kept forever.
-	/// A failed dispatch rolls back its events: nothing is scanned or recorded, so the
-	/// entire static per-transfer reservation is unspent and must be refunded.
-	/// The scan stream-decodes complete records before filtering, and record size is
-	/// caller-influenced: a successful `Multisig::execute` emits `ProposalExecuted`
-	/// carrying the full stored call (up to 10 KiB) and the approver vector (up to 100
-	/// accounts) — an order of magnitude past the ~300-byte structural assumption
-	/// behind the per-record charge. Because `skip()` still decodes discarded records,
-	/// every later transaction in the block re-decodes such records too. The registered
-	/// scan weight must therefore scale with the bytes present, not record count alone.
-	/// Pins the pipeline mechanics the refund depends on: `CheckWeight` reclaims block
-	/// weight BEFORE this extension's refund exists, so the trailing
-	/// `frame_system::WeightReclaim` in `TxExtension` is what actually returns the
-	/// refund to block capacity (idempotently, via `ExtrinsicWeightReclaimed`).
-	/// The scan must decode exactly what the streaming reader would: the single-copy
-	/// reader exists purely to make the scan linear (one `storage::get` instead of
-	/// per-2-KiB refills that each re-materialize the whole overlay value), not to
-	/// change what is read.
+	/// The single-copy event reader decodes exactly what the streaming reader
+	/// would.
+	///
+	/// It exists to make a scan linear: one `storage::get` in place of per-2-KiB
+	/// refills that each re-materialize the whole overlay value. What it reads is
+	/// the same. The scan it was built for went with
+	/// `WormholeProofRecorderExtension` at M6 and the reader is still the
+	/// runtime's, so this is what pins its behaviour.
 	#[test]
 	fn single_copy_event_reader_matches_the_streaming_reader() {
 		new_test_ext().execute_with(|| {

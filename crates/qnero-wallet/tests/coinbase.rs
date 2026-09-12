@@ -135,7 +135,7 @@ fn an_encrypted_coinbase_payload_is_rebuilt_against_the_public_value() {
     assert_eq!(
         wallet.store.unspent_total(),
         17,
-        "the chain's value, not the payload's"
+        "the chain decides the amount"
     );
     assert_eq!(wallet.store.notes[0].origin, NoteOrigin::Coinbase);
 }
