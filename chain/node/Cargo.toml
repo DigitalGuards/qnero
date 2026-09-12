@@ -16,7 +16,8 @@ targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
 array-bytes.workspace = true
-clap = { features = ["derive"], workspace = true }
+async-trait.workspace = true
+clap = { features = ["derive", "env"], workspace = true }
 codec.workspace = true
 frame-benchmarking = { workspace = true, default-features = true, optional = true }
 frame-benchmarking-cli = { workspace = true, default-features = true, optional = true }
@@ -39,6 +40,8 @@ pallet-utility.workspace = true
 pallet-zk-tree.default-features = true
 pallet-zk-tree.workspace = true
 prometheus.workspace = true
+qnero-note-core.workspace = true
+qp-coinbase.workspace = true
 qp-dilithium-crypto = { workspace = true }
 qp-rusty-crystals-dilithium.workspace = true
 qp-rusty-crystals-hdwallet.workspace = true
@@ -113,6 +116,7 @@ tokio-util.workspace = true
 zeroize = { workspace = true, default-features = true }
 
 [dev-dependencies]
+qnero-circuit = { workspace = true, default-features = false }
 sp-externalities.default-features = true
 sp-externalities.workspace = true
 sp-state-machine.default-features = true

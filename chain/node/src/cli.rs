@@ -13,6 +13,25 @@ pub struct Cli {
 	#[arg(long, value_name = "INNER_HASH")]
 	pub rewards_inner_hash: Option<String>,
 
+	/// The miner key this node's coinbase notes are minted for (`qnm1...`).
+	///
+	/// Every block this node authors mints its reward as one note that only
+	/// the wallet holding this key can find, and that is the only way value
+	/// enters circulation. Take it from `qnero-wallet miner-address`, which
+	/// prints the wallet's address beside it.
+	///
+	/// **It is secret-bearing.** It carries the coinbase viewing key, so
+	/// whoever holds it can pick this miner's coinbase notes out of the tree.
+	/// It cannot spend them and it says nothing about any other note the
+	/// wallet holds. Prefer `QNERO_MINER_KEY` to a command line, which every
+	/// process listing on the machine can read.
+	///
+	/// An authority without one builds blocks that carry no coinbase inherent,
+	/// and every node refuses those, its own import included, so startup fails
+	/// instead.
+	#[arg(long, value_name = "QNM_KEY", env = "QNERO_MINER_KEY")]
+	pub rewards_miner_key: Option<String>,
+
 	/// Port to listen for external miner connections (e.g., 9833).
 	/// When set, the node waits for miners instead of mining locally.
 	/// Requires `--validator`; startup fails otherwise.

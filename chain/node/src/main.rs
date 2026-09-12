@@ -5,6 +5,7 @@
 mod benchmarking;
 mod chain_spec;
 mod cli;
+mod coinbase;
 mod command;
 mod miner_server;
 mod prometheus;

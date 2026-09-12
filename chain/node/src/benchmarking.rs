@@ -125,9 +125,6 @@ pub fn create_benchmark_extrinsic(
 			quantus_runtime::transaction_extensions::ReversibleTransactionExtension::<
 				runtime::Runtime,
 			>::new(),
-			quantus_runtime::transaction_extensions::WormholeProofRecorderExtension::<
-				runtime::Runtime,
-			>::new(),
 			pallet_transaction_payment::ChargeTransactionPayment::<runtime::Runtime>::from(0),
 			frame_metadata_hash_extension::CheckMetadataHash::<runtime::Runtime>::new(false),
 			frame_system::WeightReclaim::<runtime::Runtime>::new(),

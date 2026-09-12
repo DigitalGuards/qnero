@@ -279,7 +279,7 @@ pub fn generate_quantus_key(
 
 impl SubstrateCli for Cli {
 	fn impl_name() -> String {
-		"Quantus Node".into()
+		"Qnero Node".into()
 	}
 
 	fn impl_version() -> String {
@@ -304,7 +304,9 @@ impl SubstrateCli for Cli {
 
 	fn load_spec(&self, id: &str) -> Result<Box<dyn sc_service::ChainSpec>, String> {
 		Ok(match id {
-			"dev" =>
+			// `--dev` resolves to this id, so it stays "dev" while the spec it
+			// builds is Qnero's.
+			"dev" | "qnero-dev" =>
 				Box::new(chain_spec::development_chain_spec()?) as Box<dyn sc_service::ChainSpec>,
 			"heisenberg_live_spec" =>
 				Box::new(chain_spec::heisenberg_chain_spec()?) as Box<dyn sc_service::ChainSpec>,
@@ -672,6 +674,52 @@ pub fn run() -> sc_cli::Result<()> {
 						},
 				};
 
+				// The miner key every coinbase note this node mints is derived
+				// from. An authority owes one: without it the node builds
+				// blocks with no coinbase inherent, and every node refuses
+				// those, its own import included, so the failure belongs at
+				// startup.
+				let miner_key = match cli.rewards_miner_key {
+					Some(ref encoded) => {
+						let key =
+							qnero_note_core::MinerKey::decode(encoded.trim()).map_err(|error| {
+								// The key itself is never printed: half of it
+								// is a viewing-tier secret.
+								eprintln!("Error: --rewards-miner-key is not a Qnero miner key: {error}\n");
+								eprintln!("To get one, run:");
+								eprintln!("  qnero-wallet miner-address\n");
+								eprintln!(
+									"Then pass the printed qnm1... string as --rewards-miner-key, \
+									 or set QNERO_MINER_KEY."
+								);
+								sc_cli::Error::Input("Invalid miner key".into())
+							})?;
+						log::info!(
+							"⛏️ Coinbase notes are minted for pk {}…",
+							&hex::encode(key.pk.to_bytes())[..16]
+						);
+						Some(key)
+					},
+					None =>
+						if config.role.is_authority() {
+							eprintln!(
+								"Error: --rewards-miner-key is required when running with --validator.\n"
+							);
+							eprintln!(
+								"Every block mints its reward as one shielded note, so the node"
+							);
+							eprintln!("needs a key to mint it for. To get one, run:");
+							eprintln!("  qnero-wallet miner-address\n");
+							eprintln!(
+								"Then pass it as --rewards-miner-key, or set QNERO_MINER_KEY."
+							);
+							return Err(sc_cli::Error::Input("Missing --rewards-miner-key".into()));
+						} else {
+							// A node that does not author mints nobody's note.
+							None
+						},
+				};
+
 				// External mining only runs on authorities; fail fast instead of
 				// silently ignoring the flags (matches --rewards-inner-hash above).
 				if cli.miner_listen_port.is_some() && !config.role.is_authority() {
@@ -696,6 +744,7 @@ pub fn run() -> sc_cli::Result<()> {
 				service::new_full::<sc_network::litep2p::Litep2pNetworkBackend>(
 					config,
 					rewards_account,
+					miner_key,
 					cli.miner_listen_port,
 					cli.miner_auth_token_file,
 					cli.enable_peer_sharing,

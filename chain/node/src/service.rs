@@ -21,6 +21,7 @@ use sp_inherents::CreateInherentDataProviders;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+	coinbase,
 	miner_server::{MinerServer, MinerServerConfig, DEFAULT_MINER_AUTH_TOKEN_FILENAME},
 	prometheus::BusinessMetrics,
 };
@@ -580,6 +581,7 @@ fn spawn_authority_tasks(
 	sync_service: Arc<sc_network_sync::SyncingService<Block>>,
 	prometheus_registry: Option<prometheus::Registry>,
 	rewards_address: AccountId32,
+	miner_key: Option<qnero_note_core::MinerKey>,
 	miner_config: Option<MinerServerConfig>,
 	tx_stream_for_worker: impl futures::Stream<Item = sp_core::H256> + Send + Unpin + 'static,
 	#[cfg(feature = "tx-logging")] tx_stream_for_logger: impl futures::Stream<Item = sp_core::H256>
@@ -597,16 +599,36 @@ fn spawn_authority_tasks(
 		None,
 	);
 
-	// Create inherent data providers
-	let inherent_data_providers = Box::new(move |_, _| async move {
-		let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
-		Ok(timestamp)
+	// Create inherent data providers.
+	//
+	// Two now. The coinbase one is what makes a block's reward a note: it
+	// derives this block's note from the operator's miner key and the height,
+	// and the runtime hashes the value it decided into the commitment. A node
+	// authoring without a miner key supplies no payload and builds a block its
+	// own import refuses, which is why `--rewards-miner-key` is required of an
+	// authority.
+	let coinbase_client = client.clone();
+	let inherent_data_providers = Box::new(move |parent, _| {
+		let client = coinbase_client.clone();
+		let miner_key = miner_key.clone();
+		async move {
+			let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
+			let coinbase = coinbase::CoinbaseInherentDataProvider::for_child_of::<Block, _>(
+				&client,
+				parent,
+				miner_key.as_ref(),
+			)?;
+			Ok((timestamp, coinbase))
+		}
 	})
 		as Box<
 			dyn CreateInherentDataProviders<
 				Block,
 				(),
-				InherentDataProviders = sp_timestamp::InherentDataProvider,
+				InherentDataProviders = (
+					sp_timestamp::InherentDataProvider,
+					coinbase::CoinbaseInherentDataProvider,
+				),
 			>,
 		>;
 
@@ -707,7 +729,10 @@ pub type PowBlockImport = sc_consensus_qpow::PowBlockImport<
 		dyn sp_inherents::CreateInherentDataProviders<
 			Block,
 			(),
-			InherentDataProviders = sp_timestamp::InherentDataProvider,
+			InherentDataProviders = (
+				sp_timestamp::InherentDataProvider,
+				coinbase::CoinbaseInherentDataProvider,
+			),
 		>,
 	>,
 	FullBackend,
@@ -769,15 +794,24 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 		.build(),
 	);
 
+	// The import-side providers. The coinbase one carries no payload here: an
+	// importing node has no reward address and builds nobody's note. It is in
+	// the tuple so that the identifier is claimed, because
+	// `PowBlockImport::check_inherents` turns an inherent error whose
+	// identifier no provider knows into `CheckInherentsUnknownError`, and a
+	// block missing its coinbase deserves the refusal that says so.
 	let inherent_data_providers = Box::new(move |_, _| async move {
 		let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
-		Ok(timestamp)
+		Ok((timestamp, coinbase::CoinbaseInherentDataProvider::checking()))
 	})
 		as Box<
 			dyn CreateInherentDataProviders<
 				Block,
 				(),
-				InherentDataProviders = sp_timestamp::InherentDataProvider,
+				InherentDataProviders = (
+					sp_timestamp::InherentDataProvider,
+					coinbase::CoinbaseInherentDataProvider,
+				),
 			>,
 		>;
 
@@ -815,6 +849,7 @@ pub fn new_full<
 >(
 	config: Configuration,
 	rewards_address: AccountId32,
+	miner_key: Option<qnero_note_core::MinerKey>,
 	miner_listen_port: Option<u16>,
 	miner_auth_token_file: Option<PathBuf>,
 	enable_peer_sharing: bool,
@@ -946,6 +981,7 @@ pub fn new_full<
 			sync_service,
 			prometheus_registry,
 			rewards_address,
+			miner_key,
 			miner_config,
 			tx_stream_for_worker,
 			tx_stream_for_logger,
@@ -961,6 +997,7 @@ pub fn new_full<
 			sync_service,
 			prometheus_registry,
 			rewards_address,
+			miner_key,
 			miner_config,
 			tx_stream_for_worker,
 			allow_mining_without_peers,

@@ -14,16 +14,16 @@ pub type ChainSpec = sc_service::GenericChainSpec;
 pub fn development_chain_spec() -> Result<ChainSpec, String> {
 	let mut properties = Properties::new();
 	properties.insert("tokenDecimals".into(), json!(12));
-	properties.insert("tokenSymbol".into(), json!("DEV"));
+	properties.insert("tokenSymbol".into(), json!("QNR"));
 	properties.insert("ss58Format".into(), json!(189));
 
 	Ok(ChainSpec::builder(
-		WASM_BINARY.ok_or_else(|| "Quantus DevNet wasm not available".to_string())?,
+		WASM_BINARY.ok_or_else(|| "Qnero DevNet wasm not available".to_string())?,
 		None,
 	)
-	.with_name("Quantus DevNet")
-	.with_id("dev")
-	.with_protocol_id("quantus-devnet")
+	.with_name("Qnero DevNet")
+	.with_id("qnero-dev")
+	.with_protocol_id("qnero-devnet")
 	.with_chain_type(ChainType::Development)
 	.with_genesis_config_preset_name(sp_genesis_builder::DEV_RUNTIME_PRESET)
 	.with_properties(properties)
