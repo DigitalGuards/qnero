@@ -148,8 +148,8 @@ Two properties of that string:
   mainnet mints unrelated notes at equal heights, and nobody carries an identification from one
   chain to the other by comparing note commitments. What separates two chains is the genesis hash
   and nothing else: `--dev --tmp` builds the same genesis every run, so two dev chains from one
-  miner key mint the identical note at every height. That is measured, not assumed, and it is
-  harmless on a throwaway chain; a network whose genesis a relaunch does not change is the same
+  miner key mint the identical note at every height. The third M6 fix pass measured that on two
+  dev chains and it is harmless on a throwaway one; a network whose genesis a relaunch does not change is the same
   chain by this rule.
 
 `--rewards-inner-hash` stays, and stays required of an authority, but it is no
