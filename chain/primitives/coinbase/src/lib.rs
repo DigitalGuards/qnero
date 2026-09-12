@@ -13,7 +13,7 @@
 //! appends that, so an author that supplies a malformed payload can only
 //! strand its own reward. What the chain does enforce is that every block
 //! carries exactly one of these, which is what makes the coinbase the only way
-//! new value enters circulation.
+//! new value is created after genesis.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

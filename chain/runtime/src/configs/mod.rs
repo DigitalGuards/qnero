@@ -145,8 +145,10 @@ impl frame_support::traits::FindAuthor<AccountId> for QpowAuthor {
 /// needed to be.
 ///
 /// The tree holds note commitments and nothing else under v1, which is what
-/// makes "every unit of value that enters circulation is a shielded note" a
-/// property of the tree rather than a claim about it.
+/// makes "every unit of value created after genesis is a shielded note" a
+/// property of the tree rather than a claim about it. The genesis allocation
+/// is the exception, and it is transparent: it is paid out by `Vesting::claim`
+/// and it was never in the tree.
 pub struct NoTransferProofNeeded;
 
 impl qp_wormhole::TransferProofRecorder<AccountId, AssetId, Balance> for NoTransferProofNeeded {

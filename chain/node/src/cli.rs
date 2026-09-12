@@ -17,8 +17,8 @@ pub struct Cli {
 	///
 	/// Every block this node authors mints its reward as one note that only
 	/// the wallet holding this key can find, and that is the only way value
-	/// enters circulation. Take it from `qnero-wallet miner-address`, which
-	/// prints the wallet's address beside it.
+	/// enters circulation after genesis. Take it from `qnero-wallet
+	/// miner-address`, which prints the wallet's address beside it.
 	///
 	/// **It is secret-bearing.** It carries the coinbase viewing key, so
 	/// whoever holds it can pick this miner's coinbase notes out of the tree.

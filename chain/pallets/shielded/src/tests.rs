@@ -2127,7 +2127,7 @@ fn a_real_public_batch_verifies_through_the_embedded_verifier() {
 }
 
 // ===========================================================================
-// The coinbase: the only way value enters circulation at v1
+// The coinbase: the only way value is created at v1, genesis aside
 // ===========================================================================
 
 /// A coinbase note for the test's own key, as a block author's node builds one:

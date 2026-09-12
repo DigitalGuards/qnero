@@ -299,7 +299,7 @@ across needs a `MigrateV0ToV1` that rehashes each stored `ZkLeaf` through
 `tree::hash_leaf`, or that refuses the upgrade outright.
 
 The identity half of that problem is closed. M6 renamed the runtime: it is
-`qnero` / `qnero-node` at `spec_version` 100 and `transaction_version` 7, so
+`qnero` / `qnero-node` at `spec_version` 101 and `transaction_version` 7, so
 the two runtimes no longer answer the same version triple, and the `spec_name`
 change is itself what makes a `set_code` from a `quantus-runtime` chain
 impossible. For a storage layout that cannot be migrated in place that is the
@@ -1643,9 +1643,11 @@ Three things about them are worth carrying into M5:
 
 ## 10. The M6 coinbase record
 
-Value enters circulation in one place under v1: the note a block mints to its
-author. This is what the chain stores, what it checks, and what it deliberately
-does not.
+Value created after genesis enters circulation in one place under v1: the note a
+block mints to its author. The genesis allocation is the exception and it is
+transparent, 27% of `MAX_SUPPLY` paid out by `Vesting::claim`
+(`docs/DESIGN.md` section 7.1). This is what the chain stores for a coinbase,
+what it checks, and what it deliberately does not.
 
 ### 10.1 The record
 
@@ -1830,6 +1832,18 @@ find it.
 | Each settlement's slot count and fee | `Event::BatchSettled` | how many leaf slots a submission settled and what it paid |
 | Each settled slot's two nullifiers, its two commitments, both leaf indices and both ciphertexts | `Event::SlotSettled` | the two notes one spend created, at consecutive leaf indices, publicly siblings and publicly tied to the two nullifiers spent alongside them |
 | A vesting payout's beneficiary and amount | `Event::Claimed { schedule_id, beneficiary, amount }` | a genesis-fixed allocation, the account it went to, and when |
+| A burn's account and amount | `Event::Burned { who, amount }` | value leaving circulation, and the account it left from |
+| A refused call's own arguments | the block body and `System::ExtrinsicFailed` | who tried to send what to whom, though nothing moved |
+
+The last row is the one a reader is least likely to expect. `QneroCallFilter`
+is a `BaseCallFilter`, checked at dispatch, so a transparent transfer is a
+valid extrinsic that enters a block, pays its fee and then fails with
+`CallFiltered`. Its arguments are in the block body and its failure is in the
+events, permanently, even though no value moved. One mistaken attempt therefore
+publishes exactly the sender, recipient and amount triple the policy exists to
+deny. A wallet should refuse these calls client-side rather than let a node
+publish them; `docs/DESIGN.md` section 7.2 carries the option of moving the
+refusal to validation, where a refused call never reaches a block.
 
 `SlotSettled` is the strongest linkage a settlement publishes, and it is what
 makes the nullifier row above weaker than it reads: the set alone says only

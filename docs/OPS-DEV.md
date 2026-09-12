@@ -115,7 +115,9 @@ nice -n 19 ./target/release/quantus-node --dev --tmp
 ### Mining under v1: the miner key
 
 From M6 every block mints its reward as one shielded note, and that is the only
-way value enters circulation. The node needs to know which note to mint, so an
+way value enters circulation after genesis. The genesis allocation is
+transparent and is paid out by `Vesting::claim`; `docs/DESIGN.md` section 7.1
+is the split. The node needs to know which note to mint, so an
 authority is configured with a **miner key**: `pk` and a coinbase viewing key
 `cvk`, in one bech32m string, printed by the wallet.
 
