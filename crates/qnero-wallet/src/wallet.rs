@@ -26,7 +26,8 @@ use crate::metadata::ChainMetadata;
 use crate::rpc::hex_0x;
 use crate::select::select_notes;
 use crate::store::{
-    NoteOrigin, PendingKind, PendingNote, RejectedNote, SecretHex, StoredNote, WalletStore,
+    NoteOrigin, PendingKind, PendingNote, RejectedNote, SecretHex, SpentDirection, StoredNote,
+    WalletStore,
 };
 use crate::POOL_QUANTUM;
 
@@ -206,10 +207,31 @@ impl Wallet {
     /// The same scan, with the operator's overrides.
     ///
     /// The only override is [`SyncOptions::rescan`], which drops the watermark
-    /// and walks the whole tree again while keeping every note. The node gates
-    /// below run first and refuse first: a rescan changes which leaves are
-    /// read and changes nothing about whether this node's answers are worth
-    /// reading at all.
+    /// and walks the whole tree again while keeping every note, and which is
+    /// also the way past a node gate that has nothing to compare against. It
+    /// buys that with reduced guarantees, and the order of the rules is what
+    /// bounds them:
+    ///
+    /// 1. The chain gate runs first and `--rescan` never bypasses it. Leaf
+    ///    indices, checkpoint hashes and spent flags are statements about one
+    ///    chain, and a walk from leaf zero over a different chain's tree is
+    ///    not a recovery of anything.
+    /// 2. The checkpoint walk runs next. Without `--rescan` its refusal is
+    ///    final. With it, a refusal is reported and bypassed: the checkpoints
+    ///    it could not stand on are dropped, and the watermark and
+    ///    `last_synced_block` go back to zero, since a rescan that trusts the
+    ///    node less than the store must not keep the store's claims either.
+    /// 3. The scan then runs **add only**. Every rule that would take
+    ///    something away rests on this node's answers being at least as new as
+    ///    the wallet's own knowledge, which is exactly what rule 2 may have
+    ///    stopped checking. So a nullifier the node carries still marks a note
+    ///    spent, a nullifier it does not carry clears nothing,
+    ///    `mark_vanished` does not run, and a commitment met again still moves
+    ///    its note and puts it back on chain. The report says so, and so does
+    ///    the CLI.
+    /// 4. The leaf-count gate stays exactly as it is for an ordinary sync.
+    ///    Under `--rescan` it cannot fire, because the watermark it compares
+    ///    against is zero.
     pub fn sync_with(
         &mut self,
         chain: &Chain,
@@ -242,7 +264,25 @@ impl Wallet {
         //
         // Nothing is mutated until both gates have passed, so a refusal leaves
         // the store exactly as it found it, in memory and on disk.
-        let stance = self.read_node_stance(chain, &head)?;
+        //
+        // `--rescan` is the operator's override on the second gate, and only
+        // on the second. A node that is behind, or that cannot answer for a
+        // height this wallet checkpointed, is refused because the store has
+        // nothing left to compare it against, and that is exactly the state an
+        // operator reaches for a rescan in: a wallet whose branch is gone, or
+        // whose checkpoints name blocks no node still serves. The refusal is
+        // reported, the checkpoints behind it are dropped with the watermark,
+        // and everything the sync would derive from the node being current is
+        // switched off below.
+        let (stance, bypassed_refusal) = match self.read_node_stance(chain, &head) {
+            Ok(stance) => (stance, None),
+            Err(refusal) if options.rescan => {
+                // Inert: the rescan branch of `apply_stance` ignores the
+                // stance and rewinds to leaf zero whatever it says.
+                (NodeStance::Current, Some(format!("{refusal:#}")))
+            }
+            Err(refusal) => return Err(refusal),
+        };
         let leaf_count = chain.leaf_count_at(&head.hash)?;
         // The leaf watermark, which is the gate the block heights and the
         // checkpoint hashes between them cannot see.
@@ -264,6 +304,14 @@ impl Wallet {
         // along one chain, so the node's head carries at least the watermark.
         // A count below it is lag, and lag is refused. The watermark never
         // regresses outside the fork path.
+        //
+        // The gate is the ordinary sync's, and `--rescan` skips it by
+        // construction: a rescan starts at leaf zero, no count is below zero,
+        // so the comparison below can never fire. There is no exemption in it
+        // for the override to take, which is why a rescan against a short tree
+        // contradicts nothing here. What the gate protects, the watermark and
+        // the checks that read backwards from it, a rescan gives up
+        // explicitly and says so.
         let watermark = if options.rescan {
             0
         } else {
@@ -302,13 +350,24 @@ impl Wallet {
             rewound_from: rewind.as_ref().map(|rewind| rewind.from),
             rewound_to: rewind.as_ref().map(|rewind| rewind.to),
             forked_at_block: rewind.as_ref().and_then(|rewind| rewind.forked_at),
+            add_only: options.rescan,
+            bypassed_refusal,
             ..Default::default()
         };
 
+        // Whether this pass is allowed to take anything away. A rescan is not:
+        // see the rules on `sync_with`. The two things it switches off are the
+        // orphan marking below and the clearing half of the spent
+        // reconciliation, and both are switched off for one reason, that the
+        // node gate which makes a missing leaf or a missing nullifier mean
+        // something may have been bypassed above.
+        let reconciles = !options.rescan;
+
         // Commitments this wallet already holds that the scan saw again. Only
-        // collected after a rewind, which is the only time a held leaf is
-        // inside the range at all, and it is what tells a note that moved
-        // apart from a note whose block was orphaned and never re-included.
+        // collected when the orphan marking will read them, which is after a
+        // fork rewind: that is the only time a held leaf is inside the range
+        // at all, and it is what tells a note that moved apart from a note
+        // whose block was orphaned and never re-included.
         let mut seen_again: BTreeSet<String> = BTreeSet::new();
 
         if leaf_count > start {
@@ -345,9 +404,14 @@ impl Wallet {
                     // watermark and the leaf range was walked again, which is
                     // what an orphaned block and a re-included extrinsic look
                     // like from here. See `WalletStore::relocate_note`.
-                    if rewind.is_some() {
+                    if rewind.is_some() && reconciles {
                         seen_again.insert(commitment_hex.clone());
                     }
+                    // Unconditional, the rescan included: a commitment the
+                    // chain carries at another index is a note whose stored
+                    // index is stale, and leaving it stale is what makes a
+                    // note unspendable. This only ever adds, since it moves a
+                    // note to where the chain has it and marks it on chain.
                     if self
                         .store
                         .relocate_note(&commitment_hex, record.index, record.block_number)
@@ -393,7 +457,7 @@ impl Wallet {
                 };
                 report.received += 1;
                 report.received_value += received.note.value;
-                if rewind.is_some() {
+                if rewind.is_some() && reconciles {
                     // A note first recorded by this very scan is on the chain
                     // by construction, and the vanished count below walks
                     // every note inside the rescanned range.
@@ -439,7 +503,19 @@ impl Wallet {
         // was orphaned out of the chain left the note it spent reported spent
         // forever, out of the balance and unselectable, with the value fully
         // spendable on chain. See `WalletStore::reconcile_spent`.
-        let reconciled = self.store.reconcile_spent(head.number);
+        //
+        // Add only under `--rescan`, which is the second half of rule 3. The
+        // clearing direction reads the absence of a nullifier as an orphaned
+        // settlement, and that reading is worth exactly as much as the gate
+        // that proved this node is not simply missing the block which settled
+        // it. A rescan may have bypassed that gate, so under it a note the
+        // chain has consumed stays consumed and the count is reported as held.
+        let direction = if reconciles {
+            SpentDirection::BothWays
+        } else {
+            SpentDirection::AddOnly
+        };
+        let reconciled = self.store.reconcile_spent(head.number, direction);
         report.newly_spent = reconciled.newly_spent;
         report.newly_unspent = reconciled.newly_unspent;
         report.held_spent = reconciled.held_spent;
@@ -461,7 +537,17 @@ impl Wallet {
         // skipped it, and the reconciliation then flipped it to unspent and
         // let it back into the balance as a phantom nobody had been told
         // about.
-        if rewind.is_some() {
+        //
+        // A rescan does not run it at all. The marking says "the chain does
+        // not carry this note", and the evidence for that is a range the scan
+        // walked on a node proved to be at or ahead of everything this wallet
+        // has read. A rescan may have bypassed that proof, and against a node
+        // that is behind, or that is serving a head it has not executed, every
+        // leaf it has not reached yet looks exactly like a leaf that is gone:
+        // the whole store would be written off in one pass. The notes stay in
+        // the balance, the report says they were not reconciled, and an
+        // ordinary sync against a current node is what settles them.
+        if rewind.is_some() && reconciles {
             report.vanished = self.store.mark_vanished(start, &seen_again);
         }
 
@@ -620,14 +706,22 @@ impl Wallet {
 
     /// Commit what the walk decided, and the operator's rescan on top of it.
     ///
-    /// The first write of the sync. Both gates have already passed.
+    /// The first write of the sync. Both gates have already passed, or the
+    /// checkpoint walk's refusal was bypassed by `--rescan` and the leaf gate
+    /// cannot fire.
     fn apply_stance(&mut self, stance: NodeStance, options: SyncOptions) -> Option<ScanRewind> {
         let from = self.store.next_leaf;
         if options.rescan {
             // Asked for, so it is not a fork and does not report as one. Every
             // note stays: the tree is walked again from zero and whatever the
-            // chain still carries is relocated or left held and marked off
-            // chain.
+            // chain still carries is relocated back on chain.
+            //
+            // `rewind_to(0, 0)` is also what the bypass owes the store. It
+            // drops every checkpoint and takes `last_synced_block` to zero, so
+            // a rescan that walked past a node gate leaves behind no claim
+            // that gate was measured against: the checkpoints this node could
+            // not answer for are gone, and the store's next sync compares
+            // against the one this rescan writes at the end.
             self.store.rewind_to(0, 0);
             return Some(ScanRewind {
                 from,
@@ -906,7 +1000,7 @@ impl Wallet {
         memo: &str,
         merkle: MerkleSource,
     ) -> Result<SendReport> {
-        let prepared = self.prepare_spend(
+        let prepared = match self.prepare_spend(
             chain,
             metadata,
             prover,
@@ -915,7 +1009,13 @@ impl Wallet {
             requested_fee,
             memo,
             merkle,
-        )?;
+        ) {
+            Ok(prepared) => prepared,
+            // One error carries a fact about the chain worth writing down:
+            // an input this wallet selected is not in the tree the anchor
+            // header roots. See `Wallet::write_off_missing_note`.
+            Err(error) => return Err(self.write_off_missing_note(error)),
+        };
         self.submit_spend(chain, metadata, prepared)
     }
 
@@ -1160,15 +1260,12 @@ impl Wallet {
         anchor_block: u32,
     ) -> Result<Vec<(Note, MerklePath)>> {
         let tree = chain.rebuild_tree(anchor_hash)?;
-        for note in selected {
-            if note.leaf_index >= tree.leaf_count() {
-                bail!(
-                    "leaf {} is not folded into the tree at block {anchor_block} yet. A note \
-                     cannot be minted and spent in the same block; wait one block and retry.",
-                    note.leaf_index
-                );
-            }
-        }
+        // The root comparison comes first, and that ordering is what lets the
+        // range check below say anything at all. A rebuilt tree whose root is
+        // the one the anchor header carries **is** the chain's tree at that
+        // block, so a leaf index past its end is a statement about the chain.
+        // Checked after the range, the same out-of-range index could as easily
+        // be a node serving a short leaf map.
         if tree.root() != header.zk_tree_root {
             bail!(
                 "the tree this wallet rebuilt from {} leaves at depth {} roots at {} where \
@@ -1180,6 +1277,11 @@ impl Wallet {
                 tree.root().to_hex(),
                 header.zk_tree_root.to_hex()
             );
+        }
+        for note in selected {
+            if note.leaf_index >= tree.leaf_count() {
+                return Err(out_of_range(note, tree.leaf_count(), anchor_block));
+            }
         }
         let pk = self.key.pk();
         let mut paths = Vec::with_capacity(selected.len());
@@ -1249,6 +1351,35 @@ impl Wallet {
             paths.push((stored, path.path));
         }
         Ok(paths)
+    }
+
+    /// Write off a note the path rebuild proved the chain does not carry.
+    ///
+    /// [`Wallet::prepare_spend`] writes nothing, which is what makes it the
+    /// seam an aggregator can take a proof from, so the one write this
+    /// discovery needs is made here, by the command that owns the store for
+    /// the whole spend. Every other error passes through untouched.
+    ///
+    /// The marking is the difference between an operator who retries and an
+    /// operator who is told to retry forever. `select_notes` picks largest
+    /// first, so a phantom larger than every real note is selected by every
+    /// later `send` and fails on the same rebuild; out of
+    /// [`WalletStore::unspent`] it is skipped, and the next attempt spends
+    /// what the chain actually carries.
+    fn write_off_missing_note(&mut self, error: anyhow::Error) -> anyhow::Error {
+        let Some(missing) = error.downcast_ref::<NoteNotOnChain>() else {
+            return error;
+        };
+        let commitment = missing.commitment.clone();
+        if self.store.mark_note_off_chain(&commitment) {
+            if let Err(failed) = self.save() {
+                return error.context(format!(
+                    "the note was also written off in memory and the store could not be saved: \
+                     {failed:#}"
+                ));
+            }
+        }
+        error
     }
 
     /// Submit a prepared spend and wait for it to settle.
@@ -1491,6 +1622,37 @@ pub struct SyncReport {
     pub forked_at_block: Option<u32>,
     /// Held notes inside a rescanned range that the chain no longer carries.
     pub vanished: u64,
+    /// Whether this sync ran add only, which is what `--rescan` runs.
+    ///
+    /// Nothing was taken away: no spent flag was cleared and no note was
+    /// marked off chain, whatever this node's answers implied. See
+    /// [`RESCAN_ADD_ONLY`] for the sentence a caller prints.
+    pub add_only: bool,
+    /// The node gate this sync bypassed, as the refusal it would have been.
+    ///
+    /// Only `--rescan` produces one, and only for the checkpoint walk: a node
+    /// behind this wallet, or one with no block at a height the store
+    /// checkpointed. It is carried so a caller can print it, because a
+    /// bypassed gate that says nothing is a gate an operator stops knowing
+    /// about.
+    pub bypassed_refusal: Option<String>,
+}
+
+/// What a rescan does not do, in one line, for the report and the CLI.
+///
+/// The guarantees an ordinary sync gives and this one does not: a spent flag
+/// that follows the settled set in both directions, and a note the chain no
+/// longer carries taken out of the balance. Both need a node proved to be at
+/// or ahead of everything the wallet has read, which is the gate `--rescan`
+/// exists to get past.
+pub const RESCAN_ADD_ONLY: &str = "rescan: add-only, spent flags and orphans are not reconciled; \
+     run a normal sync against a current node afterwards";
+
+impl SyncReport {
+    /// The add-only notice, when this sync was one.
+    pub fn rescan_notice(&self) -> Option<&'static str> {
+        self.add_only.then_some(RESCAN_ADD_ONLY)
+    }
 }
 
 /// What checking a store against a node's chain found.
@@ -1549,6 +1711,84 @@ fn archive_store(path: &Path) -> Result<PathBuf> {
     )
 }
 
+/// A note this wallet holds that the chain does not carry at the anchor.
+///
+/// A typed error because one caller acts on it. The path rebuild finds it and
+/// `Wallet::send` writes the note off, through the same field
+/// `WalletStore::mark_vanished` writes, so a note taken out of the balance by
+/// either route comes back by the one route that puts it back, a scan meeting
+/// the commitment again.
+///
+/// What makes it a fact and not a guess is the pair of conditions behind it.
+/// The rebuilt tree roots at the value the anchor header carries, so it is the
+/// chain's tree at that block and its leaf count is the chain's. And the store
+/// recorded this leaf at a block strictly below the anchor, so the anchor's
+/// state has executed the block that appended it. A leaf that is still missing
+/// from that tree is a leaf this chain does not have.
+///
+/// The other side of that line is a same-block race, and it stays a retry: a
+/// leaf appended in the anchor block itself, or one whose block the store
+/// never recorded, is out of range on a tree that is perfectly current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteNotOnChain {
+    /// The note's commitment, which is what `mark_note_off_chain` keys on.
+    pub commitment: String,
+    /// Where the store says the leaf is.
+    pub leaf_index: u64,
+    /// The block the store recorded that leaf at.
+    pub recorded_at_block: u32,
+    /// The anchor this spend was building against.
+    pub anchor_block: u32,
+    /// How many leaves the chain's tree holds at that anchor.
+    pub leaf_count: u64,
+}
+
+impl core::fmt::Display for NoteNotOnChain {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "this wallet holds a note at leaf {}, recorded at block {}, and the chain's tree at              block {} ends at leaf {}. Block {} has executed block {}, and the rebuilt tree roots              at the value that block's header carries, so this chain does not carry that leaf:              the block the note settled in was orphaned and the settlement has not been              re-included. `send` marks such a note off chain, so it keeps its secrets, leaves the              unspent total and is passed over by the next attempt, which spends what the chain              does carry. Run `sync` against a node at the current head: a sync that meets the              commitment {} again moves the note to the leaf the chain now holds it at and puts it              back.",
+            self.leaf_index,
+            self.recorded_at_block,
+            self.anchor_block,
+            self.leaf_count,
+            self.anchor_block,
+            self.recorded_at_block,
+            self.commitment,
+        )
+    }
+}
+
+impl std::error::Error for NoteNotOnChain {}
+
+/// Classify a selected note whose leaf index is past the end of the chain's
+/// tree at the anchor.
+///
+/// Two different conditions used to share one message, and the message was the
+/// wrong one for the second. A leaf the anchor block has not folded yet is a
+/// race against the block boundary and the answer is to wait; a leaf the chain
+/// no longer carries never becomes foldable, and an operator following that
+/// advice retries forever while `select_notes` keeps picking the same note.
+fn out_of_range(note: &StoredNote, leaf_count: u64, anchor_block: u32) -> anyhow::Error {
+    match note.block_number {
+        Some(block) if block < anchor_block => anyhow::Error::new(NoteNotOnChain {
+            commitment: note.commitment.clone(),
+            leaf_index: note.leaf_index,
+            recorded_at_block: block,
+            anchor_block,
+            leaf_count,
+        }),
+        // The anchor has not executed the block this leaf was appended in, or
+        // the store never recorded one. Both are a tree that is about to carry
+        // the leaf.
+        _ => anyhow!(
+            "leaf {} is not folded into the tree at block {anchor_block} yet, which holds {}              leaves. A note cannot be minted and spent in the same block; wait one block and              retry.",
+            note.leaf_index,
+            leaf_count
+        ),
+    }
+}
+
 /// Where this node stands against the store, as the checkpoint walk found it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeStance {
@@ -1591,6 +1831,13 @@ pub struct SyncOptions {
     /// whose leaf the current chain no longer carries would otherwise lose its
     /// secrets, and those secrets are the only handle on a settlement that can
     /// still be re-included.
+    ///
+    /// It is also the operator's override on the checkpoint walk, which is
+    /// what `docs/WALLET.md` has always said it was and what the code did not
+    /// do: a node that diverged above its own head reads as a node that is
+    /// behind, both are refused, and the rescan is the way through. The
+    /// override costs the guarantees in [`RESCAN_ADD_ONLY`], and
+    /// [`Wallet::sync_with`] carries the rules that bound them.
     pub rescan: bool,
 }
 
@@ -1745,6 +1992,65 @@ mod tests {
             classify_entry_rho(11, 7, 11, 7, 7),
             EntryRhoCheck::Missed { .. }
         ));
+    }
+
+    /// The regression: every input whose leaf index sat past the end of the
+    /// tree at the anchor was reported as a same-block race, with "wait one
+    /// block and retry" for advice. A leaf the chain no longer carries never
+    /// becomes foldable, and `select_notes` picks largest first, so an
+    /// operator who took that advice retried forever against the same note.
+    ///
+    /// The rebuilt tree roots at the value the anchor header carries before
+    /// this runs, so the tree is the chain's and its leaf count is the
+    /// chain's. What is left to decide is whether the anchor has executed the
+    /// block that appended the leaf.
+    #[test]
+    fn an_input_past_the_end_of_the_tree_is_a_race_or_a_missing_leaf() {
+        let note = |block: Option<u32>| StoredNote {
+            leaf_index: 9,
+            block_number: block,
+            value: 100,
+            commitment: "ab".repeat(32),
+            nullifier: "cd".repeat(32).into(),
+            rho: "ef".repeat(32).into(),
+            r: "01".repeat(32).into(),
+            memo: String::new(),
+            origin: NoteOrigin::Spend,
+            spent: false,
+            spent_seen_at_block: None,
+            on_chain: true,
+        };
+
+        // Recorded at a block this anchor has executed: the chain does not
+        // carry the leaf, and the caller is handed the fact to write down.
+        let missing = out_of_range(&note(Some(11)), 8, 14);
+        let missing = missing
+            .downcast_ref::<NoteNotOnChain>()
+            .expect("a leaf the chain does not carry is the typed error");
+        assert_eq!(missing.commitment, "ab".repeat(32));
+        assert_eq!(missing.leaf_index, 9);
+        assert_eq!(missing.recorded_at_block, 11);
+        assert_eq!(missing.anchor_block, 14);
+        assert_eq!(missing.leaf_count, 8);
+
+        // Appended in the anchor block itself: a note cannot be minted and
+        // spent in the same block, so this is the race and the answer is to
+        // wait.
+        let racing = out_of_range(&note(Some(14)), 8, 14);
+        assert!(racing.downcast_ref::<NoteNotOnChain>().is_none());
+        assert!(format!("{racing:#}").contains("wait one block"));
+
+        // Ahead of the anchor, which is a spend prepared against a node
+        // behind the one the note was scanned from. Nothing is written off on
+        // that.
+        let ahead = out_of_range(&note(Some(20)), 8, 14);
+        assert!(ahead.downcast_ref::<NoteNotOnChain>().is_none());
+
+        // And a note whose block the store never recorded says nothing either
+        // way, so it stays a race.
+        let unknown = out_of_range(&note(None), 8, 14);
+        assert!(unknown.downcast_ref::<NoteNotOnChain>().is_none());
+        assert!(format!("{unknown:#}").contains("wait one block"));
     }
 
     /// `N` is resolved from the environment the way the pallet's build script

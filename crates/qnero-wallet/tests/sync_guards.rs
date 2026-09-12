@@ -922,8 +922,11 @@ fn a_refused_sync_leaves_a_fresh_store_bound_to_no_chain() {
 /// And the notes already held stay held, which is the difference from deleting
 /// the store: a note whose leaf the current chain no longer carries would
 /// otherwise lose the secrets that are the only handle on a settlement that
-/// can still be re-included. It is marked off chain instead, by the same rule
-/// a fork rescan uses.
+/// can still be re-included.
+///
+/// What it does **not** do is write that note off. A rescan adds: see
+/// `a_rescan_bypasses_the_node_gate_and_only_adds` for the argument and the
+/// node that makes it matter.
 #[test]
 fn a_rescan_recovers_a_leaf_below_the_watermark_and_keeps_every_note() {
     let dir = support::scratch_dir("rescan");
@@ -1006,7 +1009,17 @@ fn a_rescan_recovers_a_leaf_below_the_watermark_and_keeps_every_note() {
         "a rescan the operator asked for is not a fork and must not report one"
     );
     assert_eq!(report.received, 1, "the leaf below the watermark is read");
-    assert_eq!(report.vanished, 1, "the leaf the chain dropped is marked");
+    assert_eq!(
+        report.vanished, 0,
+        "a rescan adds: the leaf the chain dropped is left alone for a sync whose node gate stands"
+    );
+    assert!(report.add_only);
+    assert_eq!(
+        report.rescan_notice(),
+        Some(qnero_wallet::wallet::RESCAN_ADD_ONLY),
+        "the report has to carry what this pass did not do"
+    );
+    assert_eq!(report.bypassed_refusal, None, "this node refused nothing");
     assert_eq!(wallet.store.next_leaf, 6);
     assert_eq!(wallet.store.last_synced_block, 11);
 
@@ -1020,17 +1033,369 @@ fn a_rescan_recovers_a_leaf_below_the_watermark_and_keeps_every_note() {
         .expect("the recovered note is held");
     assert_eq!(recovered.leaf_index, 2);
     assert_eq!(recovered.value, 1_000);
+    assert!(
+        wallet
+            .store
+            .notes
+            .iter()
+            .any(|note| note.commitment == orphaned.commitment().to_hex() && note.on_chain),
+        "the rescan leaves the note it did not find exactly as it was"
+    );
+
+    // The conflict set counts once, at the member a spend would use, and the
+    // note the rescan did not find is still counted, because this pass proved
+    // nothing about it.
+    assert_eq!(wallet.store.unspent_total(), 1_250);
+    assert_eq!(wallet.store.off_chain_total(), 0);
+    let chosen = select_notes(wallet.store.spendable(), 900).expect("the spend is fundable");
+    assert_eq!(chosen.len(), 1);
+    assert_eq!(chosen[0].commitment, twin.commitment().to_hex());
+
+    // And the ordinary sync that follows is what settles it. Nothing about the
+    // chain changed between these two calls: what changed is that this pass
+    // runs behind a node gate that stands, so a leaf the scan walks past and
+    // does not find is evidence.
+    {
+        let mut state = node.state();
+        state.fork_from = 10;
+        state.fork_tag = 4;
+        state.head_number = 12;
+    }
+    let report = wallet
+        .sync(&chain, &metadata)
+        .expect("the fork rewinds and rescans");
+    assert_eq!(report.vanished, 1, "the leaf the chain dropped is marked");
+    assert!(!report.add_only);
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+    assert_eq!(wallet.store.off_chain_total(), 250);
+}
+
+/// `--rescan` is the way past a node gate, and everything it gives up to be
+/// that is given up by name.
+///
+/// The regression, and it is two halves of one line. `sync_with` read the node
+/// stance before it looked at `options.rescan`, so the refusal a lagging node
+/// gets had no escape although the CLI's own text, the refusal's own last
+/// sentence and `docs/WALLET.md` all named `--rescan` as the way through: the
+/// operator whose branch diverged above every node's head was told to pass a
+/// flag that refused with the same message. And the flag that did get through,
+/// by forcing the watermark to zero, dropped straight into a scan that
+/// reconciles: against a node that has not executed its head, every settlement
+/// it is missing reads as an orphaned one and every leaf it has not reached
+/// reads as a leaf that is gone. Un-spending settled notes puts inputs the
+/// chain has already consumed back into the balance, where the next `send`
+/// selects them and pays a full proof for a settlement that is skipped, and
+/// writing every note above that node's tree off empties the balance of a
+/// wallet whose notes are all perfectly intact.
+///
+/// So the override is add only. It records what this node carries and takes
+/// nothing away on what this node is missing, and the report says so.
+#[test]
+fn a_rescan_bypasses_the_node_gate_and_only_adds() {
+    let dir = support::scratch_dir("rescan-bypass");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    let address = wallet.address();
+
+    // Three notes. One is spent on chain, one is orphaned by a reorg, and one
+    // sits at a leaf this wallet has already scanned past and never read, the
+    // way a store an older build wrote holds one.
+    let spent = note_for(address.pk, 1_000, "settled");
+    let orphaned = note_for(address.pk, 250, "gone with the reorg");
+    let unread = note_for(address.pk, 70, "below the watermark");
+
+    let mut state = NodeState {
+        head_number: 20,
+        ..Default::default()
+    };
+    put_leaf(
+        &mut state,
+        5,
+        19,
+        spent.commitment(),
+        &ct_for(&address, &spent, 20),
+    );
+    put_leaf(
+        &mut state,
+        6,
+        19,
+        orphaned.commitment(),
+        &ct_for(&address, &orphaned, 21),
+    );
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(8));
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let metadata = test_metadata();
+
+    wallet.sync(&chain, &metadata).expect("the first sync runs");
+    assert_eq!(wallet.store.unspent_total(), 1_250);
+
+    // The settlement lands at block 21 and the sync derives it there.
+    let nk = load_seed(&seed).expect("the seed loads").nk();
+    let used_key = blake2_128_concat_map_key(
+        "Shielded",
+        "UsedNullifiers",
+        &spent.nullifier(&nk).to_bytes(),
+    );
+    {
+        let mut state = node.state();
+        state.put_storage(&used_key, &[]);
+        state.head_number = 21;
+    }
+    wallet
+        .sync(&chain, &metadata)
+        .expect("the second sync runs");
+    assert_eq!(wallet.store.unspent_total(), 250);
+    assert_eq!(wallet.store.last_synced_block, 21);
+
+    // Now the only node this operator can reach is four blocks back and has
+    // executed neither the settlement nor the leaves above its tree. The reorg
+    // that orphaned leaf 6 has happened; this node cannot show it.
+    {
+        let mut state = node.state();
+        state.remove_storage(&used_key);
+        state.remove_storage(&identity_map_key("ZkTree", "Leaves", 6));
+        state.remove_storage(&identity_map_key("Shielded", "Ciphertexts", 6));
+        state.remove_storage(&identity_map_key("Shielded", "LeafBlocks", 6));
+        put_leaf(
+            &mut state,
+            2,
+            9,
+            unread.commitment(),
+            &ct_for(&address, &unread, 22),
+        );
+        state.head_number = 17;
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(4));
+    }
+    let refused = wallet
+        .sync(&chain, &metadata)
+        .expect_err("a node behind the wallet is refused");
+    assert!(format!("{refused:#}").contains("behind this wallet"));
+
+    let report = wallet
+        .sync_with(&chain, &metadata, SyncOptions { rescan: true })
+        .expect("--rescan is the way through that refusal");
+
+    // The gate was bypassed, and the operator is handed the refusal it would
+    // have been. A gate walked past in silence is a gate nobody knows about.
+    let bypassed = report
+        .bypassed_refusal
+        .as_deref()
+        .expect("the refusal is reported");
+    assert!(bypassed.contains("head is block 17"), "{bypassed}");
+    assert!(bypassed.contains("synced through block 21"), "{bypassed}");
+    assert!(report.add_only);
+    assert_eq!(
+        report.rescan_notice(),
+        Some(qnero_wallet::wallet::RESCAN_ADD_ONLY)
+    );
+
+    // It added the leaf nothing else would have read again.
+    assert_eq!(report.received, 1);
+    assert_eq!(report.scanned_from, 0);
+    assert_eq!(report.scanned_to, 4);
     assert!(wallet
         .store
         .notes
         .iter()
-        .any(|note| note.commitment == orphaned.commitment().to_hex() && !note.on_chain));
+        .any(|note| note.commitment == unread.commitment().to_hex() && note.on_chain));
 
-    // The conflict set counts once, at the member a spend would use, and the
-    // note the chain no longer carries counts in neither total.
-    assert_eq!(wallet.store.unspent_total(), 1_000);
+    // And it took nothing away. The settled note stays spent although this
+    // node's settled set does not carry its nullifier, and the note whose leaf
+    // this node cannot reach stays on chain.
+    assert_eq!(report.newly_unspent, 0, "a rescan clears no spent flag");
+    assert_eq!(report.held_spent, 1);
+    assert_eq!(report.vanished, 0, "a rescan marks nothing vanished");
+    // `(spent, on_chain)` for one held note, which is the pair this whole test
+    // is about.
+    fn flags(wallet: &Wallet, commitment: &str) -> (bool, bool) {
+        wallet
+            .store
+            .notes
+            .iter()
+            .find(|note| note.commitment == commitment)
+            .map(|note| (note.spent, note.on_chain))
+            .expect("the note is held")
+    }
+    assert_eq!(flags(&wallet, &spent.commitment().to_hex()), (true, true));
+    assert_eq!(
+        flags(&wallet, &orphaned.commitment().to_hex()),
+        (false, true)
+    );
+    assert_eq!(wallet.store.unspent_total(), 320);
+    assert_eq!(wallet.store.off_chain_total(), 0);
+
+    // The watermark and the checkpoints went with the bypass: a rescan that
+    // trusts this node less than the store does not keep the store's claims
+    // about a branch it could not check either.
+    assert_eq!(report.rewound_from, Some(8));
+    assert_eq!(report.rewound_to, Some(0));
+    assert_eq!(report.forked_at_block, None);
+    assert_eq!(wallet.store.checkpoints.len(), 1);
+    assert_eq!(wallet.store.checkpoints[0].block_number, 17);
+
+    // The node the operator was waiting for comes back: at a head well past
+    // everything, on the branch the reorg produced, still without the
+    // settlement that was orphaned with it. This is the sync the rescan's own
+    // notice sends the operator to, and it reconciles both halves.
+    {
+        let mut state = node.state();
+        state.fork_from = 15;
+        state.fork_tag = 3;
+        state.head_number = 25;
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(8));
+    }
+    let report = wallet
+        .sync(&chain, &metadata)
+        .expect("the node is current on its own branch");
+    assert!(!report.add_only);
+    assert_eq!(report.bypassed_refusal, None);
+    assert_eq!(
+        report.newly_unspent, 1,
+        "the settlement is gone from a node that has executed its head"
+    );
+    assert_eq!(report.vanished, 1, "and so is the leaf");
+    assert_eq!(flags(&wallet, &spent.commitment().to_hex()), (false, true));
+    assert_eq!(
+        flags(&wallet, &orphaned.commitment().to_hex()),
+        (false, false)
+    );
+    assert_eq!(wallet.store.unspent_total(), 1_070);
     assert_eq!(wallet.store.off_chain_total(), 250);
-    let chosen = select_notes(wallet.store.spendable(), 900).expect("the spend is fundable");
-    assert_eq!(chosen.len(), 1);
-    assert_eq!(chosen[0].commitment, twin.commitment().to_hex());
+}
+
+/// A rescan clears no spent flag, at any head.
+///
+/// The height guard on the clearing direction, `head >= spent_seen_at_block`,
+/// covers a node that has not reached the block a spend was latched at. It
+/// does not cover this: a node at a head well past that block whose settled
+/// set is short because it has not executed its own head, or because it is
+/// serving a branch this wallet cannot check, which is the state `--rescan`
+/// exists for. Clearing there hands the next `send` an input the chain has
+/// already consumed, and the proof is paid before the settlement is skipped.
+#[test]
+fn a_rescan_clears_no_spent_flag_at_a_head_above_the_spend() {
+    let dir = support::scratch_dir("rescan-spent");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    let address = wallet.address();
+
+    let note = note_for(address.pk, 1_000, "settled high");
+    let mut state = NodeState {
+        head_number: 20,
+        ..Default::default()
+    };
+    put_leaf(
+        &mut state,
+        5,
+        19,
+        note.commitment(),
+        &ct_for(&address, &note, 23),
+    );
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(6));
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let metadata = test_metadata();
+
+    wallet.sync(&chain, &metadata).expect("the first sync runs");
+    let nk = load_seed(&seed).expect("the seed loads").nk();
+    let used_key = blake2_128_concat_map_key(
+        "Shielded",
+        "UsedNullifiers",
+        &note.nullifier(&nk).to_bytes(),
+    );
+    {
+        let mut state = node.state();
+        state.put_storage(&used_key, &[]);
+        state.head_number = 21;
+    }
+    wallet
+        .sync(&chain, &metadata)
+        .expect("the second sync runs");
+    assert!(wallet.store.notes[0].spent);
+    assert_eq!(wallet.store.notes[0].spent_seen_at_block, Some(21));
+
+    // The nullifier is gone and the head is nine blocks past the spend, so the
+    // height guard has nothing to say.
+    {
+        let mut state = node.state();
+        state.remove_storage(&used_key);
+        state.head_number = 30;
+    }
+    let report = wallet
+        .sync_with(&chain, &metadata, SyncOptions { rescan: true })
+        .expect("the rescan runs");
+    assert_eq!(report.newly_unspent, 0);
+    assert_eq!(report.held_spent, 1);
+    assert!(wallet.store.notes[0].spent, "a rescan clears nothing");
+    assert_eq!(wallet.store.unspent_total(), 0);
+
+    // The same node, the same answers, an ordinary sync: this is the pass that
+    // is allowed to read a missing nullifier as an orphaned settlement,
+    // because the gate that says this node is not simply missing it stands.
+    let report = wallet.sync(&chain, &metadata).expect("the plain sync runs");
+    assert_eq!(report.newly_unspent, 1);
+    assert!(!wallet.store.notes[0].spent);
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+}
+
+/// `--rescan` is an override on the checkpoint walk and on nothing else. A
+/// store belonging to another chain is refused exactly as an ordinary sync
+/// refuses it.
+///
+/// Every leaf index, block number, checkpoint hash and spent flag in a store is
+/// a statement about one chain. Walking another chain's tree from leaf zero
+/// recovers nothing and writes this wallet's notes against indices that mean
+/// something else; `--new-chain-store` is the flag for that case, and it
+/// archives the old file and starts a fresh store beside it.
+#[test]
+fn a_genesis_mismatch_is_refused_under_rescan_too() {
+    let dir = support::scratch_dir("rescan-genesis");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+
+    let first = {
+        let mut state = NodeState {
+            head_number: 9,
+            ..Default::default()
+        };
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+        FakeNode::start(state)
+    };
+    let first_rpc = RpcClient::new(&first.url);
+    let first_chain = Chain::new(&first_rpc);
+    wallet
+        .sync(&first_chain, &test_metadata())
+        .expect("the store takes this chain");
+    let before = serde_json::to_value(&wallet.store).expect("the store serializes");
+
+    // Another chain: every hash differs from height zero, genesis included.
+    let other = {
+        let mut state = NodeState {
+            head_number: 40,
+            fork_from: 0,
+            fork_tag: 7,
+            ..Default::default()
+        };
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(9));
+        FakeNode::start(state)
+    };
+    let other_rpc = RpcClient::new(&other.url);
+    let other_chain = Chain::new(&other_rpc);
+
+    let refused = wallet
+        .sync_with(&other_chain, &test_metadata(), SyncOptions { rescan: true })
+        .expect_err("a rescan does not cross chains");
+    let message = format!("{refused:#}");
+    assert!(message.contains("genesis"), "{message}");
+    assert_eq!(
+        serde_json::to_value(&wallet.store).expect("the store serializes"),
+        before,
+        "a refused rescan writes nothing"
+    );
 }

@@ -312,6 +312,12 @@ above takes the watermark to a checkpoint the node's own branch carries and
 that checkpoint was written at a block whose tree was at least that large. So a
 short tree is lag, and the watermark never regresses outside the fork path.
 
+The gate is the ordinary sync's and `--rescan` skips it by construction: a
+rescan starts at leaf zero and no leaf count is below zero, so the comparison
+cannot fire. There is no exemption in it for the override to take. What the
+gate protects, the watermark and every check that reads backwards from it, a
+rescan gives up openly and says so.
+
 A lagging node is an ordinary operational state, so it is refused by name: a
 second `--node`, a node resyncing, a load balancer answering from a lagging
 replica. What it is not is new information. Its `UsedNullifiers` is
@@ -322,7 +328,10 @@ input the chain had already consumed and paid a full proof to have the
 settlement skipped. A node on a branch that diverged **above** its own head is
 indistinguishable from a lagging one, because the checkpoints that would show
 the divergence are heights it cannot answer for, so it lands in the same
-refusal and `--rescan` is the way through.
+refusal and `--rescan` is the way through. What that means exactly is under
+`--rescan` below: the refusal is printed, the checkpoints behind it are
+dropped, and the scan that follows is allowed to add and forbidden to take
+away.
 
 Nothing is written until both gates have passed. A refusal leaves the store
 exactly as it found it, in memory and on disk, checkpoint list and genesis
@@ -353,10 +362,52 @@ file. They are on chain, inside the ciphertext beside the commitment, so a walk
 from leaf zero recovers them. Keeping the notes is the difference from deleting
 the store: a note whose leaf the current chain no longer carries would
 otherwise lose the secrets that are the only handle on a settlement that can
-still be re-included, and a rescan marks it off chain instead. The node gates
-above still run first and still refuse first, since a rescan changes which
-leaves are read and changes nothing about whether this node's answers are worth
-reading at all.
+still be re-included.
+
+It is also the operator's override on the checkpoint walk, which is the one
+gate a store can be on the wrong side of through no fault of the node. A wallet
+whose branch is gone, or whose checkpoints name blocks no node still serves,
+is refused by every node it can reach, and the refusal names `--rescan` as the
+way through. Four rules bound what the override buys, in this order.
+
+1. **The chain check is never bypassed.** A genesis mismatch refuses a rescan
+   exactly as it refuses a sync. Leaf indices, checkpoint hashes and spent
+   flags are statements about one chain, and walking another chain's tree from
+   leaf zero recovers nothing.
+2. **A checkpoint-walk refusal is printed and bypassed.** The refusal text
+   goes to the operator as a warning naming what was walked past, the
+   checkpoints it could not stand on are dropped, and `last_synced_block` and
+   the watermark go to zero with them. A rescan that trusts the node less than
+   the store does not get to keep the store's claims either.
+3. **The scan runs add only.** Every rule that takes something away rests on
+   this node being at or ahead of everything the wallet has read, which is
+   exactly what rule 2 may have stopped checking. So a nullifier the node
+   carries still marks a note spent, a nullifier it does not carry clears
+   nothing, no note is marked off chain, and a commitment met again still moves
+   its note to the leaf the chain holds it at and puts it back on chain. Both
+   the report and the CLI say `rescan: add-only, spent flags and orphans are
+   not reconciled; run a normal sync against a current node afterwards`.
+4. **The leaf-count gate is unchanged**, and a rescan cannot trip it, because
+   its watermark is zero.
+
+The add-only rule is what makes the override safe to hand an operator. Against
+a node that is behind, or one serving a head it has not executed, every leaf it
+has not reached looks exactly like a leaf that is gone and every settlement it
+has not executed looks exactly like a settlement that was orphaned. A rescan
+that reconciled would write the whole store off in one pass: notes marked off
+chain, and settled notes back in the balance for the next `send` to select and
+lose a full proof on. It adds what it finds, leaves everything else alone, and
+hands the reconciliation to an ordinary sync against a node at the current
+head.
+
+What that later sync gives back is not symmetric, and the notice's wording is
+the short version of it. Every spent flag is derived afresh on every pass, so
+pointing `--node` at a node that has executed its head is all the first half
+takes. The orphan check reads a range the scan re-walked, and a scan re-walks
+leaves it has already read when the watermark rewinds, which is what the fork
+behind an orphaned settlement produces. A held note whose leaf the chain
+dropped without any visible fork therefore waits for the sync that does rewind,
+and it is in the balance until then.
 
 This deliberately does not re-read `ZkTree::Leaves` at each held note's
 recorded index, which would be the cheaper check. That names this wallet's own
@@ -378,6 +429,10 @@ permanently and with no marker in the file; `balance` does not sync, so the
 one-off line was never seen again. The note selection picks largest first, so a
 phantom larger than every real note also failed every later `send` on the path
 rebuild, with no remedy but editing the JSON by hand.
+
+The marking does not run under `--rescan`, for the reason rule 3 above gives,
+and it does not run when the scan found nothing to re-walk: a held note is only
+inside the scan range at all after a rewind.
 
 The marking runs after the spent flags are derived, and that ordering carries
 weight. A note that was spent and whose own creating leaf was orphaned in the
@@ -457,6 +512,11 @@ marked spent with no height recorded is cleared, since there is nothing to
 compare against; only a store written before the field carried meaning holds
 one.
 
+`--rescan` clears nothing at all, whatever the heights say, and the count it
+reports as held back says so. The clearing direction reads a missing nullifier
+as an orphaned settlement, and that reading is worth what the gate behind it is
+worth; a rescan may have walked past that gate.
+
 Every storage key a sync builds is checked against the runtime's own metadata
 first (`ensure_known_storage`). On the read path a drifted name or hasher is
 silent, because a key that is not there reads as an empty map, and an empty map
@@ -466,7 +526,13 @@ is a zero balance or a settled note reported unspent.
 
 Unspent total, pending total, and the note list with leaf indices, block
 numbers, state and memos. A note's state is `unspent`, `spent`, or `orphan` for
-one the current chain no longer carries. Orphans are listed again under their
+one the current chain no longer carries. A settled note reads `spent` whatever
+became of its leaf, and the orphan heading skips it for the same reason: the
+chain refuses a nullifier it has settled, so no re-inclusion brings that value
+back and counting it as value awaiting one contradicted the table above it. The
+two flags meet on a conflict set, where the orphan marking writes one member
+and one member settling marks them all spent.
+Orphans are listed again under their
 own heading with their total, since they are out of the unspent total and no
 spend selects them; `sync` above says how a note gets there and what puts it
 back. Pending and refused entries are listed under that.
@@ -571,9 +637,23 @@ refusal costs nothing:
    children, the same all-zero padding for an absent child. The rebuilt root is
    compared against the header's `zkTreeRoot`, each input's leaf against the
    note's commitment, and each path's recomputed root against the header again,
-   all before any proving. A leaf the anchor block has not folded yet is
-   reported as "wait one block": a note cannot be minted and spent in the same
-   block.
+   all before any proving.
+
+   The root comparison comes first, and that ordering is what lets an input's
+   leaf index mean anything: a rebuilt tree that roots at the value the anchor
+   header carries **is** the chain's tree at that block, so its leaf count is
+   the chain's. An input past the end of it is then one of two different
+   things. A leaf the anchor block has not folded yet, or one whose block the
+   store never recorded, is a race against the block boundary and is reported
+   as "wait one block": a note cannot be minted and spent in the same block. A
+   leaf the store recorded at a block *strictly below* the anchor is a leaf
+   this chain does not carry, because the anchor has executed the block that
+   appended it. That one is not a race and never becomes one, so `send` marks
+   the note off chain through the same field the sync's orphan check writes,
+   and says what happened. Reported as a race it left an operator retrying
+   forever, because selection picks largest first and picked the same phantom
+   note every time. The note keeps its secrets and its leaf index, and a sync
+   that meets the commitment again puts it back.
 
    `--merkle-rpc` asks the node. `zkTree_getMerkleProof` returns siblings in
    child-index order with no position and
@@ -743,11 +823,14 @@ Field notes:
   hand; it carries the block it was submitted at and the extrinsic it was
   submitted as, which is enough to tell the two apart.
 - `rejected` holds decryptable outputs that were refused, with the reason.
-- `on_chain` is false for a note a fork rescan walked past without finding: its
+- `on_chain` is false for a note a fork rescan walked past without finding, and
+  for one a spend's path rebuild proved the chain's own tree does not carry: its
   settlement was orphaned and has not been re-included, so the chain does not
   back its value. Such a note keeps its secrets and its leaf index and stays out
   of the unspent total and out of every note selection until a scan sees the
-  commitment again. `sync` above has the whole rule.
+  commitment again. `sync` above has the whole rule, and `send` step 4 has the
+  second writer. It is only ever written over an unspent note: a settled
+  nullifier ends a note whatever became of its leaf.
 - The chain's settled nullifier set is **not** on disk. It is paged whole on
   every sync and held in memory for that sync alone, because both of its
   readers, the scan's duplicate check and the spent reconciliation, run inside
@@ -997,5 +1080,7 @@ are cited at each site.
     for, so the walk has nothing to compare and the sync refuses as though the
     node were simply behind. The refusal is the safe answer, since the two are
     indistinguishable from the store alone, and `--rescan` is the way through
-    it. Telling them apart needs the wallet to keep block hashes below every
+    it, at the price `sync` above states: that pass adds what the node carries
+    and reconciles nothing, so an ordinary sync against a node at the current
+    head still owes the wallet its spent flags and its orphans. Telling them apart needs the wallet to keep block hashes below every
     checkpoint, which is a header chain, which is a node.

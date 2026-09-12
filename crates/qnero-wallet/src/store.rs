@@ -414,6 +414,22 @@ impl core::fmt::Debug for RejectedNote {
     }
 }
 
+/// Which way a [`WalletStore::reconcile_spent`] pass may move a flag.
+///
+/// The two directions are not symmetric and never were: setting a flag takes a
+/// nullifier the node carries, and clearing one takes a nullifier it does not,
+/// which is only evidence when the node has been proved to be at or ahead of
+/// everything the wallet has read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpentDirection {
+    /// Set and clear. What an ordinary sync runs, behind the node gates that
+    /// make the absence of a nullifier mean something.
+    BothWays,
+    /// Set only. What `--rescan` runs, because it may have bypassed those
+    /// gates.
+    AddOnly,
+}
+
 /// What one pass of [`WalletStore::reconcile_spent`] changed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpentReconciliation {
@@ -423,9 +439,11 @@ pub struct SpentReconciliation {
     /// Notes whose nullifier left the set, at a head that has passed the
     /// height the spend was seen at: the settlement was orphaned.
     pub newly_unspent: u64,
-    /// Notes whose nullifier is absent from the set at a head that has not
-    /// reached the height the spend was seen at. Left spent, because the
-    /// absence is the node's view lagging and not an orphaned settlement.
+    /// Notes whose nullifier is absent from the set and which were left spent
+    /// anyway: the head has not reached the height the spend was seen at, or
+    /// the pass ran [`SpentDirection::AddOnly`]. In both cases the absence is
+    /// this node's view falling short of the wallet's, and an orphaned
+    /// settlement is what it is not.
     pub held_spent: u64,
 }
 
@@ -498,6 +516,21 @@ fn collapse<'a>(notes: impl Iterator<Item = &'a StoredNote>) -> Vec<NoteRow<'a>>
         .into_iter()
         .map(|nullifier| groups[nullifier])
         .collect()
+}
+
+/// Write one note off the chain, and the one place that decides a note may be
+/// written off at all.
+///
+/// A spent note is skipped: its value is gone whether or not its leaf is still
+/// there, so the marker would buy nothing, and `off_chain` reads the pair of
+/// flags as a claim the chain can still honour. A note already off chain is
+/// skipped so the counts a sync reports are what that sync changed.
+fn mark_off_chain(note: &mut StoredNote) -> bool {
+    if note.spent || !note.on_chain {
+        return false;
+    }
+    note.on_chain = false;
+    true
 }
 
 /// Distinguishes the temporary files of two saves in one process.
@@ -704,9 +737,23 @@ impl WalletStore {
             .filter(|note| !note.spent && note.on_chain)
     }
 
-    /// Notes a fork rescan proved the chain no longer carries.
+    /// Notes a fork rescan proved the chain no longer carries, and whose
+    /// value is still theirs to lose.
+    ///
+    /// A settled nullifier is the end of a note whatever became of its leaf,
+    /// so a spent note is never off chain in the sense this heading means. The
+    /// two flags meet on a conflict set: `mark_vanished` writes `on_chain`
+    /// only over an unspent note, and one member of a set settling marks every
+    /// member spent, so a set with an off-chain member ends up carrying both
+    /// flags. Without the spent filter `balance` then printed that member's
+    /// value under "not on the current chain", saying a sync that meets the
+    /// commitment again puts it back, while the table above it printed the
+    /// same value once, as `spent`. The chain refuses a nullifier it has
+    /// settled, so nothing puts it back.
     pub fn off_chain(&self) -> impl Iterator<Item = &StoredNote> {
-        self.notes.iter().filter(|note| !note.on_chain)
+        self.notes
+            .iter()
+            .filter(|note| !note.on_chain && !note.spent)
     }
 
     /// One spendable note per nullifier: a conflict set collapses to the
@@ -813,12 +860,30 @@ impl WalletStore {
     pub fn mark_vanished(&mut self, from: u64, seen: &BTreeSet<String>) -> u64 {
         let mut marked = 0;
         for note in self.notes.iter_mut() {
-            if note.spent || !note.on_chain {
-                continue;
-            }
             if note.leaf_index >= from && !seen.contains(&note.commitment) {
-                note.on_chain = false;
-                marked += 1;
+                marked += u64::from(mark_off_chain(note));
+            }
+        }
+        marked
+    }
+
+    /// Mark one held note off chain by its commitment, the way
+    /// [`WalletStore::mark_vanished`] marks a whole rescanned range.
+    ///
+    /// The second caller is the path rebuild a spend runs: a selected note
+    /// whose leaf index is past the end of a tree whose root the anchor
+    /// header confirms, recorded at a block that anchor has executed, is a
+    /// note this chain does not carry, and reporting that as a same-block race
+    /// left `send` advising a retry that can never succeed. One rule, one
+    /// field, so a note written off by either route comes back by the one
+    /// route that puts it back, [`WalletStore::relocate_note`].
+    ///
+    /// Returns whether this changed anything.
+    pub fn mark_note_off_chain(&mut self, commitment: &str) -> bool {
+        let mut marked = false;
+        for note in self.notes.iter_mut() {
+            if note.commitment == commitment {
+                marked |= mark_off_chain(note);
             }
         }
         marked
@@ -976,7 +1041,18 @@ impl WalletStore {
     /// immediately after the set is repaged from the chain. A head that still
     /// contains the inclusion block re-derives exactly what `submit_spend`
     /// latched; a head that no longer contains it is the case this exists for.
-    pub fn reconcile_spent(&mut self, head_block: u32) -> SpentReconciliation {
+    ///
+    /// [`SpentDirection::AddOnly`] is the other half of the argument, and it
+    /// is what `--rescan` passes. That override drops the gates whose whole
+    /// job is to prove this node's settled set is not shorter than the
+    /// wallet's own knowledge, so under it the absence of a nullifier is no
+    /// evidence at all and clearing on it would un-spend notes the chain has
+    /// consumed.
+    pub fn reconcile_spent(
+        &mut self,
+        head_block: u32,
+        direction: SpentDirection,
+    ) -> SpentReconciliation {
         // Taken out and put back so the notes can be walked mutably against
         // it. The set is the authority here, and it was read at `head_block`.
         let settled = core::mem::take(&mut self.used_nullifiers);
@@ -988,14 +1064,22 @@ impl WalletStore {
                     note.spent_seen_at_block = Some(head_block);
                     counts.newly_spent += 1;
                 }
-                (false, true) => match note.spent_seen_at_block {
-                    Some(seen) if head_block < seen => counts.held_spent += 1,
-                    _ => {
+                (false, true) => {
+                    // A note marked spent with no height recorded has nothing
+                    // to compare against, so only a store written before the
+                    // field carried meaning reaches the `None` arm.
+                    let above_this_head = match note.spent_seen_at_block {
+                        Some(seen) => head_block < seen,
+                        None => false,
+                    };
+                    if direction == SpentDirection::AddOnly || above_this_head {
+                        counts.held_spent += 1;
+                    } else {
                         note.spent = false;
                         note.spent_seen_at_block = None;
                         counts.newly_unspent += 1;
                     }
-                },
+                }
                 _ => {}
             }
         }
@@ -1317,7 +1401,7 @@ mod tests {
 
         store.used_nullifiers.insert(first.clone());
         assert_eq!(
-            store.reconcile_spent(42),
+            store.reconcile_spent(42, SpentDirection::BothWays),
             SpentReconciliation {
                 newly_spent: 1,
                 ..Default::default()
@@ -1327,13 +1411,16 @@ mod tests {
         assert_eq!(store.notes[0].spent_seen_at_block, Some(42));
 
         // Idempotent: the same set at a later head changes nothing.
-        assert_eq!(store.reconcile_spent(43), SpentReconciliation::default());
+        assert_eq!(
+            store.reconcile_spent(43, SpentDirection::BothWays),
+            SpentReconciliation::default()
+        );
         assert_eq!(store.notes[0].spent_seen_at_block, Some(42));
 
         // The settlement is orphaned out and does not re-land.
         store.used_nullifiers.remove(&first);
         assert_eq!(
-            store.reconcile_spent(44),
+            store.reconcile_spent(44, SpentDirection::BothWays),
             SpentReconciliation {
                 newly_unspent: 1,
                 ..Default::default()
@@ -1376,7 +1463,7 @@ mod tests {
         // the nullifier, because it has not executed the block that settled
         // it.
         assert_eq!(
-            store.reconcile_spent(29),
+            store.reconcile_spent(29, SpentDirection::BothWays),
             SpentReconciliation {
                 held_spent: 1,
                 ..Default::default()
@@ -1393,7 +1480,7 @@ mod tests {
         // nullifier: now the absence is the chain's own answer at a height it
         // has reached, so the settlement was orphaned.
         assert_eq!(
-            store.reconcile_spent(30),
+            store.reconcile_spent(30, SpentDirection::BothWays),
             SpentReconciliation {
                 newly_unspent: 1,
                 ..Default::default()
@@ -1407,7 +1494,7 @@ mod tests {
         store.notes[0].spent = true;
         store.notes[0].spent_seen_at_block = None;
         assert_eq!(
-            store.reconcile_spent(1),
+            store.reconcile_spent(1, SpentDirection::BothWays),
             SpentReconciliation {
                 newly_unspent: 1,
                 ..Default::default()
@@ -1550,6 +1637,96 @@ mod tests {
         assert_eq!(store.unspent_total(), 250);
     }
 
+    /// The regression: `off_chain` had no spent filter, so a settled member of
+    /// a conflict set was counted under the `balance` heading that says the
+    /// chain does not back these notes and a sync that finds the commitment
+    /// again puts them back. Neither half was true of it.
+    ///
+    /// The two flags meet on a conflict set and only there. `mark_vanished`
+    /// writes `on_chain` over an unspent note alone, and one member of a set
+    /// settling marks every member spent, because they share the nullifier.
+    /// The table above the heading prints such a note once, as `spent`, so the
+    /// heading contradicted the table it sums.
+    #[test]
+    fn a_settled_note_is_not_an_orphan_whatever_became_of_its_leaf() {
+        let mut store = WalletStore::new("qn1example".into());
+        store.notes.push(sample_note(400, "vanished twin"));
+        store.notes.push(sample_note(400, "settled twin"));
+        let shared = store.notes[1].nullifier.clone();
+        store.notes[0].nullifier = shared.as_str().into();
+        store.notes[0].leaf_index = 4;
+        store.notes[1].leaf_index = 5;
+
+        // The reorg took the first member's leaf. Both are unspent, so it is
+        // an orphan and the heading is the sum of the table under it.
+        let seen: BTreeSet<String> = [store.notes[1].commitment.clone()].into_iter().collect();
+        assert_eq!(store.mark_vanished(4, &seen), 1);
+        assert_eq!(store.off_chain().count(), 1);
+        assert_eq!(store.off_chain_total(), 400);
+
+        // Then the member that is still on the chain settles, which settles
+        // the nullifier both of them carry.
+        store.used_nullifiers.insert(shared.as_str().to_string());
+        let counts = store.reconcile_spent(30, SpentDirection::BothWays);
+        assert_eq!(counts.newly_spent, 2);
+        assert_eq!(store.unspent_total(), 0);
+        assert_eq!(
+            store.off_chain().count(),
+            0,
+            "the chain refuses a nullifier it has settled, so nothing puts this note back"
+        );
+        assert_eq!(store.off_chain_total(), 0);
+        assert_eq!(
+            store.off_chain_rows().len(),
+            0,
+            "the heading and the table have to agree, and both are empty"
+        );
+
+        // And the marking itself never writes over a spent note, so the two
+        // flags cannot be made to disagree from this side either.
+        assert_eq!(store.mark_vanished(0, &BTreeSet::new()), 0);
+        assert!(!store.mark_note_off_chain(&store.notes[1].commitment.clone()));
+    }
+
+    /// The regression: `--rescan` walked past the node gate and then ran a
+    /// reconciliation that reads a missing nullifier as an orphaned
+    /// settlement. Against the node an operator reaches for a rescan on, that
+    /// un-spends every note the node has not executed the settlement for, and
+    /// the next `send` pays a full proof to have its segment skipped.
+    #[test]
+    fn an_add_only_pass_sets_spent_flags_and_clears_none() {
+        let mut store = WalletStore::new("qn1example".into());
+        store.notes.push(sample_note(1_000, "already settled"));
+        store.notes.push(sample_note(250, "settling now"));
+        store.notes[0].spent = true;
+        store.notes[0].spent_seen_at_block = Some(12);
+        store.used_nullifiers = [store.notes[1].nullifier.as_str().to_string()]
+            .into_iter()
+            .collect();
+
+        // A head far above the block the first spend was latched at, so the
+        // height guard on the clearing direction has nothing to say: only the
+        // direction itself holds the flag.
+        let counts = store.reconcile_spent(99, SpentDirection::AddOnly);
+        assert_eq!(
+            counts.newly_spent, 1,
+            "a nullifier the node carries still counts"
+        );
+        assert_eq!(counts.newly_unspent, 0);
+        assert_eq!(counts.held_spent, 1);
+        assert!(store.notes[0].spent);
+        assert_eq!(store.notes[0].spent_seen_at_block, Some(12));
+        assert!(store.notes[1].spent);
+        assert_eq!(store.unspent_total(), 0);
+
+        // The ordinary direction, on the same store and the same set, is what
+        // clears it.
+        let counts = store.reconcile_spent(99, SpentDirection::BothWays);
+        assert_eq!(counts.newly_unspent, 1);
+        assert!(!store.notes[0].spent);
+        assert_eq!(store.unspent_total(), 1_000);
+    }
+
     /// The regression: the scan refused whichever member of a conflict set it
     /// met second, permanently, so a sender who put the large note second had
     /// the wallet keep the small one with no way back.
@@ -1608,7 +1785,7 @@ mod tests {
         // the nullifier is one value.
         store.used_nullifiers.insert(shared.as_str().to_string());
         assert_eq!(
-            store.reconcile_spent(30),
+            store.reconcile_spent(30, SpentDirection::BothWays),
             SpentReconciliation {
                 newly_spent: 2,
                 ..Default::default()

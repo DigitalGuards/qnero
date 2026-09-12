@@ -92,7 +92,8 @@ enum Command {
     },
     /// Scan the chain for notes and settle spent status.
     Sync {
-        /// Walk the whole tree again from leaf zero, keeping every note.
+        /// Walk the whole tree again from leaf zero, keeping every note, and
+        /// go past a node gate this wallet cannot measure.
         ///
         /// The recovery for a store an older build wrote. Before conflict
         /// sets, a scan refused the second note it met that shared a nullifier
@@ -101,6 +102,15 @@ enum Command {
         /// bring them back. A fresh walk reads them out of the ciphertext the
         /// chain published. Every note already held is kept, which is the
         /// difference from deleting the store.
+        ///
+        /// It is also the way through a sync that refuses the node: one behind
+        /// this wallet, or one that diverged above its own head, which look
+        /// the same from a store. The refusal is printed and bypassed, the
+        /// watermark and the checkpoints go with it, and the scan then runs
+        /// add only: notes and relocations are recorded, spent flags are never
+        /// cleared and no note is marked off chain. Run an ordinary sync
+        /// against a node at the current head afterwards to get those back.
+        /// The chain check is never bypassed.
         #[arg(long)]
         rescan: bool,
     },
@@ -336,6 +346,16 @@ fn main() -> Result<()> {
                 Wallet::open_on_chain(&seed_path, &chain, cli.new_chain_store)?;
             report_binding(&binding);
             let report = wallet.sync_with(&chain, &metadata, SyncOptions { rescan })?;
+            if let Some(refusal) = &report.bypassed_refusal {
+                // Loud, and quoted in full. A gate that was checked and walked
+                // past in silence is a gate the operator stops knowing about,
+                // and this one is the reason the scan below gives up half of
+                // what a sync normally guarantees.
+                println!("warning     --rescan bypassed a node gate: {refusal}");
+            }
+            if let Some(notice) = report.rescan_notice() {
+                println!("warning     {notice}");
+            }
             if report.recorded_genesis {
                 println!("chain       recorded this node's genesis in the store");
             }
@@ -394,11 +414,14 @@ fn main() -> Result<()> {
             }
             println!("newly spent {}", report.newly_spent);
             if report.held_spent > 0 {
-                println!(
-                    "{} spent note(s) kept spent: this node has not reached the block their \
-                     settlement was seen at, so their nullifier being absent says nothing yet",
-                    report.held_spent
-                );
+                let why = if report.add_only {
+                    "this sync ran add only, so a nullifier absent from this node's settled set \
+                     clears nothing"
+                } else {
+                    "this node has not reached the block their settlement was seen at, so their \
+                     nullifier being absent says nothing yet"
+                };
+                println!("{} spent note(s) kept spent: {why}", report.held_spent);
             }
             if report.newly_unspent > 0 {
                 println!(
