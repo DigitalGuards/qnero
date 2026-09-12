@@ -966,7 +966,10 @@ Generating the set at those dimensions takes about 53 seconds and peaks around
 tags, the note commitment and nullifier rules and the spend credential;
 `qnero-notes` keeps the ML-KEM viewing keys, the bech32m address and note
 encryption on top, and re-exports the core so a wallet keeps one import.
-`qnero-circuit`, `qnero-aggregator` and `pallet-shielded` take the core.
+`qnero-circuit` and `qnero-aggregator` take the core, and `pallet-shielded`
+takes it in its test build only: the runtime graph reaches the two rules the
+chain evaluates through `qnero_circuit::chain`, and the manifest lists
+`qnero-note-core` under `[dev-dependencies]`.
 
 This is a dependency boundary. A Cargo lock file resolves optional dependencies
 too, so the chain's lock pulled `ml-kem 0.3.2` into its graph through
@@ -1138,20 +1141,29 @@ MinLeafFee + ceil(ciphertext_bytes / CiphertextBytesPerFeeQuantum)
 ```
 
 quanta, where `ciphertext_bytes` is the two ciphertexts that slot publishes. The
-runtime sets `MinLeafFee = 1` and `CiphertextBytesPerFeeQuantum = 1024`, so a
-slot carrying two real `NoteCiphertext`s pays five quanta and a slot padded to
-the cap pays nine. This is the anti-spam mechanism and it is the only one, for
-the reason section 8.6 gives.
+runtime sets `MinLeafFee = 1` and `CiphertextBytesPerFeeQuantum = 512`, so a
+slot carrying two real `NoteCiphertext`s (3462 bytes) pays eight quanta and a
+slot padded to the cap (two ciphertexts of `MaxCiphertextBytes`, 4096 bytes)
+pays nine. This is the anti-spam mechanism and it is the only one, for the
+reason section 8.6 gives.
 
 The payload term exists because the flat floor alone prices permanent state at
 whatever the ciphertext cap allows: one quantum, 0.01 QTC, would buy 4096 bytes
 of state that is never pruned and never parsed, and half of every fee comes back
-to a settler that is also the block author. The floor is computable before
-proving, because the fee is a public input and the ciphertext sizes are known by
-then, so a wallet owes the arithmetic above at witness-building time. A slot
-this submission skips is exempt: its fee was accounted when it settled, and
-re-evaluating a floor that governance may have moved since would make an
-already-settled segment fatal on its second appearance.
+to a settler that is also the block author. The divisor has to sit below the
+slack between the real ciphertext size and the cap, or the term prices none of
+that slack: at one kilobyte, 3462 and 4096 bytes both round to four quanta, so
+padding both ciphertexts to the cap buys 634 bytes of permanent state for
+nothing, which is the case the term exists to close.
+`a_slot_pays_for_the_ciphertext_bytes_it_publishes` pins the two endpoints
+apart. The floor is computable before proving, because the fee is a public input
+and the ciphertext sizes are known by then, so a wallet owes the arithmetic
+above at witness-building time. A slot this submission skips is exempt for a
+simpler reason than a paid fee: a skipped segment writes no nullifier, appends
+no leaf and stores no ciphertext, so there is no state for a fee to price. Not
+evaluating the floor in the skip branch also keeps a parameter governance may
+have moved since from making an already-settled segment fatal on its second
+appearance.
 
 The sum leaves the pool, and the pool has to be holding it: a fee above
 `PoolValue` refuses the settlement with `PoolUnderflow` before anything is
@@ -1258,26 +1270,41 @@ at M6, when the transparent layer is removed.
 
 ### 9.10 Admission
 
-`validate_unsigned` runs two gates, in cost order, and it runs both. The cheap
-gate is the size check before anything is copied, deserialization against the
-embedded verifier's circuit data, the canonical-encoding round trip, the
-public-input parse, and then the settlement check: a bounded walk over the
-segments against chain state, at most a few hundred `UsedNullifiers` reads and
-one ciphertext sponge per slot. The expensive gate is the ZK verify, and it runs
-on what survives. `pre_dispatch` runs the parse, the verify and the settlement
-check again and is the block-inclusion gate, because `validate_unsigned` does
-not run on block import. The dispatch body verifies as well, for the reason
-section 9.11 gives; those two passes are the ones block execution pays and the
-declared weight charges.
+`validate_unsigned` runs three stages, in cost order, and it runs all three.
+First the parse (the size check before anything is copied, deserialization
+against the embedded verifier's circuit data, the canonical-encoding round trip,
+the public-input parse) and then `plan_settlement`, the cheap half of the
+settlement check: a bounded walk over the segments against chain state, at most
+two `UsedNullifiers` reads per slot, integer comparisons, one block-hash lookup
+per segment, and no hashing at all. Second the ZK verify, on what survives.
+Third `bind_payload`, the Poseidon2 sponge over both ciphertexts of every real
+slot, which is the one term linear in the submitted bytes. `pre_dispatch` runs
+the parse, the verify and the whole settlement check again and is the
+block-inclusion gate, because `validate_unsigned` does not run on block import.
+The dispatch body verifies as well, for the reason section 9.11 gives; those two
+passes are the ones block execution pays and the declared weight charges.
 
-The cheap gate comes first because a settlement proof is public by construction:
+The cheap half comes first because a settlement proof is public by construction:
 the extrinsic carrying it is gossiped and old ones sit in finalized blocks.
-Anyone can take a genuine proof, keep the blob byte identical, change one byte
+Anyone can take a settled proof, keep the blob byte identical, change one byte
 of `outputs`, and have a transaction with a new hash that no node has seen, so
 every node validates it fresh. There is no proving work and no fee behind that
-and it repeats as fast as blobs can be pushed. Each such variant dies on the
-ciphertext binding or on `NullifierAlreadyUsed`, orders of magnitude below a FRI
-verification.
+and it repeats as fast as blobs can be pushed. Every segment of a settled proof
+conflicts, so every one of those variants dies on `NullifierAlreadyUsed` after a
+few hundred storage reads, whatever its `outputs` carry.
+
+The payload binding comes last because at the chain's dimensions it is the
+larger of it and the verify, which the earlier drafts of this section had
+backwards. Read off `pallets/shielded/src/weights.rs` at `N = 6` and `n = 53`, a
+full public batch is 318 real slots: one binding pass over the real 1731-byte
+ciphertexts is 34,931 Poseidon2 permutations, 349 ms of declared reference time,
+against 158 ms for one public-batch verify plus its parse, a ratio of 2.2, and
+2.6 at the ciphertext cap. Running it ahead of the verify would make a
+fabricated blob (public inputs rewritten wholesale, which the paragraphs below
+explain no cheap check can catch) cost a node the walk **and** the verify where
+it used to cost the verify alone. Behind the verify, a blob that cannot settle
+never reaches it. The private batch is the other way round, 6.5 ms of binding
+against a 30 ms verify, and the ordering is set by the case that inverts.
 
 Upstream splits the two, verifying only at `pre_dispatch`, and M4 shipped that
 split before a review took it apart. **The split does not hold, and Qnero does
@@ -1289,10 +1316,9 @@ every remaining check. Three things follow, and all three are worse than the
 cost the split was avoiding:
 
 - the forgery is admitted and, under `propagate(true)`, re-gossiped by every
-  node, each of which has already paid the whole per-slot settlement walk. At a
-  full public batch that walk is a ciphertext sponge over hundreds of kilobytes,
-  which is more work than the verify being deferred, and the submission is
-  unsigned and `Pays::No`, so none of it is charged;
+  node, each of which has already paid the whole per-slot settlement walk and
+  then the payload binding on top, and the submission is unsigned and
+  `Pays::No`, so none of it is charged;
 - the pool tag is derived from the nullifiers, which are readable from any
   transaction sitting in a mempool, so a forged clone of a victim's settlement
   carries the victim's tag. The pool replaces on strictly higher priority and
@@ -1313,8 +1339,11 @@ mutated proof object. A private-batch proof is about 157 KB, on the order of
 10^5 single-bit variants that all round-trip exactly, and each costs the node
 that receives it one full verify, unsigned and unpaid.
 
-**Open issue, M5.** One unpaid verify per distinct gossiped blob, with no rate
-limit. A rejection cache keyed on `blake2_256(proof)` bounds the repeat case, so
+**Open issue, M5.** One unpaid cheap settlement walk plus one unpaid verify per
+distinct gossiped blob, with no rate limit. The walk hashes nothing and the
+payload binding sits behind the verify, so a blob that fails the verify never
+pays the term linear in its bytes; what is unbounded is the number of distinct
+blobs. A rejection cache keyed on `blake2_256(proof)` bounds the repeat case, so
 one blob cannot be re-verified once per `outputs` variant; it does not bound
 distinct blobs. The residual is recorded here and next to `WASM_VERIFY_FACTOR`
 in `pallets/shielded/src/weights.rs`.

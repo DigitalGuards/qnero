@@ -217,7 +217,7 @@ the first second, `Imported #1` through `#17`. What this run checked:
   are the same 32 bytes.
 - `state_getMetadata` carries `Shielded` with its three calls, its five storage
   items, its errors including `FeeBelowMinimum` and `CiphertextDigestMismatch`,
-  and its five constants: `BlockHashWindow`, `MinLeafFee`,
+  and its six constants: `MintingAccount`, `BlockHashWindow`, `MinLeafFee`,
   `CiphertextBytesPerFeeQuantum` (new in this pass, the per-byte half of the fee
   floor), `FeeBurnRate` and `MaxCiphertextBytes`.
 - `state_getRuntimeVersion` still reports `quantus-runtime` spec 152,

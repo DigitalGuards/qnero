@@ -222,10 +222,13 @@ shape.
 3. Inside a segment that survives the filter, for every slot: mark both
    published nullifiers used, including a dummy input's, which the chain
    cannot tell from a real one; append `cm_out_1` and `cm_out_2` to
-   `pallet-zk-tree`, skipping a zero commitment, which is how a padding slot
-   says it created no note; recompute `ct_digest` over the submitted
-   ciphertexts and compare; emit the ciphertexts in an event and store them by
-   leaf index for wallet sync.
+   `pallet-zk-tree`; recompute `ct_digest` over the submitted ciphertexts and
+   compare; emit the ciphertexts in an event and store them by leaf index for
+   wallet sync. A padding slot never reaches the append: it is dropped when the
+   public inputs are parsed, because both its commitments are zero. A zero
+   commitment inside a real slot is a `ZeroCommitment` refusal of the whole
+   submission, since no valid proof produces one and the all-zero digest is the
+   tree's own absence sentinel. `docs/CIRCUIT.md` section 9.4 is the contract.
 4. Fee: sum of the leaf fees of those same segments, split burn / block author
    as Wormhole does today.
 5. A public batch is checked whole before any state changes. A segment holding a

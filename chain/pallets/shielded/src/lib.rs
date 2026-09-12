@@ -234,8 +234,14 @@ impl SettlementBundle {
 		Self { segments: inputs.settleable_batches().map(Segment::from).collect() }
 	}
 
-	/// Every real slot of every segment, in settlement order. This is the order
-	/// the `outputs` argument of a settlement extrinsic follows.
+	/// Every real slot of every segment, in settlement order.
+	///
+	/// This is the one statement of the order the `outputs` argument of a
+	/// settlement extrinsic follows, and it is the walk `Pallet::bind_payload`
+	/// makes: position `i` of `outputs` carries the two ciphertexts of the
+	/// `i`th real slot, skipped segments included. `Pallet::plan_settlement`
+	/// and `Pallet::settle` walk the segments themselves, because they need the
+	/// per-segment skip flag, and they count positions the same way.
 	pub fn real_slots(&self) -> impl Iterator<Item = &RealSlot> {
 		self.segments.iter().flat_map(|segment| segment.slots.iter())
 	}
@@ -395,6 +401,12 @@ pub mod pallet {
 		/// [`Config::MaxCiphertextBytes`], and `Ciphertexts` is never pruned
 		/// and carries no storage deposit. This makes the floor linear in the
 		/// payload, so the state a settlement adds is paid for in proportion.
+		///
+		/// A runtime owes one property when it picks a value: the divisor has
+		/// to sit below the slack between a real `NoteCiphertext` and
+		/// [`Config::MaxCiphertextBytes`], or both round to the same number of
+		/// quanta and padding to the cap is free, which is the whole of what
+		/// this term exists to price.
 		///
 		/// A wallet can compute the floor before it proves: the fee is a public
 		/// input and the ciphertext sizes are known by the time the proof is
@@ -736,58 +748,69 @@ pub mod pallet {
 		type Call = Call<T>;
 
 		fn validate_unsigned(_source: TransactionSource, call: &Self::Call) -> TransactionValidity {
-			// Two gates, in cost order, and admission runs both.
+			// Three stages, in cost order, and admission runs all three.
 			//
-			// The cheap gate is the parse and the settlement check: the size
-			// gate before anything is copied, deserialization, the
-			// canonical-encoding round trip, the public-input parse, and a
-			// bounded walk over the segments against chain state, at most a
-			// few hundred `UsedNullifiers` reads and one Poseidon2 sponge per
-			// slot. It has to come first, because it is what a free-to-generate
-			// variant dies on. A settlement proof is public by construction:
-			// the extrinsic carrying it is gossiped and old ones sit in
-			// finalized blocks, so anyone can take a genuine proof, keep the
-			// blob byte identical, change one byte of `outputs`, and have a
-			// transaction no node has seen. Every one of those is refused here
-			// by the ciphertext binding or by `NullifierAlreadyUsed`, at a cost
-			// orders of magnitude below a FRI verification.
+			// First the parse and the cheap half of the settlement check: the
+			// size gate before anything is copied, deserialization, the
+			// canonical-encoding round trip, the public-input parse, and then
+			// `plan_settlement`, a bounded walk over the segments against chain
+			// state. That walk is storage reads and integer comparisons, at most
+			// two `UsedNullifiers` probes per slot, and it hashes nothing. It has
+			// to come first because it is what the cheapest forgery dies on. A
+			// settlement proof is public by construction: the extrinsic carrying
+			// it is gossiped and old ones sit in finalized blocks, so anyone can
+			// take a settled proof, keep the blob byte identical, change one byte
+			// of `outputs`, and have a transaction no node has seen. Every
+			// segment of a settled proof conflicts, so every one of those dies
+			// here on `NullifierAlreadyUsed`, on a few hundred storage reads.
 			//
-			// The expensive gate is the ZK verify, and admission cannot skip
-			// it. Nothing in the parse is cryptography: a proof carries its
-			// public inputs as a plain vector, so anyone can take a genuine
-			// proof, rewrite its public inputs to claim any nullifiers,
-			// commitments, fee and block anchor, re-serialize canonically, and
-			// produce a blob that passes every check short of the verify. The
-			// canonical round trip does not close that: it rejects other
-			// encodings of one decoded proof, and says nothing about a mutated
-			// proof object. Admitting such a blob would hand it the victim's
-			// nullifier-derived `provides` tag, and under a constant priority
-			// whichever arrived first would hold the pool slot. Verifying here
-			// also cuts propagation at the first hop, so one junk blob costs
-			// one node one verify. Without it the blob reaches every node on
-			// its path and each pays the whole settlement walk.
+			// Then the ZK verify, and admission cannot skip it. Nothing in the
+			// parse is cryptography: a proof carries its public inputs as a plain
+			// vector, so anyone can take a genuine proof, rewrite its public
+			// inputs to claim any nullifiers, commitments, fee and block anchor,
+			// re-serialize canonically, and produce a blob that passes every
+			// check short of the verify. The canonical round trip does not close
+			// that: it rejects other encodings of one decoded proof, and says
+			// nothing about a mutated proof object. Admitting such a blob would
+			// hand it the victim's nullifier-derived `provides` tag, and under a
+			// constant priority whichever arrived first would hold the pool slot.
+			// Verifying here also cuts propagation at the first hop, so one junk
+			// blob costs one node one verify.
 			//
-			// The residual cost is one unverified-blob verify per distinct
-			// gossiped proof, unpaid and unrated-limited. It is an open issue,
+			// Last the payload binding, `bind_payload`, which is the one term
+			// linear in the submitted bytes: a Poseidon2 sponge over both
+			// ciphertexts of every real slot. It runs behind the verify because
+			// at the runtime's dimensions it is the larger of the two. A full
+			// public batch carries 318 real slots, and by this pallet's own
+			// weight constants that sponge is about 2.2 times one verify plus
+			// parse at the real ciphertext size and about 2.6 times it at the
+			// cap. Putting it in front of the verify would make a fabricated blob
+			// cost a node the walk and the verify where it used to cost the
+			// verify alone.
+			//
+			// The residual cost is one unpaid verify plus one unpaid cheap walk
+			// per distinct gossiped proof, unrated-limited. It is an open issue,
 			// recorded next to `WASM_VERIFY_FACTOR` in `weights.rs` and in
 			// `docs/CIRCUIT.md` section 9.11.
 			let (bundle, prefix) = match call {
 				Call::submit_private_batch { proof, outputs } => {
 					let parsed = Self::pre_validate_private_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
-					Self::check_settlement(&parsed, outputs)
+					Self::plan_settlement(&parsed, outputs)
 						.map_err(|_| InvalidTransaction::Call)?;
 					let verified = Self::validate_private_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
+					Self::bind_payload(&verified, outputs).map_err(|_| InvalidTransaction::Call)?;
 					(verified, "QneroPrivateBatch")
 				},
 				Call::submit_public_batch { proof, outputs } => {
 					let parsed = Self::pre_validate_public_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
-					Self::check_settlement(&parsed, outputs)
+					Self::plan_settlement(&parsed, outputs)
 						.map_err(|_| InvalidTransaction::Call)?;
 					let verified =
 						Self::validate_public_batch(proof).map_err(|_| InvalidTransaction::Call)?;
+					Self::bind_payload(&verified, outputs).map_err(|_| InvalidTransaction::Call)?;
 					(verified, "QneroPublicBatch")
 				},
 				_ => return InvalidTransaction::Call.into(),
@@ -901,9 +924,10 @@ pub mod pallet {
 
 		/// Everything short of the ZK verify, for a private batch.
 		///
-		/// This is the dispatch body's path, after `pre_dispatch` has already
-		/// verified. Nothing in it establishes that the public inputs are a
-		/// proof's: only a verify does that.
+		/// This is the first half of pool admission: the parse, run ahead of
+		/// the verify so a blob that cannot settle dies without one. See
+		/// `ValidateUnsigned::validate_unsigned`. Nothing in it establishes
+		/// that the public inputs are a proof's: only a verify does that.
 		pub(crate) fn pre_validate_private_batch(
 			proof: &[u8],
 		) -> Result<SettlementBundle, Error<T>> {
@@ -964,10 +988,38 @@ pub mod pallet {
 
 		/// Every rule a settlement has to pass, with nothing written.
 		///
-		/// This runs in full before `settle` touches state, so the whole
-		/// submission is decided before any of it is written. The dispatch
-		/// layer's storage rollback is the second line under it.
+		/// Two passes, split by cost. [`Pallet::plan_settlement`] is the cheap
+		/// one: storage reads and integer comparisons over the segments, no
+		/// hashing. [`Pallet::bind_payload`] is the one term linear in the
+		/// submitted bytes. Pool admission runs them on either side of the ZK
+		/// verify; a dispatch runs both, here, in full before `settle` touches
+		/// state, so the whole submission is decided before any of it is
+		/// written. The dispatch layer's storage rollback is the second line
+		/// under that.
 		pub(crate) fn check_settlement(
+			bundle: &SettlementBundle,
+			outputs: &[ShieldedOutput<T>],
+		) -> Result<PlannedSettlement, Error<T>> {
+			let plan = Self::plan_settlement(bundle, outputs)?;
+			Self::bind_payload(bundle, outputs)?;
+			Ok(plan)
+		}
+
+		/// Every settlement rule except the payload binding: what a submission
+		/// settles, and whether it is allowed to.
+		///
+		/// This is the cheap half, and it is cheap on purpose. It reads
+		/// `UsedNullifiers` twice per slot, looks up one block hash per segment,
+		/// compares integers, and hashes nothing at all. The fee floor is
+		/// evaluated here because it needs only the lengths of the submitted
+		/// ciphertexts, where the binding needs their bytes.
+		///
+		/// Pool admission runs this before the ZK verify, so the free forgery
+		/// (a settled proof copied out of a finalized block with one byte of
+		/// `outputs` changed) dies on a bounded storage walk. See
+		/// `ValidateUnsigned::validate_unsigned` for why the other half runs
+		/// behind the verify.
+		pub(crate) fn plan_settlement(
 			bundle: &SettlementBundle,
 			outputs: &[ShieldedOutput<T>],
 		) -> Result<PlannedSettlement, Error<T>> {
@@ -989,8 +1041,9 @@ pub mod pallet {
 			// `outputs` covers all of them: a submitter cannot know which
 			// segments were settled by someone else in the meantime, so the
 			// positional mapping from slot to ciphertext pair has to stay
-			// independent of that.
-			let mut real_slots: u32 = 0;
+			// independent of that. [`SettlementBundle::real_slots`] is that
+			// order, and `bind_payload` walks it.
+			let mut real_slots: usize = 0;
 
 			for segment in &bundle.segments {
 				// A segment that reached this far is not padding, so it must
@@ -1005,11 +1058,13 @@ pub mod pallet {
 				// with one an earlier segment of this submission claimed, is
 				// skipped whole and the rest of the submission stands: see
 				// `PlannedSettlement::settles` for what refusing the whole
-				// submission would cost an aggregator's participants. The
-				// scan runs before anything else about the segment, so a
-				// conflicting segment's anchor and fee are not evaluated at all
-				// and a parameter change between two settlements cannot make an
-				// already-settled segment fatal on its second appearance.
+				// submission would cost an aggregator's participants. The scan
+				// runs before anything else about the segment, so a conflicting
+				// segment's anchor and fee are not evaluated at all and a
+				// parameter change between two settlements cannot make an
+				// already-settled segment fatal on its second appearance. It is
+				// also the whole of what a replay has to touch, which is what
+				// makes this pass the right one to run first.
 				let conflicts = segment.slots.iter().any(|slot| {
 					slot.nullifiers.iter().any(|nullifier| {
 						UsedNullifiers::<T>::contains_key(nullifier) || claimed.contains(nullifier)
@@ -1017,15 +1072,17 @@ pub mod pallet {
 				});
 				if conflicts {
 					settles.push(false);
-					// The ciphertexts of a skipped slot are still bound to the
-					// proof. Every real slot needs an `outputs` entry, so a
-					// position left unchecked is a place to carry bytes nothing
-					// commits to on an unsigned, fee-free extrinsic.
-					for slot in &segment.slots {
-						Self::bind_ciphertexts(outputs, real_slots, slot)?;
-						real_slots =
-							real_slots.checked_add(1).ok_or(Error::<T>::ValueOutOfRange)?;
-					}
+					// The slots of a skipped segment still hold their positions
+					// in `outputs`, and `bind_payload` still binds them: every
+					// real slot needs an entry, so a position left unchecked is a
+					// place to carry bytes nothing commits to on an unsigned,
+					// fee-free extrinsic. No fee is evaluated for them, because a
+					// skipped segment writes no nullifier, appends no leaf and
+					// stores no ciphertext, so there is no state for a fee to
+					// price.
+					real_slots = real_slots
+						.checked_add(segment.slots.len())
+						.ok_or(Error::<T>::ValueOutOfRange)?;
 					continue;
 				}
 				settles.push(true);
@@ -1074,10 +1131,13 @@ pub mod pallet {
 					}
 
 					// The fee floor is the flat minimum plus the payload the
-					// slot writes into permanent state.
-					let ciphertext_bytes = Self::bind_ciphertexts(outputs, real_slots, slot)?;
+					// slot writes into permanent state. Only the lengths are
+					// needed here; the bytes themselves are bound in
+					// `bind_payload`.
+					let output =
+						outputs.get(real_slots).ok_or(Error::<T>::CiphertextCountMismatch)?;
 					ensure!(
-						slot.fee >= Self::fee_floor(min_fee, ciphertext_bytes),
+						slot.fee >= Self::fee_floor(min_fee, Self::output_bytes(output)),
 						Error::<T>::FeeBelowMinimum
 					);
 
@@ -1091,13 +1151,15 @@ pub mod pallet {
 
 			// Every segment was skipped: the whole submission settles nothing,
 			// which is what a replay looks like, and accepting it as a no-op
-			// would let anyone spend a block's admission work for free.
+			// would let anyone spend a block's admission work for free. This is
+			// the refusal the free forgery lands on, and it is reached without
+			// hashing a byte of the payload.
 			ensure!(slots > 0, Error::<T>::NullifierAlreadyUsed);
 
 			// Exactly one `ShieldedOutput` per real slot, skipped segments
 			// included. A trailing extra would otherwise ride along unbound by
 			// any proof.
-			ensure!(outputs.len() == real_slots as usize, Error::<T>::CiphertextCountMismatch);
+			ensure!(outputs.len() == real_slots, Error::<T>::CiphertextCountMismatch);
 
 			// Two commitments per slot, plus at most one wormhole leaf for the
 			// author's fee share.
@@ -1119,24 +1181,37 @@ pub mod pallet {
 			Ok(PlannedSettlement { fee_quanta, slots, settles })
 		}
 
-		/// Bind one real slot's two ciphertexts to the `ct_digest` its proof
-		/// publishes, and report how many bytes they carry.
+		/// Bind every real slot's ciphertexts to the `ct_digest` its proof
+		/// publishes.
 		///
-		/// Every real slot is bound, whether or not this submission settles it.
-		/// The circuit leaves `ct_digest` a free public input, so this
-		/// comparison is the whole binding between a proof and the bytes
-		/// submitted with it, and a slot position left unbound is a place to
-		/// put bytes no proof commits to.
-		fn bind_ciphertexts(
+		/// This is the whole of the settlement check that is linear in the
+		/// submitted bytes: one Poseidon2 byte sponge per slot, over both of its
+		/// ciphertexts. Every real slot is bound, whether or not this submission
+		/// settles it. The circuit leaves `ct_digest` a free public input, so
+		/// this comparison is the whole binding between a proof and the bytes
+		/// submitted with it, and a slot position left unbound is a place to put
+		/// bytes no proof commits to.
+		///
+		/// It walks [`SettlementBundle::real_slots`], which is the order
+		/// `outputs` follows and the order `settle` writes in.
+		pub(crate) fn bind_payload(
+			bundle: &SettlementBundle,
 			outputs: &[ShieldedOutput<T>],
-			index: u32,
-			slot: &RealSlot,
-		) -> Result<u64, Error<T>> {
-			let output = outputs.get(index as usize).ok_or(Error::<T>::CiphertextCountMismatch)?;
-			let recomputed =
-				qnero_circuit::chain::ct_digest(&[output.ct_1.as_slice(), output.ct_2.as_slice()]);
-			ensure!(recomputed == slot.ct_digest, Error::<T>::CiphertextDigestMismatch);
-			Ok((output.ct_1.len() as u64).saturating_add(output.ct_2.len() as u64))
+		) -> Result<(), Error<T>> {
+			for (index, slot) in bundle.real_slots().enumerate() {
+				let output = outputs.get(index).ok_or(Error::<T>::CiphertextCountMismatch)?;
+				let recomputed = qnero_circuit::chain::ct_digest(&[
+					output.ct_1.as_slice(),
+					output.ct_2.as_slice(),
+				]);
+				ensure!(recomputed == slot.ct_digest, Error::<T>::CiphertextDigestMismatch);
+			}
+			Ok(())
+		}
+
+		/// Ciphertext bytes one settlement output carries.
+		fn output_bytes(output: &ShieldedOutput<T>) -> u64 {
+			(output.ct_1.len() as u64).saturating_add(output.ct_2.len() as u64)
 		}
 
 		/// The fee one real leaf slot must carry, in pool quanta: the flat

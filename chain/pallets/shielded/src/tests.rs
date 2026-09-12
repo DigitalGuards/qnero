@@ -79,6 +79,22 @@ fn check(
 	Shielded::check_settlement(bundle, outputs).map_err(Into::into)
 }
 
+/// The cheap half of `check_settlement`: everything but the payload binding.
+fn plan(
+	bundle: &SettlementBundle,
+	outputs: &[ShieldedOutput<Test>],
+) -> Result<crate::PlannedSettlement, sp_runtime::DispatchError> {
+	Shielded::plan_settlement(bundle, outputs).map_err(Into::into)
+}
+
+/// The payload half: the one term linear in the submitted bytes.
+fn bind(
+	bundle: &SettlementBundle,
+	outputs: &[ShieldedOutput<Test>],
+) -> Result<(), sp_runtime::DispatchError> {
+	Shielded::bind_payload(bundle, outputs).map_err(Into::into)
+}
+
 /// A real slot whose `ct_digest` matches `output(a, b)`.
 fn slot(tag: &str, a: &[u8], b: &[u8], fee: u64) -> RealSlot {
 	RealSlot {
@@ -319,6 +335,9 @@ fn a_segment_anchored_at_the_current_block_is_refused() {
 #[test]
 fn a_ciphertext_that_does_not_hash_to_the_slots_digest_is_refused() {
 	new_test_ext().execute_with(|| {
+		// The binding runs behind the cheap pass, so the pool has to stand
+		// behind the fee for the submission to reach it at all.
+		fund_pool(100);
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 3)]);
 		assert_noop!(
 			check(&bundle, &[output(b"ct-a1", b"tampered")]),
@@ -721,25 +740,54 @@ fn the_ciphertexts_of_a_skipped_segment_are_still_bound_to_the_proof() {
 /// settlement writes into permanent state. The chain never parses these bytes
 /// and `Ciphertexts` is never pruned, so a flat floor would buy as much state
 /// as the ciphertext cap allows for one quantum.
+///
+/// The endpoints are what matter and they are pinned here: a pair at the
+/// ciphertext cap has to cost strictly more than a pair at the real
+/// `NoteCiphertext` size, or the divisor is wide enough that the term prices
+/// none of the slack it exists to price and a settler pads to the cap for free.
 #[test]
 fn a_slot_pays_for_the_ciphertext_bytes_it_publishes() {
 	new_test_ext().execute_with(|| {
 		fund_pool(100);
-		// Two kilobyte-and-a-half ciphertexts: three started kilobytes over
-		// the flat minimum of one quantum.
+		// Two 1500-byte ciphertexts: 3000 bytes, six started 512-byte units
+		// over the flat minimum of one quantum.
 		let big_1 = vec![1u8; 1_500];
 		let big_2 = vec![2u8; 1_500];
 		let outputs = vec![output(&big_1, &big_2)];
 
-		let cheap = one_segment(10, vec![slot("a", &big_1, &big_2, 3)]);
+		let cheap = one_segment(10, vec![slot("a", &big_1, &big_2, 6)]);
 		assert_noop!(check(&cheap, &outputs), Error::<Test>::FeeBelowMinimum);
 
-		let paid = one_segment(11, vec![slot("a", &big_1, &big_2, 4)]);
+		let paid = one_segment(11, vec![slot("a", &big_1, &big_2, 7)]);
 		assert_ok!(check(&paid, &outputs));
 
 		// A slot carrying almost nothing still pays the flat floor and no more.
 		let small = one_segment(12, vec![slot("b", b"ct-b1", b"ct-b2", 2)]);
 		assert_ok!(check(&small, &[output(b"ct-b1", b"ct-b2")]));
+
+		// The two endpoints of the reachable band. A `NoteCiphertext` at the
+		// chain's parameter set with an empty memo is 1731 bytes, pinned by
+		// `an_empty_memo_ciphertext_serializes_to_1731_bytes` in
+		// `qnero-pqcrypto`; the cap is read from the pallet's own config so
+		// the two cannot drift apart.
+		let cap = <Test as crate::Config>::MaxCiphertextBytes::get() as usize;
+		let real_1 = vec![3u8; 1_731];
+		let real_2 = vec![4u8; 1_731];
+		let real_outputs = vec![output(&real_1, &real_2)];
+		let padded_1 = vec![5u8; cap];
+		let padded_2 = vec![6u8; cap];
+		let padded_outputs = vec![output(&padded_1, &padded_2)];
+
+		// A real pair settles at eight quanta.
+		let real = one_segment(13, vec![slot("c", &real_1, &real_2, 8)]);
+		assert_ok!(check(&real, &real_outputs));
+
+		// A pair padded to the cap does not: the same fee is below its floor.
+		let padded_cheap = one_segment(14, vec![slot("d", &padded_1, &padded_2, 8)]);
+		assert_noop!(check(&padded_cheap, &padded_outputs), Error::<Test>::FeeBelowMinimum);
+
+		let padded = one_segment(15, vec![slot("d", &padded_1, &padded_2, 9)]);
+		assert_ok!(check(&padded, &padded_outputs));
 	});
 }
 
@@ -1114,33 +1162,40 @@ fn an_unverifiable_proof_is_refused_at_pool_admission() {
 	});
 }
 
-/// Admission runs the cheap gate first, and that is what bounds the work a
-/// gossiped variant can force.
+/// Pool admission decides what a submission settles before it verifies, and
+/// binds the payload only after.
 ///
 /// A settlement proof is public by construction: the extrinsic carrying it is
 /// gossiped and old ones sit in finalized blocks. An attacker keeps the proof
 /// byte identical, flips one byte of `outputs`, and has a transaction with a
 /// new hash that no node has seen, so every node validates it fresh. There is
 /// no proving work and no fee behind that, and it can be repeated as fast as
-/// the blobs can be pushed. Admission parses and walks the settlement before
-/// it verifies, so each variant dies on a bounded walk: a few hundred storage
-/// reads and one ciphertext sponge per slot. The FRI verification never runs
-/// for them.
+/// the blobs can be pushed.
+///
+/// For a settled proof, which is the variant that costs an attacker nothing at
+/// all, every segment conflicts and `plan_settlement` refuses it on
+/// `UsedNullifiers` reads alone: no FRI verification and not one byte of the
+/// payload hashed, whatever the `outputs` carry. The payload binding is the one
+/// term linear in the submitted bytes, and at the runtime's dimensions it is
+/// the larger of it and the verify, so it runs behind the verify where a blob
+/// that cannot settle never reaches it.
 #[test]
-fn a_ciphertext_variant_of_a_gossiped_settlement_dies_on_the_cheap_gate() {
+fn a_replay_is_refused_before_the_verify_and_before_any_hashing() {
 	new_test_ext_with_endowments(vec![(alice(), 10_000 * UNIT)]).execute_with(|| {
 		let spend = shield_and_prove(4, 2);
 
+		// A ciphertext variant of an unsettled proof. The cheap pass has
+		// nothing to object to, because it does not look at the bytes.
 		let mut variant = spend.outputs.clone();
 		let mut bytes = variant[0].ct_1.to_vec();
 		bytes[0] ^= 0x01;
 		variant[0].ct_1 = BoundedVec::try_from(bytes).expect("the length did not change");
 
-		// This is exactly what admission runs before any verification: the
-		// parse, then the settlement walk against chain state.
 		let parsed = Shielded::pre_validate_private_batch(&spend.proof).expect("parses");
+		assert_ok!(plan(&parsed, &variant));
+		// The binding is what refuses it, and admission runs that after the
+		// verify.
 		assert_noop!(check(&parsed, &variant), Error::<Test>::CiphertextDigestMismatch);
-
 		let call =
 			crate::Call::submit_private_batch { proof: spend.proof.clone(), outputs: variant };
 		assert!(<Shielded as ValidateUnsigned>::validate_unsigned(
@@ -1149,20 +1204,55 @@ fn a_ciphertext_variant_of_a_gossiped_settlement_dies_on_the_cheap_gate() {
 		)
 		.is_err());
 
-		// A settled proof is the other free variant: the blob is in a finalized
-		// block for anyone to copy. It dies on the same walk.
+		// A settled proof is the free variant: the blob is in a finalized
+		// block for anyone to copy, and its `outputs` can be anything at all.
 		assert_ok!(Shielded::submit_private_batch(
 			RuntimeOrigin::none(),
 			spend.proof.clone(),
 			spend.outputs.clone(),
 		));
 		let replayed = Shielded::pre_validate_private_batch(&spend.proof).expect("parses");
+		let junk = vec![output(&[9u8; 2_048], &[9u8; 2_048])];
+		// Junk `outputs`, and the refusal still comes from the nullifier scan.
+		// Nothing here hashed the payload: had the binding run first, this
+		// would be `CiphertextDigestMismatch`.
+		assert_noop!(plan(&replayed, &junk), Error::<Test>::NullifierAlreadyUsed);
+		assert_noop!(check(&replayed, &junk), Error::<Test>::NullifierAlreadyUsed);
 		assert_noop!(check(&replayed, &spend.outputs), Error::<Test>::NullifierAlreadyUsed);
 		assert!(<Shielded as ValidateUnsigned>::validate_unsigned(
 			TransactionSource::External,
-			&crate::Call::submit_private_batch { proof: spend.proof, outputs: spend.outputs }
+			&crate::Call::submit_private_batch { proof: spend.proof, outputs: junk }
 		)
 		.is_err());
+	});
+}
+
+/// The cheap pass and the payload pass are genuinely split: `plan_settlement`
+/// decides the whole submission without touching a ciphertext byte, and
+/// `bind_payload` is what the bytes have to survive.
+///
+/// This is the ordering pool admission relies on. If the payload sponge crept
+/// back into the cheap pass, a replay would pay it before the nullifier scan
+/// could refuse it, and by the pallet's own weight constants that sponge is
+/// larger than the verify the ordering exists to defer.
+#[test]
+fn the_cheap_pass_decides_a_settlement_without_hashing_the_payload() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 3)]);
+
+		// Ciphertexts of the right lengths and the wrong bytes. The cheap pass
+		// reads the lengths, for the fee floor, and nothing else.
+		let wrong = vec![output(b"ct-x1", b"ct-x2")];
+		let planned = plan(&bundle, &wrong).expect("the cheap pass passes");
+		assert_eq!(planned.slots, 1);
+		assert_eq!(planned.fee_quanta, 3);
+		assert_noop!(bind(&bundle, &wrong), Error::<Test>::CiphertextDigestMismatch);
+		assert_noop!(check(&bundle, &wrong), Error::<Test>::CiphertextDigestMismatch);
+
+		let right = vec![output(b"ct-a1", b"ct-a2")];
+		assert_ok!(bind(&bundle, &right));
+		assert_ok!(check(&bundle, &right));
 	});
 }
 
@@ -1214,11 +1304,14 @@ fn the_dispatch_body_refuses_a_proof_that_does_not_verify() {
 fn ciphertext_digest_permutations_match_the_hashed_bytes() {
 	assert_eq!(weights::SPONGE_RATE as usize, qp_poseidon_core::SPONGE_RATE);
 
+	// The last pair is the reachable worst case: `MaxCiphertextBytes` bounds
+	// each ciphertext on its own, so a larger one fails the extrinsic's SCALE
+	// decode and never reaches the weight path.
+	let cap = <Test as crate::Config>::MaxCiphertextBytes::get() as usize;
 	for (ct_1, ct_2) in [
 		(vec![0u8; 0], vec![0u8; 0]),
 		(vec![0u8; 1_731], vec![0u8; 1_731]),
-		(vec![7u8; 2_048], vec![7u8; 2_048]),
-		(vec![9u8; 4_096], vec![9u8; 4_096]),
+		(vec![7u8; cap], vec![7u8; cap]),
 	] {
 		// The preimage `qnero_circuit::chain::ct_digest` builds.
 		let mut preimage = Vec::new();

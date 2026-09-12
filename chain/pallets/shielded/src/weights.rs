@@ -30,12 +30,15 @@ use frame_support::{traits::Get, weights::Weight};
 /// chain's `N = 6` / `n = 53`.
 ///
 /// **Open issue, M5.** The same measurement owes an answer on the cost a
-/// transaction pool absorbs that no weight bounds: admission verifies every
-/// distinct gossiped settlement blob once, unpaid and unrate-limited, because
-/// nothing short of a verify establishes that a proof's public inputs are a
-/// proof's. `docs/CIRCUIT.md` section 9.11 carries the analysis. A rejection
-/// cache keyed on the proof hash bounds the repeat case; it does not bound
-/// distinct blobs.
+/// transaction pool absorbs that no weight bounds: admission pays one cheap
+/// settlement walk plus one verify for every distinct gossiped settlement blob,
+/// unpaid and unrate-limited, because nothing short of a verify establishes
+/// that a proof's public inputs are a proof's. The walk is `plan_settlement`,
+/// which is storage reads and integer comparisons and hashes nothing; the
+/// payload sponge sits behind the verify, where a blob that fails the verify
+/// never reaches it. `docs/CIRCUIT.md` section 9.11 carries the analysis. A
+/// rejection cache keyed on the proof hash bounds the repeat case; it does not
+/// bound distinct blobs.
 pub const WASM_VERIFY_FACTOR: u64 = 5;
 
 /// Reference time of one private-batch proof verification, in picoseconds.
@@ -161,8 +164,9 @@ pub const fn ct_digest_permutations(ciphertext_bytes: u64) -> u64 {
 /// permutation per slot covers the per-slot rounding, which cannot be shared
 /// because every slot's sponge is finalized on its own; that makes this an
 /// upper bound on the sum of [`ct_digest_permutations`] over the slots,
-/// whatever the payload split between them. Doubled: the settlement check runs
-/// twice per included extrinsic, and both passes recompute every digest.
+/// whatever the payload split between them. Doubled: an included settlement
+/// binds its payload twice, once in `pre_dispatch` and once in the dispatch
+/// body, and both recompute every digest.
 pub const fn ct_digest_ref_time(slots: u64, ciphertext_bytes: u64) -> u64 {
 	let per_slot_framing = slots.saturating_mul(CT_DIGEST_FRAMING_BYTES.saturating_add(1));
 	let felts = per_slot_framing.saturating_add(ciphertext_bytes).div_ceil(BYTES_PER_FELT);
@@ -322,9 +326,10 @@ mod tests {
 	/// tests pins the exact number against the real hasher's encoding.
 	#[test]
 	fn the_ciphertext_digest_is_priced_per_byte() {
-		// Two 4096-byte ciphertexts: 8212 bytes of preimage, 2054 felts, 257
-		// permutations.
-		assert_eq!(ct_digest_permutations(2 * 4_096), 257);
+		// Two ciphertexts at the reachable cap of 2048 bytes each: 4116 bytes
+		// of preimage, 1030 felts, 129 permutations. The cap is per
+		// ciphertext, so this pair is one slot's worst case.
+		assert_eq!(ct_digest_permutations(2 * 2_048), 129);
 		// An empty pair is the framing alone.
 		assert_eq!(ct_digest_permutations(0), 1);
 		// Two ciphertexts at the real ML-KEM-1024 size with no memo.
@@ -332,8 +337,8 @@ mod tests {
 
 		// The aggregate charge is an upper bound on the per-slot sum, whatever
 		// the split. Six slots of two maximum ciphertexts each:
-		let per_slot: u64 = 6 * ct_digest_permutations(2 * 4_096);
-		let charged = ct_digest_ref_time(6, 6 * 2 * 4_096) / POSEIDON_EVAL_REF_TIME_PS / 2;
+		let per_slot: u64 = 6 * ct_digest_permutations(2 * 2_048);
+		let charged = ct_digest_ref_time(6, 6 * 2 * 2_048) / POSEIDON_EVAL_REF_TIME_PS / 2;
 		assert!(charged >= per_slot, "charged {charged} permutations against {per_slot} real");
 	}
 

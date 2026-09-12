@@ -859,15 +859,24 @@ parameter_types! {
 	/// extrinsics are unsigned and fee free, so the leaf's own fee is the only
 	/// cost there is.
 	pub const ShieldedMinLeafFee: u64 = 1;
-	/// Bytes of note ciphertext one quantum of fee buys: one kilobyte.
+	/// Bytes of note ciphertext one quantum of fee buys: 512 bytes.
 	///
-	/// A real slot carries two ciphertexts of 1731 bytes, so it pays four
+	/// A real slot carries two ciphertexts of 1731 bytes, so it pays seven
 	/// quanta of payload on top of `ShieldedMinLeafFee`, and a slot padded to
-	/// the cap pays eight. The flat floor alone would price either at one
+	/// the cap (two ciphertexts of `ShieldedMaxCiphertextBytes`, 4096 bytes in
+	/// total) pays eight. The flat floor alone would price either at one
 	/// quantum. The chain never parses these bytes and `Ciphertexts` is never
 	/// pruned, so the whole cap is usable by a settler and the payload is what
 	/// has to be priced.
-	pub const ShieldedCiphertextBytesPerFeeQuantum: u32 = 1024;
+	///
+	/// The divisor has to sit below the slack between the real ciphertext size
+	/// and the cap, or the term prices nothing it was added to price: at one
+	/// kilobyte both 3462 and 4096 bytes round to four quanta, so a settler
+	/// could pad both ciphertexts to the cap and add 634 bytes of permanent,
+	/// never-pruned, never-parsed state for no extra fee.
+	/// `a_slot_pays_for_the_ciphertext_bytes_it_publishes` in the pallet's
+	/// tests pins the two endpoints apart.
+	pub const ShieldedCiphertextBytesPerFeeQuantum: u32 = 512;
 	/// Half of a settled fee is burned, half is minted to the block author. The
 	/// same split `pallet-wormhole` applies to its volume fee.
 	pub const ShieldedFeeBurnRate: Permill = Permill::from_percent(50);
