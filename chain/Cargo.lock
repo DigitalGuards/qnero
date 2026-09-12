@@ -849,6 +849,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 
 [[package]]
+name = "bech32"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
+
+[[package]]
 name = "binary-merkle-tree"
 version = "16.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5846,6 +5852,7 @@ dependencies = [
  "pallet-balances",
  "pallet-zk-tree",
  "parity-scale-codec",
+ "qp-coinbase",
  "qp-wormhole",
  "scale-info",
  "sp-consensus-qpow",
@@ -6028,6 +6035,7 @@ dependencies = [
  "qnero-note-core",
  "qnero-prover",
  "qnero-verifier",
+ "qp-coinbase",
  "qp-dilithium-crypto",
  "qp-header",
  "qp-plonky2-verifier",
@@ -6035,6 +6043,7 @@ dependencies = [
  "qp-wormhole",
  "scale-info",
  "sp-core",
+ "sp-inherents",
  "sp-io",
  "sp-runtime",
 ]
@@ -7314,6 +7323,7 @@ dependencies = [
 name = "qnero-note-core"
 version = "0.1.0"
 dependencies = [
+ "bech32",
  "hex",
  "qp-poseidon-core",
  "rand_core 0.9.3",
@@ -7337,6 +7347,16 @@ dependencies = [
  "anyhow",
  "qnero-circuit",
  "qp-plonky2-verifier",
+]
+
+[[package]]
+name = "qp-coinbase"
+version = "0.1.0"
+dependencies = [
+ "parity-scale-codec",
+ "scale-info",
+ "sp-inherents",
+ "sp-runtime",
 ]
 
 [[package]]
@@ -7659,6 +7679,7 @@ name = "quantus-node"
 version = "1.0.1"
 dependencies = [
  "array-bytes 6.2.3",
+ "async-trait",
  "clap",
  "frame-benchmarking",
  "frame-benchmarking-cli",
@@ -7675,6 +7696,9 @@ dependencies = [
  "pallet-zk-tree",
  "parity-scale-codec",
  "prometheus",
+ "qnero-circuit",
+ "qnero-note-core",
+ "qp-coinbase",
  "qp-dilithium-crypto",
  "qp-rusty-crystals-dilithium",
  "qp-rusty-crystals-hdwallet",
@@ -7756,7 +7780,6 @@ dependencies = [
  "pallet-treasury",
  "pallet-utility",
  "pallet-vesting",
- "pallet-wormhole",
  "pallet-zk-tree",
  "parity-scale-codec",
  "primitive-types 0.13.1",
