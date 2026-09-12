@@ -81,12 +81,21 @@ impl_opaque_keys! {
 // (TxExtension set or payload layout), not for verifier-rule changes. M6
 // dropped `WormholeProofRecorderExtension` from `TxExtension`, which is such a
 // change, and the wallet's own list of known extensions moved with it.
+//
+// Bump `spec_version` whenever the metadata moves, which is a wider rule than
+// "whenever consensus moves". Every client that caches metadata keys that
+// cache on `spec_version`: polkadot-js, subxt, every indexer. A changed event
+// layout under an unchanged version decodes with the stale shape, succeeds and
+// is silently wrong, and nothing in the node reports it. 101 is the M6 review
+// pass, which added a `pallet-shielded` error variant and changed three event
+// layouts across `pallet-shielded` and `pallet-mining-rewards`.
+// `the_runtime_identity_is_pinned` in `tests/call_filter.rs` is the tripwire.
 #[sp_version::runtime_version]
 pub const VERSION: RuntimeVersion = RuntimeVersion {
 	spec_name: alloc::borrow::Cow::Borrowed("qnero"),
 	impl_name: alloc::borrow::Cow::Borrowed("qnero-node"),
 	authoring_version: 1,
-	spec_version: 100,
+	spec_version: 101,
 	impl_version: 1,
 	apis: apis::RUNTIME_API_VERSIONS,
 	transaction_version: 7,

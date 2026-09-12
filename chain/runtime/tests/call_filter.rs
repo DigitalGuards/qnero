@@ -414,3 +414,31 @@ fn a_new_balance_moving_call_is_matched_here() {
 		 moves transparent value and update the filter and docs/DESIGN.md section 7"
 	);
 }
+
+/// The runtime's identity, pinned so a metadata change cannot ship under an
+/// unchanged `spec_version`.
+///
+/// Every client that caches metadata keys the cache on `spec_version`:
+/// polkadot-js, subxt, every indexer. A pass that changes an event layout, adds
+/// an error variant or moves a storage item, and leaves the version alone,
+/// hands those clients a stale shape that still decodes. A `bool` where a
+/// `Vec<u8>` was decodes as a compact length and renders as empty; an event
+/// that lost a leading `AccountId` decodes the next field's bytes as an
+/// account and over-runs. Both succeed, and nothing reports either.
+///
+/// So this test fails on purpose whenever the pair moves. Read the rule at the
+/// top of `runtime/src/lib.rs` before updating it: `spec_version` moves for any
+/// metadata change, and `transaction_version` moves only when the signed
+/// extrinsic encoding does.
+#[test]
+fn the_runtime_identity_is_pinned() {
+	let version = quantus_runtime::VERSION;
+	assert_eq!(version.spec_name, "qnero", "the chain's own name, set at M6");
+	assert_eq!(version.impl_name, "qnero-node");
+	assert_eq!(
+		(version.spec_version, version.transaction_version),
+		(101, 7),
+		"runtime metadata or the signed extrinsic encoding moved; see the rule above \
+		 `VERSION` in runtime/src/lib.rs and bump the half that changed"
+	);
+}
