@@ -10,7 +10,8 @@
 //! sensitive as the seed: `rho` and `r` plus the published nullifier are what
 //! link a spend to its note.
 
-use std::collections::BTreeSet;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -30,16 +31,19 @@ use crate::keys::{refuse_if_readable_beyond_owner, sync_parent_dir};
 /// set. Version 3 added `checkpoints`, the block hashes a sync finished at,
 /// which is how a fork is detected. Version 4 added `on_chain`, which is what
 /// a fork rescan writes down when it proves a held note is not on the chain
-/// any more, and dropped `used_nullifiers` from the file.
+/// any more, and dropped `used_nullifiers` from the file. Version 5 added
+/// `genesis_hash`, which binds the store to one chain.
 ///
-/// Both older shapes are upgraded in place on load. A version-2 store gets an
+/// Every older shape is upgraded in place on load. A version-2 store gets an
 /// empty checkpoint list: the first sync after the upgrade records one and has
 /// nothing older to compare against. A version-3 store's notes load as
 /// `on_chain: true`, which is what every note in one is: the version that
-/// wrote it had no way to mark a note otherwise. A version-1 store is refused;
+/// wrote it had no way to mark a note otherwise. A version-4 store loads with
+/// no genesis, and the first sync after the upgrade records the genesis of the
+/// node it runs against. A version-1 store is refused;
 /// deleting it and re-syncing recovers every unspent note, because every
 /// note's plaintext is on chain inside its ciphertext.
-pub const STORE_VERSION: u32 = 4;
+pub const STORE_VERSION: u32 = 5;
 
 /// The oldest store shape this wallet still upgrades. Anything older is
 /// refused.
@@ -60,6 +64,26 @@ pub struct WalletStore {
     /// The address this store belongs to. A store opened with the wrong seed
     /// is refused, so two wallets' notes never merge.
     pub address: String,
+    /// `chain_getBlockHash(0)` of the chain this store was built against, hex,
+    /// no `0x`.
+    ///
+    /// An address binds the store to a seed and says nothing about which chain
+    /// the leaf indices, the block numbers, the checkpoint hashes and the
+    /// spent flags in it came from. A `--dev --tmp` node restarts on a fresh
+    /// genesis with an empty tree, and against one of those every one of those
+    /// values is wrong in a way no later sync repairs: the watermark sits
+    /// above the new chain's leaf count so the scan range is empty, the
+    /// checkpoint hashes belong to a chain that never existed here, and the
+    /// settled set is somebody else's, so notes read spent or unspent at
+    /// random.
+    ///
+    /// `None` in a store written before version 5, and in one that has never
+    /// synced. The first sync against a node records that node's genesis, and
+    /// every sync after it refuses a node that answers a different one. The
+    /// escape is `--new-chain-store`, which archives the file rather than
+    /// deleting it: the note secrets in it are the only copy this wallet has.
+    #[serde(default)]
+    pub genesis_hash: Option<String>,
     /// Highest block whose leaves are all accounted for.
     pub last_synced_block: u32,
     /// One past the last leaf index scanned.
@@ -130,6 +154,8 @@ impl core::fmt::Debug for WalletStore {
         f.debug_struct("WalletStore")
             .field("version", &self.version)
             .field("address", &self.address)
+            // Public chain data: it is the hash of block zero.
+            .field("genesis_hash", &self.genesis_hash)
             .field("last_synced_block", &self.last_synced_block)
             .field("next_leaf", &self.next_leaf)
             .field("notes", &self.notes.len())
@@ -388,6 +414,92 @@ impl core::fmt::Debug for RejectedNote {
     }
 }
 
+/// What one pass of [`WalletStore::reconcile_spent`] changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpentReconciliation {
+    /// Notes whose nullifier the refreshed set carries and which were not
+    /// marked spent.
+    pub newly_spent: u64,
+    /// Notes whose nullifier left the set, at a head that has passed the
+    /// height the spend was seen at: the settlement was orphaned.
+    pub newly_unspent: u64,
+    /// Notes whose nullifier is absent from the set at a head that has not
+    /// reached the height the spend was seen at. Left spent, because the
+    /// absence is the node's view lagging and not an orphaned settlement.
+    pub held_spent: u64,
+}
+
+/// One row of the `balance` note table.
+///
+/// A conflict set is one row, because it is one value: at most one of its
+/// members can ever settle, so listing each member as its own line reports a
+/// balance the chain will never back. See [`WalletStore::spendable`].
+#[derive(Debug, Clone, Copy)]
+pub struct NoteRow<'a> {
+    /// The member this row stands for: the one a spend would use.
+    pub note: &'a StoredNote,
+    /// How many held notes share this row's nullifier, this one included. One
+    /// for an ordinary note, more for a conflict set.
+    pub members: usize,
+}
+
+impl NoteRow<'_> {
+    pub fn is_conflict(&self) -> bool {
+        self.members > 1
+    }
+}
+
+/// Which member of a conflict set a spend uses: the largest value, ties broken
+/// by the lowest leaf index.
+///
+/// Ties are broken so the choice is deterministic. Two members of equal value
+/// are otherwise ordered by however the store was written, and a wallet that
+/// picked differently on a retry would prove a different leaf.
+fn outranks(candidate: &StoredNote, held: &StoredNote) -> bool {
+    (candidate.value, core::cmp::Reverse(candidate.leaf_index))
+        > (held.value, core::cmp::Reverse(held.leaf_index))
+}
+
+/// The same order, for the table, where spent and off-chain members are in the
+/// running too.
+///
+/// A member a spend could use wins over one it could not, so the value the
+/// table prints is the value the balance counts.
+fn outranks_for_display(candidate: &StoredNote, held: &StoredNote) -> bool {
+    let usable = |note: &StoredNote| !note.spent && note.on_chain;
+    match (usable(candidate), usable(held)) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => outranks(candidate, held),
+    }
+}
+
+/// Collapse a note list to one row per nullifier, keeping the order the notes
+/// were first met in.
+fn collapse<'a>(notes: impl Iterator<Item = &'a StoredNote>) -> Vec<NoteRow<'a>> {
+    let mut order: Vec<&'a str> = Vec::new();
+    let mut groups: BTreeMap<&'a str, NoteRow<'a>> = BTreeMap::new();
+    for note in notes {
+        match groups.entry(note.nullifier.as_str()) {
+            Entry::Vacant(slot) => {
+                order.push(note.nullifier.as_str());
+                slot.insert(NoteRow { note, members: 1 });
+            }
+            Entry::Occupied(mut slot) => {
+                let row = slot.get_mut();
+                row.members += 1;
+                if outranks_for_display(note, row.note) {
+                    row.note = note;
+                }
+            }
+        }
+    }
+    order
+        .into_iter()
+        .map(|nullifier| groups[nullifier])
+        .collect()
+}
+
 /// Distinguishes the temporary files of two saves in one process.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -396,6 +508,7 @@ impl WalletStore {
         Self {
             version: STORE_VERSION,
             address,
+            genesis_hash: None,
             last_synced_block: 0,
             next_leaf: 0,
             notes: Vec::new(),
@@ -445,6 +558,11 @@ impl WalletStore {
             // every note already in the file, and drops `used_nullifiers` from
             // the format: the field is `#[serde(skip)]` now, so a version-3
             // file's copy is ignored on load and the first sync repages it.
+            //
+            // Version 4 to 5 adds `genesis_hash`, which serde reads as `None`.
+            // The first sync records the genesis of the node it runs against,
+            // which is the only chain such a store could have come from that
+            // this wallet can still name.
             if store.version < 3 {
                 store.checkpoints.clear();
             }
@@ -459,6 +577,62 @@ impl WalletStore {
             );
         }
         Ok(store)
+    }
+
+    /// Whether this store was built against a chain other than this one.
+    ///
+    /// A store with no genesis recorded belongs to no chain yet and is not
+    /// "other".
+    pub fn is_other_chain(&self, genesis: &str) -> bool {
+        self.genesis_hash
+            .as_deref()
+            .is_some_and(|bound| bound != genesis)
+    }
+
+    /// Bind this store to a chain, refusing one it does not belong to.
+    ///
+    /// Returns whether the genesis was newly recorded.
+    ///
+    /// The address check above binds the store to a seed. This binds it to a
+    /// chain, and nothing else does: leaf indices, block numbers, checkpoint
+    /// hashes and spent flags are all statements about one chain, and a
+    /// `--dev --tmp` node that restarted answers a fresh genesis with an empty
+    /// tree. Against one of those the watermark sits above the new leaf count,
+    /// so the scan range is empty and the wallet reports the notes it holds as
+    /// a balance the chain has never heard of, while the checkpoint hashes
+    /// name blocks that do not exist and the settled set is somebody else's.
+    ///
+    /// Nothing is written when the answer is a refusal, so a wallet pointed at
+    /// the wrong node by a typed URL leaves the file it holds untouched.
+    pub fn bind_genesis(&mut self, genesis: &str) -> Result<bool> {
+        self.ensure_genesis(genesis)?;
+        if self.genesis_hash.is_some() {
+            return Ok(false);
+        }
+        self.genesis_hash = Some(genesis.to_string());
+        Ok(true)
+    }
+
+    /// Refuse a chain this store does not belong to, recording nothing.
+    ///
+    /// What a command that only reads the store calls, where
+    /// [`WalletStore::bind_genesis`] is what a sync calls.
+    pub fn ensure_genesis(&self, genesis: &str) -> Result<()> {
+        if let Some(bound) = self.genesis_hash.as_deref() {
+            if bound != genesis {
+                bail!(
+                    "this store was built against the chain whose genesis is {bound} and this \
+                     node serves the chain whose genesis is {genesis}. Every leaf index, block \
+                     number, checkpoint hash and spent flag in the store is a statement about \
+                     the first chain and means nothing on the second, so syncing would report a \
+                     balance this chain has never carried. A --dev --tmp node that restarted is \
+                     the usual cause. Pass --new-chain-store to archive this store and start a \
+                     fresh one against this chain; the archive keeps the note secrets, which are \
+                     the only copy of them."
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Write atomically through a temporary file, so an interrupted write
@@ -525,8 +699,78 @@ impl WalletStore {
         self.notes.iter().filter(|note| !note.on_chain)
     }
 
+    /// One spendable note per nullifier: a conflict set collapses to the
+    /// member a spend would use.
+    ///
+    /// A sender picks `rho` and `r` for a note it creates
+    /// (`docs/CIRCUIT.md` section 9.8), so a sender that repeats a pair hands
+    /// over two notes sharing one nullifier. At most one of them can ever
+    /// settle, because the chain refuses a nullifier it has already seen, and
+    /// the recipient cannot tell in advance which one a settlement will
+    /// consume: it is whichever one the recipient itself spends first.
+    ///
+    /// The regression this closes: the scan used to refuse the second note it
+    /// met, permanently and by arrival order. A sender that put the large note
+    /// second had the wallet keep the small one and write the large one off
+    /// with no way back, and a rescan after a fork walked the same leaves and
+    /// refused the same one again. Both notes are held now, and the choice is
+    /// made here, on value, where it can be remade on every command.
+    ///
+    /// The two members can never be spent together either, and that is the
+    /// other half of why this collapses: a private batch constrains all its
+    /// nullifiers pairwise distinct (`docs/CIRCUIT.md` section 8), so a
+    /// selection that put both members in one leaf would fail in circuit.
+    pub fn spendable(&self) -> Vec<&StoredNote> {
+        let mut best: BTreeMap<&str, &StoredNote> = BTreeMap::new();
+        for note in self.unspent() {
+            match best.entry(note.nullifier.as_str()) {
+                Entry::Vacant(slot) => {
+                    slot.insert(note);
+                }
+                Entry::Occupied(mut slot) => {
+                    if outranks(note, slot.get()) {
+                        slot.insert(note);
+                    }
+                }
+            }
+        }
+        best.into_values().collect()
+    }
+
+    /// Held notes that share their nullifier with another held note.
+    ///
+    /// What `balance` counts to say how much of the wallet is in conflict
+    /// sets. Every member is listed, the chosen one included.
+    ///
+    /// Keyed on borrowed nullifiers, like [`WalletStore::spendable`]. The
+    /// duplicate check a scan used to run built a fresh owned set per received
+    /// note, and every one of those copies dropped without being wiped, so a
+    /// scan that received `k` notes left `k` unwiped copies of every held
+    /// nullifier on the heap. That is the one value `SecretHex` and the
+    /// `Debug` redactions exist for.
+    pub fn conflicted(&self) -> Vec<&StoredNote> {
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for note in &self.notes {
+            *counts.entry(note.nullifier.as_str()).or_default() += 1;
+        }
+        self.notes
+            .iter()
+            .filter(|note| counts[note.nullifier.as_str()] > 1)
+            .collect()
+    }
+
+    /// The note list as `balance` prints it: one row per nullifier.
+    pub fn rows(&self) -> Vec<NoteRow<'_>> {
+        collapse(self.notes.iter())
+    }
+
+    /// The same, over the notes the chain no longer carries.
+    pub fn off_chain_rows(&self) -> Vec<NoteRow<'_>> {
+        collapse(self.off_chain())
+    }
+
     pub fn unspent_total(&self) -> u64 {
-        self.unspent().map(|note| note.value).sum()
+        self.spendable().iter().map(|note| note.value).sum()
     }
 
     /// Value the chain does not back, held for the case its settlement
@@ -565,20 +809,6 @@ impl WalletStore {
 
     pub fn pending_total(&self) -> u64 {
         self.pending.iter().map(|note| note.value).sum()
-    }
-
-    /// Whether this wallet already holds a note with this nullifier, spent or
-    /// not.
-    ///
-    /// A scan asks this once per received note. It used to clone every held
-    /// nullifier into a fresh set to answer it, and every one of those copies
-    /// dropped without being wiped, so a scan that received `k` notes left `k`
-    /// unwiped copies of every held nullifier on the heap. That is the one
-    /// value `SecretHex` and the `Debug` redactions exist for.
-    pub fn holds_nullifier(&self, nullifier: &str) -> bool {
-        self.notes
-            .iter()
-            .any(|note| note.nullifier.as_str() == nullifier)
     }
 
     pub fn has_commitment(&self, commitment: &str) -> bool {
@@ -697,9 +927,7 @@ impl WalletStore {
 
     /// Re-derive every note's spent flag from the settled set.
     ///
-    /// Returns `(newly spent, newly unspent)`.
-    ///
-    /// The regression this closes: `spent` was a latch. A sync replaced the
+    /// The regression this closed: `spent` was a latch. A sync replaced the
     /// local copy of `UsedNullifiers` wholesale on every pass, so the store
     /// always held the chain's current answer, and then only ever set the flag
     /// true. When the block carrying a settlement was orphaned and the
@@ -709,33 +937,85 @@ impl WalletStore {
     /// spent forever: under-reported in the balance, passed over by every
     /// selection, and recoverable only by deleting the store.
     ///
+    /// Clearing the flag is the direction that can lose money, so it carries a
+    /// condition the setting direction does not: `head_block` has to have
+    /// reached the height the spend was seen at. A nullifier is absent from a
+    /// node's map for two different reasons, and they are indistinguishable
+    /// from the map alone. Either the settlement was orphaned, which is what
+    /// this exists for, or the node has not reached the block that settled it.
+    /// `Wallet::sync` refuses outright a node behind this wallet's own
+    /// watermark, and this covers what that gate cannot see: a spend
+    /// `submit_spend` latched at an inclusion block above the watermark, which
+    /// is every spend made since the last sync. Un-spending such a note puts
+    /// it back in the balance and lets the next `send` select an input the
+    /// chain has already consumed, which is a submission refused after the
+    /// full proving cost.
+    ///
+    /// A note marked spent with no height recorded is cleared, because there
+    /// is nothing to compare against. Only a store written before the field
+    /// carried meaning holds one.
+    ///
     /// Safe against the latch above because this runs inside `Wallet::sync`,
     /// immediately after the set is repaged from the chain. A head that still
     /// contains the inclusion block re-derives exactly what `submit_spend`
     /// latched; a head that no longer contains it is the case this exists for.
-    pub fn reconcile_spent(&mut self, seen_at: u32) -> (u64, u64) {
+    pub fn reconcile_spent(&mut self, head_block: u32) -> SpentReconciliation {
         // Taken out and put back so the notes can be walked mutably against
-        // it. The set is the authority here, and it was read at `seen_at`.
+        // it. The set is the authority here, and it was read at `head_block`.
         let settled = core::mem::take(&mut self.used_nullifiers);
-        let mut newly_spent = 0;
-        let mut newly_unspent = 0;
+        let mut counts = SpentReconciliation::default();
         for note in self.notes.iter_mut() {
             match (settled.contains(note.nullifier.as_str()), note.spent) {
                 (true, false) => {
                     note.spent = true;
-                    note.spent_seen_at_block = Some(seen_at);
-                    newly_spent += 1;
+                    note.spent_seen_at_block = Some(head_block);
+                    counts.newly_spent += 1;
                 }
-                (false, true) => {
-                    note.spent = false;
-                    note.spent_seen_at_block = None;
-                    newly_unspent += 1;
-                }
+                (false, true) => match note.spent_seen_at_block {
+                    Some(seen) if head_block < seen => counts.held_spent += 1,
+                    _ => {
+                        note.spent = false;
+                        note.spent_seen_at_block = None;
+                        counts.newly_unspent += 1;
+                    }
+                },
                 _ => {}
             }
         }
         self.used_nullifiers = settled;
-        (newly_spent, newly_unspent)
+        counts
+    }
+
+    /// Drop every refusal for an output this wallet now holds.
+    ///
+    /// Returns how many went.
+    ///
+    /// A `RejectedNote` records an output that decrypted to this wallet and
+    /// could not be kept. The one refusal left is a nullifier the chain has
+    /// already settled, and that is a statement about a chain state that a
+    /// reorg can undo: the settlement is orphaned, the rescan walks the same
+    /// leaf, the nullifier is no longer settled and the note is held. Without
+    /// this the refusal stayed in the file and `balance` went on printing
+    /// "its nullifier is already settled on chain" beside the note it had just
+    /// added to the balance.
+    pub fn prune_rejected(&mut self) -> u64 {
+        let held: BTreeSet<&str> = self
+            .notes
+            .iter()
+            .map(|note| note.commitment.as_str())
+            .collect();
+        let before = self.rejected.len();
+        // Collected first: `retain` cannot borrow `self.notes` while it holds
+        // `self.rejected` mutably.
+        let drop: BTreeSet<String> = self
+            .rejected
+            .iter()
+            .filter(|entry| held.contains(entry.commitment.as_str()))
+            .map(|entry| entry.commitment.clone())
+            .collect();
+        self.rejected
+            .retain(|entry| !drop.contains(&entry.commitment));
+        (before - self.rejected.len()) as u64
     }
 
     /// The newest checkpoint, if any.
@@ -1019,23 +1299,104 @@ mod tests {
         let first = store.notes[0].nullifier.as_str().to_string();
 
         store.used_nullifiers.insert(first.clone());
-        assert_eq!(store.reconcile_spent(42), (1, 0));
+        assert_eq!(
+            store.reconcile_spent(42),
+            SpentReconciliation {
+                newly_spent: 1,
+                ..Default::default()
+            }
+        );
         assert_eq!(store.unspent_total(), 400);
         assert_eq!(store.notes[0].spent_seen_at_block, Some(42));
 
         // Idempotent: the same set at a later head changes nothing.
-        assert_eq!(store.reconcile_spent(43), (0, 0));
+        assert_eq!(store.reconcile_spent(43), SpentReconciliation::default());
         assert_eq!(store.notes[0].spent_seen_at_block, Some(42));
 
         // The settlement is orphaned out and does not re-land.
         store.used_nullifiers.remove(&first);
-        assert_eq!(store.reconcile_spent(44), (0, 1));
+        assert_eq!(
+            store.reconcile_spent(44),
+            SpentReconciliation {
+                newly_unspent: 1,
+                ..Default::default()
+            }
+        );
         assert_eq!(store.unspent_total(), 1_400);
         assert!(!store.notes[0].spent);
         assert_eq!(store.notes[0].spent_seen_at_block, None);
 
         store.mark_unspent(&first);
         assert_eq!(store.unspent_total(), 1_400);
+    }
+
+    /// The regression the rule above opened, and the constraint that closes
+    /// it: a nullifier absent from a node's map has two causes and the map
+    /// alone cannot tell them apart.
+    ///
+    /// Either the settlement was orphaned, which is what the both-directions
+    /// rule exists for, or the node has not reached the block that settled it.
+    /// `submit_spend` latches a spend at its inclusion block, which is above
+    /// the wallet's own watermark until the next sync, so this is every spend
+    /// made since the last one: a sync against a node one block behind that
+    /// inclusion put the input note back in the balance, and the next `send`
+    /// selected an input the chain had already consumed and paid a full proof
+    /// to have the settlement refused.
+    ///
+    /// Clearing the flag is the direction that can lose money, so it is the
+    /// direction that carries the condition. Setting it stays as it was.
+    #[test]
+    fn a_spend_is_only_unspent_once_the_node_has_passed_the_block_it_settled_at() {
+        let mut store = WalletStore::new("qn1example".into());
+        store.notes.push(sample_note(1_000, "one"));
+        let nullifier = store.notes[0].nullifier.as_str().to_string();
+
+        // The spend settles at block 30 and `submit_spend` latches it there.
+        store.mark_spent(&nullifier, 30);
+        assert_eq!(store.unspent_total(), 0);
+
+        // A sync against a node whose head is block 29. Its map does not carry
+        // the nullifier, because it has not executed the block that settled
+        // it.
+        assert_eq!(
+            store.reconcile_spent(29),
+            SpentReconciliation {
+                held_spent: 1,
+                ..Default::default()
+            }
+        );
+        assert!(
+            store.notes[0].spent,
+            "a lagging node cannot un-spend a note"
+        );
+        assert_eq!(store.notes[0].spent_seen_at_block, Some(30));
+        assert_eq!(store.unspent_total(), 0);
+
+        // The same node at the settling block itself, still without the
+        // nullifier: now the absence is the chain's own answer at a height it
+        // has reached, so the settlement was orphaned.
+        assert_eq!(
+            store.reconcile_spent(30),
+            SpentReconciliation {
+                newly_unspent: 1,
+                ..Default::default()
+            }
+        );
+        assert!(!store.notes[0].spent);
+        assert_eq!(store.unspent_total(), 1_000);
+
+        // A note marked spent by a store written before the height meant
+        // anything is cleared: there is nothing to compare against.
+        store.notes[0].spent = true;
+        store.notes[0].spent_seen_at_block = None;
+        assert_eq!(
+            store.reconcile_spent(1),
+            SpentReconciliation {
+                newly_unspent: 1,
+                ..Default::default()
+            }
+        );
+        assert!(!store.notes[0].spent);
     }
 
     /// The regression: a note the fork rescan proved is no longer on the chain
@@ -1132,20 +1493,104 @@ mod tests {
         assert_eq!(store.rejected.len(), 2);
     }
 
-    /// Answered by a scan over the notes, so a scan that receives `k` notes no
-    /// longer leaves `k` unwiped copies of every held nullifier on the heap.
+    /// The regression: the scan refused whichever member of a conflict set it
+    /// met second, permanently, so a sender who put the large note second had
+    /// the wallet keep the small one with no way back.
+    ///
+    /// Both are held now and the choice is made here, on value, where it can
+    /// be remade on every command. Ties break on the leaf index so a retry
+    /// proves the same leaf.
     #[test]
-    fn a_held_nullifier_is_recognised_without_copying_the_set() {
+    fn a_conflict_set_is_one_candidate_at_its_largest_member() {
+        let mut store = WalletStore::new("qn1example".into());
+        store.notes.push(sample_note(40, "small"));
+        store.notes.push(sample_note(1_000, "large"));
+        store.notes.push(sample_note(250, "apart"));
+        // The first two share a nullifier: one sender, one repeated (rho, r).
+        let shared = store.notes[1].nullifier.clone();
+        store.notes[0].nullifier = shared.as_str().into();
+        store.notes[0].leaf_index = 4;
+        store.notes[1].leaf_index = 5;
+        store.notes[2].leaf_index = 6;
+
+        let spendable = store.spendable();
+        assert_eq!(spendable.len(), 2, "a conflict set is one candidate");
+        assert!(spendable.iter().any(|note| note.value == 1_000));
+        assert!(spendable.iter().any(|note| note.value == 250));
+        assert_eq!(
+            store.unspent_total(),
+            1_250,
+            "the set counts once, at the value a spend would use"
+        );
+        assert_eq!(store.conflicted().len(), 2);
+
+        // One row per nullifier, in the order the notes were met, carrying the
+        // member a spend would use.
+        let rows = store.rows();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].is_conflict());
+        assert_eq!(rows[0].members, 2);
+        assert_eq!(rows[0].note.value, 1_000);
+        assert!(!rows[1].is_conflict());
+        assert_eq!(rows[1].note.value, 250);
+
+        // Two members of equal value break the tie on the leaf index, so a
+        // retry proves the same leaf.
+        store.notes[0].value = 1_000;
+        assert_eq!(
+            store
+                .spendable()
+                .iter()
+                .find(|note| note.value == 1_000)
+                .expect("the set is still a candidate")
+                .leaf_index,
+            4
+        );
+
+        // One member settling takes the whole set out of the balance, because
+        // the nullifier is one value.
+        store.used_nullifiers.insert(shared.as_str().to_string());
+        assert_eq!(
+            store.reconcile_spent(30),
+            SpentReconciliation {
+                newly_spent: 2,
+                ..Default::default()
+            }
+        );
+        assert_eq!(store.unspent_total(), 250);
+    }
+
+    /// The regression: a refusal outlived the reason for it.
+    ///
+    /// The one refusal left is a nullifier the chain has already settled, and
+    /// a reorg can undo that. The rescan then holds the note and `balance`
+    /// printed "its nullifier is already settled on chain" beside a note it
+    /// had just added to the balance.
+    #[test]
+    fn a_refusal_goes_when_the_same_output_is_held() {
         let mut store = WalletStore::new("qn1example".into());
         store.notes.push(sample_note(1_000, "one"));
-        store.notes.push(sample_note(400, "two"));
-        store.notes[1].spent = true;
-        let held = store.notes[0].nullifier.as_str().to_string();
-        let spent = store.notes[1].nullifier.as_str().to_string();
-        assert!(store.holds_nullifier(&held));
-        // Spent or not: a duplicate is a duplicate.
-        assert!(store.holds_nullifier(&spent));
-        assert!(!store.holds_nullifier(&"ff".repeat(32)));
+        let held = store.notes[0].commitment.clone();
+        store.rejected.push(RejectedNote {
+            leaf_index: 3,
+            commitment: held,
+            nullifier: "cc".repeat(32).into(),
+            value: 1_000,
+            reason: "its nullifier is already settled on chain".into(),
+        });
+        store.rejected.push(RejectedNote {
+            leaf_index: 4,
+            commitment: "bb".repeat(32),
+            nullifier: "dd".repeat(32).into(),
+            value: 7,
+            reason: "its nullifier is already settled on chain".into(),
+        });
+
+        assert_eq!(store.prune_rejected(), 1);
+        assert_eq!(store.rejected.len(), 1);
+        assert_eq!(store.rejected[0].leaf_index, 4);
+        // Idempotent.
+        assert_eq!(store.prune_rejected(), 0);
     }
 
     /// Checkpoints are the fork detector's memory: one per sync, newest last,
@@ -1194,14 +1639,21 @@ mod tests {
             let mut store = WalletStore::new("qn1example".into());
             store.notes.push(sample_note(1_000, "one"));
             store.record_checkpoint(9, "ab".repeat(32), 4);
+            store.genesis_hash = Some("cd".repeat(32));
             store.save(&path).unwrap();
             let text = fs::read_to_string(&path).unwrap();
             let mut text = text.replace(
                 &format!("\"version\": {STORE_VERSION}"),
                 &format!("\"version\": {version}"),
             );
-            if version < 4 {
+            if version < 5 {
                 // A file written by a version that had no such field.
+                text = text.replace(
+                    &format!("  \"genesis_hash\": \"{}\",\n", "cd".repeat(32)),
+                    "",
+                );
+            }
+            if version < 4 {
                 text = text.replace("      \"on_chain\": true\n", "");
                 text = text.replace(",\n      \"on_chain\": true", "");
             }
@@ -1209,7 +1661,32 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         };
 
-        // Version 3 to 4. `on_chain` is absent from the file, and every note
+        // Version 4 to 5. `genesis_hash` is absent, so the store belongs to no
+        // chain this wallet can name and the first sync against a node records
+        // that node's. Nothing else can be recovered: the version that wrote
+        // the file never asked which chain it was on.
+        write_as(4);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("genesis_hash"), "{text}");
+        let mut loaded = WalletStore::load_or_new(&path, "qn1example").expect("it upgrades");
+        assert_eq!(loaded.version, STORE_VERSION);
+        assert_eq!(loaded.genesis_hash, None);
+        assert_eq!(loaded.unspent_total(), 1_000);
+        assert!(
+            loaded.bind_genesis(&"ef".repeat(32)).expect("it records"),
+            "a store with no chain takes the first one it is synced against"
+        );
+        assert_eq!(
+            loaded.genesis_hash.as_deref(),
+            Some("ef".repeat(32).as_str())
+        );
+        // And from then on it is bound.
+        assert!(!loaded
+            .bind_genesis(&"ef".repeat(32))
+            .expect("the same chain"));
+        assert!(loaded.bind_genesis(&"ab".repeat(32)).is_err());
+
+        // Version 3 to 5. `on_chain` is absent from the file, and every note
         // in a version-3 store is on the chain as far as that version could
         // tell: it had no way to mark one otherwise.
         write_as(3);
@@ -1223,7 +1700,7 @@ mod tests {
         // hashes came from the same chain.
         assert_eq!(loaded.checkpoints.len(), 1);
 
-        // Version 2 to 4. `checkpoints` did not exist, so whatever is in the
+        // Version 2 to 5. `checkpoints` did not exist, so whatever is in the
         // file is dropped: the first sync after the upgrade records one and
         // has nothing older to compare against.
         write_as(2);

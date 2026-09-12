@@ -1655,3 +1655,284 @@ comparison per command.
 | of which private batch proving | 3.40 s and 3.57 s |
 | private batch proof | 150908 bytes, unchanged |
 | submit to inclusion | 0.53 s both times |
+
+## The fourth M5 review fix pass, 2026-09-12
+
+Eight review findings against the balance-backing commit: one high, three
+medium, four low. The high one and two of the mediums are the same fault seen
+from three sides, which is that a sync trusted whatever one node answered and
+had no way to tell an answer that carries less information from an answer that
+carries a correction. The third medium is the duplicate-nullifier refusal,
+which was permanent and decided by arrival order. The lows are a stale refusal
+entry, an unwiped nullifier vector, a chain-wide property refused as if it were
+this spend's problem, and a dead public API.
+
+Four rules came out of it, and all four are properties of the sync.
+
+### What changed
+
+- **A node behind this wallet is refused, and the sync that refuses writes
+  nothing.** Nothing required a node's view to be at least as new as the
+  wallet's own last sync, and everything a sync derives is derived from what
+  one node answers at one block. `reconcile_spent` derives spent status in both
+  directions from `UsedNullifiers`, so a node that has not executed the block a
+  settlement landed in answers a map without that nullifier and the note it
+  spent came straight back into the balance; the next `send` then selected an
+  input the chain had already consumed and paid a full proof to have the
+  settlement skipped. The same answer moved the watermark too, because every
+  checkpoint above that node's head has no block at its height. The gate is
+  `head.number < last_synced_block` and it runs before the first read.
+- **No block at a checkpoint height is refused, and is not a fork.** The fork
+  walk treated "no block at that height" and "a different block at that height"
+  as one answer. Only the second is a fork. The first is a node that does not
+  reach that height, and rewinding on it rescans leaves against a tree smaller
+  than the one already recorded. The walk also probes every checkpoint before
+  it writes anything, so a refusal leaves the checkpoint list untouched.
+- **Spent is cleared only once the node has passed the block the spend was seen
+  at.** A nullifier absent from a node's map has two causes and the map alone
+  cannot tell them apart: the settlement was orphaned, or the node has not
+  reached it. The height gate covers the first version of that; what it cannot
+  see is a spend `submit_spend` latched at an inclusion block above the
+  watermark, which is every spend made since the last sync. Clearing is the
+  direction that can lose money, so it is the direction that carries the
+  condition. Setting is unchanged.
+- **The store names the chain it belongs to.** `genesis_hash` is new and
+  `STORE_VERSION` is 5. The address bound the store to a seed and nothing bound
+  it to a chain, while every leaf index, block number, checkpoint hash and
+  spent flag in the file is a statement about one. `--new-chain-store` archives
+  the old file as `<store>.archived` rather than deleting it, since it holds
+  the only copy of every note's `rho` and `r`. A version-4 store records the
+  genesis of the node it is first synced against, which is the most that can be
+  recovered: the version that wrote it never asked.
+- **A duplicated nullifier is a conflict set.** A sender picks `rho` and `r`,
+  so a sender that repeats a pair hands over two notes sharing one nullifier,
+  of which at most one can ever settle. Which one is decided by the recipient
+  spending it. The scan refused the second note it met, permanently, so a
+  sender who put the large note second had the wallet keep the small one with
+  no way back and a rescan after a fork wrote the same note off again. Every
+  output is held now; `WalletStore::spendable` yields one note per nullifier,
+  the largest member with ties on the leaf index, and that is what the
+  selection sees, what `unspent_total` sums and what `balance` prints, once,
+  with a `conflict` marker. A private batch constrains its nullifiers pairwise
+  distinct, so collapsing is also what keeps two members of one set out of one
+  leaf.
+- **A refusal goes when the same output becomes holdable.** The one refusal
+  left is a nullifier the chain has settled, which a reorg can undo. The
+  rescan then held the note and `balance` printed "its nullifier is already
+  settled on chain" beside a note it had just added to the balance.
+- **`PreparedSpend::spent_nullifiers` is zeroized.** It was a `Vec<String>`,
+  and a `PreparedSpend` exists exactly during the window between proving a
+  spend and its settlement landing, so those values have appeared nowhere at
+  all while it is alive. It is `Vec<SecretHex>` now, the same type `rho`, `r`
+  and a held note's nullifier already used.
+- **A merged fee bucket is a warning, and the spend goes ahead.** The guard
+  added last pass refused every send and every shield against a runtime whose
+  `CiphertextBytesPerFeeQuantum` swallowed the gap between an honest pair and a
+  pair padded to the cap. That is a property of the chain: a settler pads to
+  the cap whatever this wallet does, the operator cannot change the divisor,
+  and this wallet shrinking its own pad alone would publish its own ciphertext
+  length. `fee::memo_pad_separation_warning` says what the runtime did, once
+  per process, and names the pad that would restore the separation as a
+  coordinated move. The `MaxCiphertextBytes` bound stays a refusal, because
+  there the extrinsic would fail to decode.
+- **`render_memo` and `MEMO_DISPLAY_COLUMNS` are gone.** Dead since the table
+  started measuring its own prefix and asking the terminal for its width.
+
+### What the genesis binding does not catch
+
+`--dev` is a fixed chain spec, so a `--dev --tmp` node that restarts on an
+empty database answers the same genesis hash as the one before it. Both nodes
+in the run below answered
+`0xf759610207b350d194f0829b5dc0e595658e960c983665236f7b7aa05d0a8645`. The
+restarted dev node is caught by the height gate while its head is below the
+wallet's watermark, and after it climbs past that by the fork walk, which finds
+a different block at every checkpoint height and rewinds to zero. The genesis
+binding catches a store pointed at a genuinely different chain, where the fork
+walk would rewind to zero and rescan against a tree that belongs to someone
+else. The run shows both halves.
+
+### The store format
+
+Version 5. `genesis_hash` is new on the store itself and nothing else moved. A
+version-4 store upgrades in place with no chain recorded, and the first sync
+records the node's. Versions 3 and 2 upgrade as before. A version-1 store is
+still refused.
+
+### The run
+
+Two `--dev --tmp` nodes in sequence, fresh seeds, addresses truncated in the
+middle.
+
+```text
+=== 1. a fresh dev node, and a wallet that has never seen a chain ===
+
+$ nice -n 19 ./chain/target/release/quantus-node --dev --tmp   (backgrounded, pidfile)
+$ ss -ltn | grep 9944
+LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*
+LISTEN 0      1024            [::1]:9944          [::]:*
+
+$ qnero-wallet --file A.seed status
+node              http://127.0.0.1:9944
+runtime           spec 152, transaction 6
+chain head        35 (eeeb57d742f40986...)
+tree leaves       47
+store chain       not recorded yet; the next sync records it
+last synced block 0
+next leaf to scan 0
+
+$ qnero-wallet --file A.seed sync
+chain       recorded this node's genesis in the store
+scanned leaves 0..47 at block 35
+received 0 note(s) worth 0 quanta
+newly spent 0
+unspent total 0 quanta
+
+$ qnero-wallet --file A.seed status
+store chain       bound to this chain
+last synced block 35
+next leaf to scan 47
+
+=== 2. a shield and a payment, unchanged by this pass ===
+
+$ qnero-wallet --file A.seed shield --from-dev-account alice --amount 1000 --memo "first shield"
+shielding 1000 quanta (10000000000000 planck) from alice
+commitment  8258ba3f288fae15...
+leaf        65
+included    block 54 after 504.85ms
+synced      1 new note(s), unspent total 1000 quanta
+
+$ qnero-wallet --file A.seed send --to qn1... --amount 300 --memo "payment to B"
+fee         8 quanta
+circuits    built in 2.38s (6 leaf slots per batch)
+anchor      block 54
+inputs      leaves [65] for 300 quanta plus 8 fee
+change      692 quanta
+proof       150908 bytes
+proving     3.49s
+inclusion   block 57 after 1.04s
+synced      1 new note(s), unspent total 692 quanta
+
+$ qnero-wallet --file B.seed sync
+chain       recorded this node's genesis in the store
+scanned leaves 0..73 at block 57
+received 1 note(s) worth 300 quanta
+unspent total 300 quanta
+
+$ qnero-wallet --file A.seed balance
+unspent        692 quanta
+      leaf        quanta    block    state  memo
+        65          1000       54    spent  first shield
+        70           692       57  unspent
+
+=== 3. the node is replaced by a fresh --dev --tmp node ===
+
+$ kill $(cat node.pid), wait for 9944 to close, start a new one
+9944 has no listener
+9944 up after 3s
+chain_getBlockHash(0) -> 0xf759610207b350d1...   (the same genesis as before)
+
+$ qnero-wallet --file A.seed status
+chain head        11 (673a511c07046579...)
+tree leaves       16
+store chain       bound to this chain
+last synced block 57
+next leaf to scan 73
+
+$ qnero-wallet --file A.seed sync
+Error: this node's head is block 11 and this wallet has synced through block 57.
+A node behind the wallet answers every question with less than the wallet
+already knows: notes it has not seen settled would come back into the balance,
+and every checkpoint above its head would read as a fork. Nothing has been
+changed. Point --node at a node that has caught up, or wait for this one to.
+exit 1
+
+$ qnero-wallet --file A.seed balance
+unspent        692 quanta
+      leaf        quanta    block    state  memo
+        65          1000       54    spent  first shield
+        70           692       57  unspent
+
+Before this pass that sync reported 1692 quanta: the spent note came back
+because the new chain has never settled its nullifier, and the watermark
+rewound because the new chain has no block at any checkpoint height.
+`tests/sync_guards.rs` holds the same case against the scriptable node, and
+with the gate removed it reports `newly_unspent: 1, vanished: 1`.
+
+=== 4. the new chain climbs past the old watermark ===
+
+$ qnero-wallet --file A.seed sync
+scanned leaves 0..66 at block 61
+received 0 note(s) worth 0 quanta
+the chain forked below block 1: rescanned leaves from 0 where this wallet had reached 73
+2 note(s) this wallet holds are not on the current chain: their settlement was
+orphaned and has not been re-included. [...]
+newly spent 0
+back in the balance 1: their settlement is no longer on the chain
+unspent total 0 quanta
+
+$ qnero-wallet --file A.seed balance
+unspent        0 quanta
+not on chain   1692 quanta
+      leaf        quanta    block    state  memo
+        65          1000       54   orphan  first shield
+        70           692       57   orphan
+
+The fork walk reaches the right answer once the node can be asked: a chain that
+does not carry these commitments backs none of their value, so the unspent
+total is zero and both notes are listed as orphans, with their secrets kept.
+
+=== 5. the store on disk, version 5 ===
+
+{
+  "version": 5,
+  "genesis_hash": "f759610207b350d194f0829b5dc0e595658e960c983665236f7b7aa05d0a8645",
+  "last_synced_block": 61,
+  "next_leaf": 66,
+  "has_used_nullifiers": false,
+  "notes": [
+    { "leaf_index": 65, "value": 1000, "spent": false, "on_chain": false,
+      "spent_seen_at_block": null },
+    { "leaf_index": 70, "value": 692, "spent": false, "on_chain": false,
+      "spent_seen_at_block": null }
+  ],
+  "checkpoints": 1
+}
+
+=== 6. stop the node ===
+
+$ kill $(cat node.pid), then wait for 9944 to close
+port 9944 closed
+node stopped
+```
+
+A dev chain does not reorg and does not lag behind itself, so the rest is
+covered against the scriptable node in `tests/sync_guards.rs`: a node behind
+the wallet refused with the store byte-identical afterwards on disk and in
+memory, a node with no block at a checkpoint height refused with no checkpoint
+popped and the same height answering the same hash treated as no fork at all, a
+store refused against another chain by both `open_on_chain` and `sync` with
+`--new-chain-store` archiving the old file, and a conflict set spending its
+largest member and reporting every member spent once the shared nullifier
+settles. Each of the four was re-run with its constraint removed and each
+failed.
+
+### Gates
+
+```
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   37 suites ok, 0 failed, 4 ignored
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+QNERO_DEV_NODE=http://127.0.0.1:9944 RAYON_NUM_THREADS=4 nice -n 19 cargo test \
+  -j 2 --release -p qnero-wallet --features parallel --test dev_node_e2e -- --nocapture
+   1 passed, 0 failed
+```
+
+### What the fix pass cost
+
+One `chain_getBlockHash(0)` per command, which is the genesis check, and one
+`chain_getHeader` comparison. Nothing in the proving path moved: the proof is
+the same 150908 bytes and proving is the same 3.5 s. No consensus rule, hash
+layout, nullifier rule or `rho` rule changed, so no KAT vector was regenerated.

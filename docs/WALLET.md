@@ -101,9 +101,22 @@ all reads it.
   `fee::the_wallets_own_pair_stays_a_bucket_below_a_padded_one` is the gate on
   this side and `a_slot_pays_for_the_ciphertext_bytes_it_publishes` is the one
   on the chain's. `fee::ensure_memo_pad_fits` checks the compiled-in pad
-  against the runtime's own `MaxCiphertextBytes` once per command, because
-  every other chain value this wallet uses is read from metadata and this one
-  cannot be.
+  against both of the runtime's own values once per command, because every
+  other chain value this wallet uses is read from metadata and this one cannot
+  be.
+
+  The two bounds get different answers. A pad the runtime's
+  `MaxCiphertextBytes` cannot take is a refusal, because the extrinsic would
+  fail to decode after the proof committing to those bytes exists. A runtime
+  whose divisor merged the two fee buckets is a warning printed once per
+  process, and the spend goes ahead. That second one is a property of the
+  chain: a settler pads to the cap whatever this wallet does, so refusing fixed
+  nothing and stopped every send and every shield this wallet makes. The
+  operator cannot change `CiphertextBytesPerFeeQuantum`, and this wallet
+  shrinking its own pad below what every other wallet on the chain uses would
+  publish its own ciphertext length, which is the leak the pad exists to close.
+  `fee::memo_pad_separation_warning` is the sentence and it names the pad that
+  would restore the separation, as a coordinated move.
 - **Which output is the change is drawn per spend.** `ct_1` belongs to
   `cm_out_1` and `SlotSettled` names both leaf indices, so a payment fixed at
   output slot 0 splits the pool's outputs publicly into "went to a
@@ -141,6 +154,11 @@ range checked to 62 bits; the chain's transparent balance is `u128` planck.
 ```
 qnero-wallet [--node URL] [--file SEED] <command>
 ```
+
+`--new-chain-store` archives a store built against another chain and starts a
+fresh one; the store format section below says what binds a store to a chain
+and why. It archives rather than deletes, because the file is the only copy of
+every note's `rho` and `r`.
 
 `--node` defaults to `http://127.0.0.1:9944`. `--file` defaults to
 `$XDG_DATA_HOME/qnero/qnero-wallet.seed`, or
@@ -217,8 +235,31 @@ Most leaves carry no ciphertext at all and that is normal: the shielded pool
 shares one commitment tree with wormhole transfers and with the mining-reward
 leaf every block appends.
 
-Before the range is computed, the sync checks whether the chain forked under
-it. Every read is pinned to `chain_getHeader`, which is the best block, and a
+Before anything else, two gates on the node itself. Both exist because
+everything a sync derives is derived from what one node answers at one block,
+and a node that answers with less than the wallet already knows is not a
+correction.
+
+**The chain.** The store records the genesis hash of the chain it was built
+against and the sync refuses a node that answers a different one. See "Store
+format" below, which also says what this does not catch: `--dev` is a fixed
+chain spec, so a restarted `--dev --tmp` node answers the same genesis and is
+caught by the height gate and the fork walk instead.
+
+**The height.** If the node's head is below `last_synced_block` the sync
+refuses by name and writes nothing. A node behind the wallet is an ordinary
+operational state: a second `--node`, a node resyncing, a load balancer
+answering from a lagging replica. What it is not is new information. Its
+`UsedNullifiers` is missing every settlement it has not executed, and the
+spent reconciliation below derives spent status in both directions, so a
+lagging node un-spent every note whose settlement it had not reached; the next
+`send` then selected an input the chain had already consumed and paid a full
+proof to have the settlement skipped. Its block history is short too, so every
+checkpoint above its head answered with no block at all, which the fork check
+read as a branch that is gone.
+
+Then the fork check, which is where a leaf index gets repaired. Every read is
+pinned to `chain_getHeader`, which is the best block, and a
 best block can still be orphaned, so a leaf index is provisional when a scan
 first records it. When the block a note settled in is orphaned the extrinsic is
 still in the pool, is re-included, and appends the identical commitment at
@@ -235,13 +276,23 @@ keeps a `checkpoints` list, one entry per sync, each the block that sync
 finished at and the watermark it left. A sync asks `chain_getBlockHash` at the
 newest checkpoint's height: the same hash means every leaf below that watermark
 was folded at or before a block that is still canonical and cannot have moved,
-and a different hash, or no block at that height at all, means that checkpoint
-belongs to a branch that is gone. The walk pops checkpoints until one survives,
-so the ordinary cost is one call, and then the watermark is rewound to the
-survivor's before the scan range is taken. Every moved leaf is inside that
-range, and a commitment the scan meets again is relocated in place.
+and a **different** hash means that checkpoint belongs to a branch that is
+gone. The walk pops checkpoints until one survives, so the ordinary cost is one
+call, and then the watermark is rewound to the survivor's before the scan range
+is taken. Every moved leaf is inside that range, and a commitment the scan
+meets again is relocated in place.
 A fork deeper than the sixteen checkpoints the store keeps rewinds to zero and
 rescans the whole tree, which is correct and slow.
+
+**No block** at a checkpoint's height is not a fork and does not rewind
+anything. A fork is one thing: the node has a block at that height and it is a
+different block. No block there is a node that does not reach that height,
+pruned or serving a head it has not filled in behind, and rewinding on it
+rescans leaves against a tree smaller than the one already recorded. The two
+used to be the same branch, which is how a node behind the wallet popped every
+checkpoint above its own head. The sync refuses instead, by name, and the
+checkpoint list is written only after every checkpoint has been probed, so a
+refusal leaves it exactly as it found it.
 
 This deliberately does not re-read `ZkTree::Leaves` at each held note's
 recorded index, which would be the cheaper check. That names this wallet's own
@@ -270,26 +321,44 @@ same reorg still reads as spent until the reconciliation below has run against
 the repaged set; counted before it, such a note was skipped and then let back
 into the balance a moment later as a phantom nobody had been told about.
 
-A refusal is recorded once per output, not once per rescan. A refused note is
-never added to the note list, so nothing stops the scan decrypting and refusing
-it again, and before the rewind existed no leaf was ever scanned twice. The
-`rejected` list is keyed on the commitment now, and a later rescan moves the
-entry's leaf index the way a held note's is moved.
+A refusal is recorded once per output however many rescans walk past it, and
+it goes away again when the same output becomes holdable. A refused note is never added to
+the note list, so nothing stops the scan decrypting and refusing it again, and
+before the rewind existed no leaf was ever scanned twice. The `rejected` list
+is keyed on the commitment, a later rescan moves the entry's leaf index the way
+a held note's is moved, and a scan that ends up holding an output drops the
+entry: the one refusal left is a statement about chain state that a reorg can
+undo, and `balance` used to print "its nullifier is already settled on chain"
+beside a note it had just added to the balance.
 
 Every ciphertext that decrypts goes through `qnero_notes::try_receive`, which
 also checks the plaintext opens the commitment the chain published beside it.
 The memo it returns has its padding stripped, trailing zeros only, so a memo
 from a wallet that does not pad passes through unchanged.
-Then two refusals, both from `docs/CIRCUIT.md` section 9.8:
+One refusal is left, from `docs/CIRCUIT.md` section 9.8: a note whose nullifier
+is already settled on chain. It is recorded in the store's `rejected` list with
+its reason, so a wallet can say why a payment someone claims to have sent is
+missing from its balance.
 
-- a note whose nullifier duplicates one this wallet already holds, and
-- a note whose nullifier is already settled on chain.
+**A duplicated nullifier is a conflict set.** A sender picks
+`rho` and `r` for a note it creates, so a sender that repeats a pair hands over
+two notes sharing one nullifier, of which at most one can ever settle. Which
+one is not the sender's choice and not the scan's: it is whichever one this
+wallet spends first, because the chain refuses a nullifier it has already seen.
+The scan used to refuse the second note it met, which decided that by arrival
+order and decided it permanently, so a sender who put the large note second had
+the wallet keep the small one with no way back and a rescan after a fork wrote
+the same note off again.
 
-A sender picks `rho` and `r` for a note it creates, so a sender that repeats a
-pair hands over two notes sharing one nullifier, of which exactly one can ever
-be spent. The recipient is the last line. A refused note is recorded in the
-store's `rejected` list with its reason, so a wallet can say why a payment
-someone claims to have sent is missing from its balance.
+Every decryptable output is held now. `WalletStore::spendable` yields one note
+per nullifier, the largest member with ties broken on the leaf index, and that
+is what the selection sees, what `unspent_total` sums and what the `balance`
+table prints, once, with a `conflict` marker and the member count. The
+collapsing is not only about the total: a private batch constrains all its
+nullifiers pairwise distinct (`docs/CIRCUIT.md` section 8), so a selection that
+put two members of one set into one leaf would fail in circuit. Once a member
+settles, its nullifier enters `UsedNullifiers` and the reconciliation below
+marks every member of the set spent, which needs no rule of its own.
 
 Finally the settled nullifier set is read whole, pinned to the same block, and
 every note's spent flag is derived from it, in both directions. Only the
@@ -303,12 +372,26 @@ unsigned extrinsic leaves the pool after five blocks or its anchor falls
 outside the 256-block window, leaves its nullifier permanently absent. The note
 it spent then stayed `spent` forever: out of the balance, passed over by every
 selection, and fully spendable on chain, recoverable only by deleting the
-store. A note whose
-nullifier is no longer in the set comes back into the balance and its
-`spent_seen_at_block` is cleared. `submit_spend` still latches the flag the
+store. `submit_spend` still latches the flag the
 moment it has confirmed both nullifiers are settled at the inclusion block,
 which covers the window before the next sync repages the set, so
 `send --no-sync` cannot select the same input twice.
+
+The two directions are not symmetric, and clearing carries a condition setting
+does not. A nullifier absent from a node's map has two possible causes and the
+map alone cannot tell them apart: the settlement was orphaned, which is what
+this exists for, or the node has not reached the block that settled it. The
+height gate at the top of the sync covers the first version of that, a node
+behind the wallet's own watermark. What it cannot see is a spend latched at an
+inclusion block *above* that watermark, which is every spend made since the
+last sync, so the flag is cleared only when `head >= spent_seen_at_block`.
+Otherwise the note stays spent and the sync says how many it held back.
+Clearing is the direction that can lose money: an un-spent note goes back into
+the balance and the next `send` selects an input the chain has already
+consumed, which is a full proof paid for a settlement that is skipped. A note
+marked spent with no height recorded is cleared, since there is nothing to
+compare against; only a store written before the field carried meaning holds
+one.
 
 Every storage key a sync builds is checked against the runtime's own metadata
 first (`ensure_known_storage`). On the read path a drifted name or hasher is
@@ -323,6 +406,14 @@ one the current chain no longer carries. Orphans are listed again under their
 own heading with their total, since they are out of the unspent total and no
 spend selects them; `sync` above says how a note gets there and what puts it
 back. Pending and refused entries are listed under that.
+
+The table is one row per nullifier. Two notes sharing a
+nullifier are a conflict set and at most one of them can ever settle, so a row
+per member would print a total the chain will never back. The row carries the
+member a spend would use, at its value, and its state reads
+`unspent conflict 2` with the number of notes it stands for. A summary line
+above the table counts how many held notes are in conflict sets at all.
+`sync` above has the rule.
 
 A memo is remote input. Anyone holding this wallet's address can send it a note
 and choose the memo's bytes, and printed byte for byte that is an escape
@@ -461,7 +552,10 @@ and the error says so.
 ### `status`
 
 Node URL, runtime spec and transaction versions, chain head, tree leaf count,
-depth and root, and the wallet's own last synced block.
+depth and root, and the wallet's own last synced block. It also says whether
+the store is bound to this node's chain, which is the one command that reports
+a genesis mismatch without refusing: nothing it prints comes out of the store's
+own leaf indices.
 
 ## Store format
 
@@ -479,8 +573,9 @@ copied between machines under a permissive umask.
 
 ```json
 {
-  "version": 4,
+  "version": 5,
   "address": "qn1...",
+  "genesis_hash": "<64 hex chars>",
   "last_synced_block": 1062,
   "next_leaf": 1069,
   "notes": [
@@ -535,6 +630,35 @@ Field notes:
 - `version` is checked on load. A store written by another version is refused.
 - `address` is checked against the seed on load, so a store opened with the
   wrong seed is refused and two wallets' notes never merge.
+- `genesis_hash` is `chain_getBlockHash(0)` of the chain the store was built
+  against, and it is the other half of the same idea: the address binds the
+  store to a seed and nothing bound it to a chain. Every leaf index, block
+  number, checkpoint hash and spent flag in the file is a statement about one
+  chain, and against another one they are all wrong at once: the watermark can
+  sit above the other chain's leaf count, so the scan range is empty and the
+  wallet goes on reporting a balance that chain has never carried, while the
+  settled set the spent flags are derived from is somebody else's. The first
+  sync against a node records that node's genesis and every command after it
+  refuses a node that answers a different one. The escape is
+  `--new-chain-store`, which **archives** the store beside itself as
+  `<store>.archived` and starts fresh: the file is the only copy of every
+  note's `rho` and `r`, and the reason it looks wrong may be an operator who
+  typed the wrong `--node`. `status` reports a mismatch without refusing,
+  because nothing it prints comes out of the store's own leaf indices.
+
+  What this does **not** catch is the case that prompted it, and the
+  distinction is worth writing down. `--dev` is a fixed chain spec, so a
+  `--dev --tmp` node that restarts on an empty database answers the *same*
+  genesis hash as the one before it. Measured on this workstation: two
+  successive `--dev --tmp` nodes both answer
+  `0xf759610207b350d194f0829b5dc0e595658e960c983665236f7b7aa05d0a8645`. The
+  restarted dev node is caught by the height gate first, while its head is
+  below the wallet's watermark, and then by the fork walk, which finds a
+  different block at every checkpoint height and rewinds to zero. Both were run
+  against a live node and the transcript is in `docs/OPS-DEV.md`. What the
+  genesis binding catches is a store pointed at a genuinely different chain, a
+  testnet against a local dev chain, where the fork walk would rewind to zero
+  and rescan happily against a tree that belongs to someone else.
 - `next_leaf` is one past the last leaf index scanned, and `last_synced_block`
   is the block every read of that pass was pinned to.
 - `origin` is `shield` when the note's `rho` matches the entry rule for the
@@ -568,19 +692,24 @@ Field notes:
   fork detector's memory, and `sync` above says what it is for. Deleting it
   costs nothing except the ability to notice a fork that happened before the
   next sync.
-- `version` is 4. A version-3 store, written before `on_chain` existed, is
-  upgraded in place on load: every note in one reads as on chain, which is what
-  every note in one is, since that version had no way to mark a note otherwise.
-  Its checkpoints are kept, because their block hashes came from the same
-  chain. A version-2 store, written before `checkpoints` existed, is upgraded
-  with an empty checkpoint list. A version-1 store is refused. Deleting a store
-  and re-syncing recovers every unspent note, which is the same recovery the
-  paragraph below describes.
+- `version` is 5. Every older shape from 2 up is upgraded in place on load. A
+  version-4 store, written before `genesis_hash` existed, loads with no chain
+  recorded, and the first sync after the upgrade records the genesis of the
+  node it runs against: which chain it actually came from is not a question
+  that version ever asked, so that is the most this can recover. A version-3
+  store, written before `on_chain` existed, has every note read as on chain,
+  which is what every note in one is, since that version had no way to mark a
+  note otherwise; its checkpoints are kept, because their block hashes came
+  from the same chain. A version-2 store, written before `checkpoints` existed,
+  is upgraded with an empty checkpoint list. A version-1 store is refused.
+  Deleting a store and re-syncing recovers every unspent note, which is the
+  same recovery the paragraph below describes.
 
 Note secrets never reach a `Debug` format. `StoredNote`, `PendingNote`,
 `RejectedNote`, `WalletStore`, `SecretHex` and `PreparedSpend` all hand-write
 `Debug` and print `[REDACTED]`, the way every other type in this workspace that
-touches note material does. What is covered, field by field: `rho`, `r`, the
+touches note material does. `genesis_hash` is not covered: it is the hash of
+block zero, which every chain reader has. What is covered, field by field: `rho`, `r`, the
 memo and the nullifier for the store types, and for `PreparedSpend` the
 nullifiers it is about to publish, the nullifiers of the notes it spends and
 the leaf indices it holds.
@@ -606,10 +735,14 @@ parsing and the clones `prepare_spend` takes, are wiped on the way out. The
 nullifier is in there on the argument the `Debug` redaction already made: for a
 note that has not been spent it has never appeared anywhere, so it is the more
 predictive of the three, and a plain `String` freed without wiping sits in
-exactly the memory a core dump or a swap page reaches. The duplicate check a
-scan runs is a scan over the notes for the same reason, since the set it used
-to build cloned every held nullifier once per received note and every one of
-those copies dropped unwiped. The
+exactly the memory a core dump or a swap page reaches.
+`PreparedSpend::spent_nullifiers` holds the same type for the same reason, and
+on the sharpest version of the argument: a `PreparedSpend` exists exactly
+during the window between proving a spend and its settlement landing, so those
+values have appeared nowhere at all while it is alive. The conflict-set queries
+a scan runs key on borrowed nullifiers for the same reason, since the
+duplicate check they replaced built a fresh owned set per received note and
+every one of those copies dropped unwiped. The
 store's own JSON text is read and written inside `Zeroizing` as well, and the
 seed one file over gets the same treatment. What is not covered: serde_json's
 internal buffers, and any `String` that reallocated while growing, which leaves
@@ -657,7 +790,19 @@ Two of the default tests run the wallet against a scriptable JSON-RPC node in
 - `tests/sync_reorg.rs` asserts that a note re-included at a different leaf
   after its block was orphaned is moved in the store to the leaf it now
   occupies. A skipped one keeps a stale leaf index, reads as spendable, and
-  fails every spend on the path rebuild.
+  fails every spend on the path rebuild. It also asserts that one refused
+  output is one entry in `rejected` however many forks walk past it, and that
+  the entry goes when the settlement that claimed its nullifier leaves the
+  chain and the output becomes holdable.
+- `tests/sync_guards.rs` asserts what a sync refuses. A node behind the
+  wallet's own watermark is refused and the store is byte-identical afterwards,
+  on disk as well as in memory. A node with no block at a checkpoint's height
+  is refused and no checkpoint is popped, while the same hash at that height is
+  not a fork and the sync runs with nothing rewound. A store built against
+  another chain is refused by `open_on_chain` and by `sync` on its own, and
+  `--new-chain-store` archives the old file with its note secrets intact. And a
+  conflict set is one candidate at its largest member's value, spends that
+  member, and reports every member spent once the shared nullifier settles.
 
 ## Provenance
 
@@ -748,4 +893,21 @@ are cited at each site.
     is refused, so nothing goes out at a length of its own. Raising the cap is
     a coordinated change: the pad and the runtime's divisor move together, and
     every wallet on the chain has to agree on the size or the padding buys
-    nothing.
+    nothing. A runtime that merged the two buckets is a warning and not a
+    refusal, for the reason "What every chain reader learns" gives, so a wallet
+    can go on sending against a chain whose fee schedule it cannot fix.
+11. **A conflict set holds value the wallet can never reach.** Two notes
+    sharing a nullifier are one spendable value, and the smaller members are
+    dead weight that the store keeps and the balance does not count. Nothing in
+    v0 can recover them, because the chain refuses a nullifier it has already
+    settled, and nothing in a wallet can stop a sender creating them. What a
+    wallet owes is to hold every one of them and to pick the best member, which
+    is what it does; the recipient-side rule `docs/CIRCUIT.md` section 9.8 asks
+    for is a refusal to *count* them, and that is where it lives now.
+12. **The node gates are local, and a lying node is still a lying node.** The
+    height gate compares against this wallet's own watermark and the chain gate
+    against a genesis this wallet recorded from a node. A node that answers a
+    plausible head it does not have, or that forks below every checkpoint the
+    store kept, still drives a full rescan. Neither gate is a consensus check
+    and neither is meant to be: they refuse the answers that a wallet can prove
+    are not new information. Verifying the chain itself is running a node.

@@ -12,7 +12,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -47,6 +47,13 @@ pub struct NodeState {
     pub fork_tag: u8,
     /// The lowest height `fork_tag` applies to.
     pub fork_from: u32,
+    /// Heights `chain_getBlockHash` answers `null` for, whatever the head is.
+    ///
+    /// A node that has a head and no block at a lower height: pruned, or
+    /// serving a head it has not filled in behind. It is not a fork, and a
+    /// wallet that treats it as one rewinds its watermark on a node that
+    /// cannot answer for the range it rewinds into.
+    pub missing_hashes: BTreeSet<u32>,
 }
 
 impl NodeState {
@@ -171,7 +178,7 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
                 .get(0)
                 .and_then(Value::as_u64)
                 .unwrap_or(u64::from(state.head_number)) as u32;
-            if number > state.head_number {
+            if number > state.head_number || state.missing_hashes.contains(&number) {
                 return Ok(Value::Null);
             }
             Ok(json!(format!("0x{}", hex::encode(state.hash_at(number)))))

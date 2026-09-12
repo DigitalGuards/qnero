@@ -15,7 +15,7 @@ mod support;
 
 use qnero_notes::{encrypt_note, Digest, Note};
 use qnero_wallet::chain::Chain;
-use qnero_wallet::keys::create_seed;
+use qnero_wallet::keys::{create_seed, load_seed};
 use qnero_wallet::memo::pad_memo;
 use qnero_wallet::rpc::RpcClient;
 use qnero_wallet::scale::{blake2_128_concat_map_key, identity_map_key, storage_prefix};
@@ -643,33 +643,39 @@ fn a_spent_note_whose_own_leaf_was_orphaned_is_reported_too() {
 /// for every refused leaf inside the rewound range.
 ///
 /// A refused note is never added to `store.notes`, so `has_commitment` does
-/// not see it, the rescan decrypts it and refuses it again, and neither
-/// refusal branch asked whether `store.rejected` already held that
-/// commitment. Each fork touching that range added another copy, and `balance`
-/// prints one line per copy. It is new with the rewind: before it a leaf was
-/// never scanned twice.
+/// not see it, the rescan decrypts it and refuses it again, and the refusal
+/// branch did not ask whether `store.rejected` already held that commitment.
+/// Each fork touching that range added another copy, and `balance` prints one
+/// line per copy. It is new with the rewind: before it a leaf was never
+/// scanned twice.
+///
+/// The second half is the refusal going away again. The one refusal left is a
+/// nullifier the chain has already settled, and that is a statement about a
+/// chain state a reorg can undo: the settlement is orphaned, the rescan walks
+/// the same leaf, the nullifier is no longer settled and the note is held. The
+/// refusal stayed in the file, so `balance` printed "its nullifier is already
+/// settled on chain" beside a note it had just added to the balance.
 #[test]
-fn a_fork_rescan_records_one_refusal_per_refused_output() {
+fn a_fork_rescan_records_one_refusal_per_refused_output_and_drops_it_when_held() {
     let dir = support::scratch_dir("refusal-dedupe");
     let seed = dir.join("wallet.seed");
     create_seed(&seed).expect("a fresh seed");
     let mut wallet = Wallet::open(&seed).expect("the wallet opens");
     let address = wallet.address();
 
-    // A sender that reused one `(rho, r)` pair across two notes to this
-    // wallet: the second shares the first's nullifier, so exactly one of the
-    // two can ever be spent and the wallet refuses the second.
+    // A note whose nullifier the chain has already settled: whoever sent it
+    // reused a `(rho, r)` pair that a spend of an earlier note published, so
+    // this output can never be spent while that settlement stands.
     let held = note_for(address.pk, 1_000, "held");
     let held_ct = ct_for(&address, &held, 1);
-    let duplicate = Note::new(
-        address.pk,
-        7,
-        Digest::hash_bytes(&[b"rho", b"held".as_slice()]),
-        Digest::hash_bytes(&[b"r", b"held".as_slice()]),
-    )
-    .expect("a note sharing the nullifier");
-    let duplicate_ct = ct_for(&address, &duplicate, 2);
-    assert_ne!(held.commitment(), duplicate.commitment());
+    let settled = note_for(address.pk, 7, "settled");
+    let settled_ct = ct_for(&address, &settled, 2);
+    let nk = load_seed(&seed).expect("the seed loads").nk();
+    let settled_key = blake2_128_concat_map_key(
+        "Shielded",
+        "UsedNullifiers",
+        &settled.nullifier(&nk).to_bytes(),
+    );
 
     // A sync that finishes before either leaf lands, so its checkpoint is the
     // ancestor the fork check rewinds to.
@@ -678,6 +684,7 @@ fn a_fork_rescan_records_one_refusal_per_refused_output() {
         ..Default::default()
     };
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(5));
+    state.put_storage(&settled_key, &[]);
     let node = FakeNode::start(state);
     let rpc = RpcClient::new(&node.url);
     let chain = Chain::new(&rpc);
@@ -687,7 +694,7 @@ fn a_fork_rescan_records_one_refusal_per_refused_output() {
     {
         let mut state = node.state();
         put_leaf(&mut state, 5, 11, held.commitment(), &held_ct);
-        put_leaf(&mut state, 6, 11, duplicate.commitment(), &duplicate_ct);
+        put_leaf(&mut state, 6, 11, settled.commitment(), &settled_ct);
         state.head_number = 11;
         state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(7));
     }
@@ -700,7 +707,8 @@ fn a_fork_rescan_records_one_refusal_per_refused_output() {
     assert_eq!(wallet.store.rejected[0].leaf_index, 6);
 
     // A fork below both leaves. The replacement branch carries the same two
-    // outputs, so the rescan walks leaf 6 and refuses the same output again.
+    // outputs and the same settlement, so the rescan walks leaf 6 and refuses
+    // the same output again.
     {
         let mut state = node.state();
         state.fork_from = 11;
@@ -725,7 +733,7 @@ fn a_fork_rescan_records_one_refusal_per_refused_output() {
     );
     assert_eq!(wallet.store.unspent_total(), 1_000);
 
-    // A second fork over the same range, and a third: still one entry.
+    // A second fork over the same range: still one entry.
     {
         let mut state = node.state();
         state.fork_tag = 2;
@@ -735,4 +743,26 @@ fn a_fork_rescan_records_one_refusal_per_refused_output() {
         .sync(&chain, &metadata)
         .expect("the fourth sync runs");
     assert_eq!(wallet.store.rejected.len(), 1);
+
+    // The settlement that claimed the nullifier is orphaned out. The next
+    // rescan meets the same leaf, finds the nullifier unsettled and holds the
+    // note, and the refusal has to go with it.
+    {
+        let mut state = node.state();
+        state.remove_storage(&settled_key);
+        state.fork_tag = 3;
+        state.head_number = 17;
+    }
+    let report = wallet.sync(&chain, &metadata).expect("the fifth sync runs");
+    assert_eq!(report.received, 1, "the output is held now");
+    assert_eq!(
+        report.rejected_cleared, 1,
+        "a refusal for an output this wallet holds has to go"
+    );
+    assert!(
+        wallet.store.rejected.is_empty(),
+        "balance would print a refusal beside the note it names: {:?}",
+        wallet.store.rejected
+    );
+    assert_eq!(wallet.store.unspent_total(), 1_007);
 }

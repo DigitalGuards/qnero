@@ -25,7 +25,9 @@ use crate::memo::{pad_memo, unpad_memo};
 use crate::metadata::ChainMetadata;
 use crate::rpc::hex_0x;
 use crate::select::select_notes;
-use crate::store::{NoteOrigin, PendingKind, PendingNote, RejectedNote, StoredNote, WalletStore};
+use crate::store::{
+    NoteOrigin, PendingKind, PendingNote, RejectedNote, SecretHex, StoredNote, WalletStore,
+};
 use crate::POOL_QUANTUM;
 
 /// Leaf slots in a private batch. Not a metadata value and not discoverable
@@ -123,6 +125,49 @@ impl Wallet {
         })
     }
 
+    /// Open a wallet and bind its store to the chain this node serves.
+    ///
+    /// A store is bound to a seed by its address and to a chain by its
+    /// genesis, and it needs both. Leaf indices, block numbers, checkpoint
+    /// hashes and spent flags are all statements about one chain; a
+    /// `--dev --tmp` node that restarted answers a fresh genesis with an empty
+    /// tree, and against one of those the watermark sits above the new leaf
+    /// count, so the scan range is empty and the wallet keeps reporting a
+    /// balance nothing backs while every checkpoint names a block that does
+    /// not exist.
+    ///
+    /// `new_chain_store` is the escape. It archives the store beside itself
+    /// rather than deleting it, because the note secrets in it are the only
+    /// copy this wallet has of the `rho` and `r` that open its notes, and a
+    /// chain that looks gone can come back: the operator may simply have typed
+    /// the wrong `--node`.
+    pub fn open_on_chain(
+        seed_path: &Path,
+        chain: &Chain,
+        new_chain_store: bool,
+    ) -> Result<(Self, ChainBinding)> {
+        let mut wallet = Self::open(seed_path)?;
+        let genesis = hex::encode(chain.genesis_hash()?);
+        if new_chain_store && wallet.store.is_other_chain(&genesis) {
+            let archived = archive_store(&wallet.store_path)?;
+            wallet.store = WalletStore::new(wallet.key.address().encode());
+            wallet.store.bind_genesis(&genesis)?;
+            wallet.save()?;
+            return Ok((wallet, ChainBinding::Archived(archived)));
+        }
+        let binding = if wallet
+            .store
+            .bind_genesis(&genesis)
+            .with_context(|| format!("{}", wallet.store_path.display()))?
+        {
+            wallet.save()?;
+            ChainBinding::Recorded
+        } else {
+            ChainBinding::Bound
+        };
+        Ok((wallet, binding))
+    }
+
     pub fn address(&self) -> Address {
         self.key.address()
     }
@@ -146,7 +191,43 @@ impl Wallet {
     /// empty map is a zero balance or a settled note reported unspent.
     pub fn sync(&mut self, chain: &Chain, metadata: &ChainMetadata) -> Result<SyncReport> {
         metadata.ensure_known_storage()?;
+        // The chain this store belongs to, before anything in it is read as a
+        // statement about the chain this node serves. See
+        // `WalletStore::bind_genesis` and `Wallet::open_on_chain`.
+        let recorded_genesis = self
+            .store
+            .bind_genesis(&hex::encode(chain.genesis_hash()?))
+            .with_context(|| format!("{}", self.store_path.display()))?;
+
         let head = chain.head()?;
+        // The freshness gate, and it comes before every read and every write.
+        //
+        // Everything this sync derives is derived from what one node answers
+        // at one block: which leaves exist, which nullifiers are settled,
+        // which checkpoint hashes still stand. A node behind this wallet's own
+        // watermark answers all three with less than the wallet already knows,
+        // and each answer is then read as a change rather than as a gap. The
+        // settled set is the expensive one: `reconcile_spent` derives spent in
+        // both directions, so a lagging node un-spends every note whose
+        // settlement it has not seen and the next `send` selects an input the
+        // chain has already consumed. The checkpoint walk is the other: every
+        // checkpoint above the node's head answers with no block at all, which
+        // reads as a fork and rewinds the watermark.
+        //
+        // A node behind the wallet is an ordinary operational state: a second
+        // node, a node resyncing, a load balancer answering from a lagging
+        // replica. So it is refused by name and nothing is written.
+        if head.number < self.store.last_synced_block {
+            bail!(
+                "this node's head is block {} and this wallet has synced through block {}. A \
+                 node behind the wallet answers every question with less than the wallet \
+                 already knows: notes it has not seen settled would come back into the balance, \
+                 and every checkpoint above its head would read as a fork. Nothing has been \
+                 changed. Point --node at a node that has caught up, or wait for this one to.",
+                head.number,
+                self.store.last_synced_block
+            );
+        }
         let leaf_count = chain.leaf_count_at(&head.hash)?;
         // The settled nullifier set, read whole and pinned to the same block.
         //
@@ -169,6 +250,7 @@ impl Wallet {
             rewound_from: rewind.as_ref().map(|rewind| rewind.from),
             rewound_to: rewind.as_ref().map(|rewind| rewind.to),
             forked_at_block: rewind.as_ref().map(|rewind| rewind.at_block),
+            recorded_genesis,
             ..Default::default()
         };
 
@@ -226,30 +308,19 @@ impl Wallet {
                 let nullifier = received.note.nullifier(&nk);
                 let nullifier_hex = nullifier.to_hex();
 
-                // `docs/CIRCUIT.md` section 9.8: a sender picks `rho` and `r`
-                // for a note it creates, so a sender that repeats a pair
-                // hands over two notes sharing one nullifier, of which
-                // exactly one can ever be spent. The recipient is the last
-                // line, so the duplicate is refused. Carrying it would be a
-                // balance that cannot move.
+                // A note whose nullifier duplicates one this wallet already
+                // holds is kept.
                 //
-                // Recorded through `record_rejected`, which dedupes on the
-                // commitment: a refused note is never added to `notes`, so
-                // `has_commitment` does not see it and the rescan a fork
-                // triggers walks the same leaf, decrypts it and refuses it
-                // again.
-                if self.store.holds_nullifier(&nullifier_hex) {
-                    if self.store.record_rejected(RejectedNote {
-                        leaf_index: record.index,
-                        commitment: commitment_hex,
-                        nullifier: nullifier_hex.into(),
-                        value: received.note.value,
-                        reason: "its nullifier duplicates a note this wallet already holds".into(),
-                    }) {
-                        report.rejected += 1;
-                    }
-                    continue;
-                }
+                // `docs/CIRCUIT.md` section 9.8: a sender picks `rho` and `r`
+                // for a note it creates, so a sender that repeats a pair hands
+                // over two notes sharing one nullifier, of which at most one
+                // can ever settle. Which one is not the sender's choice and
+                // not the scan's: it is whichever one this wallet spends
+                // first. The scan used to refuse the second note it met, which
+                // decided that by arrival order and decided it permanently, so
+                // a sender who put the large note second had the wallet keep
+                // the small one with no way back. Both are held now and
+                // `WalletStore::spendable` picks the larger, on every command.
                 if self.store.nullifier_settled(&nullifier_hex) {
                     if self.store.record_rejected(RejectedNote {
                         leaf_index: record.index,
@@ -297,6 +368,14 @@ impl Wallet {
                     .pending
                     .retain(|pending| pending.commitment != commitment_hex);
             }
+            // A leaf this scan accepted cannot still be a refusal. The one
+            // refusal left is a settled nullifier, and a reorg that orphans
+            // the settlement makes the same leaf acceptable on the rescan,
+            // which used to leave the note in the balance and the refusal in
+            // the file, both printed by `balance`. Once per scan rather than
+            // once per note: it is a walk over two small lists.
+            // See `WalletStore::prune_rejected`.
+            report.rejected_cleared = self.store.prune_rejected();
         }
 
         // Spent status, derived against the local copy of the settled set that
@@ -309,9 +388,10 @@ impl Wallet {
         // was orphaned out of the chain left the note it spent reported spent
         // forever, out of the balance and unselectable, with the value fully
         // spendable on chain. See `WalletStore::reconcile_spent`.
-        let (newly_spent, newly_unspent) = self.store.reconcile_spent(head.number);
-        report.newly_spent = newly_spent;
-        report.newly_unspent = newly_unspent;
+        let reconciled = self.store.reconcile_spent(head.number);
+        report.newly_spent = reconciled.newly_spent;
+        report.newly_unspent = reconciled.newly_unspent;
+        report.held_spent = reconciled.held_spent;
 
         // A rescanned range that did not carry a note back is a note the
         // current chain does not have: its settlement was orphaned and never
@@ -368,24 +448,50 @@ impl Wallet {
     /// the node, which is the property `Chain::rebuild_tree` and
     /// `Chain::used_nullifiers_at` both pay for. `chain_getBlockHash` at a
     /// height names nothing.
+    ///
+    /// A fork is one thing only: the node has a block at a checkpoint's height
+    /// and it is a different block. No block at that height is not a fork, it
+    /// is a node that does not reach that height, and this refuses rather than
+    /// rewinding on it. The two used to be the same branch, which made a node
+    /// lagging behind the wallet pop every checkpoint above its head and
+    /// rewind the watermark to a height that node could still answer: the
+    /// scan then walked leaves it had already scanned, against a leaf count
+    /// smaller than the one already recorded. The freshness gate at the top of
+    /// `sync` catches the case where the head itself is behind, and this
+    /// catches what that cannot see, a node that answers a head it has no
+    /// block history for.
+    ///
+    /// Nothing is written until every checkpoint has been probed, so a refusal
+    /// leaves the checkpoint list exactly as it found it.
     fn rewind_past_fork(&mut self, chain: &Chain, head: &ChainHead) -> Result<Option<ForkRewind>> {
         let from = self.store.next_leaf;
-        let mut dropped = 0u32;
-        while let Some(checkpoint) = self.store.checkpoints.last().cloned() {
-            if checkpoint.block_number <= head.number {
-                let hash = chain.block_hash_at_height(checkpoint.block_number)?;
-                if hash.map(hex::encode).as_deref() == Some(checkpoint.block_hash.as_str()) {
-                    break;
-                }
+        let mut dropped = 0usize;
+        for checkpoint in self.store.checkpoints.iter().rev() {
+            let Some(hash) = chain.block_hash_at_height(checkpoint.block_number)? else {
+                bail!(
+                    "this node has no block at height {}, which this wallet checkpointed while \
+                     syncing, and its head is block {}. A missing block at a height a node \
+                     claims to have reached is a node that is behind or pruned, and it is not a \
+                     fork: a fork is a different block at that height. Rewinding on it would \
+                     rescan leaves against a tree smaller than the one already recorded. \
+                     Nothing has been changed.",
+                    checkpoint.block_number,
+                    head.number
+                );
+            };
+            if hex::encode(hash) == checkpoint.block_hash {
+                break;
             }
-            // Either the chain is shorter than this checkpoint or the block at
-            // its height is a different one. Both are the fork.
-            self.store.checkpoints.pop();
+            // The node has a block at that height and it is a different one.
+            // That checkpoint belongs to a branch that is gone.
             dropped += 1;
         }
         if dropped == 0 {
             return Ok(None);
         }
+        self.store
+            .checkpoints
+            .truncate(self.store.checkpoints.len() - dropped);
         let (at_block, to) = match self.store.checkpoints.last() {
             Some(checkpoint) => (checkpoint.block_number, checkpoint.next_leaf),
             // Every checkpoint the wallet kept is on a branch that is gone.
@@ -421,6 +527,11 @@ impl Wallet {
         // of at the runtime.
         metadata.ensure_known_storage()?;
         ensure_memo_pad_fits(metadata)?;
+        // The chain this store belongs to. A shield against another one burns
+        // transparent value into a tree the store's own leaf indices do not
+        // describe.
+        let genesis = chain.genesis_hash()?;
+        self.store.ensure_genesis(&hex::encode(genesis))?;
         if quanta == 0 {
             bail!("a shield of zero moves nothing and the chain refuses it");
         }
@@ -459,7 +570,7 @@ impl Wallet {
         let context = SigningContext {
             spec_version,
             transaction_version,
-            genesis_hash: chain.genesis_hash()?,
+            genesis_hash: genesis,
             nonce: chain.account_nonce(&from.account_id())?,
             tip: 0,
         };
@@ -563,7 +674,7 @@ impl Wallet {
         let target = amount
             .checked_add(fee)
             .ok_or_else(|| anyhow!("{amount} plus {fee} overflows"))?;
-        select_notes(self.store.unspent(), target)?;
+        select_notes(self.store.spendable(), target)?;
         Ok(fee)
     }
 
@@ -676,13 +787,17 @@ impl Wallet {
     ) -> Result<PreparedSpend> {
         metadata.ensure_known_storage()?;
         ensure_memo_pad_fits(metadata)?;
+        // The chain this store belongs to. Every leaf index a selection hands
+        // the path rebuild is an index into one chain's tree.
+        self.store
+            .ensure_genesis(&hex::encode(chain.genesis_hash()?))?;
         let fee = self.resolve_fee(metadata, to, memo, requested_fee)?;
         let (probe_payment, probe_change) = self.probe_lengths(to, memo)?;
 
         let target = amount
             .checked_add(fee)
             .ok_or_else(|| anyhow!("{amount} plus {fee} overflows"))?;
-        let selected: Vec<StoredNote> = select_notes(self.store.unspent(), target)?
+        let selected: Vec<StoredNote> = select_notes(self.store.spendable(), target)?
             .into_iter()
             .cloned()
             .collect();
@@ -858,7 +973,7 @@ impl Wallet {
             },
             spent_nullifiers: selected
                 .iter()
-                .map(|note| note.nullifier.as_str().to_string())
+                .map(|note| SecretHex::from(note.nullifier.as_str()))
                 .collect(),
             input_leaves: selected.iter().map(|note| note.leaf_index).collect(),
             amount,
@@ -1020,7 +1135,7 @@ impl Wallet {
             );
         }
         for nullifier in &prepared.spent_nullifiers {
-            self.store.mark_spent(nullifier, included_at);
+            self.store.mark_spent(nullifier.as_str(), included_at);
         }
         self.save()?;
 
@@ -1048,7 +1163,15 @@ pub struct PreparedSpend {
     /// Both nullifiers the leaf publishes, the dummy's included.
     pub nullifiers: [[u8; 32]; 2],
     change_note: PendingNote,
-    spent_nullifiers: Vec<String>,
+    /// The nullifiers of the notes this spend consumes, zeroized on drop.
+    ///
+    /// In `SecretHex` for the reason `StoredNote::nullifier` is: until the
+    /// settlement lands these values have appeared nowhere, and a
+    /// `PreparedSpend` exists exactly during that window. A plain `String`
+    /// dropped without wiping sits in the memory a core dump or a swap page
+    /// reaches, and beside the chain it names which settlement was this
+    /// wallet's.
+    spent_nullifiers: Vec<SecretHex>,
     pub input_leaves: Vec<u64>,
     pub amount: u64,
     pub fee: u64,
@@ -1190,10 +1313,18 @@ pub struct SyncReport {
     pub received: u64,
     pub received_value: u64,
     pub rejected: u64,
+    /// Refusals dropped because this wallet now holds the same output.
+    pub rejected_cleared: u64,
+    /// Whether this sync was the one that wrote the chain's genesis into the
+    /// store.
+    pub recorded_genesis: bool,
     pub newly_spent: u64,
     /// Notes whose nullifier left the settled set: the block that settled
     /// them was orphaned and the settlement did not re-land.
     pub newly_unspent: u64,
+    /// Notes whose nullifier this node does not carry, at a head that has not
+    /// reached the block the spend was seen at. Left spent.
+    pub held_spent: u64,
     /// Notes already held that the chain now carries at a different leaf.
     pub relocated: u64,
     /// The watermark this sync rewound from, when it found a fork.
@@ -1204,6 +1335,54 @@ pub struct SyncReport {
     pub forked_at_block: Option<u32>,
     /// Held notes inside a rescanned range that the chain no longer carries.
     pub vanished: u64,
+}
+
+/// What binding a store to a node's chain did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainBinding {
+    /// The store already named this chain.
+    Bound,
+    /// The store named no chain, and now names this one. Every store written
+    /// before version 5 starts here, and so does every fresh one.
+    Recorded,
+    /// The store named another chain and was archived at this path. The wallet
+    /// carries a fresh store bound to the node's chain.
+    Archived(PathBuf),
+}
+
+/// Move a store out of the way, keeping it.
+///
+/// Never a delete. The file holds every note's `rho` and `r`, which are the
+/// only copy this wallet has of what opens its notes, and the reason it is
+/// being moved may be an operator who typed the wrong `--node`.
+///
+/// The name carries the genesis the store was bound to, so two archives from
+/// two different chains do not collide, and a counter covers the case of two
+/// archives from the same one.
+fn archive_store(path: &Path) -> Result<PathBuf> {
+    let mut base = path.as_os_str().to_os_string();
+    base.push(".archived");
+    for attempt in 0..1_000 {
+        let mut candidate = base.clone();
+        if attempt > 0 {
+            candidate.push(format!(".{attempt}"));
+        }
+        let candidate = PathBuf::from(candidate);
+        if !candidate.exists() {
+            std::fs::rename(path, &candidate).with_context(|| {
+                format!(
+                    "failed to archive {} as {}",
+                    path.display(),
+                    candidate.display()
+                )
+            })?;
+            return Ok(candidate);
+        }
+    }
+    bail!(
+        "{} has a thousand archived copies beside it already; move them somewhere else first",
+        path.display()
+    )
 }
 
 /// What a fork check found: the watermark it rewound from, the one it rewound
@@ -1427,7 +1606,7 @@ mod tests {
                 submitted_at_block: 11,
                 extrinsic: String::new(),
             },
-            spent_nullifiers: vec![spent.clone()],
+            spent_nullifiers: vec![spent.as_str().into()],
             input_leaves: vec![1_068, 1_069],
             amount: 300,
             fee: 9,

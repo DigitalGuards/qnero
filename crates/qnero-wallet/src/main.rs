@@ -12,8 +12,8 @@ use qnero_wallet::keys::{create_seed, default_seed_path, store_path_for};
 use qnero_wallet::memo::{memo_budget_within, render_memo_within, terminal_columns, MEMO_BYTES};
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{RpcClient, DEFAULT_NODE_URL};
-use qnero_wallet::store::{PendingKind, StoredNote};
-use qnero_wallet::wallet::{EntryRhoCheck, MerkleSource, Wallet, NUM_LEAF_PROOFS};
+use qnero_wallet::store::{NoteRow, PendingKind, StoredNote};
+use qnero_wallet::wallet::{ChainBinding, EntryRhoCheck, MerkleSource, Wallet, NUM_LEAF_PROOFS};
 use qnero_wallet::POOL_QUANTUM;
 
 /// Amounts are in pool quanta. One quantum is 10^10 planck, 0.01 QTC.
@@ -52,6 +52,16 @@ struct Cli {
     /// Seed file. The note store lives beside it as `<seed>.store.json`.
     #[arg(long, global = true)]
     file: Option<PathBuf>,
+    /// Archive a store built against another chain and start a fresh one.
+    ///
+    /// A store records the genesis of the chain it was built against, and
+    /// every leaf index, block number, checkpoint hash and spent flag in it is
+    /// a statement about that chain. A node serving a different genesis, which
+    /// is what a restarted `--dev --tmp` node is, makes all of them wrong.
+    /// This moves the old store aside rather than deleting it: it holds the
+    /// only copy of every note's rho and r.
+    #[arg(long, global = true)]
+    new_chain_store: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -127,6 +137,23 @@ fn ensure_memo_fits(memo: &str) -> Result<()> {
     Ok(())
 }
 
+/// Say what binding the store to this node's chain did, when it did anything.
+///
+/// Silent for the ordinary case, a store that already named this chain.
+fn report_binding(binding: &ChainBinding) {
+    match binding {
+        ChainBinding::Bound => {}
+        ChainBinding::Recorded => {
+            println!("chain       recorded this node's genesis in the store")
+        }
+        ChainBinding::Archived(path) => println!(
+            "chain       this store belonged to another chain. It is archived at {} and this \
+             wallet starts fresh against this one.",
+            path.display()
+        ),
+    }
+}
+
 /// The `balance` note table.
 ///
 /// The four fields are measured before anything is printed, so the memo column
@@ -134,14 +161,24 @@ fn ensure_memo_fits(memo: &str) -> Result<()> {
 /// narrowest one it could: a leaf index past 9,999,999,999 or a value past
 /// 999,999,999,999 widens its own field, and a budget computed from the
 /// constant would then hand the memo the columns that field took.
-fn print_notes<'a>(notes: impl Iterator<Item = &'a StoredNote>) {
-    fn state(note: &StoredNote) -> &'static str {
-        if note.spent {
+///
+/// One row per nullifier. Two notes sharing a nullifier are
+/// a conflict set: at most one of them can ever settle, so listing both would
+/// print a total the chain will never back. The row carries the member a spend
+/// would use and says how many notes it stands for.
+fn print_notes(rows: &[NoteRow<'_>]) {
+    fn state(row: &NoteRow<'_>) -> String {
+        let base = if row.note.spent {
             "spent"
-        } else if !note.on_chain {
+        } else if !row.note.on_chain {
             "orphan"
         } else {
             "unspent"
+        };
+        if row.is_conflict() {
+            format!("{base} conflict {}", row.members)
+        } else {
+            base.to_string()
         }
     }
     fn block(note: &StoredNote) -> String {
@@ -156,20 +193,21 @@ fn print_notes<'a>(notes: impl Iterator<Item = &'a StoredNote>) {
         leaf: String,
         value: String,
         block: String,
-        state: &'static str,
+        state: String,
         memo: &'a str,
     }
 
-    let rows: Vec<Row<'a>> = notes
-        .map(|note| Row {
-            leaf: note.leaf_index.to_string(),
-            value: note.value.to_string(),
-            block: block(note),
-            state: state(note),
-            memo: note.memo.as_str(),
+    let rows: Vec<Row<'_>> = rows
+        .iter()
+        .map(|row| Row {
+            leaf: row.note.leaf_index.to_string(),
+            value: row.note.value.to_string(),
+            block: block(row.note),
+            state: state(row),
+            memo: row.note.memo.as_str(),
         })
         .collect();
-    let width = |header: usize, measure: &dyn Fn(&Row<'a>) -> usize| {
+    let width = |header: usize, measure: &dyn Fn(&Row<'_>) -> usize| {
         rows.iter().map(measure).max().unwrap_or(0).max(header)
     };
     let leaf = width(10, &|row| row.leaf.len());
@@ -253,6 +291,18 @@ fn main() -> Result<()> {
             println!("tree root         {}", hex::encode(tree.root));
             if seed_path.exists() {
                 let wallet = Wallet::open(&seed_path)?;
+                match wallet.store.genesis_hash.as_deref() {
+                    Some(genesis) if genesis == hex::encode(chain.genesis_hash()?) => {
+                        println!("store chain       bound to this chain")
+                    }
+                    Some(genesis) => println!(
+                        "store chain       {genesis}, which is NOT this node's chain: sync \
+                         and send will refuse"
+                    ),
+                    None => {
+                        println!("store chain       not recorded yet; the next sync records it")
+                    }
+                }
                 println!("last synced block {}", wallet.store.last_synced_block);
                 println!("next leaf to scan {}", wallet.store.next_leaf);
             } else {
@@ -263,7 +313,9 @@ fn main() -> Result<()> {
             let rpc = RpcClient::new(&cli.node);
             let chain = Chain::new(&rpc);
             let metadata = ChainMetadata::fetch(&rpc)?;
-            let mut wallet = Wallet::open(&seed_path)?;
+            let (mut wallet, binding) =
+                Wallet::open_on_chain(&seed_path, &chain, cli.new_chain_store)?;
+            report_binding(&binding);
             let report = wallet.sync(&chain, &metadata)?;
             println!(
                 "scanned leaves {}..{} at block {}",
@@ -306,7 +358,21 @@ fn main() -> Result<()> {
                     report.vanished
                 );
             }
+            if report.rejected_cleared > 0 {
+                println!(
+                    "{} refused output(s) are held now: the settlement that claimed their \
+                     nullifier is no longer on the chain",
+                    report.rejected_cleared
+                );
+            }
             println!("newly spent {}", report.newly_spent);
+            if report.held_spent > 0 {
+                println!(
+                    "{} spent note(s) kept spent: this node has not reached the block their \
+                     settlement was seen at, so their nullifier being absent says nothing yet",
+                    report.held_spent
+                );
+            }
             if report.newly_unspent > 0 {
                 println!(
                     "back in the balance {}: their settlement is no longer on the chain",
@@ -324,12 +390,21 @@ fn main() -> Result<()> {
             if store.off_chain().next().is_some() {
                 println!("not on chain   {} quanta", store.off_chain_total());
             }
+            let conflicted = store.conflicted();
+            if !conflicted.is_empty() {
+                println!(
+                    "in conflict    {} note(s) share a nullifier with another note this wallet \
+                     holds. At most one member of each set can ever settle, so the table lists \
+                     each set once, at the value a spend would use.",
+                    conflicted.len()
+                );
+            }
             println!("synced through block {}", store.last_synced_block);
             println!();
             if store.notes.is_empty() {
                 println!("no notes");
             } else {
-                print_notes(store.notes.iter());
+                print_notes(&store.rows());
             }
             if store.off_chain().next().is_some() {
                 println!();
@@ -340,7 +415,7 @@ fn main() -> Result<()> {
                      the commitment again puts them back.",
                     store.off_chain_total()
                 );
-                print_notes(store.off_chain());
+                print_notes(&store.off_chain_rows());
             }
             for pending in &store.pending {
                 println!(
@@ -370,7 +445,9 @@ fn main() -> Result<()> {
             // Refused here as well as inside the encryption, so an oversized
             // memo costs no signature and no round trip.
             ensure_memo_fits(&memo)?;
-            let mut wallet = Wallet::open(&seed_path)?;
+            let (mut wallet, binding) =
+                Wallet::open_on_chain(&seed_path, &chain, cli.new_chain_store)?;
+            report_binding(&binding);
             println!(
                 "shielding {amount} quanta ({} planck) from {from_dev_account}",
                 u128::from(amount) * POOL_QUANTUM
@@ -419,7 +496,9 @@ fn main() -> Result<()> {
                 Address::decode(&to).context("the recipient address does not decode")?;
             // Refused before the sync and long before the prover is built.
             ensure_memo_fits(&memo)?;
-            let mut wallet = Wallet::open(&seed_path)?;
+            let (mut wallet, binding) =
+                Wallet::open_on_chain(&seed_path, &chain, cli.new_chain_store)?;
+            report_binding(&binding);
             if !no_sync {
                 wallet.sync(&chain, &metadata)?;
             }

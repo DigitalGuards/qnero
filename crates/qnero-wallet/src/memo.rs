@@ -57,9 +57,12 @@ pub const CIPHERTEXT_FIXED_BYTES: usize = 1731;
 /// and `fee::ensure_memo_pad_fits` checks **both** bounds against the runtime
 /// the wallet is actually talking to, since this constant is compiled in while
 /// `MaxCiphertextBytes` and `CiphertextBytesPerFeeQuantum` are both read from
-/// metadata. `fee::largest_separating_pad` is where the 61 comes from, and a
-/// runtime that moves either value is refused by name rather than settling at
-/// a merged endpoint.
+/// metadata. `fee::largest_separating_pad` is where the 61 comes from. A
+/// runtime whose cap this pad no longer fits under is refused, since the
+/// extrinsic would fail to decode. A runtime whose divisor merged the two
+/// buckets is a warning and the spend goes ahead: that is a property of the
+/// chain, a settler pads to the cap whatever this wallet does, and shrinking
+/// this pad alone would publish this wallet's own ciphertext length.
 ///
 /// Zcash's 512-byte memo field is the precedent for padding at all. The size
 /// differs because this ciphertext's fixed part is larger and because the
@@ -78,10 +81,6 @@ pub const BALANCE_PREFIX_COLUMNS: usize = 44;
 
 /// The terminal width assumed when nothing says otherwise.
 pub const DEFAULT_TERMINAL_COLUMNS: usize = 80;
-
-/// Columns of memo `balance` prints before it truncates, at the default
-/// terminal width and the narrowest prefix.
-pub const MEMO_DISPLAY_COLUMNS: usize = DEFAULT_TERMINAL_COLUMNS - BALANCE_PREFIX_COLUMNS;
 
 /// The narrowest memo column worth drawing. Below it the memo moves to a line
 /// of its own.
@@ -190,11 +189,6 @@ pub fn unpad_memo(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
-/// Render a memo for a terminal, at the default budget.
-pub fn render_memo(memo: &str) -> String {
-    render_memo_within(memo, MEMO_DISPLAY_COLUMNS)
-}
-
 /// Render a memo for a terminal, inside `columns` display columns.
 ///
 /// A memo is remote input: anyone holding this wallet's address can send it a
@@ -272,6 +266,15 @@ fn needs_escaping(character: char) -> bool {
 mod tests {
     use super::*;
 
+    /// The narrowest row the table can draw, which is the budget the deleted
+    /// `render_memo` wrapper hard-coded. It is a test fixture now: `main.rs`
+    /// measures the prefix it is about to print and sizes the column from the
+    /// terminal, so nothing outside these tests ever wanted one constant
+    /// budget.
+    fn render(memo: &str) -> String {
+        render_memo_within(memo, DEFAULT_TERMINAL_COLUMNS - BALANCE_PREFIX_COLUMNS)
+    }
+
     /// The property the padding exists for: every memo this wallet writes
     /// produces a ciphertext of one length, so no observer reads a memo's size
     /// off the chain and no spend's change note is the shorter of the pair.
@@ -308,7 +311,7 @@ mod tests {
     #[test]
     fn a_memo_cannot_carry_an_escape_sequence_to_the_terminal() {
         let hostile = "\r\x1b[2K       4          9000        3    unspent  attacker's row";
-        let rendered = render_memo(hostile);
+        let rendered = render(hostile);
         assert!(
             !rendered.contains('\x1b'),
             "an ESC byte survived: {rendered}"
@@ -318,12 +321,12 @@ mod tests {
         assert!(rendered.contains("\\u{0d}"), "{rendered}");
 
         // OSC 52 writes the sender's address into the operator's clipboard.
-        let clipboard = render_memo("\x1b]52;c;cXExYWJj\x07");
+        let clipboard = render("\x1b]52;c;cXExYWJj\x07");
         assert!(!clipboard.contains('\x1b'));
         assert!(!clipboard.contains('\u{7}'));
 
         // Bidi overrides reorder a line with no escape byte at all.
-        let bidi = render_memo("paid \u{202e}0001 to bob");
+        let bidi = render("paid \u{202e}0001 to bob");
         assert!(!bidi.contains('\u{202e}'), "{bidi}");
     }
 
@@ -376,9 +379,9 @@ mod tests {
     /// budget is the terminal width less the prefix.
     #[test]
     fn a_long_memo_is_truncated_to_one_row() {
-        let row = |memo: &str| BALANCE_PREFIX_COLUMNS + render_memo(memo).chars().count();
+        let row = |memo: &str| BALANCE_PREFIX_COLUMNS + render(memo).chars().count();
 
-        let rendered = render_memo(&"m".repeat(MEMO_BYTES));
+        let rendered = render(&"m".repeat(MEMO_BYTES));
         assert!(rendered.ends_with("..."));
         assert!(
             row(&"m".repeat(MEMO_BYTES)) <= DEFAULT_TERMINAL_COLUMNS,
@@ -390,7 +393,7 @@ mod tests {
         // to `chars().count()`. Escaped, each is eight ASCII columns and the
         // budget sees every one of them.
         let wide = "\u{ff10}".repeat(MEMO_BYTES / 3);
-        let rendered = render_memo(&wide);
+        let rendered = render(&wide);
         assert!(!rendered.contains('\u{ff10}'), "{rendered}");
         assert!(
             row(&wide) <= DEFAULT_TERMINAL_COLUMNS,
@@ -403,14 +406,14 @@ mod tests {
         // different memos render identically, the second breaks the row in
         // terminals and log viewers.
         for hidden in ['\u{200b}', '\u{200d}', '\u{2028}', '\u{2029}'] {
-            let rendered = render_memo(&format!("paid{hidden}bob"));
+            let rendered = render(&format!("paid{hidden}bob"));
             assert!(!rendered.contains(hidden), "{rendered}");
             assert!(rendered.contains("\\u{"), "{rendered}");
         }
-        assert_ne!(render_memo("paid\u{200b}bob"), render_memo("paidbob"));
+        assert_ne!(render("paid\u{200b}bob"), render("paidbob"));
 
-        assert_eq!(render_memo("short"), "short");
-        assert_eq!(render_memo(""), "");
+        assert_eq!(render("short"), "short");
+        assert_eq!(render(""), "");
     }
 
     /// The regression: the budget was sized from `COLUMNS` alone.
@@ -484,10 +487,6 @@ mod tests {
     /// row fits whatever terminal it is printed into.
     #[test]
     fn the_budget_leaves_room_for_the_table_prefix() {
-        assert_eq!(
-            MEMO_DISPLAY_COLUMNS,
-            DEFAULT_TERMINAL_COLUMNS - BALANCE_PREFIX_COLUMNS
-        );
         // A narrow terminal still gets a usable column, and a wide one is not
         // truncated to the default.
         assert_eq!(render_memo_within("abcdefghij", 6), "abc...");
