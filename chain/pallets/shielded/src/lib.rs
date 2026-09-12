@@ -614,14 +614,19 @@ pub mod pallet {
 		/// touched.
 		AuthorFeeAccrued { amount: BalanceOf<T> },
 		/// The block's coinbase note. `value` is public and is what the chain
-		/// hashed with `inner` to get the commitment it appended; a ciphertext
-		/// is present only when the author encrypted one.
+		/// hashed with `inner` to get the commitment it appended.
+		///
+		/// `has_ciphertext` is a flag rather than the payload: the bytes are
+		/// already in `Ciphertexts` under the leaf index, and a block that
+		/// republished them would put every author's payload in two places
+		/// forever. v1 refuses a non-empty payload outright, so the flag is
+		/// false on every block this runtime builds.
 		CoinbaseMinted {
 			block_number: BlockNumberFor<T>,
 			leaf_index: u64,
 			inner: Hash256,
 			value: BalanceOf<T>,
-			ciphertext: Vec<u8>,
+			has_ciphertext: bool,
 		},
 		/// The block reward could not be minted into a note and stays with
 		/// `pallet-mining-rewards` for the next block. The one reachable cause
@@ -725,6 +730,10 @@ pub mod pallet {
 		CoinbaseAlreadySet,
 		/// The block has no author, so there is nobody the coinbase belongs to.
 		NoBlockAuthor,
+		/// The coinbase inherent carried an encrypted payload. v1 has no
+		/// builder for one and charges nothing for the bytes, so the field is
+		/// refused until both exist.
+		CoinbasePayloadNotSupported,
 	}
 
 	#[pallet::hooks]
@@ -963,6 +972,19 @@ pub mod pallet {
 			ensure!(!PendingCoinbase::<T>::exists(), Error::<T>::CoinbaseAlreadySet);
 			ensure!(Self::block_author().is_some(), Error::<T>::NoBlockAuthor);
 
+			// Nothing builds one yet, so nothing may publish one. An inherent
+			// pays no fee and a mandatory dispatch does not compete for block
+			// weight, so these bytes would be the one place on the chain where
+			// permanent state is free: the settlement path charges
+			// `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)` for
+			// exactly the same map, and an author writing
+			// `MaxCiphertextBytes` of anything every block it wins would pay
+			// nothing for state every full node keeps forever. A non-empty
+			// payload would also mark its own leaf, since a derived coinbase
+			// publishes none. When a builder for a third-party coinbase lands
+			// (`docs/CIRCUIT.md` section 10.6), this is where its bytes get
+			// priced against the author's own credit.
+			ensure!(ciphertext.is_empty(), Error::<T>::CoinbasePayloadNotSupported);
 			let stored: BoundedVec<u8, T::MaxCiphertextBytes> =
 				ciphertext.try_into().map_err(|_| Error::<T>::CiphertextTooLarge)?;
 			// The one property of the payload the chain does check, because it
@@ -1920,8 +1942,11 @@ pub mod pallet {
 			};
 
 			let block_number = frame_system::Pallet::<T>::block_number();
-			// Only when there is one. A derived coinbase carries no payload and
-			// an empty entry would be a key the wallet reads for nothing.
+			// Only when there is one, which under v1 is never: the inherent
+			// refuses a non-empty payload, and a derived coinbase carries none
+			// anyway. The branch is where a priced third-party payload would
+			// land, and an empty entry would be a key the wallet reads for
+			// nothing.
 			if !payload.ciphertext.is_empty() {
 				Ciphertexts::<T>::insert(leaf_index, &payload.ciphertext);
 			}
@@ -1935,7 +1960,7 @@ pub mod pallet {
 				leaf_index,
 				inner: payload.inner,
 				value,
-				ciphertext: payload.ciphertext.to_vec(),
+				has_ciphertext: !payload.ciphertext.is_empty(),
 			});
 			Ok(())
 		}

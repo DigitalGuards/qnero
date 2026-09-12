@@ -2181,7 +2181,7 @@ fn a_block_mints_one_coinbase_note_worth_the_reward() {
 				leaf_index: 0,
 				inner,
 				value: 7 * POOL_QUANTUM,
-				ciphertext: Vec::new(),
+				has_ciphertext: false,
 			}
 			.into(),
 		);
@@ -2218,6 +2218,45 @@ fn the_coinbase_note_carries_the_block_reward_and_the_author_fee_share() {
 	});
 }
 
+/// A zero credit still mints, when what the pool owes the author is already
+/// inside it.
+///
+/// This is the end state the emission curve is heading for: supply reaches
+/// `MaxSupply`, the block reward rounds to zero, and a block whose only traffic
+/// is settlements collects no transaction fees either, because a settlement is
+/// `Pays::No`. What that block does have is the author's share of the fees it
+/// settled, waiting in `PendingCoinbaseFee`. It has to become a note here or it
+/// never does: it left `PoolValue` on the way, `ShieldedSupply` counts it, and
+/// nothing else drains it.
+#[test]
+fn a_zero_reward_still_mints_the_author_fee_already_in_the_pool() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		set_author_preimage([5u8; 32]);
+		let block = System::block_number() as u32;
+		let inner = record_coinbase(block);
+
+		// Nine quanta of fee: five burned, four to the author.
+		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 9)]);
+		assert_ok!(Shielded::settle(bundle, vec![output(b"ct-a1", b"ct-a2")]));
+		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_QUANTUM);
+
+		// No emission and no collected fees: exactly what a late-life block
+		// hands over.
+		assert_ok!(deposit_coinbase(0));
+
+		let leaf = ZkTree::leaf_count() - 1;
+		assert_eq!(Shielded::coinbase_value(leaf), Some(4), "the author's share is the note");
+		assert_eq!(
+			pallet_zk_tree::Leaves::<Test>::get(leaf),
+			qnero_circuit::chain::commitment(&inner, 4)
+		);
+		assert_eq!(Shielded::pending_coinbase_fee(), 0);
+		// 100 in, 9 of fee out, 4 back as the note.
+		assert_eq!(Shielded::pool_value(), 95 * POOL_QUANTUM);
+	});
+}
+
 /// Two coinbase notes in one block would be two notes on one `rho`, because the
 /// block number is the whole identifier the rule hashes. The refusal is a
 /// mandatory dispatch failure, which is a dead block.
@@ -2229,7 +2268,7 @@ fn a_second_coinbase_in_one_block_is_refused() {
 		record_coinbase(block);
 		let (inner, _, _) = coinbase_payload(block + 1);
 		assert_noop!(
-			Shielded::coinbase(RuntimeOrigin::none(), inner, b"second".to_vec()),
+			Shielded::coinbase(RuntimeOrigin::none(), inner, Vec::new()),
 			Error::<Test>::CoinbaseAlreadySet
 		);
 	});
@@ -2254,7 +2293,7 @@ fn a_coinbase_inner_that_is_not_four_canonical_limbs_is_refused() {
 	new_test_ext().execute_with(|| {
 		set_author_preimage([3u8; 32]);
 		assert_noop!(
-			Shielded::coinbase(RuntimeOrigin::none(), [0xffu8; 32], b"ct".to_vec()),
+			Shielded::coinbase(RuntimeOrigin::none(), [0xffu8; 32], Vec::new()),
 			Error::<Test>::NonCanonicalInner
 		);
 		// An empty ciphertext is the ordinary case: a derived coinbase carries
@@ -2288,11 +2327,7 @@ fn the_previous_blocks_payload_is_cleared_before_the_next_inherent() {
 		<Shielded as frame_support::traits::Hooks<u64>>::on_initialize(2);
 		assert!(Shielded::pending_coinbase().is_none());
 		// And the block after can record its own.
-		assert_ok!(Shielded::coinbase(
-			RuntimeOrigin::none(),
-			coinbase_payload(2).0,
-			b"ct".to_vec()
-		));
+		assert_ok!(Shielded::coinbase(RuntimeOrigin::none(), coinbase_payload(2).0, Vec::new()));
 	});
 }
 
@@ -2341,9 +2376,14 @@ fn the_coinbase_is_a_required_inherent_and_the_settlements_are_not() {
 
 /// The payload round-trips from inherent data to the call the author's node
 /// puts in the block.
+///
+/// The ciphertext field survives on the wire, so the path is one `ensure!`
+/// away when a builder exists, and the dispatch refuses what the mapping
+/// carries: v1 accepts the empty field and nothing else.
 #[test]
 fn the_inherent_data_becomes_the_coinbase_call() {
 	new_test_ext().execute_with(|| {
+		set_author_preimage([3u8; 32]);
 		let (inner, _, _) = coinbase_payload(4);
 		let mut data = sp_inherents::InherentData::new();
 		data.put_data(
@@ -2355,37 +2395,52 @@ fn the_inherent_data_becomes_the_coinbase_call() {
 			<Shielded as frame_support::inherent::ProvideInherent>::create_inherent(&data),
 			Some(crate::Call::coinbase { inner, ciphertext: b"ct".to_vec() })
 		);
+		assert_noop!(
+			Shielded::coinbase(RuntimeOrigin::none(), inner, b"ct".to_vec()),
+			Error::<Test>::CoinbasePayloadNotSupported
+		);
 	});
 }
 
-/// The other coinbase shape: an author paying an address whose coinbase
-/// viewing key it does not hold encrypts `(rho, r)` into a payload, and the
-/// chain stores it beside the leaf for the recipient to decrypt. The chain
-/// treats it as opaque bytes either way.
+/// The other coinbase shape, an author paying an address whose coinbase
+/// viewing key it does not hold, has no builder yet, so v1 refuses the field
+/// it would ride in.
+///
+/// An inherent pays no fee and a mandatory dispatch does not compete for block
+/// weight, so an accepted payload would be permanent state at no cost: the
+/// settlement path charges `MinLeafFee + ceil(bytes / q)` for the same map,
+/// and an author writing the cap on every block it wins would pay nothing for
+/// bytes every full node keeps forever. One byte is as refused as the cap.
 #[test]
-fn a_coinbase_may_carry_an_encrypted_payload() {
+fn a_coinbase_payload_has_no_builder_and_is_refused() {
 	new_test_ext().execute_with(|| {
 		set_author_preimage([3u8; 32]);
 		let (inner, _, _) = coinbase_payload(System::block_number() as u32);
-		assert_ok!(Shielded::coinbase(RuntimeOrigin::none(), inner, b"payload".to_vec()));
+		for payload in [
+			b"x".to_vec(),
+			vec![0u8; MaxCiphertextBytes::get() as usize],
+			vec![0u8; (MaxCiphertextBytes::get() + 1) as usize],
+		] {
+			assert_noop!(
+				Shielded::coinbase(RuntimeOrigin::none(), inner, payload),
+				Error::<Test>::CoinbasePayloadNotSupported
+			);
+		}
+
+		// The empty field is the one a node publishes, and it still works.
+		assert_ok!(Shielded::coinbase(RuntimeOrigin::none(), inner, Vec::new()));
 		assert_ok!(deposit_coinbase(3 * POOL_QUANTUM));
-
-		assert_eq!(Shielded::ciphertext(0).map(|ct| ct.to_vec()), Some(b"payload".to_vec()));
 		assert_eq!(Shielded::coinbase_value(0), Some(3));
-	});
-}
-
-/// A payload larger than the runtime's cap is refused at the inherent, where a
-/// refusal is still possible. `on_finalize` cannot refuse anything.
-#[test]
-fn a_coinbase_payload_above_the_ciphertext_cap_is_refused() {
-	new_test_ext().execute_with(|| {
-		set_author_preimage([3u8; 32]);
-		let (inner, _, _) = coinbase_payload(1);
-		let oversized = vec![0u8; (MaxCiphertextBytes::get() + 1) as usize];
-		assert_noop!(
-			Shielded::coinbase(RuntimeOrigin::none(), inner, oversized),
-			Error::<Test>::CiphertextTooLarge
+		assert_eq!(Shielded::ciphertext(0), None, "no payload, no stored bytes");
+		System::assert_has_event(
+			Event::CoinbaseMinted {
+				block_number: System::block_number(),
+				leaf_index: 0,
+				inner,
+				value: 3 * POOL_QUANTUM,
+				has_ciphertext: false,
+			}
+			.into(),
 		);
 	});
 }
