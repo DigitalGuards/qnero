@@ -1082,5 +1082,23 @@ are cited at each site.
     indistinguishable from the store alone, and `--rescan` is the way through
     it, at the price `sync` above states: that pass adds what the node carries
     and reconciles nothing, so an ordinary sync against a node at the current
-    head still owes the wallet its spent flags and its orphans. Telling them apart needs the wallet to keep block hashes below every
-    checkpoint, which is a header chain, which is a node.
+    head still owes the wallet its spent flags and its orphans. Telling them
+    apart needs the wallet to keep block hashes below every checkpoint, which
+    is a header chain, which is a node.
+
+14. **`--rescan` is an operator override and its edges are known.** A final
+    adversarial pass over the rescan rules left these open, all inside the
+    override and none reachable by an ordinary sync: a rescan that bypassed the
+    node gate leaves `next_leaf` and `last_synced_block` at that node's head,
+    so the same node no longer reads as lagging on the next ordinary sync (a
+    separate high-water leaf count that only a checkpoint-verified fork may
+    lower would close it); add-only is keyed on the flag rather than on
+    whether a gate was actually bypassed, so a rescan over a fully visible
+    fork also skips the orphan check; the bypass arm catches transport errors
+    as if they were gate refusals; a rescan that bypassed the gate can restore
+    `on_chain` on a note a good sync had written off; `send` writes off a
+    phantom note only for an out-of-range leaf index, while an in-range
+    commitment mismatch still advises a retry; the `--merkle-rpc` route keeps
+    the old undifferentiated message. The mitigation until these are closed:
+    use `--rescan` only against a node you trust to be current, and follow it
+    with an ordinary sync against that node.
