@@ -116,9 +116,35 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// holding one of the endpoint's slots, so it gets a short window.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Connections one address may hold at once. The global cap alone lets a single
-/// host take the whole endpoint; this bounds what one address can claim of it.
-const MAX_CONNECTIONS_PER_IP: usize = 4;
+/// Connections one address may hold at once, by default. The global cap alone
+/// lets a single host take the whole endpoint; this bounds what one address can
+/// claim of it.
+///
+/// A farm behind one NAT gateway, and several xmrig instances pinned per CCX on
+/// the node's own box, both arrive from a single address, so the default has to
+/// clear a real deployment: `--stratum-max-connections-per-ip` moves it and the
+/// global cap is the bound that matters.
+pub(crate) const MAX_CONNECTIONS_PER_IP: usize = 16;
+
+/// Refusals being written at once, and how long one may take.
+///
+/// A refusal is one short line on a socket that is about to be dropped. The
+/// bound is what keeps a flood of connections from becoming a flood of tasks;
+/// past it the socket closes with nothing said, which is what every refusal did
+/// before.
+const MAX_REFUSAL_WRITES: usize = 16;
+const REFUSAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How often a refusal is logged. Every refusal past one inside the window is
+/// counted and reported with the next one.
+const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+/// What a refused connection is told.
+///
+/// Not one of the four strings xmrig treats as critical: a cap is a transient
+/// condition and the rig should keep retrying, and it should print the reason
+/// while it does.
+pub(crate) const REFUSED_MESSAGE: &str = "Too many connections";
 
 /// Entries the duplicate-share set may hold.
 ///
@@ -217,6 +243,8 @@ pub struct StratumConfig {
 	/// Share difficulty handed to a connection, clamped per job to the block
 	/// difficulty so a share is never harder to find than a block.
 	pub share_difficulty: u64,
+	/// Connections one address may hold at once.
+	pub max_connections_per_ip: usize,
 }
 
 /// The bounds one connection is served under.
@@ -283,6 +311,46 @@ impl Jobs {
 	}
 }
 
+/// A refusal log that a flood cannot turn into a log flood.
+///
+/// The refusals themselves were logged at `debug`, which is off at the default
+/// `RUST_LOG=info`, so a farm whose connections were being refused had no
+/// diagnostic on either end: the rig saw a connect and an immediate EOF, and
+/// the node said nothing at all. They are worth a `warn` and are not worth one
+/// per socket.
+struct RefusalLog {
+	started: Instant,
+	/// Milliseconds since `started` at the last line printed, or `u64::MAX`
+	/// when none has been.
+	last: AtomicU64,
+	suppressed: AtomicU64,
+}
+
+impl RefusalLog {
+	fn new() -> Self {
+		Self::since(Instant::now())
+	}
+
+	/// The same, dated. The unit test builds one whose clock already reads an
+	/// hour, so it can move the window without waiting out a minute.
+	fn since(started: Instant) -> Self {
+		Self { started, last: AtomicU64::new(u64::MAX), suppressed: AtomicU64::new(0) }
+	}
+
+	/// Whether to print now, and how many refusals went unprinted since the
+	/// last time it said yes.
+	fn due(&self) -> Option<u64> {
+		let now = self.started.elapsed().as_millis() as u64;
+		let last = self.last.load(Ordering::Relaxed);
+		if last != u64::MAX && now.saturating_sub(last) < REFUSAL_LOG_INTERVAL.as_millis() as u64 {
+			self.suppressed.fetch_add(1, Ordering::Relaxed);
+			return None;
+		}
+		self.last.store(now, Ordering::Relaxed);
+		Some(self.suppressed.swap(0, Ordering::Relaxed))
+	}
+}
+
 /// A connection's submit budget: a token bucket, so an unauthenticated peer
 /// cannot queue unbounded RandomX work by sending 100-byte lines.
 struct SubmitBudget {
@@ -344,6 +412,10 @@ pub struct StratumServer {
 	connection_slots: Arc<Semaphore>,
 	/// Sockets open per address, so one host cannot take every slot.
 	connections_per_ip: std::sync::Mutex<HashMap<IpAddr, usize>>,
+	/// Bounds how many refusals are being written at once.
+	refusal_slots: Arc<Semaphore>,
+	/// Bounds how often a refusal is logged.
+	refusal_log: RefusalLog,
 	limits: Limits,
 	seal_tx: mpsc::Sender<MinedSeal>,
 	seal_rx: tokio::sync::Mutex<mpsc::Receiver<MinedSeal>>,
@@ -357,7 +429,9 @@ impl StratumServer {
 		config: StratumConfig,
 		engine: Arc<RandomxEngine>,
 	) -> Result<Arc<Self>, String> {
-		Self::start_with_limits(config, engine, Limits::default()).await
+		let limits =
+			Limits { max_connections_per_ip: config.max_connections_per_ip, ..Limits::default() };
+		Self::start_with_limits(config, engine, limits).await
 	}
 
 	/// Bind under explicit bounds. The protocol tests use this to reach a cap
@@ -384,6 +458,8 @@ impl StratumServer {
 			hash_slots: Semaphore::new(MAX_CONCURRENT_SHARE_CHECKS),
 			connection_slots: Arc::new(Semaphore::new(limits.max_connections)),
 			connections_per_ip: std::sync::Mutex::new(HashMap::new()),
+			refusal_slots: Arc::new(Semaphore::new(MAX_REFUSAL_WRITES)),
+			refusal_log: RefusalLog::new(),
 			limits,
 			seal_tx,
 			seal_rx: tokio::sync::Mutex::new(seal_rx),
@@ -408,24 +484,31 @@ impl StratumServer {
 						// peer can claim.
 						let Ok(slot) = accept_server.connection_slots.clone().try_acquire_owned()
 						else {
-							log::debug!(
-								target: LOG_TARGET,
-								"refusing {peer}: {} connections already open",
-								accept_server.limits.max_connections,
-							);
-							drop(stream);
+							if let Some(suppressed) = accept_server.refusal_log.due() {
+								log::warn!(
+									target: LOG_TARGET,
+									"refusing {peer}: all {} connections are open{}",
+									accept_server.limits.max_connections,
+									suppressed_tail(suppressed),
+								);
+							}
+							accept_server.refuse(stream);
 							continue;
 						};
 						// And a second claim, on the address's own budget: the global
 						// cap alone lets one host hold every slot and lock the
 						// operator's rigs out.
 						let Some(ip_slot) = IpSlot::claim(&accept_server, peer.ip()) else {
-							log::debug!(
-								target: LOG_TARGET,
-								"refusing {peer}: that address already holds {} connections",
-								accept_server.limits.max_connections_per_ip,
-							);
-							drop(stream);
+							if let Some(suppressed) = accept_server.refusal_log.due() {
+								log::warn!(
+									target: LOG_TARGET,
+									"refusing {peer}: that address already holds {} connections, \
+									 which is --stratum-max-connections-per-ip{}",
+									accept_server.limits.max_connections_per_ip,
+									suppressed_tail(suppressed),
+								);
+							}
+							accept_server.refuse(stream);
 							continue;
 						};
 						let server = accept_server.clone();
@@ -446,6 +529,27 @@ impl StratumServer {
 		});
 
 		Ok(server)
+	}
+
+	/// Tell a refused peer why, then drop the socket.
+	///
+	/// Without the line the rig sees a connect followed immediately by an EOF
+	/// and logs only "connection closed", so neither end says which cap was
+	/// reached. The write is deadlined, and bounded in number, because it is
+	/// being made to a peer the endpoint has already decided it cannot serve.
+	fn refuse(&self, mut stream: TcpStream) {
+		let Ok(slot) = self.refusal_slots.clone().try_acquire_owned() else {
+			return;
+		};
+		let line = error_response(&Value::Null, -1, REFUSED_MESSAGE);
+		tokio::spawn(async move {
+			let write = async {
+				stream.write_all(line.as_bytes()).await?;
+				stream.write_all(b"\n").await
+			};
+			let _ = tokio::time::timeout(REFUSAL_WRITE_TIMEOUT, write).await;
+			drop(slot);
+		});
 	}
 
 	/// The address the listener actually bound. Port 0 resolves here, which is
@@ -1108,6 +1212,14 @@ fn trim_ascii(line: &[u8]) -> &[u8] {
 	let Some(start) = start else { return &[] };
 	let end = line.iter().rposition(|byte| !byte.is_ascii_whitespace()).unwrap_or(start);
 	&line[start..=end]
+}
+
+/// What to append to a refusal line when others went unprinted.
+fn suppressed_tail(suppressed: u64) -> String {
+	match suppressed {
+		0 => String::new(),
+		n => format!(" ({n} more refusals since the last of these)"),
+	}
 }
 
 /// Bound a miner-supplied string before it is kept or logged.

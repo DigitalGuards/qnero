@@ -129,7 +129,12 @@ async fn server_with_limits(
 ) -> (Arc<StratumServer>, Arc<RandomxEngine>) {
 	let engine = RandomxEngine::light(2);
 	let server = StratumServer::start_with_limits(
-		StratumConfig { host: IpAddr::from([127, 0, 0, 1]), port: 0, share_difficulty },
+		StratumConfig {
+			host: IpAddr::from([127, 0, 0, 1]),
+			port: 0,
+			share_difficulty,
+			max_connections_per_ip: MAX_CONNECTIONS_PER_IP,
+		},
 		engine.clone(),
 		limits,
 	)
@@ -392,6 +397,23 @@ fn the_duplicate_set_stops_growing_at_its_ceiling() {
 	assert!(!insert_seen(&mut seen, ("1".to_string(), 1, 7), 8));
 }
 
+/// A flood of refusals must not become a flood of log lines, and the count of
+/// what went unprinted has to survive to the next one that is printed.
+#[test]
+fn refusals_are_logged_once_and_then_counted() {
+	// A clock that already reads an hour, so the window can be moved without
+	// waiting out a minute.
+	let log = RefusalLog::since(Instant::now() - Duration::from_secs(3_600));
+	assert_eq!(log.due(), Some(0), "the first refusal is always printed");
+	for _ in 0..10 {
+		assert_eq!(log.due(), None, "the rest are inside the window");
+	}
+	// Put the last printed line an hour back, which is past the window.
+	log.last.store(0, Ordering::Relaxed);
+	assert_eq!(log.due(), Some(10), "the suppressed refusals are reported with the next line");
+	assert_eq!(log.due(), None);
+}
+
 /// The line bound has to be on the reader. `read_line` on its own appends until
 /// it sees a newline, so a peer that never sends one could allocate for as long
 /// as the idle deadline allowed: tens of gigabytes on a fast link, times as
@@ -432,8 +454,9 @@ async fn the_listener_stops_accepting_past_the_connection_cap() {
 	// and not from the listen queue.
 	tokio::time::sleep(Duration::from_millis(300)).await;
 	// The listen backlog still completes the handshake, so the refusal shows up
-	// as the server closing the socket without a word.
+	// on the socket: a reason, then an EOF.
 	let mut extra = FakeMiner::connect(server.local_addr()).await;
+	assert_eq!(extra.recv().await["error"]["message"], REFUSED_MESSAGE);
 	assert!(is_closed(&mut extra, Duration::from_secs(10)).await, "expected a closed socket");
 
 	// Freeing one lets the next connection in.
@@ -604,6 +627,15 @@ async fn one_address_cannot_take_every_connection_slot() {
 
 	// Six global slots are still free, and this address has used its two.
 	let mut extra = FakeMiner::connect(server.local_addr()).await;
+	// And the refusal says so. Without a line the rig sees a connect and an
+	// immediate EOF, logs "connection closed", and retries every five seconds
+	// forever with neither end saying which cap it hit.
+	let refusal = extra.recv().await;
+	assert_eq!(refusal["error"]["message"], REFUSED_MESSAGE);
+	assert!(
+		!is_xmrig_critical(REFUSED_MESSAGE),
+		"{REFUSED_MESSAGE:?} makes xmrig drop the pool instead of retrying",
+	);
 	assert!(
 		is_closed(&mut extra, Duration::from_secs(5)).await,
 		"the per-address budget must refuse this while the endpoint still has room",
@@ -684,7 +716,12 @@ async fn keepalived_is_answered_so_the_miner_does_not_reconnect() {
 async fn a_login_before_the_first_template_is_refused_and_the_socket_closes() {
 	let engine = RandomxEngine::light(1);
 	let server = StratumServer::start(
-		StratumConfig { host: IpAddr::from([127, 0, 0, 1]), port: 0, share_difficulty: 100 },
+		StratumConfig {
+			host: IpAddr::from([127, 0, 0, 1]),
+			port: 0,
+			share_difficulty: 100,
+			max_connections_per_ip: MAX_CONNECTIONS_PER_IP,
+		},
 		engine,
 	)
 	.await

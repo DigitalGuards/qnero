@@ -804,6 +804,24 @@ pub fn run() -> sc_cli::Result<()> {
 					eprintln!("Error: --stratum-share-difficulty must be at least 1.\n");
 					return Err(sc_cli::Error::Input("--stratum-share-difficulty is zero".into()));
 				}
+				if cli.stratum_port.is_none() &&
+					cli.stratum_max_connections_per_ip != crate::stratum::MAX_CONNECTIONS_PER_IP
+				{
+					eprintln!(
+						"Error: --stratum-max-connections-per-ip is only used with \
+						 --stratum-port.\n"
+					);
+					return Err(sc_cli::Error::Input(
+						"--stratum-max-connections-per-ip requires --stratum-port".into(),
+					));
+				}
+				if cli.stratum_max_connections_per_ip == 0 {
+					eprintln!("Error: --stratum-max-connections-per-ip must be at least 1.\n");
+					eprintln!("Zero refuses every rig, including one on the node's own box.");
+					return Err(sc_cli::Error::Input(
+						"--stratum-max-connections-per-ip is zero".into(),
+					));
+				}
 				if cli.mining_threads == 0 &&
 					cli.stratum_port.is_none() &&
 					config.role.is_authority()
@@ -841,6 +859,7 @@ pub fn run() -> sc_cli::Result<()> {
 					host: cli.stratum_host,
 					port,
 					share_difficulty: cli.stratum_share_difficulty,
+					max_connections_per_ip: cli.stratum_max_connections_per_ip,
 				});
 
 				// Allow mining without peers if --dev or --force-authoring is set
@@ -997,6 +1016,39 @@ mod tests {
 				 what to pass: {error}"
 			);
 		}
+	}
+
+	/// The per-address connection cap is a flag, and its default clears a real
+	/// farm.
+	///
+	/// It was a hard-coded 4, which is a normal number of rigs behind one NAT
+	/// gateway and a normal number of xmrig instances pinned per CCX on the
+	/// node's own box. Past it the socket was dropped with nothing written and
+	/// the only trace was a `debug` line, so neither end said why the fifth rig
+	/// could not connect.
+	#[test]
+	fn the_per_address_connection_cap_is_a_flag() {
+		use clap::Parser;
+
+		let default = crate::cli::Cli::try_parse_from(["qnero-node", "--validator"])
+			.expect("parse a bare authority command line");
+		assert_eq!(default.stratum_max_connections_per_ip, crate::stratum::MAX_CONNECTIONS_PER_IP,);
+		assert!(
+			default.stratum_max_connections_per_ip >= 8,
+			"the default has to clear a farm behind one address, and it is {}",
+			default.stratum_max_connections_per_ip,
+		);
+
+		let raised = crate::cli::Cli::try_parse_from([
+			"qnero-node",
+			"--validator",
+			"--stratum-port",
+			"3333",
+			"--stratum-max-connections-per-ip",
+			"32",
+		])
+		.expect("parse --stratum-max-connections-per-ip");
+		assert_eq!(raised.stratum_max_connections_per_ip, 32);
 	}
 
 	#[test]

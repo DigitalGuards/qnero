@@ -74,6 +74,22 @@ pub struct Cli {
 	#[arg(long, value_name = "DIFFICULTY", default_value_t = DEFAULT_SHARE_DIFFICULTY)]
 	pub stratum_share_difficulty: u64,
 
+	/// Connections the stratum endpoint accepts from one address.
+	///
+	/// A farm behind one NAT gateway and several xmrig instances pinned per
+	/// CCX on the node's own box both arrive from a single address, so this
+	/// has to clear a real deployment; 64 connections across the endpoint is
+	/// the bound that matters. Raise it for a bigger farm, lower it for an
+	/// endpoint open to a network.
+	///
+	/// Requires `--stratum-port`; startup fails otherwise.
+	#[arg(
+		long,
+		value_name = "COUNT",
+		default_value_t = crate::stratum::MAX_CONNECTIONS_PER_IP
+	)]
+	pub stratum_max_connections_per_ip: usize,
+
 	/// Threads the node mines with in process, in RandomX light mode.
 	///
 	/// One by default, which is what keeps a `--dev` chain producing blocks
