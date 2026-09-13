@@ -35,6 +35,27 @@
 //! away from consensus, and every miner-supplied string is truncated and
 //! escaped before it reaches a log line.
 //!
+//! **What keeps a session alive.** One rule: an accepted share. A logged-in
+//! connection has `first_share_timeout` to produce its first share at or above
+//! the job's share target, and `share_timeout` between accepted shares after
+//! that. Nothing else refreshes that clock. A blank line does not, a
+//! `keepalived` does not, a malformed line does not, a rejected share does
+//! not, and neither does anything the node writes to the connection. Both
+//! windows come from [`default_share_timeout`], which sizes them from the
+//! configured share difficulty for a rig slower than any real one, and
+//! `--stratum-share-timeout` sets them outright. Before login a connection is
+//! on a separate window, [`LOGIN_TIMEOUT`], measured from the moment it was
+//! accepted.
+//!
+//! An inbound-silence ceiling used to be the liveness signal, and it is gone,
+//! so the endpoint has one rule to explain and one deadline to tune. Every
+//! completed line refreshed that ceiling, a blank line and a `keepalived`
+//! included, so a peer that logged in and then sent one byte a window held a
+//! connection slot for the life of the process while producing nothing at all.
+//! Sixteen of those took the endpoint away from the operator's own rigs, and on
+//! the documented rig-only deployment, `--mining-threads 0` with a stratum
+//! port, that is a node that stops authoring.
+//!
 //! **Lock order.** `jobs`, then `sessions` or `seen_shares`, always in that
 //! order, and no `sessions` guard is ever held across an `await` on `jobs`. Login and
 //! `broadcast_job` both hold the `jobs` guard across their session work, so a rig that logs in
@@ -124,7 +145,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a connection has to log in, measured from the moment it opened.
 ///
-/// The share-scaled deadline below is a rig's allowance, and a peer earns it by
+/// The share deadline above is a rig's allowance, and a peer earns it by
 /// logging in. Until then the connection is one line away from useful and is
 /// holding one of the endpoint's slots, so it gets a short window. This one is
 /// a lifetime and no inbound line refreshes it, because a peer that has nothing
@@ -169,19 +190,30 @@ pub(crate) const REFUSED_MESSAGE: &str = "Too many connections";
 /// ceiling costs is written out at `insert_seen`.
 const MAX_SEEN_SHARES: usize = 100_000;
 
-/// Floor and ceiling on how long a connection may stay silent.
+/// Floor and ceiling on how long a session may go without an accepted share.
 ///
-/// xmrig resets its keepalive timer on every line it *receives*, so a healthy
-/// rig that is taking job pushes and has not found a share sends nothing at
-/// all. The deadline therefore has to outlast the time it takes that rig to
-/// find one share. One keepalive interval is far short of that.
-const MIN_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(7_200);
+/// The floor is the deadline at the default share difficulty, and it is what
+/// `--stratum-share-timeout` moves. Ten minutes is generous for any real rig
+/// there: a 900 H/s box finds a 5000-difficulty share every six seconds, so
+/// the window is a hundred expected shares wide, and it also covers the minute
+/// a full-mode rig spends building its dataset after login, before it hashes
+/// anything at all.
+///
+/// The ceiling bounds what one unproductive session can cost when the share
+/// difficulty is raised far enough for the estimate below to run away.
+const DEFAULT_SHARE_TIMEOUT: Duration = Duration::from_secs(600);
+const MAX_SHARE_TIMEOUT: Duration = Duration::from_secs(7_200);
 
-/// The hash rate the idle deadline assumes of the slowest plausible rig, and
+/// The hash rate the share deadline assumes of the slowest plausible rig, and
 /// how many expected share intervals it waits for.
+///
+/// Finding shares is a Poisson process, so the window is stated in expected
+/// intervals and converted to seconds here: twelve of them leave a rig at
+/// exactly that hash rate a 6 in a million chance of a spurious disconnect per
+/// window, and a real rig is an order of magnitude faster than the one assumed
+/// here.
 const SLOW_RIG_HASHES_PER_SECOND: u64 = 100;
-const IDLE_SHARE_INTERVALS: u64 = 20;
+const SHARE_TIMEOUT_INTERVALS: u64 = 12;
 
 /// Error strings xmrig treats as critical: it closes the socket, drops the
 /// pool and sits out its retry pause.
@@ -202,6 +234,14 @@ pub(crate) const XMRIG_CRITICAL_ERRORS: [&str; 4] =
 /// running.
 pub(crate) const PAUSED_MESSAGE: &str = "Node is not authoring";
 
+/// What a session is told when it is closed for producing no accepted share.
+///
+/// Deliberately not one of the four above either. A rig whose deadline ran out
+/// is one the endpoint wants back: the usual cause is a rig that was pointed at
+/// the wrong algorithm or that stopped hashing, and both are conditions the
+/// operator fixes on the rig while xmrig keeps retrying on its own timer.
+pub(crate) const NO_SHARES_MESSAGE: &str = "No accepted shares";
+
 /// Whether xmrig would treat this message as critical and drop the pool.
 /// Matched the way xmrig matches it: on the prefix, ignoring case.
 pub(crate) fn is_xmrig_critical(message: &str) -> bool {
@@ -212,12 +252,24 @@ pub(crate) fn is_xmrig_critical(message: &str) -> bool {
 	})
 }
 
-/// How long a silent connection is given, for a share difficulty.
-fn idle_timeout(share_difficulty: u64) -> Duration {
+/// How long a session is given to produce an accepted share, for a share
+/// difficulty. This is the default both windows take, and what
+/// `--stratum-share-timeout` replaces.
+///
+/// The estimate is what a rig of [`SLOW_RIG_HASHES_PER_SECOND`] takes to find
+/// [`SHARE_TIMEOUT_INTERVALS`] shares at that difficulty, floored at
+/// [`DEFAULT_SHARE_TIMEOUT`] and capped at [`MAX_SHARE_TIMEOUT`].
+///
+/// It is computed from the *configured* share difficulty, and a job's share
+/// difficulty is that value clamped down to the block difficulty, so the
+/// estimate is never shorter than the time a share actually takes to find. A
+/// chain sitting at the difficulty floor hands out shares far easier than the
+/// configuration asks for, and the deadline stays sized for the harder one.
+pub(crate) fn default_share_timeout(share_difficulty: u64) -> Duration {
 	let seconds = share_difficulty
-		.saturating_mul(IDLE_SHARE_INTERVALS)
+		.saturating_mul(SHARE_TIMEOUT_INTERVALS)
 		.saturating_div(SLOW_RIG_HASHES_PER_SECOND);
-	Duration::from_secs(seconds).clamp(MIN_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT)
+	Duration::from_secs(seconds).clamp(DEFAULT_SHARE_TIMEOUT, MAX_SHARE_TIMEOUT)
 }
 
 /// What the node hands miners to work on.
@@ -249,6 +301,11 @@ pub struct MinedSeal {
 }
 
 /// Configuration for the stratum listener.
+///
+/// The two deadlines are the whole liveness rule: a logged-in session is closed
+/// unless it keeps producing accepted shares. They are separate fields because
+/// the clocks start on different events, a login and a share, and both default
+/// to [`default_share_timeout`] of `share_difficulty`.
 #[derive(Clone, Debug)]
 pub struct StratumConfig {
 	/// Address to bind.
@@ -260,6 +317,11 @@ pub struct StratumConfig {
 	pub share_difficulty: u64,
 	/// Connections one address may hold at once.
 	pub max_connections_per_ip: usize,
+	/// How long a session has, from its login, to produce its first accepted
+	/// share.
+	pub first_share_timeout: Duration,
+	/// How long a session that has produced one has to produce the next.
+	pub share_timeout: Duration,
 }
 
 /// The bounds one connection is served under.
@@ -277,9 +339,6 @@ struct Limits {
 	max_connections: usize,
 	/// Connections open at once from one address.
 	max_connections_per_ip: usize,
-	/// How long a connection may go without sending anything, whatever the
-	/// node writes to it.
-	max_idle: Duration,
 }
 
 impl Default for Limits {
@@ -289,7 +348,6 @@ impl Default for Limits {
 			write_timeout: WRITE_TIMEOUT,
 			max_connections: MAX_CONNECTIONS,
 			max_connections_per_ip: MAX_CONNECTIONS_PER_IP,
-			max_idle: MAX_IDLE_TIMEOUT,
 		}
 	}
 }
@@ -505,9 +563,11 @@ impl StratumServer {
 
 		log::info!(
 			target: LOG_TARGET,
-			"⛏️ Stratum listening on {bound} (algo {ALGO}, share difficulty {}, idle timeout {}s)",
+			"⛏️ Stratum listening on {bound} (algo {ALGO}, share difficulty {}, first share \
+			 within {}s, a share every {}s after that)",
 			server.config.share_difficulty,
-			idle_timeout(server.config.share_difficulty).as_secs(),
+			server.config.first_share_timeout.as_secs(),
+			server.config.share_timeout.as_secs(),
 		);
 
 		let accept_server = server.clone();
@@ -737,15 +797,11 @@ impl StratumServer {
 		let (read_half, mut write_half) = stream.into_split();
 		let (out_tx, mut out_rx) = mpsc::channel::<String>(WRITE_QUEUE_DEPTH);
 
-		// Milliseconds since `opened` at the last write that landed. xmrig
-		// re-arms its keepalive timer on every line it *receives*, so a job push
-		// proves the connection is alive exactly as an inbound line does, and the
-		// deadline below counts from whichever came last.
+		// The connection's own age. The pre-login window runs from here and
+		// nothing the peer sends moves it.
 		let opened = Instant::now();
-		let last_write = Arc::new(AtomicU64::new(0));
 
 		let write_timeout = self.limits.write_timeout;
-		let writer_activity = last_write.clone();
 		let mut writer = tokio::spawn(async move {
 			while let Some(line) = out_rx.recv().await {
 				// Deadlined: a peer that stops reading shuts its receive window,
@@ -758,11 +814,9 @@ impl StratumServer {
 				if !matches!(tokio::time::timeout(write_timeout, write).await, Ok(Ok(()))) {
 					break;
 				}
-				writer_activity.store(opened.elapsed().as_millis() as u64, Ordering::Relaxed);
 			}
 		});
 
-		let authenticated_deadline = idle_timeout(self.config.share_difficulty);
 		// Handed to the session at login, so the server can end this loop.
 		let closed = Arc::new(tokio::sync::Notify::new());
 		let mut session_id: Option<u64> = None;
@@ -772,60 +826,55 @@ impl StratumServer {
 		// is resumed here, and the reader below is the only thing that clears
 		// it.
 		let mut line: Vec<u8> = Vec::new();
-		let mut last_read = Instant::now();
+		// The instant of the first successful login, which never moves
+		// afterwards: a second login line is as cheap to send as a newline, so
+		// letting one restart the clock would be the hole this rule closes.
+		let mut logged_in_at: Option<Instant> = None;
+		// The last share this connection had accepted, which is the only thing
+		// that refreshes the deadline.
+		let mut last_accepted: Option<Instant> = None;
 		let result = loop {
-			// A rig earns the long share-scaled window by logging in, and that
-			// window is an activity deadline: an inbound line or a job push
-			// refreshes it, which is what a rig that is hashing and has found
-			// nothing needs.
-			//
-			// Until login the connection is one line away from useful and is
-			// holding one of the endpoint's slots, so it gets a short window, and
-			// that one runs from `opened`, over the connection's whole life.
-			// Measured from the last line it would be no bound at
-			// all. A blank line is a complete line, so it stamps the activity clock
-			// at the top of this loop before it is discarded below, and a
-			// `keepalived` is answered before any login. One byte a window would
-			// then earn a peer that never intends to log in the slot it holds for
-			// the life of the process, and four addresses at the per-address cap
-			// would take the whole endpoint away from the operator's own rigs.
-			let login_left = if session_id.is_some() {
-				None
-			} else {
-				let Some(left) = self.limits.login_timeout.checked_sub(opened.elapsed()) else {
-					break Err("did not log in".to_string());
-				};
-				Some(left)
+			// Exactly one deadline is live at a time, and it is folded into the
+			// read's own timeout rather than checked only on re-entry: a bound
+			// that no inbound line ever takes the loop past would otherwise
+			// never be checked again.
+			let remaining = match logged_in_at {
+				// Before login the connection is one line away from useful and
+				// is holding one of the endpoint's slots, so it gets the short
+				// window, and that one is the connection's whole life. Measured
+				// from the last line it would be no bound at all: a blank line
+				// is a complete line, and `keepalived` is answered without a
+				// session, so one byte a window would buy a peer that never
+				// intends to log in the slot it holds for the life of the
+				// process.
+				None => {
+					let Some(left) = self.limits.login_timeout.checked_sub(opened.elapsed()) else {
+						break Err("did not log in".to_string());
+					};
+					left
+				},
+				// After login there is one rule, and it is what the endpoint
+				// exists for: an accepted share. A rig that is hashing and has
+				// found nothing is covered by the window's width, which is sized
+				// for a rig slower than any real one at the configured share
+				// difficulty. A peer that will never produce one is closed
+				// whatever it sends and whatever the node writes to it.
+				Some(login) => {
+					let (clock, deadline) = match last_accepted {
+						Some(accepted) => (accepted, self.config.share_timeout),
+						None => (login, self.config.first_share_timeout),
+					};
+					let Some(left) = deadline.checked_sub(clock.elapsed()) else {
+						// Queued before the close, so the writer drains it on its
+						// way out: the rig prints the reason and retries on its
+						// own timer, and the operator has something to act on.
+						let reason = error_response(&Value::Null, -1, NO_SHARES_MESSAGE);
+						let _ = out_tx.try_send(reason);
+						break Err("no accepted share".to_string());
+					};
+					left
+				},
 			};
-			// A ceiling on inbound silence, and the node's own writes do not
-			// refresh it. The share-scaled deadline below counts a job push as
-			// proof of life, which is right for a rig that is hashing and has
-			// found nothing; on its own it is also a session that never has to
-			// say anything again, because the node pushes a job every block
-			// interval and the deadline's floor is 25 of those. A peer that
-			// logs in and then goes silent forever would hold its slot until
-			// the node restarted. A real rig submits or keepalives well inside
-			// two hours, so this costs a healthy miner nothing.
-			let Some(silence_left) = self.limits.max_idle.checked_sub(last_read.elapsed()) else {
-				break Err("no inbound traffic".to_string());
-			};
-			let since_write = opened
-				.elapsed()
-				.saturating_sub(Duration::from_millis(last_write.load(Ordering::Relaxed)));
-			let Some(remaining) =
-				authenticated_deadline.checked_sub(last_read.elapsed().min(since_write))
-			else {
-				break Err("idle timeout".to_string());
-			};
-			// Whichever runs out first. The ceiling has to be part of the wait:
-			// a connection the node keeps writing to has a share-scaled
-			// deadline hours away, so a check made only on re-entry would leave
-			// the loop inside one read for all of it.
-			let remaining = remaining.min(silence_left);
-			// And the login window, for the same reason the ceiling is folded in
-			// here: checked only on re-entry, a bound that no inbound line ever
-			// takes the loop past would never be checked again.
-			let remaining = login_left.map_or(remaining, |left| remaining.min(left));
 
 			let read = tokio::select! {
 				biased;
@@ -837,13 +886,13 @@ impl StratumServer {
 			};
 			let read = match read {
 				Ok(read) => read,
-				// A job push written while this waited counts as activity, so the
-				// deadline is recomputed before the connection is given up. What
-				// the reader has already taken off the socket is still in `line`,
-				// which is why it has to be cancel safe to be re-entered here.
+				// The deadline this wait was sized for has run out. The loop
+				// re-checks it above and ends there, so one place decides what
+				// closes a connection and why. What the reader has already taken
+				// off the socket is still in `line`, which is why it has to be
+				// cancel safe to be re-entered here.
 				Err(_) => continue,
 			};
-			last_read = Instant::now();
 			match read {
 				Ok(Line::Complete) => {},
 				Ok(Line::Eof) => break Ok(()),
@@ -864,6 +913,15 @@ impl StratumServer {
 						.await,
 				Err(error) => Reply::open(error_response(&Value::Null, -32700, &error.to_string())),
 			};
+			if logged_in_at.is_none() && session_id.is_some() {
+				logged_in_at = Some(Instant::now());
+			}
+			if reply.accepted_share {
+				// Stamped where the answer was produced: the hash behind it runs
+				// on the blocking pool and can queue behind other connections'
+				// shares, so the submit's own arrival is the earlier instant.
+				last_accepted = Some(Instant::now());
+			}
 			if let Some(body) = reply.body {
 				// `try_send`, never `send().await`: waiting for queue capacity is
 				// waiting on a peer that may never read again, and this task
@@ -907,7 +965,10 @@ impl StratumServer {
 
 		match method {
 			"login" => self.handle_login(&id, &params, out_tx, session_id, closed, peer).await,
-			"submit" => Reply::open(self.handle_submit(&id, &params, session_id, budget).await),
+			"submit" => self.handle_submit(&id, &params, session_id, budget).await,
+			// Answered because xmrig expects an answer, and inert otherwise: it
+			// is one line any peer can send and it says nothing about whether
+			// the peer is mining. See the liveness rule in the module doc.
 			"keepalived" => Reply::open(ok_response(&id, json!({"status": "KEEPALIVED"}))),
 			"" => Reply::open(error_response(&id, -32600, "Missing method")),
 			other => Reply::open(error_response(&id, -32601, &format!("Unknown method {other}"))),
@@ -999,7 +1060,7 @@ impl StratumServer {
 		params: &Value,
 		session_id: &Option<u64>,
 		budget: &mut SubmitBudget,
-	) -> String {
+	) -> Reply {
 		let Some(session_id) = *session_id else {
 			return self.reject_fatal(id, "Unauthenticated");
 		};
@@ -1141,12 +1202,13 @@ impl StratumServer {
 				log::debug!(target: LOG_TARGET, "share from {worker:?} accepted at height {}", job.height),
 		}
 
-		ok_response(id, json!({"status": "OK"}))
+		// The one line that refreshes this session's deadline.
+		Reply::accepted(ok_response(id, json!({"status": "OK"})))
 	}
 
 	/// Refuse one share. The message must not be one xmrig treats as critical,
 	/// prefix and case included, because that is how xmrig compares it.
-	fn reject_share(&self, id: &Value, message: &str) -> String {
+	fn reject_share(&self, id: &Value, message: &str) -> Reply {
 		debug_assert!(
 			!is_xmrig_critical(message),
 			"{message:?} makes xmrig drop the pool; it is not a share-level rejection",
@@ -1155,35 +1217,49 @@ impl StratumServer {
 	}
 
 	/// Refuse, and mean it: the miner is expected to close.
-	fn reject_fatal(&self, id: &Value, message: &str) -> String {
+	///
+	/// A refusal returns [`Reply::open`], which leaves the session's liveness
+	/// clock where it was: a peer that could refresh its deadline with a
+	/// rejected share is a peer that never has to mine.
+	fn reject_fatal(&self, id: &Value, message: &str) -> Reply {
 		self.counters.rejected.fetch_add(1, Ordering::Relaxed);
 		log::debug!(target: LOG_TARGET, "share rejected: {message}");
-		error_response(id, -1, message)
+		Reply::open(error_response(id, -1, message))
 	}
 }
 
-/// What one request produced: the line to answer with, and whether the
-/// connection is finished.
+/// What one request produced: the line to answer with, whether the connection
+/// is finished, and whether this was the one thing that proves the peer is
+/// mining.
 struct Reply {
 	body: Option<String>,
 	close: bool,
+	/// Whether the line was a share the endpoint accepted. The only thing that
+	/// refreshes a session's liveness clock, which is why it is carried out of
+	/// here rather than inferred from the answer's text.
+	accepted_share: bool,
 }
 
 impl Reply {
 	/// Answer and keep serving.
 	fn open(body: String) -> Self {
-		Self { body: Some(body), close: false }
+		Self { body: Some(body), close: false, accepted_share: false }
+	}
+
+	/// Answer an accepted share, and keep serving.
+	fn accepted(body: String) -> Self {
+		Self { accepted_share: true, ..Self::open(body) }
 	}
 
 	/// Answer already queued elsewhere, and keep serving.
 	fn silent() -> Self {
-		Self { body: None, close: false }
+		Self { body: None, close: false, accepted_share: false }
 	}
 
 	/// Answer, then close. A refusal a miner cannot act on has to arrive as an
 	/// EOF too, or xmrig holds the socket and stops its own retry timers.
 	fn closing(body: String) -> Self {
-		Self { body: Some(body), close: true }
+		Self { close: true, ..Self::open(body) }
 	}
 }
 

@@ -90,6 +90,24 @@ pub struct Cli {
 	)]
 	pub stratum_max_connections_per_ip: usize,
 
+	/// How long a stratum session has to produce an accepted share, in seconds.
+	///
+	/// This is the endpoint's whole liveness rule: a logged-in connection is
+	/// closed unless it keeps submitting shares that verify. Nothing else
+	/// refreshes it, a `keepalived` included, because a session that answers
+	/// its keepalives and mines nothing still holds one of the 64 connection
+	/// slots the operator's own rigs need.
+	///
+	/// Defaults to 600 and rises with `--stratum-share-difficulty`, so a rig of
+	/// 100 H/s always gets twelve expected share intervals, capped at 7200.
+	/// Raise it for a rig slower than that. A value below the time one share
+	/// takes to find disconnects healthy miners, and the rig then reconnects
+	/// and starts over.
+	///
+	/// Requires `--stratum-port`; startup fails otherwise.
+	#[arg(long, value_name = "SECONDS")]
+	pub stratum_share_timeout: Option<u64>,
+
 	/// Threads the node mines with in process, in RandomX light mode.
 	///
 	/// One by default, which is what keeps a `--dev` chain producing blocks

@@ -815,6 +815,18 @@ pub fn run() -> sc_cli::Result<()> {
 						"--stratum-max-connections-per-ip requires --stratum-port".into(),
 					));
 				}
+				if cli.stratum_port.is_none() && cli.stratum_share_timeout.is_some() {
+					eprintln!("Error: --stratum-share-timeout is only used with --stratum-port.\n");
+					return Err(sc_cli::Error::Input(
+						"--stratum-share-timeout requires --stratum-port".into(),
+					));
+				}
+				if cli.stratum_share_timeout == Some(0) {
+					eprintln!("Error: --stratum-share-timeout must be at least 1.\n");
+					eprintln!("Zero closes every session before a rig can submit anything, so");
+					eprintln!("the endpoint would accept logins and disconnect them at once.");
+					return Err(sc_cli::Error::Input("--stratum-share-timeout is zero".into()));
+				}
 				if cli.stratum_max_connections_per_ip == 0 {
 					eprintln!("Error: --stratum-max-connections-per-ip must be at least 1.\n");
 					eprintln!("Zero refuses every rig, including one on the node's own box.");
@@ -855,11 +867,23 @@ pub fn run() -> sc_cli::Result<()> {
 					));
 				}
 
-				let stratum_config = cli.stratum_port.map(|port| crate::stratum::StratumConfig {
-					host: cli.stratum_host,
-					port,
-					share_difficulty: cli.stratum_share_difficulty,
-					max_connections_per_ip: cli.stratum_max_connections_per_ip,
+				let stratum_config = cli.stratum_port.map(|port| {
+					// One flag sets both windows. The two clocks start on
+					// different events, a login and an accepted share, and there
+					// is no reason for the length to differ: the default already
+					// covers the dataset a full-mode rig builds after login.
+					let share_timeout = cli.stratum_share_timeout.map_or_else(
+						|| crate::stratum::default_share_timeout(cli.stratum_share_difficulty),
+						std::time::Duration::from_secs,
+					);
+					crate::stratum::StratumConfig {
+						host: cli.stratum_host,
+						port,
+						share_difficulty: cli.stratum_share_difficulty,
+						max_connections_per_ip: cli.stratum_max_connections_per_ip,
+						first_share_timeout: share_timeout,
+						share_timeout,
+					}
 				});
 
 				// Allow mining without peers if --dev or --force-authoring is set
@@ -1049,6 +1073,47 @@ mod tests {
 		])
 		.expect("parse --stratum-max-connections-per-ip");
 		assert_eq!(raised.stratum_max_connections_per_ip, 32);
+	}
+
+	/// The session deadline is a flag, and its default is derived from the
+	/// share difficulty.
+	///
+	/// It is the endpoint's whole liveness rule after login, so a deadline
+	/// fixed in seconds while `--stratum-share-difficulty` moves is a bet on
+	/// the rig's hash rate: raise the difficulty far enough and a healthy rig
+	/// producing shares at exactly the rate it was asked for is disconnected
+	/// between two of them.
+	#[test]
+	fn the_session_share_deadline_is_a_flag_defaulted_from_the_difficulty() {
+		use clap::Parser;
+
+		let default = crate::cli::Cli::try_parse_from(["qnero-node", "--validator"])
+			.expect("parse a bare authority command line");
+		assert_eq!(
+			default.stratum_share_timeout, None,
+			"an unset flag is what makes the default the derived one",
+		);
+		assert_eq!(
+			crate::stratum::default_share_timeout(crate::cli::DEFAULT_SHARE_DIFFICULTY),
+			std::time::Duration::from_secs(600),
+			"the documented default is ten minutes at the default share difficulty",
+		);
+		assert!(
+			crate::stratum::default_share_timeout(crate::cli::DEFAULT_SHARE_DIFFICULTY * 10) >
+				crate::stratum::default_share_timeout(crate::cli::DEFAULT_SHARE_DIFFICULTY),
+			"a raised share difficulty has to widen the window it is measured against",
+		);
+
+		let set = crate::cli::Cli::try_parse_from([
+			"qnero-node",
+			"--validator",
+			"--stratum-port",
+			"3333",
+			"--stratum-share-timeout",
+			"1200",
+		])
+		.expect("parse --stratum-share-timeout");
+		assert_eq!(set.stratum_share_timeout, Some(1_200));
 	}
 
 	#[test]

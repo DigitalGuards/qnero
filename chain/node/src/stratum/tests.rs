@@ -112,6 +112,20 @@ fn test_job(difficulty: u64) -> MiningJob {
 	}
 }
 
+/// The configuration a node starts the endpoint with, for a share difficulty.
+fn test_config(share_difficulty: u64) -> StratumConfig {
+	StratumConfig {
+		host: IpAddr::from([127, 0, 0, 1]),
+		port: 0,
+		share_difficulty,
+		max_connections_per_ip: MAX_CONNECTIONS_PER_IP,
+		// What `command.rs` computes when `--stratum-share-timeout` is not
+		// given, which is the deployed default.
+		first_share_timeout: default_share_timeout(share_difficulty),
+		share_timeout: default_share_timeout(share_difficulty),
+	}
+}
+
 async fn server_with_job(
 	difficulty: u64,
 	share_difficulty: u64,
@@ -120,26 +134,28 @@ async fn server_with_job(
 }
 
 /// The same, under bounds a test can reach: a cap of 64 connections and a
-/// deadline of half an hour are production numbers, and reaching either one
+/// deadline of ten minutes are production numbers, and reaching either one
 /// honestly in a test would take hundreds of sockets or minutes of waiting.
 async fn server_with_limits(
 	difficulty: u64,
 	share_difficulty: u64,
 	limits: Limits,
 ) -> (Arc<StratumServer>, Arc<RandomxEngine>) {
+	server_with_config(difficulty, test_config(share_difficulty), limits).await
+}
+
+/// The same, with the session deadlines set as well. They live in
+/// [`StratumConfig`], because an operator moves them with
+/// `--stratum-share-timeout`, where [`Limits`] holds what only a test varies.
+async fn server_with_config(
+	difficulty: u64,
+	config: StratumConfig,
+	limits: Limits,
+) -> (Arc<StratumServer>, Arc<RandomxEngine>) {
 	let engine = RandomxEngine::light(2);
-	let server = StratumServer::start_with_limits(
-		StratumConfig {
-			host: IpAddr::from([127, 0, 0, 1]),
-			port: 0,
-			share_difficulty,
-			max_connections_per_ip: MAX_CONNECTIONS_PER_IP,
-		},
-		engine.clone(),
-		limits,
-	)
-	.await
-	.expect("bind");
+	let server = StratumServer::start_with_limits(config, engine.clone(), limits)
+		.await
+		.expect("bind");
 	server.broadcast_job(test_job(difficulty)).await;
 	(server, engine)
 }
@@ -153,6 +169,63 @@ async fn is_closed(miner: &mut FakeMiner, within: Duration) -> bool {
 	)
 }
 
+/// How a connection ended: whether the server closed it inside the window, and
+/// the last error message it sent before it did.
+///
+/// It keeps the last *error* the server sent, because the node pushes jobs to a
+/// session it is about to close and one of those can land between the reason
+/// and the close.
+struct Ending {
+	closed: bool,
+	last_error: Option<String>,
+}
+
+/// Drive a connection whose peer writes what `next_line` gives it every `every`
+/// and reads whatever comes back, until the server closes it or `within` runs
+/// out. A `None` line sends nothing that round, which is the fully silent peer.
+async fn drive_until_closed<F>(
+	miner: &mut FakeMiner,
+	mut next_line: F,
+	every: Duration,
+	within: Duration,
+) -> Ending
+where
+	F: FnMut(usize) -> Option<String>,
+{
+	let mut last_error = None;
+	let closed = tokio::time::timeout(within, async {
+		for round in 0.. {
+			if let Some(line) = next_line(round) {
+				if miner.writer.write_all(line.as_bytes()).await.is_err() {
+					return;
+				}
+			}
+			let drain = async {
+				loop {
+					let mut reply = String::new();
+					match miner.reader.read_line(&mut reply).await {
+						Ok(0) | Err(_) => return,
+						Ok(_) =>
+							if let Ok(value) = serde_json::from_str::<Value>(&reply) {
+								if let Some(message) = value["error"]["message"].as_str() {
+									last_error = Some(message.to_string());
+								}
+							},
+					}
+				}
+			};
+			// Replies are read for their reason; the end of the stream is the
+			// answer this is waiting for, and a quiet window means write again.
+			if tokio::time::timeout(every, drain).await.is_ok() {
+				return;
+			}
+		}
+	})
+	.await
+	.is_ok();
+	Ending { closed, last_error }
+}
+
 /// Whether the server closes this connection within `within`, while the peer
 /// keeps writing `line` every `every` and reads whatever comes back.
 async fn closes_while_sending(
@@ -161,34 +234,20 @@ async fn closes_while_sending(
 	every: Duration,
 	within: Duration,
 ) -> bool {
-	tokio::time::timeout(within, async {
-		loop {
-			if miner.writer.write_all(line.as_bytes()).await.is_err() {
-				return;
-			}
-			let drain = async {
-				let mut reply = String::new();
-				loop {
-					match miner.reader.read_line(&mut reply).await {
-						Ok(0) | Err(_) => return,
-						Ok(_) => reply.clear(),
-					}
-				}
-			};
-			// Replies are read and thrown away; the end of the stream is the
-			// answer this is waiting for, and a quiet window means write again.
-			if tokio::time::timeout(every, drain).await.is_ok() {
-				return;
-			}
-		}
-	})
-	.await
-	.is_ok()
+	drive_until_closed(miner, |_| Some(line.to_string()), every, within)
+		.await
+		.closed
 }
 
 /// Take the job apart the way a miner does, find a nonce that clears the
 /// target the job carried, and return it with the hash.
 fn mine_from_job(engine: &Arc<RandomxEngine>, job: &Value) -> (u32, String) {
+	mine_from_job_above(engine, job, 0)
+}
+
+/// The same, resumed at `from`, so one connection can submit a run of shares
+/// the duplicate set has not already seen.
+fn mine_from_job_above(engine: &Arc<RandomxEngine>, job: &Value, from: u32) -> (u32, String) {
 	let blob = hex::decode(job["blob"].as_str().expect("blob")).expect("blob hex");
 	assert!(blob.len() >= 76, "xmrig refuses a blob under 76 bytes, got {}", blob.len());
 	let seed: [u8; 32] = hex::decode(job["seed_hash"].as_str().expect("seed_hash"))
@@ -203,7 +262,7 @@ fn mine_from_job(engine: &Arc<RandomxEngine>, job: &Value) -> (u32, String) {
 
 	let lease = engine.acquire(seed).expect("lease");
 	let mut blob: [u8; 76] = blob[..76].try_into().expect("76 bytes");
-	for nonce in 0..8_192u32 {
+	for nonce in from..from.saturating_add(8_192) {
 		// Exactly what a miner does: overwrite four bytes at offset 39.
 		blob[39..43].copy_from_slice(&nonce.to_le_bytes());
 		let hash = lease.hash(&blob).expect("hash");
@@ -668,61 +727,221 @@ async fn a_peer_that_talks_without_logging_in_gives_its_slot_back() {
 	}
 }
 
-/// A session that logs in and then never says anything again must not live on
-/// the node's own job pushes.
+/// The whole liveness rule after login, in the three shapes that used to keep a
+/// connection open for the life of the process.
 ///
-/// The share-scaled deadline counts a job push as proof of life, which is
-/// right for a rig that is hashing and has found nothing. On its own it is also
-/// a session that never has to send another byte: the node pushes a job every
-/// block interval and the deadline's floor is 25 of those, so a peer that sends
-/// one login line and then drains forever held a connection slot until the node
-/// restarted. With 64 slots on the endpoint and four to an address, sixteen
-/// addresses sending one line each took the whole thing away from the
-/// operator's own rigs.
+/// The rule was a ceiling on inbound silence, and any completed line refreshed
+/// it. A blank line is a completed line: `read_one_line` returns
+/// `Line::Complete` and the clock was stamped before the line was discarded. A
+/// `keepalived` is answered without looking at the session at all. Beside that
+/// ceiling sat a share-scaled deadline that counted the node's own job pushes
+/// as proof of life, so a peer that logged in once and then drained forever was
+/// held open by the node itself. A session that mined nothing therefore held
+/// one of the 64 connection slots until the node restarted, and sixteen of them
+/// took the endpoint away from the operator's own rigs. On the documented
+/// rig-only deployment, `--mining-threads 0` with a stratum port, that is a
+/// node that stops authoring.
+///
+/// The rule is an accepted share and nothing else, so all three shapes end the
+/// same way, and the job pushes run underneath all three.
 #[tokio::test]
-async fn a_session_that_goes_silent_is_dropped_even_while_jobs_are_pushed() {
-	let (server, _engine) = server_with_limits(
-		8,
-		// The authenticated deadline at its two-hour ceiling, so the only rule
-		// that can close this connection is the inbound one.
+async fn a_logged_in_session_that_never_submits_a_share_is_closed() {
+	let keepalived = json!({"id": 1, "method": "keepalived", "params": {}}).to_string() + "\n";
+	for shape in [None, Some("\n".to_string()), Some(keepalived)] {
+		let (server, _engine) = server_with_config(
+			8,
+			StratumConfig {
+				// Wide enough for a login and its reply, short enough to wait
+				// out: the production default is ten minutes.
+				first_share_timeout: Duration::from_millis(600),
+				share_timeout: Duration::from_millis(600),
+				// And a share difficulty whose own default deadline is the
+				// two-hour ceiling, so nothing but the configured one can close
+				// this.
+				..test_config(u64::MAX)
+			},
+			Limits::default(),
+		)
+		.await;
+
+		let mut miner = FakeMiner::connect(server.local_addr()).await;
+		assert_eq!(miner.login("qnero-worker").await["result"]["status"], "OK");
+
+		// Exactly what used to hold such a connection open: the node writing to
+		// it, every block interval, forever.
+		let pushing = tokio::spawn({
+			let server = server.clone();
+			async move {
+				for id in 2..40u64 {
+					let mut job = test_job(8);
+					job.job_id = id.to_string();
+					server.broadcast_job(job).await;
+					tokio::time::sleep(Duration::from_millis(100)).await;
+				}
+			}
+		});
+
+		let ending = drive_until_closed(
+			&mut miner,
+			|_| shape.clone(),
+			// Half a window apart, so the last inbound line is never more than
+			// half a window old and the old rule could never have fired.
+			Duration::from_millis(300),
+			Duration::from_secs(5),
+		)
+		.await;
+		pushing.abort();
+
+		assert!(
+			ending.closed,
+			"a session sending {shape:?} and mining nothing held its slot while the node \
+			 kept writing to it",
+		);
+		assert_eq!(
+			ending.last_error.as_deref(),
+			Some(NO_SHARES_MESSAGE),
+			"the rig has to be told why, or it reconnects into the same deadline with \
+			 nothing to go on",
+		);
+		assert_eq!(server.stats().accepted, 0);
+	}
+}
+
+/// A session that submits and never lands one is closed on the same rule.
+///
+/// A rejected share is the shape this rule most has to refuse: it is a line a
+/// peer can produce at will, it reaches further into the endpoint than a
+/// keepalive does, and crediting it would make the deadline something a peer
+/// that never mines can hold off forever. Every submit here carries a fresh
+/// nonce, so every one of them is hashed on the blocking pool and refused as
+/// low difficulty; none is dismissed as a duplicate before the work is done.
+#[tokio::test]
+async fn a_session_whose_shares_are_all_rejected_is_closed() {
+	// Both difficulties at the ceiling, so no nonce this peer sends can clear
+	// the share target.
+	let (server, _engine) = server_with_config(
 		u64::MAX,
-		Limits { max_idle: Duration::from_millis(600), ..Limits::default() },
+		StratumConfig {
+			first_share_timeout: Duration::from_millis(1_000),
+			share_timeout: Duration::from_millis(1_000),
+			..test_config(u64::MAX)
+		},
+		Limits::default(),
 	)
 	.await;
 
-	let mut silent = FakeMiner::connect(server.local_addr()).await;
-	assert_eq!(silent.login("qnero-worker").await["result"]["status"], "OK");
+	let mut miner = FakeMiner::connect(server.local_addr()).await;
+	assert_eq!(miner.login("qnero-worker").await["result"]["status"], "OK");
+	let session = miner.session.clone();
 
-	// Exactly what used to hold the connection open: the node writing to it.
-	let pushing = tokio::spawn({
-		let server = server.clone();
-		async move {
-			for id in 2..40u64 {
-				let mut job = test_job(8);
-				job.job_id = id.to_string();
-				server.broadcast_job(job).await;
-				tokio::time::sleep(Duration::from_millis(100)).await;
-			}
-		}
-	});
-
-	// Drain the pushes without answering any of them, until the server closes.
-	let closed = tokio::time::timeout(Duration::from_secs(5), async {
-		loop {
-			let mut line = String::new();
-			match silent.reader.read_line(&mut line).await {
-				Ok(0) | Err(_) => break,
-				Ok(_) => {},
-			}
-		}
-	})
+	let ending = drive_until_closed(
+		&mut miner,
+		|round| {
+			Some(
+				json!({
+					"id": round + 2,
+					"jsonrpc": "2.0",
+					"method": "submit",
+					"params": {
+						"id": session,
+						"job_id": "1",
+						"nonce": hex::encode((round as u32).to_le_bytes()),
+						"algo": "rx/0",
+					},
+				})
+				.to_string() + "\n",
+			)
+		},
+		Duration::from_millis(250),
+		Duration::from_secs(10),
+	)
 	.await;
-	pushing.abort();
+
+	assert!(ending.closed, "a session that submits and never lands one held its slot");
+	assert_eq!(ending.last_error.as_deref(), Some(NO_SHARES_MESSAGE));
+	let stats = server.stats();
+	assert_eq!(stats.accepted, 0);
+	assert!(stats.rejected >= 2, "the test has to reach the rejection paths: {stats:?}");
+}
+
+/// An accepted share refreshes the deadline, and it is what the whole rule is
+/// built around: a rig that keeps mining is never disconnected, however long it
+/// stays.
+///
+/// The second half is the other direction of the same rule. The clock is a
+/// deadline and not a one-shot: the same connection, having been accepted
+/// eight times, is closed one window after it stops producing.
+#[tokio::test]
+async fn an_accepted_share_refreshes_the_deadline_and_a_stopped_rig_is_closed() {
+	// Share difficulty 1, so every nonce is a share and this miner can produce
+	// them on demand. The block difficulty is out of reach, so none is a seal.
+	let deadline = Duration::from_millis(1_500);
+	let (server, engine) = server_with_config(
+		u64::MAX,
+		StratumConfig { first_share_timeout: deadline, share_timeout: deadline, ..test_config(1) },
+		Limits::default(),
+	)
+	.await;
+
+	let mut miner = FakeMiner::connect(server.local_addr()).await;
+	let login = miner.login("qnero-worker").await;
+	let job = login["result"]["job"].clone();
+
+	// Eight shares a third of a window apart: three deadlines of wall clock,
+	// none of which may end the connection.
+	let rounds = 8u32;
+	for round in 0..rounds {
+		tokio::time::sleep(deadline / 3).await;
+		let (nonce, result) = mine_from_job_above(&engine, &job, round);
+		let response = miner.submit("1", nonce, Some(&result)).await;
+		assert!(response["error"].is_null(), "round {round} must be accepted: {response}");
+	}
+	assert_eq!(server.stats().accepted, u64::from(rounds));
 	assert!(
-		closed.is_ok(),
-		"a logged-in peer that sends nothing held its slot for as long as the node kept \
-		 writing to it",
+		!is_closed(&mut miner, Duration::from_millis(100)).await,
+		"a rig that keeps landing shares must never be disconnected",
 	);
+
+	let ending = drive_until_closed(
+		&mut miner,
+		|_| None,
+		Duration::from_millis(300),
+		Duration::from_secs(5),
+	)
+	.await;
+	assert!(ending.closed, "the deadline is a deadline: a rig that stops producing is closed");
+	assert_eq!(ending.last_error.as_deref(), Some(NO_SHARES_MESSAGE));
+}
+
+/// The reason a closed session is given must not be one xmrig treats as
+/// critical.
+///
+/// It is written to a rig the endpoint wants back: the usual cause is a rig
+/// pointed at the wrong algorithm or one that stopped hashing, and a critical
+/// string costs it the pool and its retry timer both.
+#[test]
+fn the_deadline_reason_is_not_a_string_xmrig_treats_as_critical() {
+	assert!(!is_xmrig_critical(NO_SHARES_MESSAGE), "{NO_SHARES_MESSAGE:?} drops the pool");
+}
+
+/// The default deadline is ten minutes and rises with the share difficulty.
+///
+/// A deadline fixed in seconds is a bet on the rig's hash rate. It is computed
+/// from the *configured* share difficulty, and a job's share difficulty is that
+/// value clamped down to the block difficulty, so the estimate is never shorter
+/// than the time a share actually takes to find.
+#[test]
+fn the_default_share_deadline_scales_with_the_share_difficulty() {
+	assert_eq!(default_share_timeout(5_000), Duration::from_secs(600));
+	// Twelve expected share intervals for a 100 H/s rig, once that is past the
+	// floor.
+	assert_eq!(default_share_timeout(50_000), Duration::from_secs(6_000));
+	assert!(default_share_timeout(50_000) > default_share_timeout(5_000));
+	// Floored, so an easy chain does not get a deadline a rig cannot meet
+	// while it builds its dataset.
+	assert_eq!(default_share_timeout(1), Duration::from_secs(600));
+	// And capped, so one unproductive session cannot hold a slot for a day.
+	assert_eq!(default_share_timeout(u64::MAX), Duration::from_secs(7_200));
 }
 
 /// One address must not be able to take every slot on the endpoint.
@@ -830,17 +1049,7 @@ async fn keepalived_is_answered_so_the_miner_does_not_reconnect() {
 #[tokio::test]
 async fn a_login_before_the_first_template_is_refused_and_the_socket_closes() {
 	let engine = RandomxEngine::light(1);
-	let server = StratumServer::start(
-		StratumConfig {
-			host: IpAddr::from([127, 0, 0, 1]),
-			port: 0,
-			share_difficulty: 100,
-			max_connections_per_ip: MAX_CONNECTIONS_PER_IP,
-		},
-		engine,
-	)
-	.await
-	.expect("bind");
+	let server = StratumServer::start(test_config(100), engine).await.expect("bind");
 	let mut miner = FakeMiner::connect(server.local_addr()).await;
 	let response = miner.login("qnero-worker").await;
 	assert_eq!(response["error"]["message"], "No job available yet");

@@ -471,6 +471,7 @@ nice -n 19 ./target/release/qnero-node --dev --tmp \
 | `--stratum-host ADDR` | `127.0.0.1` | Bind address. A rig on another machine needs `0.0.0.0`. Requires `--stratum-port`. |
 | `--stratum-share-difficulty D` | 5000 | Per-connection share difficulty, clamped per job to the block difficulty. Requires `--stratum-port`. |
 | `--stratum-max-connections-per-ip N` | 16 | Connections one address may hold. A farm behind one NAT gateway and several xmrig instances on the node's own box all arrive from a single address. Requires `--stratum-port`. |
+| `--stratum-share-timeout S` | 600, rising with the share difficulty | How long a logged-in session has to produce an accepted share. The endpoint's whole liveness rule. Requires `--stratum-port`. |
 
 An authority with `--mining-threads 0` and no `--stratum-port` has nothing
 mining, so the node refuses to start and says so. `--mining-threads` above the
@@ -497,18 +498,14 @@ anything an unauthenticated peer can reach:
   the refusal is logged at `warn`, rate limited to one a minute with the count
   of what it suppressed. A cap that refuses in silence is a rig retrying every
   five seconds forever with neither end saying why;
-- 30 seconds to log in, counted from the moment the connection opened. The long
-  share-scaled deadline below is a rig's allowance and a peer earns it by
+- 30 seconds to log in, counted from the moment the connection opened. The
+  share deadline below is a rig's allowance and a peer earns it by
   logging in. Nothing a peer sends before it logs in extends the 30 seconds: a
   blank line and a `keepalived` are both answered before any login, so a
   deadline measured from the last line would have been one newline a window
   away from no deadline at all;
-- two hours of inbound silence, whatever the node writes. The share-scaled
-  deadline counts a job push as proof of life, which is right for a rig that is
-  hashing and has found nothing, and on its own it is also a session that never
-  has to send another byte: the node pushes a job every block interval and the
-  deadline's floor is 25 of those. A real rig submits or keepalives far inside
-  two hours;
+- one accepted share every `--stratum-share-timeout` once logged in, which is
+  the endpoint's whole liveness rule and is the next paragraph;
 - 10 seconds for one write to land, and a 32-line outgoing queue. A peer that
   stops reading its socket is disconnected, so it cannot park a connection task
   on a stalled `write_all` and keep the slot that task holds;
@@ -526,15 +523,35 @@ anything an unauthenticated peer can reach:
 - miner-supplied strings truncated to 64 characters and logged with `{:?}`, so
   a login cannot forge a log line or rewrite a terminal.
 
-The idle deadline scales with the share difficulty (`20` expected share
-intervals for a 100 H/s rig, floored at 5 minutes and capped at 2 hours), and
-it counts from the last line in **either** direction. xmrig resets its own
-keepalive timer on every line it *receives*, so a rig that is taking job pushes
-and has not found a share sends nothing at all: a deadline measured only on
-inbound lines is a bet on the rig's hash rate, and a fixed 5-minute one
-disconnects healthy miners at a high share difficulty. Counting the node's own
-job pushes as proof of life makes it an invariant, because a push is exactly
-what re-arms the timer on the other end.
+**The liveness rule is an accepted share.** A logged-in session has
+`--stratum-share-timeout` to produce its first share at or above the job's share
+target, and the same window between accepted shares after that. Nothing else
+refreshes that clock: a blank line does not, a `keepalived` does not, a
+malformed line does not, a rejected share does not, and neither does a job the
+node pushes. This is the rule a pool uses, and it is the only one the endpoint
+has, so there is one thing to explain and one thing to tune. A connection slot
+is there to be mined with.
+
+`keepalived` is still answered, because xmrig arms a keepalive timer inside a
+successful login and expects a reply. It is inert otherwise.
+
+The default is 600 seconds and it rises with `--stratum-share-difficulty`:
+twelve expected share intervals for a rig of 100 H/s, capped at 7200. A deadline
+fixed in seconds is a bet on the rig's hash rate. It is computed from the
+*configured* share difficulty, and a job's share difficulty is that value
+clamped down to the block difficulty, so the estimate is never shorter than the
+time a share actually takes to find: a chain sitting at the difficulty floor
+hands out shares far easier than the configuration asks for, and the deadline
+stays sized for the harder one. At the default share difficulty of 5000 a
+900 H/s box finds a share every six seconds, so the window is a hundred expected
+shares wide, and it also covers the minute a full-mode rig spends building its
+dataset after login, before it hashes anything at all.
+
+A session that runs out is told `No accepted shares` and then closed.
+Deliberately not one of the four strings xmrig treats as critical: the endpoint
+wants the rig back, the usual causes are a rig pointed at the wrong algorithm
+and a rig that stopped hashing, and both are fixed on the rig while xmrig keeps
+retrying on its own timer.
 
 **When authoring pauses**, on a stale tip, on no peers, or for the length of an
 initial sync, the endpoint stops handing the template out and closes the
@@ -4650,3 +4667,134 @@ that only nightly rustfmt honours, so `cargo +nightly fmt` is the gate. Stable
 `rustfmt` on a file in that workspace rewrites match arms and binary operators
 that nightly leaves alone, and it follows `mod` declarations into files it was
 not handed.
+
+## The M7 fourth review fix pass, 2026-09-13
+
+One finding against the third fix pass, a medium, and it is the stratum
+endpoint for the fifth time: the same connection slot, held by the same kind of
+peer, through the last bound that was still refreshed by a line the peer chose
+to send.
+
+### What changed
+
+**The liveness rule is an accepted share, and it is the only rule.** The
+post-login bound was a ceiling on inbound silence, and every completed line
+refreshed it. A blank line is a completed line, `keepalived` is answered without
+looking at the session, and a malformed line and a rejected share are both
+answered too, so a peer that logged in once and then sent one byte every hour
+held its connection slot for the life of the process. Beside that ceiling sat a
+share-scaled deadline that counted the node's own job pushes as proof of life,
+which meant the node itself kept such a session alive. The third pass closed the
+pre-login half of this, and the post-login half is the same defect one line
+later: 16 peers at the per-address cap, or 64 across four addresses, and the
+operator's own rigs are answered `Too many connections` until the node restarts.
+On the documented rig-only deployment, `--mining-threads 0` with a stratum
+port, that is a node that stops authoring.
+
+The new rule is the one a pool uses. A logged-in session has
+`first_share_timeout` to produce a share that verifies at or above the job's
+share target, and `share_timeout` between accepted shares after that. Nothing
+else refreshes the clock. A blank line does not, a `keepalived` does not, a
+malformed line does not, a rejected share does not, and neither does anything
+the node writes to the connection. `keepalived` is still answered, because
+xmrig arms a keepalive timer inside a successful login and expects a reply, and
+it is inert otherwise. The silence ceiling is gone, so there is one bound after
+login to explain and one flag to tune, and the pre-login window from the
+connection's age is untouched. A session that runs out is told
+`No accepted shares`, which is deliberately not one of the four strings xmrig
+treats as critical, and then closed.
+
+The deadline is carried out of the request handler, so nothing has to be
+inferred from the answer's text: `Reply` gained an `accepted_share` flag that
+only the final `OK` of a verified share sets, and every rejection path returns
+`Reply::open`. A second login does not restart the clock either, because a
+login line is as cheap to repeat as a newline and that is exactly the hole this
+rule closes.
+
+**The deadline is configuration, and its default is derived.**
+`--stratum-share-timeout` sets both windows; left alone they are 600 seconds,
+rising with `--stratum-share-difficulty` at twelve expected share intervals for
+a rig of 100 H/s and capped at 7200. A deadline fixed in seconds is a bet on the
+rig's hash rate. It is computed from the configured share difficulty, and a
+job's share difficulty is that value clamped down to the block difficulty, so
+the estimate is never shorter than the time a share actually takes to find: a
+chain at the difficulty floor hands out shares far easier than the configuration
+asks for and the deadline stays sized for the harder one. At the default share
+difficulty of 5000 a 900 H/s box finds a share every six seconds, so the window
+is a hundred expected shares wide, and it also covers the minute a full-mode rig
+spends building its dataset after login.
+
+### The tests
+
+`a_logged_in_session_that_never_submits_a_share_is_closed` is the regression
+test, and it runs the case three times: a peer that sends nothing, one that
+sends a bare newline every half window, and one that sends a `keepalived` every
+half window, with the node broadcasting a job every 100 ms underneath all three.
+It replaces `a_session_that_goes_silent_is_dropped_even_while_jobs_are_pushed`,
+which is its first shape. `a_session_whose_shares_are_all_rejected_is_closed`
+covers the shape that reaches furthest into the endpoint: every submit carries a
+fresh nonce, so every one of them is hashed on the blocking pool and refused as
+low difficulty, and none of them counts.
+`an_accepted_share_refreshes_the_deadline_and_a_stopped_rig_is_closed` is the
+other direction, eight accepted shares a third of a window apart across three
+deadlines with no disconnect, and then the same connection closed one window
+after it stops producing.
+
+All three were run against the rule they defend, removed. Putting the old
+refresh back, so that any completed line stamps the clock, fails
+`a_logged_in_session_that_never_submits_a_share_is_closed` on the newline shape
+and fails `a_session_whose_shares_are_all_rejected_is_closed` outright:
+`30 passed; 2 failed`. Dropping the accepted-share stamp instead fails
+`an_accepted_share_refreshes_the_deadline_and_a_stopped_rig_is_closed` on its
+third submit, with a broken pipe, the server having closed the connection at the
+first deadline: `31 passed; 1 failed`. The silent shape passes under both
+removals, which is why the newline and the `keepalived` are in the test beside
+it.
+
+### The run
+
+The node was rebuilt once for this change, then `--dev --tmp --stratum-port
+3350 --mining-threads 1` against xmrig 6.21.3 at `nice -n 19 --threads=2` for
+two minutes. The deadline was set to `--stratum-share-timeout 20` on purpose:
+at the 600-second default a two-minute session cannot tell a working rule from
+a missing one, where at 20 seconds a rig whose accepted shares stopped
+refreshing the clock would be disconnected six times over the run and every
+reconnect writes its own login line.
+
+```
+⛏️ Stratum listening on 127.0.0.1:3350 (algo rx/0, share difficulty 5000, first share within 20s, a share every 20s after that)
+⛏️ Miner 127.0.0.1:39048 logged in as "qnero-rig" ("XMRig/6.21.3 (Linux x86_64) libuv/1.48.0 gcc/13.2.1"), extra nonce 0x943bdbb6
+🥇 Successfully mined and submitted a new block by stratum miner "qnero-rig" (mining time: 1s)
+⛏️ Stratum so far: 455 shares accepted, 0 rejected, 455 at the block difficulty, 189 sealed, 266 too late
+```
+
+One login in the whole log and no second one, which is what says the session was
+never closed and never retried. The first accepted share landed 3 seconds after
+the login, xmrig's 2336 MB dataset build included, against a 20-second first
+share window. 455 shares accepted, 0 rejected, 189 blocks sealed from the rig,
+and the chain reached #197 at difficulty 325 from a genesis of 128. Both ends
+were stopped by pidfile; port 3350 and the RPC port were closed afterwards and
+no process survived.
+
+### Gates
+
+```
+# the chain workspace
+SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p qnero-node --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 -p qnero-node --all-targets
+cargo +nightly fmt --all -- --check
+
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+cargo fmt --all -- --check
+```
+
+All green. The node crate is at 98 unit tests plus 5 integration tests, 32 of
+the unit tests stratum protocol tests driven by a fake miner that speaks
+xmrig's messages, and the root workspace is unchanged by this pass. The one
+node rebuild took 10:01, cold for the runtime wasm and for rocksdb.
+
+`cargo +nightly fmt` is the gate in the chain workspace, as before: its
+`.rustfmt.toml` sets options only nightly honours, and stable `rustfmt` on a
+file there rewrites match arms and binary operators that nightly leaves alone.
