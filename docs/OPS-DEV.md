@@ -553,6 +553,20 @@ wants the rig back, the usual causes are a rig pointed at the wrong algorithm
 and a rig that stopped hashing, and both are fixed on the rig while xmrig keeps
 retrying on its own timer.
 
+**What the endpoint does not bound, and why it is open.** Every deadline above
+is a property of one TCP connection, and a connection costs a peer nothing to
+replace. A peer that logs in, mines nothing, is closed at the share deadline
+and reconnects at once holds a slot continuously, and the only handle the
+endpoint has on it is its address, which `--stratum-max-connections-per-ip`
+already bounds at 16 of the 64 slots. Closing this fully means keying on the
+peer rather than the socket: a per-address strike for every session closed
+with `No accepted shares`, and a cooldown during which that address is refused
+at accept, which a peer with many addresses still walks around, at which point
+the answer is a firewall in front of a port that is loopback by default. It is
+recorded here as the known limit of an unauthenticated endpoint and left
+open; an operator who exposes the port to a network should put it behind an
+address allowlist or a pool.
+
 **When authoring pauses**, on a stale tip, on no peers, or for the length of an
 initial sync, the endpoint stops handing the template out and closes the
 connections holding it: `Node is not authoring`, then an EOF. That is the same
