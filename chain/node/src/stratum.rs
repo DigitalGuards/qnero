@@ -197,7 +197,7 @@ pub(crate) const XMRIG_CRITICAL_ERRORS: [&str; 4] =
 ///
 /// Deliberately not one of the four above: the node expects the rig back as
 /// soon as it is authoring again, so this must leave xmrig's own retry timer
-/// running rather than making it drop the pool.
+/// running.
 pub(crate) const PAUSED_MESSAGE: &str = "Node is not authoring";
 
 /// Whether xmrig would treat this message as critical and drop the pool.
@@ -687,10 +687,10 @@ impl StratumServer {
 
 	/// A seal this endpoint produced went into a block.
 	///
-	/// Counted where the seal is consumed rather than where the share is
-	/// hashed, because the mining loop takes one seal per template and drops
-	/// the rest: counting block-worthy shares as blocks overstated a rig's
-	/// output by more than a factor of two in a measured session.
+	/// Counted where the seal is consumed, because the mining loop takes one
+	/// seal per template and drops the rest: counting block-worthy shares as
+	/// blocks overstated a rig's output by more than a factor of two in a
+	/// measured session.
 	pub fn note_block_sealed(&self) {
 		self.counters.sealed.fetch_add(1, Ordering::Relaxed);
 	}
@@ -794,10 +794,10 @@ impl StratumServer {
 			let Some(remaining) = deadline.checked_sub(last_read.elapsed().min(since_write)) else {
 				break Err("idle timeout".to_string());
 			};
-			// Whichever runs out first. The ceiling has to be part of the wait
-			// and not only a check on re-entry: a connection the node keeps
-			// writing to has a share-scaled deadline hours away, so the loop
-			// would sit inside one read for all of it.
+			// Whichever runs out first. The ceiling has to be part of the wait:
+			// a connection the node keeps writing to has a share-scaled
+			// deadline hours away, so a check made only on re-entry would leave
+			// the loop inside one read for all of it.
 			let remaining = remaining.min(silence_left);
 
 			let read = tokio::select! {
@@ -1232,7 +1232,7 @@ enum Line {
 /// without either end knowing which.
 ///
 /// `fill_buf` is cancel safe (cancelling it consumes nothing) and `line` is the
-/// caller's, so a line split across two waits is resumed rather than truncated.
+/// caller's, so a line split across two waits is resumed whole.
 /// The bound is counted on `line` itself, which is the same bound the `take`
 /// this replaced provided: a peer that never sends a newline cannot make the
 /// node buffer for it.

@@ -470,6 +470,7 @@ nice -n 19 ./target/release/qnero-node --dev --tmp \
 | `--stratum-port PORT` | off | Opens the endpoint xmrig connects to. Requires `--validator` (`--dev` is one). |
 | `--stratum-host ADDR` | `127.0.0.1` | Bind address. A rig on another machine needs `0.0.0.0`. Requires `--stratum-port`. |
 | `--stratum-share-difficulty D` | 5000 | Per-connection share difficulty, clamped per job to the block difficulty. Requires `--stratum-port`. |
+| `--stratum-max-connections-per-ip N` | 16 | Connections one address may hold. A farm behind one NAT gateway and several xmrig instances on the node's own box all arrive from a single address. Requires `--stratum-port`. |
 
 An authority with `--mining-threads 0` and no `--stratum-port` has nothing
 mining, so the node refuses to start and says so. `--mining-threads` above the
@@ -484,13 +485,26 @@ out from the rig that cannot connect.
 default, and opening it to a network is a decision, so it is bounded like
 anything an unauthenticated peer can reach:
 
-- a line is read through a `take` capped at 8 KiB, so a peer that never sends a
-  newline cannot make the node buffer for it;
-- 64 connections at once, and 4 from any one address, refused past either, so
-  one peer cannot multiply a per-connection allowance across sockets and one
-  host cannot take the endpoint away from the operator's rigs;
+- a line is bounded at 8 KiB as it accumulates, so a peer that never sends a
+  newline cannot make the node buffer for it. The read is cancel safe, because
+  the deadline below re-enters it: a line split across two TCP segments is
+  resumed whole, and the share in a submit split that way is not lost to a
+  parse error;
+- 64 connections at once, and `--stratum-max-connections-per-ip` (16) from any
+  one address, so one peer cannot multiply a per-connection allowance across
+  sockets and one host cannot take the endpoint away from the operator's rigs.
+  A refused peer is told `Too many connections` before the socket closes, and
+  the refusal is logged at `warn`, rate limited to one a minute with the count
+  of what it suppressed. A cap that refuses in silence is a rig retrying every
+  five seconds forever with neither end saying why;
 - 30 seconds to log in. The long share-scaled deadline below is a rig's
   allowance and a peer earns it by logging in;
+- two hours of inbound silence, whatever the node writes. The share-scaled
+  deadline counts a job push as proof of life, which is right for a rig that is
+  hashing and has found nothing, and on its own it is also a session that never
+  has to send another byte: the node pushes a job every block interval and the
+  deadline's floor is 25 of those. A real rig submits or keepalives far inside
+  two hours;
 - 10 seconds for one write to land, and a 32-line outgoing queue. A peer that
   stops reading its socket is disconnected, so it cannot park a connection task
   on a stalled `write_all` and keep the slot that task holds;
@@ -499,7 +513,10 @@ anything an unauthenticated peer can reach:
   and networking;
 - 64 submits of burst per connection, refilling at 32 a second: far above any
   real rig's submit rate and far below what it would take to keep all four hash
-  slots saturated;
+  slots saturated. The refill rises to 256 a second for a job whose share
+  target is the block target, which is every job on a chain sitting at the
+  difficulty floor, because there a share refused for budget is a block thrown
+  away before it was hashed;
 - 100 000 entries in the duplicate-share set, cleared at the ceiling. Eviction
   is otherwise driven by the template rolling, and a stalled chain rolls none;
 - miner-supplied strings truncated to 64 characters and logged with `{:?}`, so
@@ -514,6 +531,16 @@ inbound lines is a bet on the rig's hash rate, and a fixed 5-minute one
 disconnects healthy miners at a high share difficulty. Counting the node's own
 job pushes as proof of life makes it an invariant, because a push is exactly
 what re-arms the timer on the other end.
+
+**When authoring pauses**, on a stale tip, on no peers, or for the length of an
+initial sync, the endpoint stops handing the template out and closes the
+connections holding it: `Node is not authoring`, then an EOF. That is the same
+answer a rig gets when it connects during a pause, and it is what makes xmrig
+count a failure and retry on its own timer. A connection left open through a
+pause is answered `OK` for every share it finds against a template with no
+build behind it, which is a 100% accept rate on work that cannot become a
+block. The one-generation grace slot stays for what it is for: a genuine
+template roll, where a rig is always mid-nonce when the push goes out.
 
 **The xmrig command line**, against a node with `--stratum-port 3333`:
 
@@ -4359,3 +4386,149 @@ cargo fmt --all -- --check
 All green. The node crate is at 84 tests, 22 of them stratum protocol tests
 driven by a fake miner that speaks xmrig's messages, with the node built once
 for the run above.
+
+## The M7 second review fix pass, 2026-09-13
+
+Nine findings against the first fix pass: four medium, five low. Three of the
+four mediums were the stratum endpoint again, and each one was a way for a
+connection to cost the node something it could not get back: a slot held
+forever, a rig hashing a dead template, a farm refused in silence. The fourth
+was the verifier.
+
+### What changed
+
+**A header at or below the finalized height is refused.** `verify_pow` bounded
+a candidate's height against its parent and nothing else, so on an archive node
+a peer chose which RandomX seed epoch the verifier resolved. A fork response
+carries up to `MaxReorgDepth` headers of which only the last is pinned to the
+hash that was asked for; the other 99 are free-form, and an archive node still
+resolves every old parent they name. Headers whose heights fall in three
+rotating epochs miss both seed caches the engine holds, and a miss is a 256 MiB
+Argon2d fill before one byte of the hash meets the target: hundreds of
+milliseconds of the import queue's single verification task per header carrying
+no proof of work, and the eviction costs the live seed a re-fill for the honest
+block that follows. The floor is the one `sc-client` applies a few stages later
+as `NotInFinalizedChain`, so nothing importable is lost, and what it leaves is
+the unfinalized window, `MaxReorgDepth` blocks wide and therefore at most the
+two epochs the cache pool already holds. Two exemptions, both paid for only on
+the path that is about to reject: the block that fills a warp or fast sync gap,
+which is the exemption `sc-client` carries, and a block the node already has,
+which is what `check-block` and `import-blocks` hand back to the import queue
+by design.
+
+**A pause now reaches the rigs that are already connected.** `pause_authoring`
+fires once on the enabled-to-disabled edge and moves the template to the grace
+slot, and while authoring is paused nothing rolls it out of there: the mining
+loop never reaches `mine_one_template`, so `broadcast_job` is never called. A
+connected rig therefore kept its job, kept its keepalives answered, and had
+every share hashed, counted and answered `OK`, for the length of a stale tip or
+an initial sync. Meanwhile a rig connecting during the same pause was told
+`No job available yet` and closed. The endpoint now answers both the same way:
+`Node is not authoring`, then the EOF that makes xmrig count a failure and
+retry on its own timer. Dropping the server's copy of the outgoing sender does
+not do it, because the connection holds its own, so a session carries a
+`Notify` the read loop selects on.
+
+**A logged-in connection can reach the idle deadline again.** The deadline
+counts the node's own job pushes as proof of life, which is what keeps a rig at
+a high share difficulty from being disconnected while it hashes. It also meant
+a peer that sent one login line and then only drained was refreshed by the node
+every block interval against a floor of 25 of them: 16 addresses at four
+connections each took all 64 slots with one line apiece and held them until the
+node restarted. There is now a ceiling on inbound silence that writes do not
+refresh, and it is part of the wait itself: the share-scaled deadline is hours
+away, so a check made only on re-entry would leave the loop inside one read for
+all of it. Two hours leaves a real rig, which submits or keepalives far
+inside that, untouched.
+
+**And the read is cancel safe.** `read_line` is documented as not cancel safe:
+the bytes it has taken off the socket live in the future and are dropped with
+it. Harmless while a timeout ended the connection, and not harmless once the
+timeout began re-entering the read, because the resumed call started mid-line.
+A submit split across two TCP segments with the timer firing between them came
+back as a parse error and the share in it was lost with nobody able to say
+which. `fill_buf` consumes nothing when cancelled, and the line buffer now
+outlives the iteration.
+
+**The per-address cap is a flag, and a refusal says so.** It was a hard-coded
+4: a normal number of rigs behind one NAT gateway, and a normal number of xmrig
+instances pinned per CCX on the node's own box. Past it the socket was dropped
+with nothing written and the only trace was a `debug` line, which is off at the
+default `RUST_LOG=info`, so the rig logged "connection closed" and retried every
+five seconds forever with neither end saying why.
+`--stratum-max-connections-per-ip` defaults to 16, both refusal paths write
+`Too many connections` before closing, and both log at `warn`, rate limited to
+one a minute with the suppressed count carried to the next line.
+
+**Smaller ones.** A dropped local mining round kept hashing: its workers are
+`spawn_blocking` tasks, which cannot be aborted, so every time a rig won a
+template the round's threads ran their whole batch on the pool that also
+carries rocksdb and block import. The round now holds a stop flag its workers
+poll, set by the flag's `Drop`. The operator's stratum line counted
+block-worthy shares as blocks, which on an easy chain overstates a rig's output
+by more than a factor of two; shares at the block difficulty, blocks sealed and
+seals that arrived too late are now three numbers, and blocks are counted where
+the seal is consumed. And the submit budget could refuse a block before it was
+hashed: the share difficulty is clamped per job to the block difficulty, so on
+a chain at the difficulty floor every share is a block, and a 10 kH/s rig there
+submits about 78 a second into a bucket refilling at 32. The refill now follows
+what a share is worth.
+
+### The run
+
+```
+export QNERO_MINER_KEY=$(qnero-wallet miner-address)
+RUST_LOG=info nice -n 19 ./target/release/qnero-node --dev --tmp \
+  --stratum-port 3338 --mining-threads 1
+
+nice -n 19 xmrig --threads=2 -o 127.0.0.1:3338 -u qnero-rig -p x --algo rx/0 \
+  --no-color --log-file=rig.log --print-time=15
+```
+
+Node side, with the counters split:
+
+```
+⛏️ Stratum listening on 127.0.0.1:3338 (algo rx/0, share difficulty 5000, idle timeout 1000s)
+⛏️ Mining #5 with rx/0: pre_hash=3cdcb854…, difficulty=131, seed #0 c61648d3…
+⛏️ Miner 127.0.0.1:… logged in as "qnero-rig" ("XMRig/6.21.3 (Linux x86_64) …"), extra nonce 0xd78f8e2e
+🥇 Share from "qnero-rig" meets the block difficulty 220 at height 94
+🥇 Successfully mined and submitted a new block by stratum miner "qnero-rig" (mining time: 0s)
+⛏️ Stratum so far: 334 shares accepted, 0 rejected, 334 at the block difficulty, 128 sealed, 205 too late
+```
+
+Rig side, from its own log:
+
+```
+[14:42:52.567]  net      use pool 127.0.0.1:3338  127.0.0.1
+[14:43:10.785]  miner    speed 10s/60s/15m 924.4 n/a n/a H/s max 926.6 H/s
+[14:44:11.644]  cpu      accepted (334/0) diff 270 (24 ms)
+```
+
+Both ends agree: 334 shares accepted, 0 rejected, one pool connection and no
+reconnects over the 79-second window, about 900 H/s on two threads against the
+node's own 33 H/s on one. The node's `128 sealed` is exactly the number of
+`by stratum miner` lines in its log, which is the point of splitting the
+counter: one template is one block by definition, and at a difficulty around
+250 a 900 H/s rig finds several block-worthy nonces against each one. The
+`205 too late` is that arithmetic, and it is now a number an operator can read
+at the default log level. An earlier 103-second run on the same build reached
+#181 with 167 of its blocks mined by the rig on the same terms.
+
+### Gates
+
+```
+# the chain workspace
+SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
+  -p sc-consensus-randomx -p pallet-qpow -p qnero-runtime -p qnero-node --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 -p qnero-node -p sc-consensus-randomx --all-targets
+cargo +nightly fmt --all -- --check
+
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+cargo fmt --all -- --check
+```
+
+All green. The consensus crate is at 58 tests and the node crate at 92, 26 of
+them stratum protocol tests driven by a fake miner that speaks xmrig's
+messages, with the node built once for the run above.

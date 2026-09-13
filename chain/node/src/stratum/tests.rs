@@ -666,10 +666,7 @@ async fn one_address_cannot_take_every_connection_slot() {
 	// forever with neither end saying which cap it hit.
 	let refusal = extra.recv().await;
 	assert_eq!(refusal["error"]["message"], REFUSED_MESSAGE);
-	assert!(
-		!is_xmrig_critical(REFUSED_MESSAGE),
-		"{REFUSED_MESSAGE:?} makes xmrig drop the pool instead of retrying",
-	);
+	assert!(!is_xmrig_critical(REFUSED_MESSAGE), "{REFUSED_MESSAGE:?} makes xmrig drop the pool",);
 	assert!(
 		is_closed(&mut extra, Duration::from_secs(5)).await,
 		"the per-address budget must refuse this while the endpoint still has room",
@@ -790,10 +787,7 @@ async fn a_pause_disconnects_the_rigs_it_can_no_longer_serve() {
 	// node wants this rig back as soon as it is authoring again.
 	let reason = miner.recv().await;
 	assert_eq!(reason["error"]["message"], PAUSED_MESSAGE);
-	assert!(
-		!is_xmrig_critical(PAUSED_MESSAGE),
-		"{PAUSED_MESSAGE:?} makes xmrig drop the pool instead of retrying",
-	);
+	assert!(!is_xmrig_critical(PAUSED_MESSAGE), "{PAUSED_MESSAGE:?} makes xmrig drop the pool",);
 	// Then the same EOF a fresh login gets, which is what makes the rig count a
 	// failure and stop hashing a template that cannot become a block.
 	assert!(
