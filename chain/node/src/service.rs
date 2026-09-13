@@ -62,11 +62,11 @@ fn freshness_gate_applies(allow_mining_without_peers: bool, tip_has_been_fresh: 
 /// the version check the dominant cost.
 const LOCAL_MINING_BATCH: u32 = 16;
 
-/// How long the loop waits on a stratum share when it is also mining in
-/// process, so the two producers interleave instead of one starving the other.
-const STRATUM_POLL_WHILE_MINING: Duration = Duration::from_millis(1);
-
-/// How long the loop waits on a stratum share when it is not mining in process.
+/// How long the loop waits on a stratum share when nothing else is running.
+///
+/// With in-process mining on, the wait is the round itself: the two producers
+/// are raced against each other, so a rig's seal is taken as it lands and not
+/// at the next batch boundary.
 const STRATUM_POLL_IDLE: Duration = Duration::from_millis(500);
 
 /// Idle RandomX VMs the pool holds before the mining thread count is known:
@@ -146,6 +146,36 @@ async fn local_mining_round(
 		}
 	}
 	found
+}
+
+/// Which producer won the template.
+#[derive(Debug)]
+enum Won {
+	/// The node's own light-mode miner.
+	Local(Seal),
+	/// A rig on the stratum endpoint.
+	Stratum(stratum::MinedSeal),
+}
+
+/// Take whichever producer finishes first, the rig ahead of the local round.
+///
+/// A share a rig has already found must not wait out a batch of hashing that
+/// has not. Polling the seal channel only between batches put up to a full
+/// batch of latency in front of every rig seal, and a seal that aged past its
+/// template that way was then dropped as superseded: 17 of 65 block-worthy
+/// shares in one measured session, each one acknowledged to the miner and then
+/// thrown away. Both futures are cancel safe, so a seal the select does not
+/// take is still on the channel.
+async fn first_producer<L, S>(local: L, stratum: S) -> Option<Won>
+where
+	L: std::future::Future<Output = Option<Seal>>,
+	S: std::future::Future<Output = stratum::MinedSeal>,
+{
+	tokio::select! {
+		biased;
+		mined = stratum => Some(Won::Stratum(mined)),
+		found = local => found.map(Won::Local),
+	}
 }
 
 /// Submit a mined seal to the worker handle.
@@ -257,59 +287,56 @@ async fn mine_one_template(
 	let extra_nonce: u32 = rand::random();
 	let mut nonce_cursor: u32 = rand::random();
 
+	// One batch of in-process hashing, and the cursor moved past it.
+	let round = |cursor: &mut u32| {
+		let round = local_mining_round(
+			engine.clone(),
+			metadata.clone(),
+			mining_threads,
+			*cursor,
+			extra_nonce,
+		);
+		*cursor = cursor.wrapping_add(LOCAL_MINING_BATCH.wrapping_mul(mining_threads as u32));
+		round
+	};
+
 	while !superseded() {
-		if mining_threads > 0 {
-			let found = local_mining_round(
-				engine.clone(),
-				metadata.clone(),
-				mining_threads,
-				nonce_cursor,
-				extra_nonce,
-			)
-			.await;
-			nonce_cursor =
-				nonce_cursor.wrapping_add(LOCAL_MINING_BATCH.wrapping_mul(mining_threads as u32));
-			if let Some(seal) = found {
-				if superseded() {
-					return;
-				}
-				submit_mined_block(
-					worker_handle,
-					seal.encode().to_vec(),
-					mining_start_time,
-					" in process",
-				)
-				.await;
-				return;
-			}
-		}
-
-		match stratum_server {
-			Some(server) => {
-				let wait =
-					if mining_threads > 0 { STRATUM_POLL_WHILE_MINING } else { STRATUM_POLL_IDLE };
-				if let Some(mined) = server.recv_seal_timeout(wait).await {
-					if mined.job_id != job_id {
-						log::debug!(target: "stratum", "dropping a seal for the superseded job {}", mined.job_id);
-						continue;
-					}
-					if superseded() {
-						return;
-					}
-					let source = format!(" by stratum miner {:?}", mined.worker);
-					submit_mined_block(worker_handle, mined.seal, mining_start_time, &source).await;
-					return;
-				}
+		let won = match (mining_threads > 0, stratum_server) {
+			// Both producers on one template, raced against each other, so a
+			// rig's seal is taken the moment it lands.
+			(true, Some(server)) =>
+				first_producer(round(&mut nonce_cursor), server.recv_seal()).await,
+			(true, None) => round(&mut nonce_cursor).await.map(Won::Local),
+			(false, Some(server)) =>
+				server.recv_seal_timeout(STRATUM_POLL_IDLE).await.map(Won::Stratum),
+			(false, None) => {
+				// Neither producer is configured: nothing to do but wait for
+				// the operator to fix it.
+				tokio::time::sleep(STRATUM_POLL_IDLE).await;
+				None
 			},
-			None =>
-				if mining_threads == 0 {
-					// Neither producer is configured: nothing to do but wait
-					// for the operator to fix it.
-					tokio::time::sleep(STRATUM_POLL_IDLE).await;
-				},
-		}
+		};
 
-		tokio::task::yield_now().await;
+		let (seal, source) = match won {
+			Some(Won::Local(seal)) => (seal.encode().to_vec(), " in process".to_string()),
+			Some(Won::Stratum(mined)) => {
+				if mined.job_id != job_id {
+					log::debug!(target: "stratum", "dropping a seal for the superseded job {}", mined.job_id);
+					continue;
+				}
+				(mined.seal, format!(" by stratum miner {:?}", mined.worker))
+			},
+			None => {
+				tokio::task::yield_now().await;
+				continue;
+			},
+		};
+
+		if superseded() {
+			return;
+		}
+		submit_mined_block(worker_handle, seal, mining_start_time, &source).await;
+		return;
 	}
 }
 
@@ -1006,7 +1033,12 @@ pub fn new_full<
 
 #[cfg(test)]
 mod tests {
-	use super::{freshness_gate_applies, tip_is_stale, DEFAULT_MAX_TIP_AGE_SECS};
+	use super::{
+		first_producer, freshness_gate_applies, stratum, tip_is_stale, Seal, Won,
+		DEFAULT_MAX_TIP_AGE_SECS,
+	};
+	use jsonrpsee::tokio;
+	use std::time::{Duration, Instant};
 
 	const NOW_MS: u64 = 1_755_000_000_000;
 	const MAX_TIP_AGE_MS: u64 = DEFAULT_MAX_TIP_AGE_SECS * 1000;
@@ -1041,5 +1073,59 @@ mod tests {
 	#[test]
 	fn force_authoring_bypasses_gate() {
 		assert!(!freshness_gate_applies(true, false));
+	}
+
+	fn rig_seal() -> stratum::MinedSeal {
+		stratum::MinedSeal { job_id: "1".to_string(), worker: "rig".to_string(), seal: vec![7; 64] }
+	}
+
+	/// A rig's seal must not wait out a batch of in-process hashing.
+	///
+	/// The loop used to hash a whole batch and then poll the seal channel for a
+	/// millisecond, so a block-worthy share sat in the queue for up to half a
+	/// second and was dropped as superseded if the template moved first: 17 of
+	/// 65 in one measured session, every one of them acknowledged to the miner.
+	#[tokio::test]
+	async fn a_rig_seal_is_taken_while_the_local_round_is_still_hashing() {
+		let local = async {
+			tokio::time::sleep(Duration::from_secs(30)).await;
+			Some(Seal { nonce: 1, extra_nonce: 2 })
+		};
+		let started = Instant::now();
+		let won = first_producer(local, std::future::ready(rig_seal())).await;
+
+		match won {
+			Some(Won::Stratum(mined)) => assert_eq!(mined.job_id, "1"),
+			other =>
+				panic!("the rig's seal must win a round it did not have to wait for: {other:?}"),
+		}
+		assert!(
+			started.elapsed() < Duration::from_secs(1),
+			"the seal waited on the local batch: {:?}",
+			started.elapsed(),
+		);
+	}
+
+	/// And with no rig attached the local round still wins the template.
+	#[tokio::test]
+	async fn the_local_round_wins_when_no_share_arrives() {
+		let won = first_producer(
+			std::future::ready(Some(Seal { nonce: 9, extra_nonce: 3 })),
+			std::future::pending::<stratum::MinedSeal>(),
+		)
+		.await;
+		match won {
+			Some(Won::Local(seal)) => assert_eq!(seal.nonce, 9),
+			other => panic!("expected the local seal: {other:?}"),
+		}
+	}
+
+	/// A round that finds nothing is a round, and the loop goes again.
+	#[tokio::test]
+	async fn a_round_that_finds_nothing_wins_nothing() {
+		let won =
+			first_producer(std::future::ready(None), std::future::pending::<stratum::MinedSeal>())
+				.await;
+		assert!(won.is_none(), "expected no winner: {won:?}");
 	}
 }
