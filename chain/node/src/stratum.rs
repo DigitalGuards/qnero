@@ -54,7 +54,7 @@ use std::{
 	time::{Duration, Instant},
 };
 use tokio::{
-	io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+	io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
 	net::{TcpListener, TcpStream},
 	sync::{mpsc, RwLock, Semaphore},
 };
@@ -64,10 +64,11 @@ const LOG_TARGET: &str = "stratum";
 /// Longest line a miner may send. A login with a long agent string is a few
 /// hundred bytes; anything past this is not a miner.
 ///
-/// The bound lives on the reader itself. `read_line` left to its own devices
-/// buffers until it finds a newline, so a peer that never sends one would be
-/// free to allocate as fast as it can write, and a length check afterwards runs
-/// only once that allocation has already happened.
+/// The bound is counted as the line is accumulated, in [`read_one_line`]. A
+/// reader left to its own devices buffers until it finds a newline, so a peer
+/// that never sends one would be free to allocate as fast as it can write, and
+/// a length check afterwards runs only once that allocation has already
+/// happened.
 const MAX_LINE_BYTES: usize = 8 * 1024;
 
 /// Connections accepted at once. One rig needs one; the cap is what stops an
@@ -226,6 +227,9 @@ struct Limits {
 	max_connections: usize,
 	/// Connections open at once from one address.
 	max_connections_per_ip: usize,
+	/// How long a connection may go without sending anything, whatever the
+	/// node writes to it.
+	max_idle: Duration,
 }
 
 impl Default for Limits {
@@ -235,6 +239,7 @@ impl Default for Limits {
 			write_timeout: WRITE_TIMEOUT,
 			max_connections: MAX_CONNECTIONS,
 			max_connections_per_ip: MAX_CONNECTIONS_PER_IP,
+			max_idle: MAX_IDLE_TIMEOUT,
 		}
 	}
 }
@@ -573,7 +578,10 @@ impl StratumServer {
 		let mut session_id: Option<u64> = None;
 		let mut budget = SubmitBudget::new();
 		let mut reader = BufReader::new(read_half);
-		let mut line = String::new();
+		// Survives the loop iteration on purpose: a line split across two waits
+		// is resumed here, and the reader below is the only thing that clears
+		// it.
+		let mut line: Vec<u8> = Vec::new();
 		let mut last_read = Instant::now();
 		let result = loop {
 			// A rig earns the long share-scaled window by logging in. Until then
@@ -584,40 +592,55 @@ impl StratumServer {
 			} else {
 				self.limits.login_timeout
 			};
+			// A ceiling on inbound silence, and the node's own writes do not
+			// refresh it. The share-scaled deadline below counts a job push as
+			// proof of life, which is right for a rig that is hashing and has
+			// found nothing; on its own it is also a session that never has to
+			// say anything again, because the node pushes a job every block
+			// interval and the deadline's floor is 25 of those. A peer that
+			// logs in and then goes silent forever would hold its slot until
+			// the node restarted. A real rig submits or keepalives well inside
+			// two hours, so this costs a healthy miner nothing.
+			let Some(silence_left) = self.limits.max_idle.checked_sub(last_read.elapsed()) else {
+				break Err("no inbound traffic".to_string());
+			};
 			let since_write = opened
 				.elapsed()
 				.saturating_sub(Duration::from_millis(last_write.load(Ordering::Relaxed)));
 			let Some(remaining) = deadline.checked_sub(last_read.elapsed().min(since_write)) else {
 				break Err("idle timeout".to_string());
 			};
+			// Whichever runs out first. The ceiling has to be part of the wait
+			// and not only a check on re-entry: a connection the node keeps
+			// writing to has a share-scaled deadline hours away, so the loop
+			// would sit inside one read for all of it.
+			let remaining = remaining.min(silence_left);
 
-			line.clear();
-			// One byte past the limit, so an over-long line is caught by the
-			// reader stopping, before the length is measured on a buffer that
-			// has already grown. This is the bound: without it a peer that never
-			// sends a newline can allocate for as long as the deadline allows.
-			let mut limited = (&mut reader).take(MAX_LINE_BYTES as u64 + 1);
-			let read = tokio::time::timeout(remaining, limited.read_line(&mut line)).await;
+			let read = tokio::time::timeout(remaining, read_one_line(&mut reader, &mut line)).await;
 			let read = match read {
 				Ok(read) => read,
 				// A job push written while this waited counts as activity, so the
-				// deadline is recomputed before the connection is given up.
+				// deadline is recomputed before the connection is given up. What
+				// the reader has already taken off the socket is still in `line`,
+				// which is why it has to be cancel safe to be re-entered here.
 				Err(_) => continue,
 			};
 			last_read = Instant::now();
 			match read {
-				Ok(0) => break Ok(()),
+				Ok(Line::Complete) => {},
+				Ok(Line::Eof) => break Ok(()),
 				// The unread tail is still queued, so there is nothing to
 				// resynchronise to: drop the connection.
-				Ok(bytes) if bytes > MAX_LINE_BYTES => break Err("line too long".to_string()),
-				Ok(_) => {},
+				Ok(Line::TooLong) => break Err("line too long".to_string()),
 				Err(error) => break Err(error.to_string()),
 			}
-			let trimmed = line.trim();
-			if trimmed.is_empty() {
+			let request = serde_json::from_slice::<Value>(trim_ascii(&line));
+			let blank = trim_ascii(&line).is_empty();
+			line.clear();
+			if blank {
 				continue;
 			}
-			let reply = match serde_json::from_str::<Value>(trimmed) {
+			let reply = match request {
 				Ok(request) =>
 					self.handle(&request, &out_tx, &mut session_id, &mut budget, peer).await,
 				Err(error) => Reply::open(error_response(&Value::Null, -32700, &error.to_string())),
@@ -973,6 +996,68 @@ fn insert_seen(
 		seen.clear();
 	}
 	seen.insert(share)
+}
+
+/// What one read produced.
+enum Line {
+	/// A newline was reached; `line` holds it.
+	Complete,
+	/// The peer closed.
+	Eof,
+	/// The peer sent more than `MAX_LINE_BYTES` without a newline.
+	TooLong,
+}
+
+/// Read one line into `line`, cancel safe.
+///
+/// `AsyncBufReadExt::read_line` is documented as **not** cancel safe: the bytes
+/// it has taken off the socket live in the future's own buffer and are dropped
+/// with it. That was harmless while a timeout ended the connection, and it is
+/// not harmless now that a timeout re-enters the read, because the resumed call
+/// would start in the middle of the peer's line: a submit split across two TCP
+/// segments would come back as a parse error and the share in it would be lost
+/// without either end knowing which.
+///
+/// `fill_buf` is cancel safe (cancelling it consumes nothing) and `line` is the
+/// caller's, so a line split across two waits is resumed rather than truncated.
+/// The bound is counted on `line` itself, which is the same bound the `take`
+/// this replaced provided: a peer that never sends a newline cannot make the
+/// node buffer for it.
+async fn read_one_line<R>(reader: &mut R, line: &mut Vec<u8>) -> std::io::Result<Line>
+where
+	R: tokio::io::AsyncBufRead + Unpin,
+{
+	loop {
+		let available = reader.fill_buf().await?;
+		if available.is_empty() {
+			return Ok(Line::Eof);
+		}
+		let (taken, complete) = match available.iter().position(|byte| *byte == b'\n') {
+			Some(end) => (end + 1, true),
+			None => (available.len(), false),
+		};
+		line.extend_from_slice(&available[..taken]);
+		reader.consume(taken);
+		if complete {
+			// The newline itself is not part of the line.
+			return Ok(if line.len().saturating_sub(1) > MAX_LINE_BYTES {
+				Line::TooLong
+			} else {
+				Line::Complete
+			});
+		}
+		if line.len() > MAX_LINE_BYTES {
+			return Ok(Line::TooLong);
+		}
+	}
+}
+
+/// The line without its surrounding whitespace.
+fn trim_ascii(line: &[u8]) -> &[u8] {
+	let start = line.iter().position(|byte| !byte.is_ascii_whitespace());
+	let Some(start) = start else { return &[] };
+	let end = line.iter().rposition(|byte| !byte.is_ascii_whitespace()).unwrap_or(start);
+	&line[start..=end]
 }
 
 /// Bound a miner-supplied string before it is kept or logged.

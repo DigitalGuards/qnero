@@ -527,6 +527,63 @@ async fn a_connection_that_never_logs_in_gives_its_slot_back() {
 	assert_eq!(next.login("qnero-worker").await["result"]["status"], "OK");
 }
 
+/// A session that logs in and then never says anything again must not live on
+/// the node's own job pushes.
+///
+/// The share-scaled deadline counts a job push as proof of life, which is
+/// right for a rig that is hashing and has found nothing. On its own it is also
+/// a session that never has to send another byte: the node pushes a job every
+/// block interval and the deadline's floor is 25 of those, so a peer that sends
+/// one login line and then drains forever held a connection slot until the node
+/// restarted. With 64 slots on the endpoint and four to an address, sixteen
+/// addresses sending one line each took the whole thing away from the
+/// operator's own rigs.
+#[tokio::test]
+async fn a_session_that_goes_silent_is_dropped_even_while_jobs_are_pushed() {
+	let (server, _engine) = server_with_limits(
+		8,
+		// The authenticated deadline at its two-hour ceiling, so the only rule
+		// that can close this connection is the inbound one.
+		u64::MAX,
+		Limits { max_idle: Duration::from_millis(600), ..Limits::default() },
+	)
+	.await;
+
+	let mut silent = FakeMiner::connect(server.local_addr()).await;
+	assert_eq!(silent.login("qnero-worker").await["result"]["status"], "OK");
+
+	// Exactly what used to hold the connection open: the node writing to it.
+	let pushing = tokio::spawn({
+		let server = server.clone();
+		async move {
+			for id in 2..40u64 {
+				let mut job = test_job(8);
+				job.job_id = id.to_string();
+				server.broadcast_job(job).await;
+				tokio::time::sleep(Duration::from_millis(100)).await;
+			}
+		}
+	});
+
+	// Drain the pushes without answering any of them, until the server closes.
+	let closed = tokio::time::timeout(Duration::from_secs(5), async {
+		loop {
+			let mut line = String::new();
+			match silent.reader.read_line(&mut line).await {
+				Ok(0) | Err(_) => break,
+				Ok(_) => {},
+			}
+		}
+	})
+	.await;
+	pushing.abort();
+	assert!(
+		closed.is_ok(),
+		"a logged-in peer that sends nothing held its slot for as long as the node kept \
+		 writing to it",
+	);
+}
+
 /// One address must not be able to take every slot on the endpoint.
 #[tokio::test]
 async fn one_address_cannot_take_every_connection_slot() {
@@ -676,6 +733,67 @@ async fn garbage_does_not_take_the_connection_down() {
 	// Still usable afterwards.
 	let login = miner.login("qnero-worker").await;
 	assert_eq!(login["result"]["status"], "OK");
+}
+
+/// The read has to be cancel safe, because the idle deadline now re-enters it.
+///
+/// `read_line` is documented as not cancel safe: what it has taken off the
+/// socket is dropped with the future. A submit split across two TCP segments
+/// with the deadline firing between them would come back as a parse error, and
+/// the share in it would be lost without either end knowing which.
+#[tokio::test]
+async fn a_line_split_by_a_cancelled_read_is_resumed_and_not_lost() {
+	let (mut client, server) = tokio::io::duplex(64);
+	let mut reader = BufReader::new(server);
+	let mut line: Vec<u8> = Vec::new();
+
+	// The first half arrives, then nothing: the read is cancelled by the
+	// deadline, exactly as the serve loop cancels it.
+	client.write_all(br#"{"id":1,"meth"#).await.expect("first segment");
+	assert!(
+		tokio::time::timeout(Duration::from_millis(200), read_one_line(&mut reader, &mut line))
+			.await
+			.is_err(),
+		"the read must still be waiting for the rest of the line",
+	);
+
+	// The tail arrives and the resumed read completes the same line.
+	client.write_all(b"od\":\"keepalived\"}\n").await.expect("second segment");
+	let outcome =
+		tokio::time::timeout(Duration::from_secs(5), read_one_line(&mut reader, &mut line))
+			.await
+			.expect("a line within five seconds")
+			.expect("read");
+	assert!(matches!(outcome, Line::Complete), "expected a complete line");
+	let parsed: Value = serde_json::from_slice(trim_ascii(&line)).expect("the whole line parses");
+	assert_eq!(parsed["method"], "keepalived");
+}
+
+/// The line bound is counted as the line accumulates, so a peer that never
+/// sends a newline cannot allocate past it across resumed reads either.
+#[tokio::test]
+async fn an_unterminated_line_is_refused_at_the_bound() {
+	let (mut client, server) = tokio::io::duplex(4096);
+	let writing = tokio::spawn(async move {
+		let chunk = vec![b'a'; 4096];
+		while client.write_all(&chunk).await.is_ok() {}
+	});
+	let mut reader = BufReader::new(server);
+	let mut line: Vec<u8> = Vec::new();
+	let outcome =
+		tokio::time::timeout(Duration::from_secs(5), read_one_line(&mut reader, &mut line))
+			.await
+			.expect("the bound must be reached within five seconds")
+			.expect("read");
+	writing.abort();
+	assert!(matches!(outcome, Line::TooLong), "expected the line to be refused");
+	// The bound plus at most one `fill_buf` chunk, which is the reader's own
+	// 8 KiB buffer.
+	assert!(
+		line.len() <= MAX_LINE_BYTES + 8 * 1024,
+		"the buffer grew past the bound: {}",
+		line.len(),
+	);
 }
 
 /// Two connections must not be handed the same blob, or they grind the same
