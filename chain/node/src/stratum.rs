@@ -377,7 +377,11 @@ impl SubmitBudget {
 	}
 
 	fn take(&mut self, refill_per_second: f64) -> bool {
-		let now = Instant::now();
+		self.take_at(Instant::now(), refill_per_second)
+	}
+
+	/// The same, at a stated time, so the unit test does not race the clock.
+	fn take_at(&mut self, now: Instant, refill_per_second: f64) -> bool {
 		let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
 		self.last = now;
 		self.tokens = (self.tokens + elapsed * refill_per_second).min(SUBMIT_BURST);

@@ -417,16 +417,18 @@ fn the_duplicate_set_stops_growing_at_its_ceiling() {
 #[test]
 fn the_submit_budget_refills_faster_when_every_share_is_a_block() {
 	// Ten milliseconds buys 0.32 tokens at the ordinary rate and 2.56 at the
-	// rate an easy chain gets.
-	let elapsed = Duration::from_millis(10);
-	let mut ordinary = SubmitBudget { tokens: 0.0, last: Instant::now() - elapsed };
+	// rate an easy chain gets. The clock is stated, so the test measures the
+	// rates and never the scheduler.
+	let start = Instant::now();
+	let later = start + Duration::from_millis(10);
+	let mut ordinary = SubmitBudget { tokens: 0.0, last: start };
 	assert!(
-		!ordinary.take(SUBMIT_REFILL_PER_SECOND),
+		!ordinary.take_at(later, SUBMIT_REFILL_PER_SECOND),
 		"the ordinary rate is what bounds a rig on a chain where a share is not a block",
 	);
-	let mut easy = SubmitBudget { tokens: 0.0, last: Instant::now() - elapsed };
+	let mut easy = SubmitBudget { tokens: 0.0, last: start };
 	assert!(
-		easy.take(SUBMIT_REFILL_WHEN_EVERY_SHARE_IS_A_BLOCK),
+		easy.take_at(later, SUBMIT_REFILL_WHEN_EVERY_SHARE_IS_A_BLOCK),
 		"a block was refused for budget before it was hashed",
 	);
 }
