@@ -233,8 +233,13 @@ async fn a_valid_share_above_the_block_difficulty_becomes_a_seal() {
 	let decoded = Seal::decode(&seal.seal).expect("the seal is well formed");
 	assert_eq!(decoded.nonce, nonce);
 
-	let (accepted, _rejected, blocks) = server.stats();
-	assert_eq!((accepted, blocks), (1, 1));
+	let stats = server.stats();
+	assert_eq!((stats.accepted, stats.block_candidates), (1, 1));
+	// A candidate is not a block yet: the mining loop is what consumes the
+	// seal, and it takes one per template.
+	assert_eq!((stats.sealed, stats.superseded), (0, 0));
+	server.note_block_sealed();
+	assert_eq!(server.stats().sealed, 1);
 }
 
 /// A share that clears the easy per-connection target but not the block
@@ -252,8 +257,8 @@ async fn a_share_below_the_block_difficulty_is_counted_and_acknowledged() {
 	let response = miner.submit("1", nonce, Some(&result)).await;
 	assert!(response["error"].is_null(), "share must be accepted: {response}");
 
-	let (accepted, rejected, blocks) = server.stats();
-	assert_eq!((accepted, rejected, blocks), (1, 0, 0));
+	let stats = server.stats();
+	assert_eq!((stats.accepted, stats.rejected, stats.block_candidates), (1, 0, 0));
 	assert!(server.recv_seal_timeout(Duration::from_millis(200)).await.is_none());
 }
 
@@ -281,8 +286,11 @@ async fn a_share_for_the_job_that_just_moved_on_is_credited_and_seals_nothing() 
 	assert!(response["error"].is_null(), "the grace job must be credited: {response}");
 	assert_eq!(response["result"]["status"], "OK");
 
-	let (accepted, rejected, blocks) = server.stats();
-	assert_eq!((accepted, rejected, blocks), (1, 0, 0));
+	let stats = server.stats();
+	assert_eq!((stats.accepted, stats.rejected), (1, 0));
+	// It met the block difficulty and it is not a block: both are counted, and
+	// separately, because the operator's line has to distinguish them.
+	assert_eq!((stats.block_candidates, stats.sealed, stats.superseded), (1, 0, 1));
 	assert!(
 		server.recv_seal_timeout(Duration::from_millis(200)).await.is_none(),
 		"a superseded template has no build left to seal",
@@ -395,6 +403,32 @@ fn the_duplicate_set_stops_growing_at_its_ceiling() {
 	let mut seen = HashSet::new();
 	assert!(insert_seen(&mut seen, ("1".to_string(), 1, 7), 8));
 	assert!(!insert_seen(&mut seen, ("1".to_string(), 1, 7), 8));
+}
+
+/// A share that is also a block must not be refused for budget before it is
+/// hashed.
+///
+/// The share difficulty is clamped per job to the block difficulty, so on a
+/// chain at the difficulty floor every share a rig finds is a block. A 10 kH/s
+/// rig there submits about 78 a second into a bucket refilling at 32, so most
+/// of its blocks were answered "Too many shares" and dropped above both the
+/// block rule and the seal channel, where nothing downstream could recover
+/// them.
+#[test]
+fn the_submit_budget_refills_faster_when_every_share_is_a_block() {
+	// Ten milliseconds buys 0.32 tokens at the ordinary rate and 2.56 at the
+	// rate an easy chain gets.
+	let elapsed = Duration::from_millis(10);
+	let mut ordinary = SubmitBudget { tokens: 0.0, last: Instant::now() - elapsed };
+	assert!(
+		!ordinary.take(SUBMIT_REFILL_PER_SECOND),
+		"the ordinary rate is what bounds a rig on a chain where a share is not a block",
+	);
+	let mut easy = SubmitBudget { tokens: 0.0, last: Instant::now() - elapsed };
+	assert!(
+		easy.take(SUBMIT_REFILL_WHEN_EVERY_SHARE_IS_A_BLOCK),
+		"a block was refused for budget before it was hashed",
+	);
 }
 
 /// A flood of refusals must not become a flood of log lines, and the count of
@@ -669,8 +703,8 @@ async fn a_claimed_hash_the_node_does_not_compute_is_refused() {
 
 	let response = miner.submit("1", 1, Some(&"00".repeat(32))).await;
 	assert_eq!(response["error"]["message"], "Invalid result");
-	let (accepted, rejected, blocks) = server.stats();
-	assert_eq!((accepted, rejected, blocks), (0, 1, 0));
+	let stats = server.stats();
+	assert_eq!((stats.accepted, stats.rejected, stats.block_candidates), (0, 1, 0));
 }
 
 /// A miner that sends no `result` at all is still checked, because the node

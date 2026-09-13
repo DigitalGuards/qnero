@@ -97,6 +97,19 @@ const MAX_AGENT_CHARS: usize = 64;
 const SUBMIT_BURST: f64 = 64.0;
 const SUBMIT_REFILL_PER_SECOND: f64 = 32.0;
 
+/// The refill a job gets when every share it can produce is also a block.
+///
+/// The share difficulty is clamped per job to the block difficulty, so on a
+/// chain whose difficulty sits below the configured share difficulty the two
+/// rules are the same rule. A new chain sits at the difficulty floor and so
+/// does one recovering from a hashrate collapse, and there a 10 kH/s rig finds
+/// about 78 shares a second, every one of them a block. Refusing those for
+/// budget throws blocks away before they are ever hashed. The concurrency cap
+/// on the hashing itself is what bounds the work, and it is unchanged: a
+/// connection has at most one submit in flight, because it is served from its
+/// own read loop.
+const SUBMIT_REFILL_WHEN_EVERY_SHARE_IS_A_BLOCK: f64 = 256.0;
+
 /// Outgoing queue depth per connection. A miner that will not read its socket
 /// is disconnected, so the memory one peer can claim stays bounded.
 const WRITE_QUEUE_DEPTH: usize = 32;
@@ -363,11 +376,11 @@ impl SubmitBudget {
 		Self { tokens: SUBMIT_BURST, last: Instant::now() }
 	}
 
-	fn take(&mut self) -> bool {
+	fn take(&mut self, refill_per_second: f64) -> bool {
 		let now = Instant::now();
 		let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
 		self.last = now;
-		self.tokens = (self.tokens + elapsed * SUBMIT_REFILL_PER_SECOND).min(SUBMIT_BURST);
+		self.tokens = (self.tokens + elapsed * refill_per_second).min(SUBMIT_BURST);
 		if self.tokens < 1.0 {
 			return false;
 		}
@@ -390,7 +403,24 @@ struct Session {
 struct Counters {
 	accepted: AtomicU64,
 	rejected: AtomicU64,
-	blocks: AtomicU64,
+	block_candidates: AtomicU64,
+	sealed: AtomicU64,
+	superseded: AtomicU64,
+}
+
+/// What the endpoint has done so far, for the operator's line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StratumStats {
+	/// Shares hashed and credited.
+	pub accepted: u64,
+	/// Shares refused, for any reason.
+	pub rejected: u64,
+	/// Accepted shares that met the block difficulty.
+	pub block_candidates: u64,
+	/// Those that became a block.
+	pub sealed: u64,
+	/// Those that arrived after the template they belonged to had moved on.
+	pub superseded: u64,
 }
 
 /// The listener, the sessions, and the share check.
@@ -644,13 +674,30 @@ impl StratumServer {
 		}
 	}
 
-	/// Accepted shares, rejected shares, and shares that were blocks.
-	pub fn stats(&self) -> (u64, u64, u64) {
-		(
-			self.counters.accepted.load(Ordering::Relaxed),
-			self.counters.rejected.load(Ordering::Relaxed),
-			self.counters.blocks.load(Ordering::Relaxed),
-		)
+	/// What the endpoint has done so far.
+	pub fn stats(&self) -> StratumStats {
+		StratumStats {
+			accepted: self.counters.accepted.load(Ordering::Relaxed),
+			rejected: self.counters.rejected.load(Ordering::Relaxed),
+			block_candidates: self.counters.block_candidates.load(Ordering::Relaxed),
+			sealed: self.counters.sealed.load(Ordering::Relaxed),
+			superseded: self.counters.superseded.load(Ordering::Relaxed),
+		}
+	}
+
+	/// A seal this endpoint produced went into a block.
+	///
+	/// Counted where the seal is consumed rather than where the share is
+	/// hashed, because the mining loop takes one seal per template and drops
+	/// the rest: counting block-worthy shares as blocks overstated a rig's
+	/// output by more than a factor of two in a measured session.
+	pub fn note_block_sealed(&self) {
+		self.counters.sealed.fetch_add(1, Ordering::Relaxed);
+	}
+
+	/// A seal this endpoint produced arrived too late to be used.
+	pub fn note_seal_superseded(&self) {
+		self.counters.superseded.fetch_add(1, Ordering::Relaxed);
 	}
 
 	/// The share difficulty for a job: the configured one, never above the
@@ -957,8 +1004,16 @@ impl StratumServer {
 		};
 
 		// Everything above is cheap. The hash is not, so the budget is spent
-		// here, before any RandomX work is queued.
-		if !budget.take() {
+		// here, before any RandomX work is queued. What a share is worth
+		// decides the rate: when the job's share target is the block target,
+		// every share refused for budget is a block thrown away unhashed.
+		let block_difficulty = target::difficulty_as_u64(job.difficulty);
+		let refill = if self.job_share_difficulty(&job) >= block_difficulty {
+			SUBMIT_REFILL_WHEN_EVERY_SHARE_IS_A_BLOCK
+		} else {
+			SUBMIT_REFILL_PER_SECOND
+		};
+		if !budget.take(refill) {
 			return self.reject_share(id, "Too many shares");
 		}
 
@@ -1022,7 +1077,7 @@ impl StratumServer {
 
 		match (is_block, is_current) {
 			(true, true) => {
-				self.counters.blocks.fetch_add(1, Ordering::Relaxed);
+				self.counters.block_candidates.fetch_add(1, Ordering::Relaxed);
 				log::info!(
 					target: LOG_TARGET,
 					"🥇 Share from {worker:?} meets the block difficulty {} at height {}",
@@ -1046,11 +1101,15 @@ impl StratumServer {
 					);
 				}
 			},
-			(true, false) => log::debug!(
-				target: LOG_TARGET,
-				"a block-worthy share arrived for the superseded job {}; credited, and the build it belongs to is gone",
-				job.job_id,
-			),
+			(true, false) => {
+				self.counters.block_candidates.fetch_add(1, Ordering::Relaxed);
+				self.counters.superseded.fetch_add(1, Ordering::Relaxed);
+				log::debug!(
+					target: LOG_TARGET,
+					"a block-worthy share arrived for the superseded job {}; credited, and the build it belongs to is gone",
+					job.job_id,
+				);
+			},
 			(false, _) =>
 				log::debug!(target: LOG_TARGET, "share from {worker:?} accepted at height {}", job.height),
 		}

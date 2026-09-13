@@ -107,9 +107,16 @@ async fn local_mining_round(
 ) -> Option<Seal> {
 	let (pre_hash, height, seed, difficulty) =
 		(metadata.pre_hash, metadata.height, metadata.seed_hash, metadata.difficulty);
+	// Dropping this future detaches its workers: a `spawn_blocking` task cannot
+	// be aborted, so without a flag they each run their whole batch on the pool
+	// that also carries rocksdb reads and block import. The round is dropped
+	// every time a rig wins the template, which on a busy endpoint is several
+	// times a second.
+	let stop = StopFlag::new();
 	let mut workers = Vec::with_capacity(threads);
 	for thread in 0..threads {
 		let engine = engine.clone();
+		let stop = stop.handle();
 		workers.push(tokio::task::spawn_blocking(move || {
 			let lease = match engine.acquire(seed.0) {
 				Ok(lease) => lease,
@@ -119,6 +126,9 @@ async fn local_mining_round(
 				},
 			};
 			for step in 0..LOCAL_MINING_BATCH {
+				if stop.load(std::sync::atomic::Ordering::Relaxed) {
+					return None;
+				}
 				// Threads interleave rather than take disjoint ranges, so a
 				// short round still spreads over the space.
 				let nonce = start_nonce
@@ -142,10 +152,39 @@ async fn local_mining_round(
 	let mut found = None;
 	for worker in workers {
 		if let Ok(Some(seal)) = worker.await {
+			// The template is won; the rest of the round is wasted hashing.
+			stop.stop();
 			found = found.or(Some(seal));
 		}
 	}
 	found
+}
+
+/// A stop flag the blocking workers poll, set when the round ends however it
+/// ends.
+///
+/// The `Drop` is the point: the round is a future in a `select!`, and the arm
+/// that loses is dropped where it stands.
+struct StopFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl StopFlag {
+	fn new() -> Self {
+		Self(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+	}
+
+	fn handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+		self.0.clone()
+	}
+
+	fn stop(&self) {
+		self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+	}
+}
+
+impl Drop for StopFlag {
+	fn drop(&mut self) {
+		self.stop();
+	}
 }
 
 /// Which producer won the template.
@@ -268,9 +307,19 @@ async fn mine_one_template(
 	);
 
 	if let Some(server) = stratum_server {
-		let (accepted, rejected, blocks) = server.stats();
+		let stats = server.stats();
+		// Shares that met the block difficulty and blocks are separate numbers
+		// on purpose: the loop takes one seal per template and drops the rest,
+		// so reporting candidates as blocks overstated a rig's output by more
+		// than a factor of two.
 		log::info!(
-			"⛏️ Stratum so far: {accepted} shares accepted, {rejected} rejected, {blocks} of them blocks",
+			"⛏️ Stratum so far: {} shares accepted, {} rejected, {} at the block difficulty, \
+			 {} sealed, {} too late",
+			stats.accepted,
+			stats.rejected,
+			stats.block_candidates,
+			stats.sealed,
+			stats.superseded,
 		);
 		server.broadcast_job(job_from_metadata(job_id.clone(), &metadata)).await;
 	}
@@ -317,14 +366,17 @@ async fn mine_one_template(
 			},
 		};
 
-		let (seal, source) = match won {
-			Some(Won::Local(seal)) => (seal.encode().to_vec(), " in process".to_string()),
+		let (seal, source, from_a_rig) = match won {
+			Some(Won::Local(seal)) => (seal.encode().to_vec(), " in process".to_string(), false),
 			Some(Won::Stratum(mined)) => {
 				if mined.job_id != job_id {
+					if let Some(server) = stratum_server {
+						server.note_seal_superseded();
+					}
 					log::debug!(target: "stratum", "dropping a seal for the superseded job {}", mined.job_id);
 					continue;
 				}
-				(mined.seal, format!(" by stratum miner {:?}", mined.worker))
+				(mined.seal, format!(" by stratum miner {:?}", mined.worker), true)
 			},
 			None => {
 				tokio::task::yield_now().await;
@@ -333,9 +385,23 @@ async fn mine_one_template(
 		};
 
 		if superseded() {
+			if from_a_rig {
+				if let Some(server) = stratum_server {
+					server.note_seal_superseded();
+				}
+			}
 			return;
 		}
-		submit_mined_block(worker_handle, seal, mining_start_time, &source).await;
+		let submitted = submit_mined_block(worker_handle, seal, mining_start_time, &source).await;
+		if from_a_rig {
+			if let Some(server) = stratum_server {
+				if submitted {
+					server.note_block_sealed();
+				} else {
+					server.note_seal_superseded();
+				}
+			}
+		}
 		return;
 	}
 }
@@ -1034,7 +1100,7 @@ pub fn new_full<
 #[cfg(test)]
 mod tests {
 	use super::{
-		first_producer, freshness_gate_applies, stratum, tip_is_stale, Seal, Won,
+		first_producer, freshness_gate_applies, stratum, tip_is_stale, Seal, StopFlag, Won,
 		DEFAULT_MAX_TIP_AGE_SECS,
 	};
 	use jsonrpsee::tokio;
@@ -1118,6 +1184,35 @@ mod tests {
 			Some(Won::Local(seal)) => assert_eq!(seal.nonce, 9),
 			other => panic!("expected the local seal: {other:?}"),
 		}
+	}
+
+	/// Dropping a round has to stop its hashing.
+	///
+	/// The round's workers are `spawn_blocking` tasks, and a blocking task
+	/// cannot be aborted: dropping the round detaches them and they run their
+	/// whole batch on the pool that also carries rocksdb and block import. The
+	/// select drops the round every time a rig wins the template, so on a busy
+	/// endpoint that is several abandoned batches a second on top of the ones
+	/// the next round starts.
+	#[test]
+	fn dropping_a_round_stops_its_workers() {
+		let flag = StopFlag::new();
+		let handle = flag.handle();
+		assert!(!handle.load(std::sync::atomic::Ordering::Relaxed));
+		drop(flag);
+		assert!(
+			handle.load(std::sync::atomic::Ordering::Relaxed),
+			"a dropped round leaves its workers hashing a template nobody wants",
+		);
+	}
+
+	/// And a round that wins stops the threads that have not finished.
+	#[test]
+	fn a_won_round_stops_the_rest_of_its_workers() {
+		let flag = StopFlag::new();
+		let handle = flag.handle();
+		flag.stop();
+		assert!(handle.load(std::sync::atomic::Ordering::Relaxed));
 	}
 
 	/// A round that finds nothing is a round, and the loop goes again.
