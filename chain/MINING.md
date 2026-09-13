@@ -13,6 +13,16 @@
 > Qnero equivalent: the commands of record are the repository `README.md` and
 > `docs/OPS-DEV.md` one directory up. The two defaults that differ between the
 > binaries are called out where they appear below.
+>
+> **M7 moved the proof of work, and this guide did not follow it.** Qnero's
+> engine is RandomX (`rx/0`), and its external-miner interface is a stratum
+> endpoint a stock xmrig connects to (`--stratum-port`). Upstream's QUIC
+> protocol below, the `quantus-miner` binary that speaks it, and the
+> `--miner-listen-port` and `--miner-auth-token-file` flags are gone from
+> `qnero-node`: that miner computes Poseidon hashes and could not mine this
+> chain whatever transport carried them. Read the "Point a rig at it" block in
+> the repository `README.md` and the mining section of `docs/OPS-DEV.md`
+> instead. Everything below is upstream's, for upstream's binary.
 
 Get started mining on the Quantus Network testnet in minutes.
 

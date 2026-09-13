@@ -84,9 +84,37 @@ export RAYON_NUM_THREADS=4
 
 RPC is the Substrate default, port 9944. A `send` picks two notes largest-first, rebuilds Merkle paths locally and proves the batch itself. `docs/OPS-DEV.md` carries the build preconditions and the end-to-end transcripts; `docs/WALLET.md` is the wallet's reference.
 
+### Point a rig at it
+
+The proof of work is RandomX, stock `rx/0`, the same algorithm and the same
+constants Monero uses. A rig that mines Monero mines Qnero with a config
+change. Open the stratum port on the node:
+
+```
+nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
+  --rewards-miner-key "$QNERO_MINER_KEY" --rewards-inner-hash <hash> \
+  --stratum-port 3333 --mining-threads 0
+```
+
+and point a stock xmrig at it:
+
+```
+nice -n 19 xmrig --threads=2 --algo rx/0 \
+  -o 127.0.0.1:3333 -u qnero-rig -p x --no-color
+```
+
+`--mining-threads 0` turns off the node's own in-process miner, which is there
+so a devnet produces blocks with no rig attached and is an order of magnitude
+slower than a rig (light mode, no 2 GiB dataset). Leave it at 1 to run both.
+
+Nothing is paid to the `-u` login. The block reward is a shielded note minted
+for the key in `--rewards-miner-key`, so this is a solo-mining endpoint and the
+login is a worker label. `--stratum-host` defaults to loopback; a rig on
+another machine needs `0.0.0.0` and a firewall rule you chose.
+
 ## Status, audits and caveats
 
-M1 through M6 are done, through the wallet CLI and v1 mandatory privacy. The audits are upstream's: Eiger on the Wormhole circuits (2026-03-20), a Substrate audit of the chain (2026-05-13), a proof-of-work and Poseidon review. **No external audit of the Qnero delta exists.** That delta is the leaf circuit's note fragments, the public-input layouts at all three layers, the aggregator rules, and `pallet-shielded`. The design claims a reviewer can read it in a day, and Plonky2's 100-bit security here is a conjecture.
+M1 through M7 are done, through the wallet CLI, v1 mandatory privacy and RandomX proof of work. The audits are upstream's: Eiger on the Wormhole circuits (2026-03-20), a Substrate audit of the chain (2026-05-13), a proof-of-work and Poseidon review. **No external audit of the Qnero delta exists.** That delta is the leaf circuit's note fragments, the public-input layouts at all three layers, the aggregator rules, and `pallet-shielded`. The design claims a reviewer can read it in a day, and Plonky2's 100-bit security here is a conjecture.
 
 - Key storage is dev grade: 32 bytes of hex in a `0600` file, no passphrase or encryption, beside a note store holding every `rho` and `r` in clear text.
 - Weights are unbenchmarked, and admission work is unpaid per gossiped blob: a settlement walk and a verify each, with no rate limit.
@@ -94,7 +122,7 @@ M1 through M6 are done, through the wallet CLI and v1 mandatory privacy. The aud
 - The real-transfer count is public: a padding slot publishes zero commitments, which the chain needs to append correctly.
 - One transfer per submission today: six slots, one filled, so 150908 bytes carries one transfer, about 22 KB each when full.
 
-Next is M7, RandomX, which M6 made a one-file change by routing everything that needs the block author through one `FindAuthor` implementation. Also queued: real key storage, a keccak pin on the first tagged circuit release, hiding the real-transfer count. Testnet targets: a proof per transaction under 105 KB or amortized below it, proving under 5 s on a laptop, no cryptographic component without a firm's review.
+M7 is done: the proof of work is RandomX, so a Monero rig mines Qnero through the node's stratum port. Queued next: real key storage, a keccak pin on the first tagged circuit release, hiding the real-transfer count. Testnet targets: a proof per transaction under 105 KB or amortized below it, proving under 5 s on a laptop, no cryptographic component without a firm's review.
 
 ## Credits and licence
 

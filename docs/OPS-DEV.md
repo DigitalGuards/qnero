@@ -47,10 +47,12 @@ knowing about, because each looks like an omission until you check it:
   binary: a grep of `node/src` finds neither of them.
 - **The prometheus namespace.** The one metric this node registers is
   `qpow_metrics` (`node/src/prometheus.rs`), named after the consensus engine.
-- **The miner server's log lines.** Every one of them is `⛏️ Miner ...`
-  (`node/src/miner_server.rs`). The ALPN beside them, `quantus-miner/2`, stays:
-  it is a wire identifier negotiated with the external `quantus-miner` program,
-  so changing it would refuse every miner that connects.
+- **The miner-facing log lines.** Every one of them is `⛏️ ...`. M7 replaced
+  upstream's QUIC miner server with a stratum endpoint
+  (`node/src/stratum.rs`), so the ALPN that used to be pinned here,
+  `quantus-miner/2`, is gone with it. The wire identifier that is pinned now is
+  `rx/0`, and it is pinned for the same reason: it is what a stock xmrig
+  negotiates, and changing it would refuse every miner that connects.
 
 One thing moved that no file names, and it has state behind it: **the default
 base path**. `sc_cli` derives it from the executable's file name, so a node
@@ -75,9 +77,11 @@ file name moves.
 Kept as upstream, deliberately:
 
 - **Every other crate under `chain/`**: `client/*`, `frame/*`, `pallets/*`,
-  `primitives/*`, `miner-api`'s `quantus-miner-api`, and the `qp-*`
-  dependencies. Renaming them buys nothing an operator sees and costs a
-  conflict in every merge.
+  `primitives/*` and the `qp-*` dependencies. Renaming them buys nothing an
+  operator sees and costs a conflict in every merge. Two went away at M7
+  instead of being renamed: `miner-api`'s `quantus-miner-api` and
+  `client/consensus/qpow`, both of which described a proof of work this chain
+  no longer has.
 - **Module paths and Rust identifiers** inside the node crate:
   `QuantusKeySubcommand`, `QuantusAddressType`, `generate_quantus_key`,
   `QuantusKeyDetails`. The clap attribute `#[command(name = "qnero")]` is what
@@ -95,7 +99,7 @@ Kept as upstream, deliberately:
   and the network names in them are untouched, and each carries a banner saying
   which half is which. `chain/docs/RUNTIME_SURFACE.md`, `RUNTIME_UPDATE.md` and
   `CHAINSPEC_CREATION.md` are Qnero-maintained (M6 edited all three) and say
-  `qnero-runtime` throughout. `chain/MINING.md` keeps upstream's names: every
+  `qnero-runtime` throughout. `chain/MINING.md` keeps upstream's names, under an M7 banner saying its external-miner half no longer describes this node: every
   binary in it is a release binary from `Quantus-Network/chain` or an image
   from `ghcr.io/quantus-network`, and every network in it is upstream's, so a
   rename would have produced a guide telling an operator to download one binary
@@ -262,6 +266,23 @@ it somewhere non-standard; on a Debian-family box point it at whichever
 `/usr/lib/llvm-*/lib` holds `libclang.so`, and install `libclang-dev` if none
 does.
 
+**cmake and a C++17 compiler are not optional either, since M7.** The proof of
+work is RandomX, and the bindings (`randomx-rs`) vendor tevador's `librandomx`
+and build it with cmake in their build script. On a Debian-family box:
+
+```
+sudo apt install cmake g++
+```
+
+Without cmake the build fails inside `randomx-rs`'s `build.rs` with `failed to
+execute CMake`, which is a long way from the crate an operator was building.
+The RandomX sources ship inside the published crate, so the build needs no git
+submodule and no second fetch, and `configuration.h` in that tree is stock,
+which is what makes these hashes `rx/0` rather than a private algorithm.
+`chain/client/consensus/randomx` asserts the `librandomx` known-answer vectors
+in its own tests, so a toolchain that miscompiled RandomX fails the test suite
+rather than forking the chain.
+
 `pallet-shielded`'s build script generates the circuit artifact set before the
 pallet compiles, which is where the first minute goes and where most of the
 memory goes. Two sizing knobs override the defaults, and both are declared
@@ -425,6 +446,108 @@ printed, both ends of the string. A stale or mistyped miner key mines correct
 blocks into notes the operator's wallet cannot open, block after block, and the
 only other symptom is a balance that never grows.
 
+### The proof of work: RandomX, and what to point at it
+
+Since M7 the engine is RandomX, algorithm `rx/0`, stock constants. That is the
+same hash Monero uses, computed by the same C library every Monero miner
+links, so a rig that mines Monero mines Qnero with a config change and no
+patched miner.
+
+Two things mine a Qnero node, and both run at once by default:
+
+```
+# in process, light mode, one thread. This is what makes --dev produce blocks.
+nice -n 19 ./target/release/qnero-node --dev --tmp --mining-threads 1
+
+# and/or a stratum endpoint for real rigs
+nice -n 19 ./target/release/qnero-node --dev --tmp \
+  --stratum-port 3333 --mining-threads 0
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--mining-threads N` | 1 | In-process RandomX threads, light mode. 0 turns it off. |
+| `--stratum-port PORT` | off | Opens the endpoint xmrig connects to. Requires `--validator` (`--dev` is one). |
+| `--stratum-host ADDR` | `127.0.0.1` | Bind address. A rig on another machine needs `0.0.0.0`. |
+| `--stratum-share-difficulty D` | 5000 | Per-connection share difficulty, clamped per job to the block difficulty. |
+
+An authority with `--mining-threads 0` and no `--stratum-port` has nothing
+mining, so the node refuses to start rather than idling silently. That is the
+same fail-fast shape as `--rewards-miner-key`.
+
+**The xmrig command line**, against a node with `--stratum-port 3333`:
+
+```
+nice -n 19 xmrig --threads=2 --algo rx/0 -o 127.0.0.1:3333 -u qnero-rig -p x --no-color
+```
+
+`-u` is a worker label and nothing is paid to it. Qnero's block reward is a
+shielded note minted for the key in `--rewards-miner-key`, and that key is
+secret-bearing, so it is exactly the thing not to put on a stratum login line.
+This is a solo-mining endpoint: whoever runs the node owns the coinbase. A pool
+paying many miners would need a payout ledger and share accounting, which is a
+different product.
+
+**Light mode versus full mode.** The node always runs RandomX in light mode: a
+256 MiB Argon2d cache per seed and no 2 GiB dataset. It hashes once per block
+it verifies and once per share it is offered, so a dataset would cost more
+memory than the rest of the node for no gain. A rig does the opposite, and
+that is why it is roughly an order of magnitude faster per thread. On this
+workstation light mode is about 33 H/s per thread (`docs/BENCH.md`). Neither
+mode changes the hash; a light-mode verifier and a full-mode miner agree on
+every bit.
+
+**The seed rule.** RandomX is keyed by a 32-byte seed that moves on a slow
+schedule, because every move costs a full-mode rig a dataset rebuild. The rule
+is Monero's, and the two constants are runtime constants
+(`pallet_qpow::Config::SeedEpochBlocks` and `SeedEpochLag`, 2048 and 64), so a
+chain can pick its own without a client release:
+
+```
+seed_height(h) = 0                             if h <= epoch + lag
+                 (h - lag - 1) rounded down to a multiple of epoch   otherwise
+```
+
+The seed is the hash of the block at that height, resolved along the
+candidate's **own ancestry** rather than by canonical height, so a block on a
+fork hashes under its own branch's seed. Every job a rig is handed carries
+`next_seed_hash` as well, so xmrig builds the next dataset in the background
+instead of stalling at the boundary.
+
+Two things about 2048 and 64 are worth knowing before a launch, and both are a
+one-line change in `runtime/src/configs/mod.rs`:
+
+- 2048 blocks at Monero's 120 s target is 2.8 days. At this chain's 12 s target
+  it is 6.8 hours, so a rig rebuilds its dataset three times a day. 16384
+  blocks restores Monero's cadence and is still a power of two.
+- The lag is 64 and `MaxReorgDepth` is 100, so the seed block is still inside
+  the window a legal reorg can move. That cannot split the chain, because the
+  seed follows each candidate's ancestry, but a deep reorg across an epoch
+  boundary does change the seed under work already started. A lag of 128
+  removes even that.
+
+**The difficulty floor moved with the engine.** `get_min_difficulty()` was
+Ethereum's 2^17 and is now 128. At the 33 H/s one light-mode thread manages,
+the old floor was 66 core-minutes per block against a 12 s target: a
+single-machine devnet would never produce one. The `dev` preset starts at the
+floor, and the Homestead retarget's increment is `difficulty / 2048`, which is
+zero below 2048, so a dev chain stays at 128 instead of drifting. Live presets
+start at `QPoWInitialDifficulty`, now 100 000.
+
+**What did not move.** The header shape (one 32-byte `PreRuntime` item plus a
+64-byte `Seal`, filling the 110-byte digest window exactly), the author label
+`H(cvk, parent_hash)`, the `FindAuthor` seam below, the coinbase inherent, the
+fork-choice rule and the aux-store work entries. The engine swap went through
+the seam and touched nothing the runtime reads.
+
+**Where the seal's 64 bytes went.** A RandomX proof is a 4-byte nonce, and the
+digest window needs 64. The seal is `nonce_le(4) || extra_nonce_le(4) || 56
+zero bytes`, both miner-chosen fields are inside the hashed 76-byte blob, and
+the 56 remaining bytes are pinned: a seal whose padding is not exactly zero is
+refused before the header is hashed. Without that pin one won nonce would be
+2^448 distinct valid block hashes, and a block hash is what every child commits
+to.
+
 ### The block-author seam
 
 Everything in the runtime that needs to know who authored a block reads it
@@ -436,7 +559,7 @@ derives the wormhole address from it (`qp_wormhole::derive_wormhole_address`).
 **What those 32 bytes are.** Not the operator's identity. An authoring node
 publishes `H(cvk, parent_hash)` there, computed by
 `qnero_note_core::MinerKey::author_label` and handed to the consensus client as
-`sc_consensus_qpow::AuthorLabel`, so the item changes every block. A constant
+`sc_consensus_randomx::AuthorLabel`, so the item changes every block. A constant
 item would label every block one operator won, and `Shielded::CoinbaseValues`
 publishes each coinbase note's value while `Shielded::LeafBlocks` dates it, so
 an observer could partition the tree by miner and read each miner's income
@@ -3852,3 +3975,196 @@ reason.
 | `cargo test -j 4 -p qnero-node --release`, the widened guard | 4.9 s of test time |
 | the negative control: rebuild with the mainnet fields restored, guard, rebuild forward | 2 x 1:05 |
 | the end-to-end, both tests, three proofs | 16.5 s |
+
+## The M7 run: RandomX proof of work, 2026-09-13
+
+### What changed
+
+The engine. Qnero's proof of work is RandomX `rx/0`, stock upstream constants,
+so the hash is the one Monero mines and a rig moves over by editing a pool
+address. Six things moved and one thing deliberately did not.
+
+- **`chain/client/consensus/randomx`** is the new engine crate and replaces
+  `chain/client/consensus/qpow`, which is deleted. It carries the blob layout,
+  the seed rule, Monero's target comparison, the RandomX cache and VM pool, the
+  block import, the import-queue verifier and the mining worker. The bindings
+  are `randomx-rs`, which vendors tevador's `librandomx` and builds it with
+  cmake; the crate asserts `librandomx`'s own known-answer vectors in its
+  tests, so a toolchain that miscompiled RandomX fails a test rather than
+  forking a chain.
+- **Verification left the runtime.** RandomX cannot run in wasm: the Argon2d
+  cache alone is 256 MiB against a 128 MiB runtime heap, there is no JIT, and
+  the VM sets a floating-point rounding mode wasm has no way to express. So
+  `pallet_qpow::verify_nonce_on_import_block`, `verify_nonce_local_mining` and
+  `verify_and_get_achieved_difficulty` are gone, with the three matching
+  runtime-API methods and the `ProofSubmitted` event. `chain/qpow-math` is
+  deleted with them.
+- **`pallet-qpow` kept its difficulty half, and that was the point of looking.**
+  The retarget is a pure function of the parent difficulty, the observed block
+  time and the target block time. Nothing in it reads a nonce, a hash or an
+  engine id, so there was no engine-specific part to fork out, and an LWMA
+  would have been a different tuning of the same inputs rather than a different
+  pallet. Storage, the genesis override and the `DifficultyAdjusted` event are
+  untouched, so no storage item moved. Two constants joined the config,
+  `SeedEpochBlocks` and `SeedEpochLag`, and two runtime-API methods read them.
+- **The floor moved, and the increment grew a floor of its own.**
+  `get_min_difficulty()` was Ethereum's 2^17 and is 128: at 33 H/s the old
+  floor was 66 core-minutes per block against a 12 s target, so a
+  single-machine devnet could never produce one. `QPoWInitialDifficulty` went
+  from about 10^11 to 100 000 for the same reason. And because the Homestead
+  increment is `parent / 2048`, which integer division rounds to zero below
+  2048, a chain that reached the new floor could never leave it; the increment
+  is now `max(parent / 2048, 1)`, which changes nothing above 2048.
+- **The node grew a stratum endpoint** (`node/src/stratum.rs`, `--stratum-port`)
+  and lost the QUIC miner server (`node/src/miner_server.rs`, the
+  `quantus-miner-api` crate, `--miner-listen-port`, `--miner-auth-token-file`).
+  Upstream's external miner computes Poseidon hashes; no transport would have
+  let it mine this chain, so keeping its protocol would have meant shipping an
+  interface nothing could speak.
+- **In-process mining is RandomX light mode on `--mining-threads` threads**,
+  one by default, which is what keeps `--dev` producing blocks with no rig
+  attached.
+
+What did not move is the seam M6 built. `configs::QpowAuthor` was not edited.
+`POW_ENGINE_ID` is still `pow_`, the header still carries one 32-byte
+`PreRuntime` item and one 64-byte `Seal` filling the 110-byte digest window
+exactly, the author label is still `H(cvk, parent_hash)`, the coinbase inherent
+still mints the block's note from the node's own miner key, and fork choice is
+still `parent_work + difficulty` in the aux store. `spec_version` moved to 102
+for the metadata the deleted API methods and event took with them;
+`transaction_version` stayed at 7.
+
+### Where the seal's 64 bytes went
+
+A RandomX proof is four bytes and the digest window needs 64. The blob is a
+fixed 76 bytes with the nonce at offset 39, because that is where xmrig writes
+and it is not configurable on the miner side:
+
+```
+0..7    b"qnero/1"                      domain tag
+7..39   pre-seal header hash
+39..43  nonce, little-endian u32        <- the four bytes xmrig writes
+43..51  block height, little-endian
+51..55  extra nonce, little-endian u32  <- per stratum connection
+55..76  zero padding
+```
+
+and the seal is `nonce_le(4) || extra_nonce_le(4) || 56 zero bytes`. Both
+miner-chosen fields are inside the hashed blob and the remaining 56 bytes are
+pinned: a seal whose padding is not exactly zero is refused before the header
+is hashed. Without that pin one won nonce would be 2^448 distinct valid block
+hashes, and a block hash is what every child commits to, including through the
+parent hash the author label is derived from.
+
+### The run
+
+```
+# in the chain workspace
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
+
+export QNERO_MINER_KEY=$(qnero-wallet miner-address)
+RUST_LOG=info nice -n 19 ./target/release/qnero-node --dev --tmp \
+  --stratum-port 3333 --mining-threads 1
+```
+
+```
+⛏️ Coinbase notes are minted for miner key qnm1q8ams9rq…0dfx95rk
+Genesis: Set initial difficulty to 80
+⛏️ Stratum listening on 127.0.0.1:3333 (algo rx/0, share difficulty 5000)
+⛏️ Point a rig at 127.0.0.1:3333: xmrig --algo rx/0 -o 127.0.0.1:3333 -u <label>
+⛏️ RandomX: initialising the seed cache for c61648d3…e622b037 (light mode, 256 MiB)
+⛏️ RandomX mining task spawned (rx/0, 1 in-process thread(s), flags FLAG_HARD_AES | FLAG_JIT | FLAG_ARGON2_SSSE3 | FLAG_ARGON2_AVX2)
+⛏️ Mining #7 with rx/0: pre_hash=144b6dcb…f396229e, difficulty=132, seed #0 c61648d3…e622b037
+🥇 Successfully mined and submitted a new block in process (mining time: 4s)
+🏆 Imported #7 (0x199d…fd59 → 0x89cb…b080)
+```
+
+`seed #0` is the seed height, genesis for every block below `epoch + lag`,
+which on a devnet is every block it will ever have. Blocks #1 to #14 took 56 s
+on one light-mode thread, 4.3 s each, with the difficulty climbing one step per
+block from the floor of 128.
+
+Then a stock xmrig, downloaded as a release tarball outside the repository and
+never into it:
+
+```
+nice -n 19 xmrig --threads=2 --algo rx/0 -o 127.0.0.1:3333 -u qnero-rig -p x --no-color
+```
+
+xmrig's own transcript, unedited except for trimming:
+
+```
+ * ABOUT        XMRig/6.21.3 gcc/13.2.1 (built for Linux x86-64, 64 bit)
+ * POOL #1      127.0.0.1:3333 algo rx/0
+[..] net      use pool 127.0.0.1:3333  127.0.0.1
+[..] net      new job from 127.0.0.1:3333 diff 174 algo rx/0 height 49
+[..] randomx  init dataset algo rx/0 (20 threads) seed c61648d3568edb0a...
+[..] randomx  allocated 2336 MB (2080+256) huge pages 0% 0/1168 +JIT (0 ms)
+[..] randomx  dataset ready (3809 ms)
+[..] cpu      use profile  *  (2 threads) scratchpad 2048 KB
+[..] cpu      accepted (1/0) diff 174 (26 ms)
+[..] net      new job from 127.0.0.1:3333 diff 175 algo rx/0 height 50
+[..] cpu      accepted (2/0) diff 175 (27 ms)
+...
+[..] cpu      accepted (74/0) diff 184 (1717 ms)
+[..] cpu      rejected (74/1) diff 184 "Invalid job id" (1653 ms)
+```
+
+and the node's side of the same conversation:
+
+```
+⛏️ Miner 127.0.0.1:39320 logged in as "qnero-rig" (XMRig/6.21.3 (Linux x86_64) …), extra nonce 0x202af7ad
+🥇 Share from "qnero-rig" meets the block difficulty 153 at height 28
+🥇 Successfully mined and submitted a new block by stratum miner "qnero-rig" (mining time: 1s)
+⛏️ Stratum so far: 264 shares accepted, 39 rejected, 264 of them blocks
+```
+
+The chain reached #66 in 3 m 48 s: **50 blocks mined in process and 14 mined by
+xmrig**, every one of them verified by the node's own RandomX before import.
+The `Invalid job id` rejections are the expected shape here. A 3.5 kH/s rig
+against a difficulty of 175 finds several shares per template, and the ones
+that arrive after the node has already sealed and moved on are refused by job
+id. Every share the node accepted it re-hashed itself, over a blob it rebuilt
+from the job it issued; the `result` field a miner sends is compared against
+that and never used in its place.
+
+The header of block #65, read back over RPC, is the whole seal design in one
+line:
+
+```
+PreRuntime  0x06 706f775f 80 d232d9d0…cedf504e          (32-byte author label)
+Seal        0x05 706f775f 0101 5f30fa7a 3c3881e7 00…00  (nonce, extra nonce, 56 zero bytes)
+```
+
+Shut down by pidfile, with `ss -ltn` confirming 9944 and 3333 closed and no
+`qnero-node` or `xmrig` process left.
+
+### Gates
+
+```
+# the chain workspace
+SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
+  -p sc-consensus-randomx -p pallet-qpow -p qnero-runtime -p qnero-node --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p sc-consensus-randomx -p pallet-qpow -p sp-consensus-qpow -p qnero-node --all-targets
+cargo +nightly fmt -p sc-consensus-randomx -p pallet-qpow -p sp-consensus-qpow \
+  -p qnero-node -p qnero-runtime -- --check
+
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+cargo fmt --all -- --check
+```
+
+All green. 50 tests in `sc-consensus-randomx`, 21 in `pallet-qpow`, 71 in the
+node crate (10 of them stratum protocol tests driven by a fake miner that
+speaks xmrig's messages), 60 in the runtime's integration suite, and 38 test
+binaries in the root workspace.
+
+The chain workspace's formatting convention is **nightly** rustfmt: its
+`rustfmt.toml` sets `binop_separator`, `match_arm_blocks` and six other
+unstable options, and stable rustfmt silently ignores them and then disagrees
+with the result. `cargo fmt` on stable reformats upstream crates that were
+never stable-clean, so the chain-side format gate is `cargo +nightly fmt`. The
+root workspace is stable-clean and its gate is the stable one.
+

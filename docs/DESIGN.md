@@ -43,7 +43,7 @@ lives.
 | CLSAG ring + key image | Merkle membership proof in the 4-ary Poseidon tree + nullifier `nf = H(NF, nk, rho, r)`, or `nf = H(NF_DUMMY, nk, rho, r)` for a padding input slot | `qp-zk-circuits` `zk_merkle`, `nullifier` fragments |
 | Ring size / decoys | Anonymity set = the whole tree (all notes ever) | `pallet-zk-tree` |
 | Transaction signature | Spend proof bound to the transaction digest as a public input | plonky2 public inputs |
-| RandomX PoW | QPoW (kept through v1, behind one author seam; section 10) | `pallets/qpow` |
+| RandomX PoW | RandomX, `rx/0`, stock constants, since M7 (section 10) | `client/consensus/randomx`, `pallets/qpow` for difficulty |
 | Node identity, p2p | ML-DSA-87 accounts, PQ Noise (ML-KEM) | Quantus |
 
 Field: Goldilocks. Hash: Poseidon (Quantus parameters, Eiger reviewed). Proof
@@ -464,6 +464,8 @@ author derivation lives there and the runtime's one author seam calls it.
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | DONE 2026-09-12 (`crates/qnero-wallet`, binary `qnero-wallet`: keygen, address, shield, sync, balance, send, status; hand-encoded extrinsics over JSON-RPC, storage layout and fee floor read from runtime metadata, Merkle paths rebuilt locally and the settled nullifier set paged whole so no request names a note as its own, notes in one JSON store beside the seed; memos padded to one size, at a pad chosen so the padded pair stays a fee bucket below a pair padded to `MaxCiphertextBytes`, and the payment's output slot drawn per spend, so the chain publishes neither a memo length nor which of a settlement's two leaves is the sender's change; one checkpoint-hash walk decides both whether a node is on the wallet's chain and whether it has reached everything the wallet has read, rewinding the leaf watermark to the newest checkpoint still canonical on a fork and refusing a node that is behind, with a leaf-count gate under it so the watermark never regresses outside the fork path, and spent status is derived from the settled set in both directions; see `docs/WALLET.md`, and `docs/BENCH.md` for the public batch at `n = 53`, which M4 left unmeasured); `sync --rescan` is the operator override on the node gates, runs add-only, and its known edges are docs/WALLET.md open issue 14) |
 | M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | DONE 2026-09-12 (every unit of value created after genesis is a note, the genesis allocation staying transparent and reaching its holders through `Vesting::claim`: `pallet-shielded` mints one coinbase note per block from a required inherent, the author's share of settled fees rides in it, mining rewards to transparent accounts are off, and `BaseCallFilter` refuses every call that moves transparent value between accounts a user chooses, leaving `Vesting::claim`, a genesis-fixed payout from a keyless pot, as the one transparent payout; `pallet-wormhole` is out of the runtime with its transaction extension, the runtime identifies as `qnero` at `spec_version` 101 and `transaction_version` 7, and the wallet finds its coinbase notes from a miner key the node is configured with; see section 7, `docs/CIRCUIT.md` section 10, `docs/WALLET.md` and `docs/OPS-DEV.md`. The review pass that closed it changed five things: the header's author item became per block so no coinbase leaf carries a mining identity, `set_high_security` joined the refused list so no account can enrol into a feature whose every call v1 refuses, and the high-security whitelist stayed as it is because every call on it is delayed and a guardian can reverse it, `Vesting::claim` stays dispatchable so the genesis allocation is deliverable and no preset endows a keyless account, the coinbase inherent refuses the encrypted payload nothing builds, and a block with no emission still mints the author fee the pool already holds. A second review pass reversed one of those: `shield` and `burn` came back off the high-security whitelist, because every other call on it is delayed and a guardian can reverse it, and the freeze they were paying for is unreachable while the enrolment itself is refused. It also moved `spec_version` to 101, which is the number above, for the metadata the first pass changed without it. A third pass bound the coinbase note's `r` to the chain's genesis, so one miner key on two chains no longer mints byte-identical notes at equal heights, and corrected the claim this row itself carried: the 27% genesis allocation is transparent and reaches its holders through `Vesting::claim`) |
 
+| M7 | RandomX proof of work, so a Monero rig mines Qnero | DONE 2026-09-13 (the engine is RandomX `rx/0`, stock upstream constants, so the hash is bit-identical to what a stock xmrig computes and a Monero rig moves over with a config change; `chain/client/consensus/randomx` is the whole engine, the runtime no longer verifies a nonce because RandomX cannot run in wasm, `pallet-qpow` keeps the difficulty storage and the Homestead retarget because both are functions of block times rather than of the hash, and the node grew a stratum endpoint behind `--stratum-port` speaking the dialect xmrig speaks to a Monero pool. The M6 author seam did what it was built for: `H(cvk, parent_hash)`, `configs::QpowAuthor`, the coinbase inherent, the header shape and fork choice are untouched, and `POW_ENGINE_ID` is still `pow_`. The proof is a 4-byte nonce and a 4-byte extra nonce over a fixed 76-byte blob with the nonce at offset 39 where xmrig writes it, packed into the 64-byte seal the digest window needs with the remaining 56 bytes pinned to zero, because free seal bytes would be free block-hash grinding. The comparison is Monero's: the hash read little-endian, accepted when `hash * difficulty <= 2^256 - 1`. Seed rotation is Monero's rule with the epoch and lag as runtime constants. `spec_version` moved to 102 for the three runtime-API methods and the event that went away; `transaction_version` stayed at 7. See section 10, `docs/OPS-DEV.md` and `docs/BENCH.md`) |
+
 About 10 to 12 weeks to a private testnet. The measured risk to retire first
 is wallet-side proving time and memory for a 2-in/2-out leaf plus a
 6-slot private batch (see `docs/BENCH.md`).
@@ -473,7 +475,17 @@ is wallet-side proving time and memory for a 2-in/2-out leaf plus a
 1. ML-KEM-1024 chosen for addresses (level-5 parity with ML-DSA-87, same as Hegemon). Encoded address is 2571 characters.
 2. Proof size and verify weight for the private batch under the new PI
    layout; Wormhole's numbers are the baseline.
-3. Whether to keep QPoW or bring RandomX; unrelated to privacy, defer.
+3. ~~Whether to keep QPoW or bring RandomX~~ **Closed at M7: RandomX.** What
+   is open is the sizing of its two seed constants, which are runtime
+   constants and so a one-line change. The epoch is Monero's 2048 blocks,
+   which at this chain's 12 s target rotates every 6.8 hours instead of
+   Monero's 2.8 days, and every rotation costs a full-mode rig a 2 GiB dataset
+   rebuild; 16384 restores the cadence. The lag is Monero's 64 blocks and
+   `MaxReorgDepth` is 100, so the seed block is still inside the window a legal
+   reorg can move. That cannot split the chain, because the seed is resolved
+   along each candidate's own ancestry, but a deep reorg across a boundary does
+   change the seed under work already started; a lag of 128 removes it. Decide
+   both before a network launches, because after that they are a fork.
 4. Fee visibility: fees are public, as in Monero. **M4 decided: per-slot public
    fees, no tiering. M6 kept it, and the coinbase is why.** A block's coinbase
    note is worth the emission plus every fee the block settled, and that total
@@ -530,20 +542,23 @@ Where Qnero beats it, if we execute:
    SDK and dApp tooling already exist in the QRL stack and can be pointed at
    Qnero. Hegemon has one Electron app.
 4. Reviewability. A reviewer can read Qnero's delta over Quantus in a day.
-5. Mining story. Consider RandomX in place of QPoW so Monero miners can move
-   over with the software they already run. **M6 made the swap a one-file
-   change and recorded the evaluation for M7.** Everything in the runtime that
-   needs to know who authored a block now reads it through one
-   `FindAuthor` implementation, `configs::QpowAuthor`, and nothing else in the
-   runtime touches the proof of work: the coinbase belongs to the block's
-   author, the author is whatever that impl says, and the note's recipient is
-   the miner key its own node holds. Swapping the engine is that impl plus the
-   consensus client. `docs/OPS-DEV.md` carries the seam. **M4 kept QPoW**: the shielded
-   pool's author fee reads the QPoW pre-runtime digest and credits the
-   QPoW-derived account through a wormhole leaf (`docs/CIRCUIT.md` 9.7), which
-   is the same seam `pallet-mining-rewards` uses, and nothing in M4 depends on
-   which proof of work sits behind that digest. The RandomX evaluation is
-   re-deferred to M6, which is the milestone that touches the coinbase.
+5. Mining story. **M7 made it RandomX, and the swap cost the seam and nothing
+   else.** The engine is `rx/0` with stock upstream constants, so the hash is
+   the one Monero mines and a rig moves over by editing a pool address. The
+   node speaks the stratum dialect xmrig speaks to a Monero pool
+   (`--stratum-port`), and a stock `xmrig --algo rx/0` mined this chain in the
+   M7 smoke run with no patched miner. Nothing in the runtime moved except
+   what had to: RandomX cannot run in a wasm runtime (a 256 MiB Argon2d cache
+   against a 128 MiB heap, no JIT, and a floating-point rounding mode wasm
+   cannot set), so verification is client side and the runtime is the oracle
+   the client asks for the difficulty and the seed schedule. M6 built for this
+   exactly: everything that needs to know who authored a block reads one
+   `FindAuthor` implementation, `configs::QpowAuthor`, the coinbase belongs to
+   the block's author, and the note's recipient is the miner key the node
+   holds. That file was not edited. Neither was the header shape, the fork
+   choice, the coinbase inherent or the engine id. `docs/OPS-DEV.md` carries
+   the seam and the flags. Hegemon has no CPU-mining story to compare: it runs
+   its own proof of work and no existing rig speaks it.
 
 Concrete "beat it" targets for the first testnet:
 - proof per tx smaller than 105 KB, or clearly amortized below it per batch
@@ -564,7 +579,10 @@ Pillars, in this order:
    at genesis an amount fixed at genesis out of a pot that cannot sign, and
    `Balances::burn` names the account taking its own value out of circulation.
    `docs/CIRCUIT.md` section 10.7 is the full list.
-2. Proof of work. No stake, no validators, no foundation keys in consensus.
+2. Proof of work, and the one every CPU miner already runs. RandomX `rx/0`,
+   stock constants, so a Monero rig points xmrig at a Qnero node and mines. No
+   stake, no validators, no foundation keys in consensus, and no algorithm
+   nobody has hardware or software for.
 3. Post-quantum from genesis. Hash-based proofs, lattice signatures and
    encapsulation, nothing for Shor to break.
 4. Audited parts only. Standardized primitives and firm-audited circuits.

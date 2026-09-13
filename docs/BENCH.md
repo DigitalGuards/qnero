@@ -314,3 +314,56 @@ batch's 3.4 s. The measurement builds every circuit before it takes an anchor,
 which is what keeps the 28 s build out of the window. An aggregator collecting
 inners from wallets has less room: its participants' anchors are already older
 when they arrive.
+
+# M7: RandomX proof of work (2026-09-13)
+
+Measured on the dev workstation (AMD Ryzen AI 9 365, 10C/20T, 23.5 GB, WSL2)
+against the M7 node at `--dev --tmp`. Everything the node does is RandomX
+**light mode**; xmrig builds the full dataset, which is the gap in the first
+table.
+
+## Hash rate
+
+| | mode | memory | threads | rate |
+|---|---|---|---:|---:|
+| node, in process | light (cache only) | 256 MiB + 2 MiB per VM | 1 | **32.9 H/s** |
+| node, verification | light (cache only) | shared with the above | 1 | ~30 ms per block verified |
+| xmrig 6.21.3 | full (dataset) | 2336 MiB (2080 + 256) | 2 | ~40 shares/s at difficulty 175, so roughly **3.5 kH/s** |
+
+The node is about two orders of magnitude slower per thread than the rig, and
+that is the intended shape: the node hashes once per block it verifies and once
+per share it is offered, so a 2 GiB dataset would cost more memory than the
+rest of the node for nothing. A rig pays the dataset once and gets it back
+immediately.
+
+Fixed costs measured alongside:
+
+- **Argon2d cache fill: 372 ms**, once per seed epoch, 256 MiB. The node holds
+  two caches so a block that straddles an epoch boundary, or a reorg across
+  one, verifies without paying it again.
+- **xmrig dataset build: 3809 ms** with 20 threads, 2080 MiB. This is what
+  `next_seed_hash` in every job exists to hide: a rig that is told the next
+  seed in advance builds the next dataset in the background instead of
+  stalling for four seconds at the boundary.
+
+## Dev-chain block time
+
+`--dev --tmp --mining-threads 1`, genesis difficulty 128 (the pallet's floor):
+
+| | value |
+|---|---|
+| blocks #1 to #14, in process only | 56 s, **4.3 s per block** |
+| difficulty at #1 | 128 |
+| difficulty at #66 | 189 |
+| blocks in the run | 66 in 3 m 48 s, 50 mined in process and 14 by xmrig |
+
+4.3 s against a 12 s target is the retarget climbing: at 32.9 H/s a difficulty
+of 128 is about four seconds, so the chain runs fast and the difficulty rises
+one step per block. The step is one rather than `difficulty / 2048` because
+integer division rounds that to zero below 2048, and M7 floored the increment
+at one so a chain that reaches the difficulty floor can leave it again.
+
+With xmrig attached the same chain produced blocks as fast as the node could
+build templates, which is what a 3.5 kH/s rig against a difficulty of 175
+means: the proof of work stopped being the constraint and block building became
+one.
