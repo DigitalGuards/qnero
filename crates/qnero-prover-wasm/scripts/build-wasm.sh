@@ -28,8 +28,8 @@ fi
 if ! command -v wasm-bindgen >/dev/null 2>&1; then
     cat >&2 <<'MSG'
 wasm-bindgen is not on PATH. Install the CLI at the exact version the
-wasm-bindgen crate resolves to (a mismatch is a hard refusal, not a subtle
-bug):
+wasm-bindgen crate resolves to (a mismatch is a hard refusal with a version
+message, so it fails loudly on the first dependency bump):
 
     version=$(cargo tree -p qnero-prover-wasm -e normal \
         | sed -n 's/.*wasm-bindgen v\([0-9.]*\).*/\1/p' | head -1)
@@ -46,9 +46,9 @@ echo "checking the ${target} dependency tree for rayon"
 # would report a clean tree because grep found nothing in an empty stream. So
 # the tree is captured first and its exit status is the gate.
 tree="$(nice -n 19 cargo tree --target "${target}" -p "${package}" -e normal)"
-# Match the crate name, not the substring: `plonky2_maybe_rayon` is always in
-# the tree and takes its serial path. `rayon` and `rayon-core` are the ones that
-# spawn threads.
+# Match the whole crate name. `plonky2_maybe_rayon` contains the substring, is
+# always in the tree and takes its serial path. `rayon` and `rayon-core` are the
+# two that spawn threads.
 if sed -E 's/^[^a-zA-Z]*//' <<<"${tree}" | awk '{print $1}' | grep -qxE 'rayon|rayon-core'; then
     echo "rayon is in the ${target} dependency tree: some crate turned on a parallel feature" >&2
     exit 1

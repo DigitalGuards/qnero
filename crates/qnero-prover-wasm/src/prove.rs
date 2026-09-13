@@ -229,11 +229,10 @@ pub fn verify(prover: &WalletProver, proof_bytes: &[u8]) -> Result<f64> {
 /// hands it to somebody else's batcher. `docs/DESIGN.md` section 8 carries what
 /// that costs in privacy.
 ///
-/// It builds its own circuit per call, so it is a measurement entry point and
-/// not something to put on a payment path. The proof does not leave this
+/// It builds its own circuit per call, which makes it a measurement entry
+/// point and keeps it off any payment path. The proof does not leave this
 /// function: a ZK leaf is safe to hand out, and handing one out is a decision
-/// for the milestone that builds the delegated batcher, not a side effect of a
-/// benchmark.
+/// for the milestone that builds the delegated batcher to make deliberately.
 #[derive(Debug, Serialize)]
 pub struct ZkLeafReport {
     pub build_millis: f64,
