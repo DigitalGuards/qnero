@@ -1,0 +1,14 @@
+{
+  "name": "qnero-prover-wasm-harness",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Headless-Chromium harness for the Qnero browser prover (M8)",
+  "scripts": {
+    "serve": "node server.mjs 8787",
+    "measure": "node run.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.57.0"
+  }
+}
