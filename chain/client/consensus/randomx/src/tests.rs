@@ -234,19 +234,28 @@ fn the_difficulty_is_what_decides() {
 	assert!(matches!(result, Err(Error::InvalidSeal)));
 }
 
-/// A chain the height check can be asked about: hash to header, nothing else.
+/// A chain the height check can be asked about: hash to header, where
+/// finality sits, and nothing else.
 struct FakeBackend {
 	headers: std::collections::HashMap<H256, TestHeader>,
+	finalized_number: u32,
+	block_gap: Option<sp_blockchain::BlockGap<u32>>,
 }
 
 impl FakeBackend {
-	/// One block at `number`, and its hash.
+	/// One block at `number`, and its hash. Nothing is finalized.
 	fn with_block(number: u32) -> (Self, H256) {
 		let header = sealed_header_at(number, canonical_digest());
 		let hash = header.hash();
 		let mut headers = std::collections::HashMap::new();
 		headers.insert(hash, header);
-		(Self { headers }, hash)
+		(Self { headers, finalized_number: 0, block_gap: None }, hash)
+	}
+
+	/// The same, with finality at `finalized`.
+	fn with_block_finalized_at(number: u32, finalized: u32) -> (Self, H256) {
+		let (backend, hash) = Self::with_block(number);
+		(Self { finalized_number: finalized, ..backend }, hash)
 	}
 }
 
@@ -261,10 +270,10 @@ impl HeaderBackend<TestBlock> for FakeBackend {
 			best_number: 0,
 			genesis_hash: H256::zero(),
 			finalized_hash: H256::zero(),
-			finalized_number: 0,
+			finalized_number: self.finalized_number,
 			finalized_state: None,
 			number_leaves: 0,
-			block_gap: None,
+			block_gap: self.block_gap,
 		}
 	}
 
@@ -298,11 +307,11 @@ impl HeaderBackend<TestBlock> for FakeBackend {
 fn a_height_that_does_not_follow_its_parent_is_refused() {
 	let (backend, parent) = FakeBackend::with_block(1_000);
 
-	check_height_follows_parent::<TestBlock, _>(&backend, parent, 1_001)
+	check_header_position::<TestBlock, _>(&backend, parent, 1_001, UNKNOWN_BLOCK)
 		.expect("the only height that follows #1000 is #1001");
 
 	for claimed in [1_000u64, 1_002, 4_000, 0, u64::MAX] {
-		let error = check_height_follows_parent::<TestBlock, _>(&backend, parent, claimed)
+		let error = check_header_position::<TestBlock, _>(&backend, parent, claimed, UNKNOWN_BLOCK)
 			.expect_err("a height that does not follow its parent must be refused");
 		assert!(
 			matches!(error, Error::HeightMismatch { height, parent_number }
@@ -317,7 +326,69 @@ fn a_height_that_does_not_follow_its_parent_is_refused() {
 #[test]
 fn an_unknown_parent_is_refused_before_anything_is_walked() {
 	let (backend, _parent) = FakeBackend::with_block(1_000);
-	let error = check_height_follows_parent::<TestBlock, _>(&backend, H256([0xabu8; 32]), 1_001)
-		.expect_err("an unknown parent must be refused");
+	let error =
+		check_header_position::<TestBlock, _>(&backend, H256([0xabu8; 32]), 1_001, UNKNOWN_BLOCK)
+			.expect_err("an unknown parent must be refused");
 	assert!(matches!(error, Error::UnknownParent(_)), "got: {error}");
 }
+
+/// A header at or below the finalized height is refused before the seed walk
+/// and before any hash.
+///
+/// This is what bounds the seed epochs an unauthenticated peer can name. A
+/// fork response carries up to `MaxReorgDepth` headers of which only the last
+/// is pinned to the hash that was requested; the rest are free-form, and on an
+/// archive node every old parent they name still resolves. Left unbounded,
+/// each one is a seed epoch of the peer's choosing, so each one misses the two
+/// caches the engine holds and buys a 256 MiB Argon2d fill before the target is
+/// ever compared, on the import queue's single verification task, for a header
+/// with no proof of work in it.
+#[test]
+fn a_header_at_or_below_the_finalized_height_is_refused() {
+	// Finality at #1000, and a parent that is the finalized block itself.
+	let (backend, parent) = FakeBackend::with_block_finalized_at(1_000, 1_000);
+	check_header_position::<TestBlock, _>(&backend, parent, 1_001, UNKNOWN_BLOCK)
+		.expect("the first unfinalized height is still importable");
+
+	for finalized in [1_001u32, 1_002, 5_000] {
+		let (backend, parent) = FakeBackend::with_block_finalized_at(1_000, finalized);
+		let error = check_header_position::<TestBlock, _>(&backend, parent, 1_001, UNKNOWN_BLOCK)
+			.expect_err("a header at or below the finalized height must be refused");
+		assert!(
+			matches!(error, Error::BelowFinalized { height, finalized: seen }
+				if height == 1_001 && seen == u64::from(finalized)),
+			"expected a finalized-height refusal, got: {error}",
+		);
+	}
+}
+
+/// With one exemption, and it is the one `sc-client` itself carries: the block
+/// that fills the gap warp or fast sync left behind is below finality by
+/// construction and is the only such block that can ever be imported.
+#[test]
+fn the_block_that_fills_a_sync_gap_is_exempt() {
+	let (backend, parent) = FakeBackend::with_block_finalized_at(1_000, 5_000);
+	let backend = FakeBackend {
+		block_gap: Some(sp_blockchain::BlockGap {
+			start: 1_001,
+			end: 2_000,
+			gap_type: sp_blockchain::BlockGapType::MissingHeaderAndBody,
+		}),
+		..backend
+	};
+	check_header_position::<TestBlock, _>(&backend, parent, 1_001, UNKNOWN_BLOCK)
+		.expect("the gap block is the one below-finality block that is importable");
+}
+
+/// And a block the node already has is exempt too, because re-verifying one is
+/// what `check-block` and `import-blocks` do and both are aimed at blocks that
+/// are below finality by construction.
+#[test]
+fn a_block_the_node_already_has_is_exempt() {
+	let (backend, parent) = FakeBackend::with_block_finalized_at(1_000, 5_000);
+	check_header_position::<TestBlock, _>(&backend, parent, 1_001, parent)
+		.expect("a block already in the chain is not a new submission");
+}
+
+/// A hash no header in the fake chain has, so neither exemption applies to it.
+const UNKNOWN_BLOCK: H256 = H256([0xcdu8; 32]);

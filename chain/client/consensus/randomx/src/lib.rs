@@ -135,6 +135,8 @@ pub enum Error<B: BlockT> {
 	UnknownParent(B::Hash),
 	#[error("Block claims height {height}, but its parent is #{parent_number}")]
 	HeightMismatch { height: u64, parent_number: u64 },
+	#[error("Block #{height} is at or below the finalized height #{finalized}")]
+	BelowFinalized { height: u64, finalized: u64 },
 	#[error("RandomX engine error: {0}")]
 	Engine(EngineError),
 	#[error(transparent)]
@@ -238,7 +240,8 @@ where
 		.ok_or(Error::SeedUnreachable(target_height))
 }
 
-/// The height a header claims must be its parent's plus one.
+/// Where a header sits: its height must be its parent's plus one, and it must
+/// be somewhere the chain could still accept it.
 ///
 /// The height is attacker-supplied and it is load bearing twice over: it picks
 /// the RandomX seed epoch, and it is hashed into the mining blob. The runtime
@@ -247,10 +250,30 @@ where
 /// here, before the seed walk and before any hash, is what keeps a header that
 /// lies about its height from buying an ancestry walk the length of a whole
 /// seed epoch plus a RandomX hash for a few hundred bytes of input.
-pub fn check_height_follows_parent<B, C>(
+///
+/// The finalized floor is the other half of the same argument, and it is what
+/// bounds which seed epochs an unauthenticated peer can name. A fork response
+/// carries up to `MaxReorgDepth` headers of which only the last is pinned to
+/// the hash that was asked for; the rest are free-form, and on an archive node
+/// their old parents all still resolve. Headers built on parents scattered
+/// across several epochs then each miss the two seed caches the engine holds,
+/// and every miss is a 256 MiB Argon2d fill before a single byte of the hash is
+/// compared against the target: hundreds of milliseconds of the import queue's
+/// one verification task for a header carrying no proof of work at all, and the
+/// evictions cost the live seed a re-fill on top. Refusing everything at or
+/// below the finalized height for two database reads leaves only the
+/// unfinalized window, which is `MaxReorgDepth` blocks wide and therefore spans
+/// at most two seed epochs: exactly what the cache pool already holds.
+///
+/// Nothing importable is lost by it. `sc-client` refuses the same blocks a few
+/// stages later with `NotInFinalizedChain`, and it carries the same exemption
+/// for the one legitimate case, a block filling the gap left by warp or fast
+/// sync.
+pub fn check_header_position<B, C>(
 	client: &C,
 	parent_hash: B::Hash,
 	height: u64,
+	block_hash: B::Hash,
 ) -> Result<(), Error<B>>
 where
 	B: BlockT<Hash = H256>,
@@ -265,7 +288,27 @@ where
 	if height != parent_number.saturating_add(1) {
 		return Err(Error::HeightMismatch { height, parent_number });
 	}
-	Ok(())
+
+	let info = client.info();
+	let finalized: u64 = info.finalized_number.try_into().unwrap_or(u64::MAX);
+	if height > finalized {
+		return Ok(());
+	}
+
+	// Below the floor, and only here, the two exemptions are worth a lookup
+	// each: the gap left by warp or fast sync, and a block the node already
+	// has, which is what `check-block` and `import-blocks` hand back to the
+	// import queue by design. A peer's junk header is neither, so it still
+	// costs one read and no hash.
+	let fills_the_sync_gap = info
+		.block_gap
+		.is_some_and(|gap| TryInto::<u64>::try_into(gap.start).unwrap_or(u64::MAX) == height);
+	let already_imported =
+		matches!(client.status(block_hash), Ok(sp_blockchain::BlockStatus::InChain));
+	if fills_the_sync_gap || already_imported {
+		return Ok(());
+	}
+	Err(Error::BelowFinalized { height, finalized })
 }
 
 /// Verify one block's proof of work, and return the work it contributes.
@@ -283,6 +326,7 @@ pub fn verify_pow<B, C>(
 	parent_hash: B::Hash,
 	height: u64,
 	pre_hash: B::Hash,
+	block_hash: B::Hash,
 	seal_bytes: &[u8],
 ) -> Result<U512, Error<B>>
 where
@@ -295,8 +339,9 @@ where
 	let seal = Seal::decode(seal_bytes).map_err(Error::MalformedSeal)?;
 
 	// Then the position: the seed epoch and the blob both come off this height,
-	// so it has to agree with where the block actually sits.
-	check_height_follows_parent::<B, C>(client, parent_hash, height)?;
+	// so it has to agree with where the block actually sits, and the block has
+	// to sit somewhere the chain could still accept it.
+	check_header_position::<B, C>(client, parent_hash, height, block_hash)?;
 
 	let difficulty = client
 		.runtime_api()
@@ -538,6 +583,7 @@ where
 			parent_hash,
 			number,
 			pre_hash,
+			post_header.hash(),
 			&inner_seal,
 		)
 		.map_err(|error| {
@@ -736,16 +782,27 @@ where
 		let parent_hash = *block.header.parent_hash();
 		let number = (*block.header.number()).try_into().unwrap_or(u64::MAX);
 		let pre_hash = block.header.hash();
+		// With the seal back on the header: the block's own hash, which is what
+		// the position check needs to recognise a block the node already has.
+		let block_hash = block.post_hash();
 		let inner_seal = fetch_seal::<B>(block.post_digests.last(), pre_hash)?;
 
-		verify_pow::<B, _>(&*self.client, &self.engine, parent_hash, number, pre_hash, &inner_seal)
-			.map_err(|error| {
-				log::error!(
-					target: LOG_TARGET,
-					"Invalid seal for block #{number} on parent {parent_hash:?}: {error}"
-				);
-				String::from(error)
-			})?;
+		verify_pow::<B, _>(
+			&*self.client,
+			&self.engine,
+			parent_hash,
+			number,
+			pre_hash,
+			block_hash,
+			&inner_seal,
+		)
+		.map_err(|error| {
+			log::error!(
+				target: LOG_TARGET,
+				"Invalid seal for block #{number} on parent {parent_hash:?}: {error}"
+			);
+			String::from(error)
+		})?;
 
 		Ok(block)
 	}
