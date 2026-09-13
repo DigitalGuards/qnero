@@ -9,7 +9,7 @@ mod tests {
 	use codec::Encode;
 	use frame_support::{assert_ok, traits::Currency};
 	use pallet_referenda::TracksInfo;
-	use quantus_runtime::{
+	use qnero_runtime::{
 		configs::TechReferendaInstance,
 		genesis_config_presets::tech_referendum_cost,
 		governance::definitions::{TechCollectiveTracksInfo, FAST_UPGRADE_TRACK_ID},

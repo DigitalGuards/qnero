@@ -7,15 +7,15 @@ use crate::{
 };
 #[cfg(feature = "runtime-benchmarks")]
 use frame_benchmarking_cli::{BenchmarkCmd, ExtrinsicFactory, SUBSTRATE_REFERENCE_HARDWARE};
+use qnero_runtime::Block;
+#[cfg(feature = "runtime-benchmarks")]
+use qnero_runtime::EXISTENTIAL_DEPOSIT;
 use qp_dilithium_crypto::{traits::WormholeAddress, Dilithium87Pair};
 use qp_rusty_crystals_hdwallet::{
 	derive_key_from_mnemonic, derive_wormhole_from_mnemonic, generate_mnemonic, mnemonic_to_seed,
 	wormhole::WormholePair, SensitiveBytes32, SensitiveBytes64, QUANTUS_DILITHIUM_CHAIN_ID,
 	QUANTUS_WORMHOLE_CHAIN_ID,
 };
-use quantus_runtime::Block;
-#[cfg(feature = "runtime-benchmarks")]
-use quantus_runtime::EXISTENTIAL_DEPOSIT;
 use rand::Rng;
 use sc_cli::SubstrateCli;
 use sc_network::config::{NodeKeyConfig, Secret};
@@ -290,16 +290,28 @@ impl SubstrateCli for Cli {
 		env!("CARGO_PKG_DESCRIPTION").into()
 	}
 
+	/// The startup banner's byline, and the one place an operator reads a
+	/// maintainer at every start.
+	///
+	/// `CARGO_PKG_AUTHORS` would answer "Quantus Network Developers
+	/// <hello@quantus.com>" here, which is the upstream workspace's
+	/// attribution and stays in `chain/Cargo.toml` where the crate metadata
+	/// belongs. A Qnero node that prints it names the wrong maintainer and
+	/// sends an operator's bug report to the wrong address. Upstream's credit
+	/// is in `chain/LICENSE`, in each crate's `NOTICE` and in the repository
+	/// README, where the licence puts it.
 	fn author() -> String {
-		env!("CARGO_PKG_AUTHORS").into()
+		"DigitalGuards <https://github.com/DigitalGuards/qnero>".into()
 	}
 
 	fn support_url() -> String {
 		"support.anonymous.an".into()
 	}
 
+	/// 2017 is the Substrate node template's own default, carried through
+	/// upstream. This repository's first commit is 2026.
 	fn copyright_start_year() -> i32 {
-		2017
+		2026
 	}
 
 	/// Every id here builds its genesis from a preset compiled into this
@@ -387,7 +399,7 @@ pub fn run() -> sc_cli::Result<()> {
 						Ok(details) => {
 							match scheme {
 								QuantusAddressType::Standard => {
-									println!("Generating Quantus Standard address...");
+									println!("Generating Qnero Standard address...");
 									if *seed {
 										println!("Using provided hex seed...");
 									} else if *words {
@@ -408,7 +420,7 @@ pub fn run() -> sc_cli::Result<()> {
 									}
 
 									println!(
-										"XXXXXXXXXXXXXXX Quantus Account Details XXXXXXXXXXXXXXXXX"
+										"XXXXXXXXXXXXXXXX Qnero Account Details XXXXXXXXXXXXXXXXXX"
 									);
 									if let Some(phrase) = &details.secret_phrase {
 										println!("Secret phrase: {}", phrase);
@@ -434,7 +446,7 @@ pub fn run() -> sc_cli::Result<()> {
 								QuantusAddressType::Wormhole => {
 									println!("Generating wormhole address...");
 									println!(
-                                        "XXXXXXXXXXXXXXX Quantus Wormhole Details XXXXXXXXXXXXXXXXX"
+                                        "XXXXXXXXXXXXXXXX Qnero Wormhole Details XXXXXXXXXXXXXXXXXX"
                                     );
 									if let Some(phrase) = &details.secret_phrase {
 										println!("Secret phrase: {}", phrase);
@@ -615,7 +627,7 @@ pub fn run() -> sc_cli::Result<()> {
 							None => {
 								eprintln!("Error: --rewards-inner-hash must start with '0x'.\n");
 								eprintln!("To generate an inner hash, run:");
-								eprintln!("  quantus-node key quantus --scheme wormhole\n");
+								eprintln!("  qnero-node key qnero --scheme wormhole\n");
 								eprintln!(
 									"Then pass the 'Inner Hash' value as --rewards-inner-hash."
 								);
@@ -629,7 +641,7 @@ pub fn run() -> sc_cli::Result<()> {
 							eprintln!("  Provided: {}", inner_hash);
 							eprintln!("  Expected 66 characters, got {}.\n", inner_hash.len());
 							eprintln!("To generate an inner hash, run:");
-							eprintln!("  quantus-node key quantus --scheme wormhole\n");
+							eprintln!("  qnero-node key qnero --scheme wormhole\n");
 							eprintln!("Then pass the 'Inner Hash' value as --rewards-inner-hash.");
 							return Err(sc_cli::Error::Input("Invalid inner hash length".into()));
 						}
@@ -638,7 +650,7 @@ pub fn run() -> sc_cli::Result<()> {
 								"Error: --rewards-inner-hash contains invalid hex characters.\n"
 							);
 							eprintln!("To generate an inner hash, run:");
-							eprintln!("  quantus-node key quantus --scheme wormhole\n");
+							eprintln!("  qnero-node key qnero --scheme wormhole\n");
 							eprintln!("Then pass the 'Inner Hash' value as --rewards-inner-hash.");
 							sc_cli::Error::Input("Invalid hex characters".into())
 						})?;
@@ -651,7 +663,7 @@ pub fn run() -> sc_cli::Result<()> {
 									"Error: --rewards-inner-hash is not a canonical Poseidon digest.\n"
 								);
 								eprintln!("To generate an inner hash, run:");
-								eprintln!("  quantus-node key quantus --scheme wormhole\n");
+								eprintln!("  qnero-node key qnero --scheme wormhole\n");
 								eprintln!(
 									"Then pass the 'Inner Hash' value as --rewards-inner-hash."
 								);
@@ -673,9 +685,8 @@ pub fn run() -> sc_cli::Result<()> {
 					},
 					None =>
 						if cli.run.shared_params.is_dev() {
-							let treasury_account =
-								quantus_runtime::configs::TreasuryPalletId::get()
-									.into_account_truncating();
+							let treasury_account = qnero_runtime::configs::TreasuryPalletId::get()
+								.into_account_truncating();
 							// Same reason as the branch above: v1 pays no
 							// account, so this is only the fallback author
 							// label a --dev node signs its blocks with.
@@ -689,7 +700,7 @@ pub fn run() -> sc_cli::Result<()> {
 								"Error: --rewards-inner-hash is required when running with --validator.\n"
 							);
 							eprintln!("To generate an inner hash, run:");
-							eprintln!("  quantus-node key quantus --scheme wormhole\n");
+							eprintln!("  qnero-node key qnero --scheme wormhole\n");
 							eprintln!("Then pass the 'Inner Hash' value as --rewards-inner-hash.");
 							return Err(sc_cli::Error::Input("Missing --rewards-inner-hash".into()));
 						} else {
@@ -804,6 +815,36 @@ mod tests {
 		},
 	};
 
+	/// The startup banner names Qnero and its maintainer.
+	///
+	/// `sc_cli` prints `impl_name`, the version, then `by {author}` before any
+	/// other line, and that banner is neither `--version` nor `--help`, so
+	/// `tests/naming_guard.rs` cannot see it: it reads only what the binary
+	/// writes for those two flags. This is the part of the rename guard that
+	/// covers the banner.
+	#[test]
+	fn the_startup_banner_names_qnero_and_no_upstream_maintainer() {
+		use sc_cli::SubstrateCli;
+
+		let name = <Cli as SubstrateCli>::impl_name();
+		let author = <Cli as SubstrateCli>::author();
+		let description = <Cli as SubstrateCli>::description();
+
+		assert_eq!(name, "Qnero Node");
+		for (what, line) in
+			[("impl_name", &name), ("author", &author), ("description", &description)]
+		{
+			assert!(
+				!line.to_ascii_lowercase().contains("quantus"),
+				"the startup banner's {what} still says Quantus: {line}"
+			);
+		}
+		assert!(
+			description.contains("Qnero"),
+			"the --help about line never says Qnero: {description}"
+		);
+	}
+
 	/// Every `--chain` id this node accepts resolves to a Qnero chain.
 	///
 	/// Three foreign raw specs used to ship inside this binary, and the empty
@@ -827,7 +868,7 @@ mod tests {
 		use clap::Parser;
 		use sc_cli::SubstrateCli;
 
-		let cli = crate::cli::Cli::try_parse_from(["quantus-node", "--validator"])
+		let cli = crate::cli::Cli::try_parse_from(["qnero-node", "--validator"])
 			.expect("parse a bare authority command line");
 
 		for id in [
@@ -866,7 +907,7 @@ mod tests {
 		use clap::Parser;
 		use sc_cli::SubstrateCli;
 
-		let cli = crate::cli::Cli::try_parse_from(["quantus-node", "--validator"])
+		let cli = crate::cli::Cli::try_parse_from(["qnero-node", "--validator"])
 			.expect("parse a bare authority command line");
 
 		let error = cli.load_spec("").expect_err("an empty chain id must not resolve to a chain");
@@ -885,12 +926,12 @@ mod tests {
 		use sc_cli::CliConfiguration;
 
 		let with_flag =
-			crate::cli::Cli::try_parse_from(["quantus-node", "--validator", "--force-authoring"])
+			crate::cli::Cli::try_parse_from(["qnero-node", "--validator", "--force-authoring"])
 				.expect("parse --force-authoring");
 		assert!(with_flag.run.force_authoring);
 		assert!(with_flag.run.force_authoring().expect("force_authoring"));
 
-		let without_flag = crate::cli::Cli::try_parse_from(["quantus-node", "--validator"])
+		let without_flag = crate::cli::Cli::try_parse_from(["qnero-node", "--validator"])
 			.expect("parse --validator");
 		assert!(!without_flag.run.force_authoring);
 		assert!(!without_flag.run.force_authoring().expect("force_authoring"));
@@ -901,7 +942,7 @@ mod tests {
 		use clap::Parser;
 		use sc_cli::CliConfiguration;
 
-		let cli = crate::cli::Cli::try_parse_from(["quantus-node", "--dev"]).expect("parse --dev");
+		let cli = crate::cli::Cli::try_parse_from(["qnero-node", "--dev"]).expect("parse --dev");
 		assert!(cli.run.force_authoring().expect("force_authoring"));
 	}
 
@@ -920,9 +961,9 @@ mod tests {
 		use clap::Parser;
 		assert!(
 			crate::cli::Cli::try_parse_from([
-				"quantus-node",
+				"qnero-node",
 				"key",
-				"quantus",
+				"qnero",
 				"--seed",
 				TEST_SEED_HEX,
 			])
@@ -931,9 +972,9 @@ mod tests {
 		);
 		assert!(
 			crate::cli::Cli::try_parse_from([
-				"quantus-node",
+				"qnero-node",
 				"key",
-				"quantus",
+				"qnero",
 				"--words",
 				TEST_MNEMONIC,
 			])

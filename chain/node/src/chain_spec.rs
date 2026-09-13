@@ -1,4 +1,4 @@
-use quantus_runtime::{
+use qnero_runtime::{
 	genesis_config_presets::{
 		HEISENBERG_RUNTIME_PRESET, MAINNET_RUNTIME_PRESET, PLANCK_RUNTIME_PRESET,
 	},
@@ -195,7 +195,7 @@ mod tests {
 
 		assert_eq!(
 			built.len(),
-			quantus_runtime::genesis_config_presets::preset_names().len(),
+			qnero_runtime::genesis_config_presets::preset_names().len(),
 			"the runtime's preset list moved; every preset needs a builder here or its \
 			 chain properties are checked by nothing"
 		);

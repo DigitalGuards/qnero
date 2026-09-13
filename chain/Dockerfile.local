@@ -22,7 +22,7 @@ COPY . .
 
 # Build the release binary
 # We use --locked to respect the Cargo.lock file
-RUN cargo build --release -p quantus-node
+RUN cargo build --release -p qnero-node
 
 # Stage 2: Runtime
 FROM ubuntu:24.04
@@ -37,7 +37,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from the builder stage
-COPY --from=builder /app/target/release/quantus-node /usr/local/bin/
+COPY --from=builder /app/target/release/qnero-node /usr/local/bin/
 
 # Expose P2P and public WS/RPC ports
 EXPOSE 30333 9944
@@ -50,4 +50,4 @@ RUN useradd --system --uid 10001 quantus \
 USER 10001:10001
 
 # Start the node
-ENTRYPOINT ["quantus-node"]
+ENTRYPOINT ["qnero-node"]

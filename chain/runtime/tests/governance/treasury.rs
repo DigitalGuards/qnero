@@ -4,7 +4,7 @@
 mod tests {
 	use frame_support::{assert_err, assert_ok};
 	use frame_system::RawOrigin;
-	use quantus_runtime::{
+	use qnero_runtime::{
 		configs::TreasuryPalletId, AccountId, Runtime, System, TreasuryPallet, UNIT,
 	};
 	use sp_runtime::{traits::AccountIdConversion, BuildStorage};

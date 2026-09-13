@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use pallet_zk_tree::{Hash256, ZkMerkleProofRpc, ZkTreeApi as ZkTreeRuntimeApi};
-use quantus_runtime::opaque::Block;
+use qnero_runtime::opaque::Block;
 use sc_client_api::{CallExecutor, ExecutorProvider};
 use sc_rpc_api::DenyUnsafe;
 use sc_rpc_spec_v2::archive::{error::Error as ArchiveRpcError, MethodResult};
@@ -79,7 +79,7 @@ pub trait ZkTreeApi {
 /// fork state is unusable by construction — reject it here instead of spending
 /// state-execution resources producing it.
 ///
-/// The window is `quantus_runtime::configs::BlockHashCount` from the runtime
+/// The window is `qnero_runtime::configs::BlockHashCount` from the runtime
 /// crate linked into this node binary — a compile-time constant, not a live
 /// chain/metadata lookup. After a forkless upgrade that changes
 /// `BlockHashCount`, already-running nodes keep the old value until rebuilt.
@@ -151,7 +151,7 @@ where
 	}
 
 	// Compile-time constant from the linked runtime crate — see fn docs.
-	let window = <quantus_runtime::configs::BlockHashCount as sp_core::Get<u32>>::get();
+	let window = <qnero_runtime::configs::BlockHashCount as sp_core::Get<u32>>::get();
 	if info.best_number.saturating_sub(number) > window {
 		return Err(jsonrpsee::types::error::ErrorObject::owned(
 			9005,
@@ -416,7 +416,7 @@ mod tests {
 	use std::collections::{HashMap, HashSet};
 
 	fn window() -> u32 {
-		<quantus_runtime::configs::BlockHashCount as Get<u32>>::get()
+		<qnero_runtime::configs::BlockHashCount as Get<u32>>::get()
 	}
 
 	fn hash_for(number: u32) -> H256 {

@@ -2,7 +2,7 @@
 //!
 //! Skipped unless `QNERO_DEV_NODE` points at one, because it shields real
 //! value, proves two private batches and waits for them to settle. Start a
-//! node with `nice -n 19 ./chain/target/release/quantus-node --dev --tmp` and
+//! node with `nice -n 19 ./chain/target/release/qnero-node --dev --tmp` and
 //! run:
 //!
 //! ```text
@@ -199,7 +199,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
 /// ```text
 /// qnero-wallet --file /tmp/qnero-m6/miner.seed keygen
 /// QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6/miner.seed miner-address) \
-///   nice -n 19 ./chain/target/release/quantus-node --dev --tmp
+///   nice -n 19 ./chain/target/release/qnero-node --dev --tmp
 /// QNERO_DEV_NODE=http://127.0.0.1:9944 \
 ///   QNERO_MINER_SEED=/tmp/qnero-m6/miner.seed RAYON_NUM_THREADS=4 nice -n 19 \
 ///   cargo test -j 2 --release -p qnero-wallet --features parallel \

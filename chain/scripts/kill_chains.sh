@@ -1,1 +1,1 @@
-pkill -f quantus-node
+pkill -f qnero-node

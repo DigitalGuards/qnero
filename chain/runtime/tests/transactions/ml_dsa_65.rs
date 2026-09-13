@@ -3,15 +3,15 @@
 
 use crate::common::TestCommons;
 use frame_support::traits::Currency;
-use qp_dilithium_crypto::Dilithium65Pair;
-use quantus_runtime::{
+use qnero_runtime::{
 	Balances, BalancesCall, Executive, Runtime, RuntimeCall, System, UncheckedExtrinsic, UNIT,
 };
+use qp_dilithium_crypto::Dilithium65Pair;
 use sp_core::Pair;
 use sp_runtime::{traits::IdentifyAccount, AccountId32, MultiAddress};
 
 fn test_ext(account: &AccountId32) -> sp_io::TestExternalities {
-	use quantus_runtime::BuildStorage;
+	use qnero_runtime::BuildStorage;
 
 	let t = frame_system::GenesisConfig::<Runtime>::default().build_storage().unwrap();
 	let mut ext = sp_io::TestExternalities::new(t);

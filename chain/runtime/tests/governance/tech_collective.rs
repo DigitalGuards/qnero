@@ -5,9 +5,9 @@ mod tests {
 	use frame_support::{assert_ok, traits::Currency};
 	use frame_system;
 	use pallet_referenda::TracksInfo;
-	use quantus_runtime::configs::TechReferendaInstance;
+	use qnero_runtime::configs::TechReferendaInstance;
 
-	use quantus_runtime::{
+	use qnero_runtime::{
 		Balances, OriginCaller, Preimage, Runtime, RuntimeCall, RuntimeOrigin, TechCollective,
 		TechReferenda, UNIT,
 	};
@@ -23,7 +23,7 @@ mod tests {
 	/// remove them — until the 45-day undeciding timeout, renewably.
 	#[test]
 	fn member_collusion_cannot_reach_the_global_referenda_bound() {
-		use quantus_runtime::configs::{
+		use qnero_runtime::configs::{
 			MaxActiveReferenda, MaxActiveReferendaPerAccount, MaxMemberCount,
 		};
 		let worst_case =
@@ -39,7 +39,7 @@ mod tests {
 	#[test]
 	fn max_proposal_size_stays_within_submission_deposit() {
 		use frame_support::traits::Footprint;
-		use quantus_runtime::{
+		use qnero_runtime::{
 			configs::{MaxReferendaProposalSize, ReferendumSubmissionDeposit},
 			governance::definitions::preimage_amount,
 		};
@@ -445,7 +445,7 @@ mod tests {
 		TestCommons::new_fast_governance_test_ext().execute_with(|| {
 			let member_count =
 				|| pallet_ranked_collective::MemberCount::<Runtime, ()>::get(0) as usize;
-			let floor = quantus_runtime::genesis_config_presets::MIN_TECH_COLLECTIVE_MEMBERS;
+			let floor = qnero_runtime::genesis_config_presets::MIN_TECH_COLLECTIVE_MEMBERS;
 
 			// Seed exactly the floor-sized collective (5 members).
 			for i in 1..=floor as u8 {
@@ -1629,7 +1629,7 @@ mod tests {
 
 			let mut seed = vec![proposer.clone(), voter.clone()];
 			seed.extend(extra.iter().cloned());
-			assert_ok!(quantus_runtime::genesis_config_presets::seed_tech_collective(&seed));
+			assert_ok!(qnero_runtime::genesis_config_presets::seed_tech_collective(&seed));
 
 			assert!(
 				pallet_ranked_collective::Members::<Runtime>::contains_key(&proposer),
@@ -1721,7 +1721,7 @@ mod tests {
 			];
 
 			let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-				quantus_runtime::genesis_config_presets::seed_tech_collective(&dup_seed)
+				qnero_runtime::genesis_config_presets::seed_tech_collective(&dup_seed)
 			}));
 			let result =
 				outcome.expect("seeding with a duplicate member must return an error, not panic");
@@ -1734,8 +1734,7 @@ mod tests {
 				.chain((5..=8u8).map(TestCommons::account_id))
 				.collect();
 			assert!(
-				quantus_runtime::genesis_config_presets::seed_tech_collective(&overlap_seed)
-					.is_err(),
+				qnero_runtime::genesis_config_presets::seed_tech_collective(&overlap_seed).is_err(),
 				"re-seeding an existing member must be rejected"
 			);
 		});
@@ -1753,7 +1752,7 @@ mod tests {
 			let seed: Vec<_> = std::iter::once(proposer.clone())
 				.chain((2..=5u8).map(TestCommons::account_id))
 				.collect();
-			assert_ok!(quantus_runtime::genesis_config_presets::seed_tech_collective(&seed));
+			assert_ok!(qnero_runtime::genesis_config_presets::seed_tech_collective(&seed));
 
 			assert!(
 				!pallet_ranked_collective::Members::<Runtime>::contains_key(&non_member),
@@ -1801,7 +1800,7 @@ mod tests {
 	#[test]
 	#[ignore = "treasury spend removed - config pallet only"]
 	fn tech_collective_can_spend_with_root_origin() {
-		use quantus_runtime::EXISTENTIAL_DEPOSIT;
+		use qnero_runtime::EXISTENTIAL_DEPOSIT;
 
 		TestCommons::new_fast_governance_test_ext().execute_with(|| {
 			// Treasury spend/payout removed; test kept as placeholder.

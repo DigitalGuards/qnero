@@ -4,7 +4,7 @@
 
 use super::high_security_tip::{bogus_cancel, empty_batch_all, funded_ext, pair, signed_call};
 use frame_support::pallet_prelude::{InvalidTransaction, TransactionValidityError};
-use quantus_runtime::{
+use qnero_runtime::{
 	transaction_extensions::HIGH_SECURITY_TX_QUOTA_EXCEEDED, Executive, System, DAYS,
 };
 use sp_core::Pair;
@@ -56,7 +56,7 @@ fn normal_account_is_not_capped_by_the_high_security_quota() {
 	});
 }
 
-fn assert_included(xt: quantus_runtime::UncheckedExtrinsic, nonce: u32) {
+fn assert_included(xt: qnero_runtime::UncheckedExtrinsic, nonce: u32) {
 	// The quota gates inclusion; the dispatch outcome is irrelevant here.
 	let _ = Executive::apply_extrinsic(xt)
 		.unwrap_or_else(|e| panic!("nonce {nonce} should be included: {e:?}"));

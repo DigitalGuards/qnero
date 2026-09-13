@@ -14,7 +14,7 @@ use frame_support::{
 	dispatch::GetDispatchInfo,
 	traits::{Contains, Currency},
 };
-use quantus_runtime::{
+use qnero_runtime::{
 	configs::QneroCallFilter, AccountId, Balances, Runtime, RuntimeCall, RuntimeOrigin, System,
 	UNIT,
 };
@@ -206,7 +206,7 @@ fn the_high_security_whitelist_admits_only_reversible_calls() {
 		RuntimeCall::Balances(pallet_balances::Call::burn { value: UNIT, keep_alive: true }),
 	] {
 		assert!(
-			!quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
+			!qnero_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
 			"{call:?} is immediate and irreversible, so a stolen high-security key must not \
 			 be able to sign it"
 		);
@@ -214,7 +214,7 @@ fn the_high_security_whitelist_admits_only_reversible_calls() {
 		let wrapped =
 			RuntimeCall::Utility(pallet_utility::Call::batch_all { calls: vec![call.clone()] });
 		assert!(
-			!quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&wrapped),
+			!qnero_runtime::configs::HighSecurityConfig::is_whitelisted(&wrapped),
 			"a batch_all carrying {call:?} must be refused the same way"
 		);
 		// The base filter is a different question and still allows both: this
@@ -240,7 +240,7 @@ fn the_high_security_whitelist_admits_only_reversible_calls() {
 		}),
 	] {
 		assert!(
-			quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
+			qnero_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
 			"{call:?} is the delayed path the guarantee is built on and must stay whitelisted"
 		);
 	}
@@ -432,7 +432,7 @@ fn a_new_balance_moving_call_is_matched_here() {
 /// extrinsic encoding does.
 #[test]
 fn the_runtime_identity_is_pinned() {
-	let version = quantus_runtime::VERSION;
+	let version = qnero_runtime::VERSION;
 	assert_eq!(version.spec_name, "qnero", "the chain's own name, set at M6");
 	assert_eq!(version.impl_name, "qnero-node");
 	assert_eq!(

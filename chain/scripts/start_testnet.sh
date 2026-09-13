@@ -10,7 +10,7 @@
 
 rm -rf /tmp/validator1
 
-./target/release/quantus-node \
+./target/release/qnero-node \
   --base-path /tmp/validator1 \
   --chain planck \
   --port 30333 \

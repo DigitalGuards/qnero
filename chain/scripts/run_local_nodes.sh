@@ -12,7 +12,7 @@ fi
 
 echo "Starting $NUM_NODES local nodes..."
 
-pkill -f "quantus-node"
+pkill -f "qnero-node"
 sleep 1
 
 # Clean up old data
@@ -20,11 +20,11 @@ for i in $(seq 1 $NUM_NODES); do
   rm -rf /tmp/validator$i
 done
 
-BINARY=./target/release/quantus-node
+BINARY=./target/release/qnero-node
 
 if [ ! -f "$BINARY" ]; then
   echo "Binary not found at $BINARY — building release..."
-  cargo build --release -p quantus-node || exit 1
+  cargo build --release -p qnero-node || exit 1
 fi
 
 # Base ports

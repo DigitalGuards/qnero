@@ -1,11 +1,11 @@
 use codec::Encode;
 use frame_support::traits::{Currency, OnFinalize, OnInitialize};
-use qp_dilithium_crypto::Dilithium65Pair;
-use quantus_runtime::{
+use qnero_runtime::{
 	configs::TreasuryPalletId, transaction_extensions::ReversibleTransactionExtension, Balances,
 	Runtime, RuntimeCall, Signature, SignedPayload, System, TxExtension, UncheckedExtrinsic, UNIT,
 	VERSION,
 };
+use qp_dilithium_crypto::Dilithium65Pair;
 use sp_core::{crypto::AccountId32, Pair};
 use sp_runtime::{generic::Era, traits::AccountIdConversion, BuildStorage, MultiAddress};
 
@@ -18,7 +18,7 @@ use sp_runtime::{generic::Era, traits::AccountIdConversion, BuildStorage, MultiA
 /// it. Bypassing the filter here exercises the pallet exactly as a privileged
 /// dispatch does, which is the one origin that can still reach these calls.
 pub fn dispatch_unfiltered(
-	origin: quantus_runtime::RuntimeOrigin,
+	origin: qnero_runtime::RuntimeOrigin,
 	call: RuntimeCall,
 ) -> sp_runtime::DispatchResultWithInfo<frame_support::dispatch::PostDispatchInfo> {
 	use frame_support::traits::UnfilteredDispatchable;
@@ -88,7 +88,7 @@ impl TestCommons {
 		while System::block_number() < n {
 			let b = System::block_number();
 			// Call on_finalize for pallets that need it
-			quantus_runtime::Scheduler::on_finalize(b);
+			qnero_runtime::Scheduler::on_finalize(b);
 			System::on_finalize(b);
 
 			// Move to next block
@@ -96,7 +96,7 @@ impl TestCommons {
 
 			// Call on_initialize for pallets that need it
 			System::on_initialize(b + 1);
-			quantus_runtime::Scheduler::on_initialize(b + 1);
+			qnero_runtime::Scheduler::on_initialize(b + 1);
 		}
 	}
 

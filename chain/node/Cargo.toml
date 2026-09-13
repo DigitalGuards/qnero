@@ -1,12 +1,12 @@
 [package]
 authors.workspace = true
 build = "build.rs"
-default-run = "quantus-node"
-description = "Quantus Node - Echo Chamber"
+default-run = "qnero-node"
+description = "Qnero Node: a post-quantum shielded pool on proof of work"
 edition.workspace = true
 homepage.workspace = true
 license = "Apache-2.0"
-name = "quantus-node"
+name = "qnero-node"
 publish = false
 repository.workspace = true
 version = "1.0.1"
@@ -41,6 +41,7 @@ pallet-zk-tree.default-features = true
 pallet-zk-tree.workspace = true
 prometheus.workspace = true
 qnero-note-core.workspace = true
+qnero-runtime.workspace = true
 qp-coinbase.workspace = true
 qp-dilithium-crypto = { workspace = true }
 qp-rusty-crystals-dilithium.workspace = true
@@ -48,7 +49,6 @@ qp-rusty-crystals-hdwallet.workspace = true
 qp-wormhole.workspace = true
 qpow-math.workspace = true
 quantus-miner-api = { workspace = true }
-quantus-runtime.workspace = true
 quinn.workspace = true
 rand = { workspace = true, default-features = false, features = [
 	"alloc",
@@ -133,8 +133,8 @@ std = [
 	"codec/std",
 	"hex/std",
 	"log/std",
+	"qnero-runtime/std",
 	"qp-dilithium-crypto/std",
-	"quantus-runtime/std",
 	"rand/std",
 	"sc-consensus-qpow/std",
 	"serde_json/std",
@@ -149,7 +149,7 @@ runtime-benchmarks = [
 	"frame-benchmarking/runtime-benchmarks",
 	"frame-system/runtime-benchmarks",
 	"pallet-transaction-payment/runtime-benchmarks",
-	"quantus-runtime/runtime-benchmarks",
+	"qnero-runtime/runtime-benchmarks",
 	"sc-service/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 ]
@@ -158,6 +158,6 @@ runtime-benchmarks = [
 try-runtime = [
 	"frame-system/try-runtime",
 	"pallet-transaction-payment/try-runtime",
-	"quantus-runtime/try-runtime",
+	"qnero-runtime/try-runtime",
 	"sp-runtime/try-runtime",
 ]

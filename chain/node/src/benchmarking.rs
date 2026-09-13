@@ -4,7 +4,7 @@
 
 use crate::service::FullClient;
 
-use quantus_runtime as runtime;
+use qnero_runtime as runtime;
 use runtime::{AccountId, Balance, BalancesCall, SystemCall};
 use sc_cli::Result;
 use sc_client_api::BlockBackend;
@@ -122,7 +122,7 @@ pub fn create_benchmark_extrinsic(
 			)),
 			frame_system::CheckNonce::<runtime::Runtime>::from(nonce),
 			frame_system::CheckWeight::<runtime::Runtime>::new(),
-			quantus_runtime::transaction_extensions::ReversibleTransactionExtension::<
+			qnero_runtime::transaction_extensions::ReversibleTransactionExtension::<
 				runtime::Runtime,
 			>::new(),
 			pallet_transaction_payment::ChargeTransactionPayment::<runtime::Runtime>::from(0),

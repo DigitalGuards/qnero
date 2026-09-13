@@ -75,7 +75,9 @@ impl_opaque_keys! {
 // note commitments here and typed wormhole preimages there. A node that
 // matched on that name and version would have substituted native execution for
 // a wasm runtime with different state rules. The name is the chain's, the
-// version restarts at 100, and both move together from here.
+// version restarts at 100, and both move together from here. The crate that
+// builds this runtime is `qnero-runtime`, renamed after M6 along with the
+// node package, so the wasm blob it emits is `qnero_runtime.wasm`.
 //
 // Bump `transaction_version` only when the signed extrinsic encoding changes
 // (TxExtension set or payload layout), not for verifier-rule changes. M6

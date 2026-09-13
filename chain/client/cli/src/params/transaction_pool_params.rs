@@ -46,7 +46,7 @@ impl Into<sc_transaction_pool::TransactionPoolType> for TransactionPoolType {
 pub struct TransactionPoolParams {
 	/// Maximum number of transactions in the transaction pool.
 	///
-	/// Default sized for Quantus PQ signatures (~7300 bytes/tx) within ~256 MiB.
+	/// Default sized for ML-DSA-87 signatures (~7300 bytes/tx) within ~256 MiB.
 	/// Kept in lockstep with transaction gossip via `DEFAULT_READY_POOL_LIMIT`.
 	#[arg(long, value_name = "COUNT", default_value_t = DEFAULT_READY_POOL_LIMIT)]
 	pub pool_limit: usize,
@@ -65,8 +65,8 @@ pub struct TransactionPoolParams {
 
 	/// The type of transaction pool to be instantiated.
 	///
-	/// Defaults to `single-state` to preserve prior Quantus node behavior; pass
-	/// `--pool-type fork-aware` to exercise the fork-aware pool.
+	/// Defaults to `single-state`, the behavior this node inherited from
+	/// upstream; pass `--pool-type fork-aware` to exercise the fork-aware pool.
 	#[arg(long, value_enum, default_value_t = TransactionPoolType::SingleState)]
 	pub pool_type: TransactionPoolType,
 }

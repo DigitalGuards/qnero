@@ -1,10 +1,10 @@
 [package]
 authors.workspace = true
-description = "Quantus Runtime - Proof of Vibes"
+description = "Qnero Runtime: the shielded-pool runtime this node builds"
 edition.workspace = true
 homepage.workspace = true
 license = "Apache-2.0"
-name = "quantus-runtime"
+name = "qnero-runtime"
 publish = false
 repository.workspace = true
 version = "1.0.0-gm"

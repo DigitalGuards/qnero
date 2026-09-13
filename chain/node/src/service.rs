@@ -1,6 +1,6 @@
 //! Service and ServiceFactory implementation. Specialized wrapper over substrate service.
 //!
-//! This module provides the main service setup for a Quantus node, including:
+//! This module provides the main service setup for a Qnero node, including:
 //! - Network configuration and setup
 //! - Transaction pool management
 //! - Mining infrastructure (local and external miner support)
@@ -9,7 +9,7 @@
 use futures::FutureExt;
 #[cfg(feature = "tx-logging")]
 use futures::StreamExt;
-use quantus_runtime::{self, apis::RuntimeApi, opaque::Block};
+use qnero_runtime::{self, apis::RuntimeApi, opaque::Block};
 use sc_client_api::Backend;
 use sc_consensus_qpow::MiningHandle;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};

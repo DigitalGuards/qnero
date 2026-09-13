@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-NODE="$TARGET_DIR/release/quantus-node"
-RUNTIME="$TARGET_DIR/release/wbuild/quantus-runtime/quantus_runtime.wasm"
+NODE="$TARGET_DIR/release/qnero-node"
+RUNTIME="$TARGET_DIR/release/wbuild/qnero-runtime/qnero_runtime.wasm"
 TEMPLATE="./.maintain/frame-weight-template.hbs"
 
 # pallet_name:output_path:steps:repeat

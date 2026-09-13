@@ -24,7 +24,7 @@ use jsonrpsee::{
 	tokio::sync::broadcast,
 	PendingSubscriptionSink, SubscriptionMessage,
 };
-use quantus_runtime::{opaque::Block, AccountId, Balance, RuntimeCall, UncheckedExtrinsic};
+use qnero_runtime::{opaque::Block, AccountId, Balance, RuntimeCall, UncheckedExtrinsic};
 use sc_transaction_pool_api::{InPoolTransaction, TransactionPool};
 use serde::{Deserialize, Serialize};
 use sp_core::crypto::Ss58Codec;
@@ -242,7 +242,7 @@ pub(crate) fn extract_transfers_to(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use quantus_runtime::UNIT;
+	use qnero_runtime::UNIT;
 	use sp_runtime::AccountId32;
 
 	fn merchant() -> AccountId {

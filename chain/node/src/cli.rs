@@ -117,7 +117,8 @@ pub enum QuantusKeySubcommand {
 	/// Standard key commands from sc_cli
 	#[command(flatten)]
 	Sc(Box<sc_cli::KeySubcommand>),
-	/// Generate a quantus address
+	/// Generate a Qnero transparent (ML-DSA-87) address
+	#[command(name = "qnero")]
 	Quantus {
 		/// Type of the key
 		#[arg(long, value_name = "SCHEME", value_enum, default_value_t = QuantusAddressType::Standard, ignore_case = true)]

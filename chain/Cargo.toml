@@ -262,6 +262,7 @@ pallet-scheduler = { path = "./pallets/scheduler", default-features = false }
 pallet-shielded = { path = "./pallets/shielded", default-features = false }
 pallet-wormhole = { path = "./pallets/wormhole", default-features = false }
 pallet-zk-tree = { path = "./pallets/zk-tree", default-features = false }
+qnero-runtime = { path = "./runtime", default-features = false }
 qp-dilithium-crypto = { path = "./primitives/dilithium-crypto", version = "0.7.0", default-features = false }
 qp-header = { path = "./primitives/header", default-features = false }
 qp-high-security = { path = "./primitives/high-security", default-features = false }
@@ -270,7 +271,6 @@ qp-coinbase = { path = "./primitives/coinbase", default-features = false }
 qp-wormhole = { path = "./primitives/wormhole", default-features = false }
 qpow-math = { path = "./qpow-math", default-features = false }
 quantus-miner-api = { path = "./miner-api", version = "0.3.0", default-features = false }
-quantus-runtime = { path = "./runtime", default-features = false }
 sc-consensus-qpow = { path = "./client/consensus/qpow", default-features = false }
 sp-consensus-qpow = { path = "./primitives/consensus/qpow", default-features = false }
 

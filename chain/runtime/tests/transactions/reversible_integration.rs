@@ -19,7 +19,7 @@
 
 use crate::common::TestCommons;
 use frame_support::traits::Currency;
-use quantus_runtime::{
+use qnero_runtime::{
 	Balances, ReversibleTransfers, Runtime, RuntimeCall, RuntimeOrigin, System, EXISTENTIAL_DEPOSIT,
 };
 use sp_runtime::{traits::Dispatchable, DispatchError, MultiAddress};
@@ -93,7 +93,7 @@ fn the_whitelist_refuses_the_undelayed_drain() {
 		}),
 	] {
 		assert!(
-			!quantus_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
+			!qnero_runtime::configs::HighSecurityConfig::is_whitelisted(&call),
 			"{call:?} is immediate and outside recover_funds, so it must not be whitelisted"
 		);
 	}

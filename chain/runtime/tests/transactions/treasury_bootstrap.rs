@@ -9,11 +9,11 @@
 use crate::common::TestCommons;
 use codec::Encode;
 use frame_support::{assert_ok, traits::Currency};
-use qp_dilithium_crypto::Dilithium65Pair;
-use quantus_runtime::{
+use qnero_runtime::{
 	genesis_config_presets::treasury_signer_seed, Balances, Executive, Multisig, RuntimeCall,
 	System,
 };
+use qp_dilithium_crypto::Dilithium65Pair;
 use sp_core::Pair;
 use sp_runtime::traits::IdentifyAccount;
 

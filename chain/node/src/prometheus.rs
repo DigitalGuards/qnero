@@ -1,6 +1,6 @@
 use futures::StreamExt;
 use prometheus::{GaugeVec, Opts, Registry};
-use quantus_runtime::opaque::Block;
+use qnero_runtime::opaque::Block;
 use sc_client_api::BlockchainEvents;
 use sp_api::ProvideRuntimeApi;
 use sp_consensus_qpow::QPoWApi;

@@ -12,14 +12,14 @@ use frame_support::{
 	pallet_prelude::{InvalidTransaction, TransactionValidityError},
 	traits::{Currency, Hooks},
 };
-use qp_dilithium_crypto::Dilithium65Pair;
-use qp_scheduler::BlockNumberOrTimestamp;
-use qp_wormhole::{derive_wormhole_address, POW_ENGINE_ID};
-use quantus_runtime::{
+use qnero_runtime::{
 	transaction_extensions::HIGH_SECURITY_TIP_FORBIDDEN, Balances, Executive, MiningRewards,
 	ReversibleTransfers, Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin, System,
 	UncheckedExtrinsic, EXISTENTIAL_DEPOSIT, MILLI_UNIT, UNIT,
 };
+use qp_dilithium_crypto::Dilithium65Pair;
+use qp_scheduler::BlockNumberOrTimestamp;
+use qp_wormhole::{derive_wormhole_address, POW_ENGINE_ID};
 use sp_core::Pair;
 use sp_runtime::{generic::DigestItem, traits::IdentifyAccount, AccountId32, MultiAddress};
 
@@ -207,7 +207,7 @@ fn high_security_fee_ceiling_admits_worst_case_legitimate_extrinsics() {
 	let pair = pair();
 	let account = pair.public().into_account();
 	test_ext(&account).execute_with(|| {
-		let ceiling = quantus_runtime::configs::MAX_HIGH_SECURITY_INCLUSION_FEE;
+		let ceiling = qnero_runtime::configs::MAX_HIGH_SECURITY_INCLUSION_FEE;
 		let batch16 = RuntimeCall::Utility(pallet_utility::Call::batch_all {
 			calls: vec![schedule_small_transfer(); 16],
 		});

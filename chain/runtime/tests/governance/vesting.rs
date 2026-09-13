@@ -6,7 +6,7 @@
 mod tests {
 	use crate::common::TestCommons;
 	use frame_support::{assert_noop, assert_ok, traits::Currency};
-	use quantus_runtime::{
+	use qnero_runtime::{
 		configs::{VestingMinClaimInterval, VestingPayoutQuantum},
 		AccountId, Balance, Balances, Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin, System,
 		Vesting, ZkTree, EXISTENTIAL_DEPOSIT, UNIT,
@@ -348,7 +348,7 @@ mod tests {
 			schedule::{v3::Anon, DispatchTime},
 			Hooks, StorePreimage,
 		};
-		use quantus_runtime::{OriginCaller, Scheduler};
+		use qnero_runtime::{OriginCaller, Scheduler};
 
 		new_test_ext(Some(account(4))).execute_with(|| {
 			Balances::make_free_balance_be(&account(4), 1000 * UNIT);
