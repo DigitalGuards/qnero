@@ -466,7 +466,7 @@ author derivation lives there and the runtime's one author seam calls it.
 
 | M7 | RandomX proof of work, so a Monero rig mines Qnero | DONE 2026-09-13 (the engine is RandomX `rx/0`, stock upstream constants, so the hash is bit-identical to what a stock xmrig computes and a Monero rig moves over with a config change; `chain/client/consensus/randomx` is the whole engine, the runtime no longer verifies a nonce because RandomX cannot run in wasm, `pallet-qpow` keeps the difficulty storage and the Homestead retarget because both are functions of block times rather than of the hash, and the node grew a stratum endpoint behind `--stratum-port` speaking the dialect xmrig speaks to a Monero pool. The M6 author seam did what it was built for: `H(cvk, parent_hash)`, `configs::QpowAuthor`, the coinbase inherent, the header shape and fork choice are untouched, and `POW_ENGINE_ID` is still `pow_`. The proof is a 4-byte nonce and a 4-byte extra nonce over a fixed 76-byte blob with the nonce at offset 39 where xmrig writes it, packed into the 64-byte seal the digest window needs with the remaining 56 bytes pinned to zero, because free seal bytes would be free block-hash grinding. The comparison is Monero's: the hash read little-endian, accepted when `hash * difficulty <= 2^256 - 1`. Seed rotation is Monero's rule with the epoch and lag as runtime constants. `spec_version` moved to 102 for the three runtime-API methods and the event that went away; `transaction_version` stayed at 7. See section 10, `docs/OPS-DEV.md` and `docs/BENCH.md`) |
 
-| M8 | Prover budget on a phone-class device: a browser prover, measured | DONE 2026-09-14 (`crates/qnero-prover-wasm` is the browser surface, compiled to `wasm32-unknown-unknown`, single threaded, rayon-free: derive an address, decrypt a ciphertext while scanning, and prove one private batch at `N = 6`, with a headless-Chromium harness under `www/` and its Node runner. Measured three times per figure: **33.6 s per payment and 910 MiB peak** in single-threaded wasm, on top of 12.1 s of circuit build once per worker, against 9.95 s and the same shape natively. A desktop core under headless Chromium is the phone proxy and the stated factor is 2 to 4, so a phone is 67 to 134 s per payment: **memory fits and the single-threaded clock misses the 60 s target at every point of the range**. The ZK leaf a delegated batcher would take is measured too, at 16.7 s and 150932 bytes, which is 24 bytes larger than the whole six-slot batch it would be handed to. See the section below and `docs/BENCH.md`)
+| M8 | Prover budget on a phone-class device: a browser prover, measured | DONE 2026-09-14 (`crates/qnero-prover-wasm` is the browser surface, compiled to `wasm32-unknown-unknown`, single threaded, rayon-free: derive an address, decrypt a ciphertext while scanning, and prove one private batch at `N = 6`, with a headless-Chromium harness under `www/` and its Node runner. Nine samples per per-payment figure: **33.6 s per payment and 910.4 MiB peak** in single-threaded wasm, on top of 12.7 s of circuit build once per worker, against 9.90 s and the same shape natively. A desktop core under headless Chromium is the phone proxy and the stated factor is 2 to 4 with room above it, so a phone is 67 to 134 s per payment or worse: **memory fits and the single-threaded clock misses the 60 s target at every point of the range**. Seven slots were measured too: 66.5 s and 1.72 GiB, which fits this browser and does not fit a phone. The ZK leaf a delegated batcher would take is 16.7 s, 511 MiB on its own, and 150932 bytes, 24 bytes larger than the whole six-slot batch it would be handed to. See the section below and `docs/BENCH.md`)
 
 About 10 to 12 weeks to a private testnet. M8 retired the measured risk this
 line used to name, wallet-side proving time and memory for a 2-in/2-out leaf
@@ -479,37 +479,46 @@ The measurement is in `docs/BENCH.md`. The decisions it forces are here.
 
 **Can a phone prove a full private batch locally, under the 60 s target?**
 Not on one thread. A payment is 33.6 s of single-threaded wasm on a desktop
-core under headless Chromium, plus 12.1 s of circuit build once per worker.
+core under headless Chromium, plus 12.7 s of circuit build once per worker.
 Read through the stated 2 to 4 phone factor that is 67 to 134 s per payment
-and 91 to 183 s for the first payment after a cold start. The most optimistic
-end of the range still misses 60 s.
+and 93 to 185 s for the first payment after a cold start. The most optimistic
+end of the range still misses 60 s, and the factor is a floor: its low end is a
+peak single-core score ratio that excludes both the throttling a 30-second
+flat-out run causes and whatever a mobile browser's wasm engine costs.
 
-**What memory does it need?** 910 MiB peak, identical across all three runs,
-against the 2 GiB ceiling the run pinned and the 4 GiB a 32-bit linear memory
-can address. The sticky part is the wasm part: linear memory grows and never
+**What memory does it need?** 910.4 MiB peak, byte-identical across all nine
+runs, against the 2 GiB ceiling the run pinned and the 4 GiB a 32-bit linear
+memory can address. That is 44 percent of the ceiling and 22 percent of the
+address space. The sticky part is the wasm part: linear memory grows and never
 shrinks, so the peak stands for the life of the worker and a second prover
 would add its own gigabyte. A 6 GB or 8 GB Android device has this comfortably.
 A 3 GB or 4 GB device is marginal once the renderer's own footprint counts. iOS
 Safari polices per-tab memory hard enough that its failure mode is a reclaimed
 tab with no catchable error. Settling that one takes a device test.
 
-This settles the `N = 6` choice with a measurement. `docs/CIRCUIT.md` section
+**What `N = 6` bought, now measured on both sides.** `docs/CIRCUIT.md` section
 9.1 argued six slots against seven as "the difference between a phone that can
-prove and one that cannot" on an estimate. At `degree_bits = 16` the same run
-would be roughly twice this, about 67 s of wasm proving and near 2 GiB, which
-is over the pinned ceiling and outside what a phone survives. The argument was
-right and the margin is smaller than it reads.
+prove and one that cannot" on an estimate. Seven slots measure at 66.5 s of
+wasm proving and 1.72 GiB of peak linear memory, against 33.0 s and 910.4 MiB
+at six: 2.02x the clock and 1.94x the memory for one more settlement per proof.
+Seven fits this browser, at 86 percent of the same 2 GiB ceiling, so an earlier
+claim here that it would land over that ceiling was wrong. What seven does not
+fit is a phone: 133 to 266 s per payment at the stated factor, and 1.72 GiB
+that never shrinks inside a renderer with its own footprint. The section 9.1
+argument holds as a statement about phones, and the margin is 1.9x of memory
+and half the clock.
 
 **So the deciding change is threads.** The map written before this milestone
 assumed threading was a comfort improvement that could not turn a no into a
-yes. The measurement reverses that: memory has 3x of headroom and the clock is
-the only thing failing, so the 3.1x that M3 measured from four native threads
-is exactly the size of the gap. Four threads at that factor put a payment at
-about 11 s of wasm and 22 to 44 s on a phone, inside the target. Nothing is
-promised here: wasm threads need a nightly toolchain with `-Z build-std`
-(the workspace is pinned to stable 1.93.0), `wasm-bindgen-rayon`, a
-SharedArrayBuffer, and cross-origin isolation on whatever origin serves the
-wallet. The harness already sets COOP and COEP so that experiment needs no
+yes. The measurement reverses that: memory has better than 2x of headroom under
+the pinned ceiling and the clock is the only thing failing, so the 3.1x that M3
+measured from four native threads is the size of the gap. Four threads at that
+factor put a payment at about 10.6 s of wasm and 21 to 43 s on a phone, inside
+the target, with enough slack that even a phone factor of 5 stays under 60 s.
+Nothing is promised here: wasm threads need a nightly toolchain with
+`-Z build-std` (the workspace is pinned to stable 1.93.0), `wasm-bindgen-rayon`,
+a SharedArrayBuffer, and cross-origin isolation on whatever origin serves the
+wallet. The harness already sets COOP and COEP, so that experiment needs no
 different server. That is the next thing to measure, and it should be measured
 before anything is designed around delegation.
 
@@ -520,7 +529,10 @@ badly.
 
 What it buys is 16.7 s against 33.6 s, a 2.0x saving, which lands a phone at 33
 to 67 s. That is the same order as what threads would buy for free, and it is
-still over the target at the pessimistic end.
+still over the target at the pessimistic end. It does not even save the memory
+a delegating device would be delegating for: measured on its own, in a worker
+that builds no private batch, a ZK-leaf prover still peaks at 511 MiB, which is
+56 percent of what proving the whole batch costs.
 
 What it costs is stated plainly. A leaf publishes 26 felts
 (`crates/qnero-circuit/src/layout.rs`): the anchor block hash and number, both
