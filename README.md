@@ -18,7 +18,7 @@ The mental model carries over almost intact.
 
 **A coinbase still pays the miner in a note.** One note per block, minted from a required inherent, its value and its block public, the recipient hidden. Every unit minted after genesis is a note, and the pool is where it lives, which is what fungibility rests on: `shield` is the only door in, v0 has no exit, and `BaseCallFilter` blocks transparent transfers. Two bypasses are open, for Root and the scheduler.
 
-**Rigs mine it once RandomX lands.** Qnero runs QPoW through v1 behind one `FindAuthor` seam, and M7 is the RandomX swap, so Monero rigs can mine Qnero with the software they already run. The evaluation is recorded. No engine work has started.
+**Rigs mine it.** Qnero's proof of work is RandomX, stock `rx/0`, behind the same `FindAuthor` seam QPoW ran behind, so a Monero rig mines Qnero with a config change. The node serves the stratum dialect xmrig speaks to a Monero pool.
 
 Two habits do not carry over. There is no unlock time field: an anchor expires after `BlockHashWindow`, 256 blocks, and that is the only waiting rule.
 

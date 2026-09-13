@@ -468,12 +468,37 @@ nice -n 19 ./target/release/qnero-node --dev --tmp \
 |---|---|---|
 | `--mining-threads N` | 1 | In-process RandomX threads, light mode. 0 turns it off. |
 | `--stratum-port PORT` | off | Opens the endpoint xmrig connects to. Requires `--validator` (`--dev` is one). |
-| `--stratum-host ADDR` | `127.0.0.1` | Bind address. A rig on another machine needs `0.0.0.0`. |
-| `--stratum-share-difficulty D` | 5000 | Per-connection share difficulty, clamped per job to the block difficulty. |
+| `--stratum-host ADDR` | `127.0.0.1` | Bind address. A rig on another machine needs `0.0.0.0`. Requires `--stratum-port`. |
+| `--stratum-share-difficulty D` | 5000 | Per-connection share difficulty, clamped per job to the block difficulty. Requires `--stratum-port`. |
 
 An authority with `--mining-threads 0` and no `--stratum-port` has nothing
-mining, so the node refuses to start rather than idling silently. That is the
-same fail-fast shape as `--rewards-miner-key`.
+mining, so the node refuses to start rather than idling silently. Every stratum
+flag that needs a port says so at startup for the same reason: an address or a
+share difficulty with no listener behind it is a flag that silently did
+nothing, and the operator finds out from the rig that cannot connect.
+
+**What the endpoint bounds.** The port is off by default and binds loopback by
+default, and opening it to a network is a decision, so it is bounded like
+anything an unauthenticated peer can reach:
+
+- a line is read through a `take` capped at 8 KiB, so a peer that never sends a
+  newline cannot make the node buffer for it;
+- 64 connections at once, refused past that, so one peer cannot multiply a
+  per-connection allowance across sockets;
+- four share hashes at once, each on the blocking pool rather than on the async
+  runtime, so a flood of submits cannot take the runtime away from block import
+  and networking;
+- 64 submits of burst per connection, refilling at 32 a second, which is orders
+  of magnitude above any real rig and below what it takes to keep the hashing
+  bounded above busy;
+- miner-supplied strings truncated to 64 characters and logged with `{:?}`, so
+  a login cannot forge a log line or rewrite a terminal.
+
+The idle deadline scales with the share difficulty (`20` expected share
+intervals for a 100 H/s rig, floored at 5 minutes and capped at 2 hours). xmrig
+resets its own keepalive timer on every line it *receives*, so a rig that is
+taking job pushes and has not found a share sends nothing at all: a fixed
+5-minute read deadline disconnects healthy miners at a high share difficulty.
 
 **The xmrig command line**, against a node with `--stratum-port 3333`:
 
@@ -4097,36 +4122,58 @@ xmrig's own transcript, unedited except for trimming:
  * ABOUT        XMRig/6.21.3 gcc/13.2.1 (built for Linux x86-64, 64 bit)
  * POOL #1      127.0.0.1:3333 algo rx/0
 [..] net      use pool 127.0.0.1:3333  127.0.0.1
-[..] net      new job from 127.0.0.1:3333 diff 174 algo rx/0 height 49
+[..] net      new job from 127.0.0.1:3333 diff 182 algo rx/0 height 56
 [..] randomx  init dataset algo rx/0 (20 threads) seed c61648d3568edb0a...
 [..] randomx  allocated 2336 MB (2080+256) huge pages 0% 0/1168 +JIT (0 ms)
 [..] randomx  dataset ready (3809 ms)
 [..] cpu      use profile  *  (2 threads) scratchpad 2048 KB
-[..] cpu      accepted (1/0) diff 174 (26 ms)
-[..] net      new job from 127.0.0.1:3333 diff 175 algo rx/0 height 50
-[..] cpu      accepted (2/0) diff 175 (27 ms)
+[..] cpu      accepted (1/0) diff 182 (23 ms)
+[..] net      new job from 127.0.0.1:3333 diff 183 algo rx/0 height 57
+[..] cpu      accepted (2/0) diff 182 (38 ms)
 ...
-[..] cpu      accepted (74/0) diff 184 (1717 ms)
-[..] cpu      rejected (74/1) diff 184 "Invalid job id" (1653 ms)
+[..] miner    speed 10s/60s/15m 817.6 n/a n/a H/s max 851.0 H/s
+[..] cpu      accepted (309/0) diff 205 (24 ms)
 ```
 
 and the node's side of the same conversation:
 
 ```
-⛏️ Miner 127.0.0.1:39320 logged in as "qnero-rig" (XMRig/6.21.3 (Linux x86_64) …), extra nonce 0x202af7ad
-🥇 Share from "qnero-rig" meets the block difficulty 153 at height 28
+⛏️ Miner 127.0.0.1:36264 logged in as "qnero-rig" ("XMRig/6.21.3 (Linux x86_64) …"), extra nonce 0xbc53418c
+🥇 Share from "qnero-rig" meets the block difficulty 176 at height 50
 🥇 Successfully mined and submitted a new block by stratum miner "qnero-rig" (mining time: 1s)
-⛏️ Stratum so far: 264 shares accepted, 39 rejected, 264 of them blocks
+⛏️ Stratum so far: 912 shares accepted, 0 rejected, 911 of them blocks
 ```
 
-The chain reached #66 in 3 m 48 s: **50 blocks mined in process and 14 mined by
+The chain reached #84 in 4 m 02 s: **74 blocks mined in process and 10 mined by
 xmrig**, every one of them verified by the node's own RandomX before import.
-The `Invalid job id` rejections are the expected shape here. A 3.5 kH/s rig
-against a difficulty of 175 finds several shares per template, and the ones
-that arrive after the node has already sealed and moved on are refused by job
-id. Every share the node accepted it re-hashed itself, over a blob it rebuilt
-from the job it issued; the `result` field a miner sends is compared against
-that and never used in its place.
+Every share the node accepted it re-hashed itself, over a blob it rebuilt from
+the job it issued; the `result` field a miner sends is compared against that
+and never used in its place. The in-process miner wins most of this devnet
+because the loop hashes a whole batch before it looks at the share channel, and
+at a difficulty of 180 almost any nonce is a block: on a real difficulty the
+rig's 800 H/s against the node's 33 H/s decides it.
+
+The zero in that rejection count is the whole point of the run, and it was not
+zero the first time. xmrig's `Client::isCriticalError` treats four pool error
+strings as fatal and closes the socket on any of them: `Unauthenticated`,
+`your IP is banned`, `IP Address currently banned`, and `Invalid job id`. An
+earlier build answered a stale share with `Invalid job id`, which is the
+ordinary outcome of a template roll, so every burst of stale shares cost a
+disconnect and a retry pause:
+
+```
+[..] cpu      rejected (74/1) diff 184 "Invalid job id" (1653 ms)
+[..] net      no active pools, stop mining
+[..] net      use pool 127.0.0.1:3333  127.0.0.1
+```
+
+Six of those in 69 s of mining, about half the wall time at zero hash rate. Two
+changes closed it. The endpoint keeps the immediately-previous template beside
+the current one and credits shares against it, because a rig is always
+mid-nonce when the template moves and that work was earned; and nothing below a
+connection-level failure is ever answered with one of xmrig's four strings, so
+a genuinely expired job is `Block expired` and the rig keeps mining. A test
+enumerates the share-level rejections and fails if any of them is in that set.
 
 The header of block #65, read back over RPC, is the whole seal design in one
 line:
@@ -4156,8 +4203,8 @@ nice -n 19 cargo clippy -j 2 --workspace --all-targets
 cargo fmt --all -- --check
 ```
 
-All green. 50 tests in `sc-consensus-randomx`, 21 in `pallet-qpow`, 71 in the
-node crate (10 of them stratum protocol tests driven by a fake miner that
+All green. 55 tests in `sc-consensus-randomx`, 21 in `pallet-qpow`, 75 in the
+node crate (16 of them stratum protocol tests driven by a fake miner that
 speaks xmrig's messages), 60 in the runtime's integration suite, and 38 test
 binaries in the root workspace.
 
