@@ -154,6 +154,13 @@ const IDLE_SHARE_INTERVALS: u64 = 20;
 pub(crate) const XMRIG_CRITICAL_ERRORS: [&str; 4] =
 	["Unauthenticated", "your IP is banned", "IP Address currently banned", "Invalid job id"];
 
+/// What a rig is told when authoring pauses under it.
+///
+/// Deliberately not one of the four above: the node expects the rig back as
+/// soon as it is authoring again, so this must leave xmrig's own retry timer
+/// running rather than making it drop the pool.
+pub(crate) const PAUSED_MESSAGE: &str = "Node is not authoring";
+
 /// Whether xmrig would treat this message as critical and drop the pool.
 /// Matched the way xmrig matches it: on the prefix, ignoring case.
 pub(crate) fn is_xmrig_critical(message: &str) -> bool {
@@ -305,6 +312,10 @@ struct Session {
 	worker: String,
 	extra_nonce: u32,
 	out: mpsc::Sender<String>,
+	/// Ends this connection's read loop. Dropping the server's copy of `out`
+	/// is not enough: the loop holds its own sender, so the writer stays alive
+	/// and the socket stays open.
+	close: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -475,17 +486,37 @@ impl StratumServer {
 		}
 	}
 
-	/// Stop handing the current template out, so a miner that logs in next is
-	/// not given work the node has stopped building on.
+	/// Stop handing the current template out, and disconnect the rigs that are
+	/// holding it.
 	///
-	/// The template moves to the grace slot, so a rig that was mid-nonce when
-	/// authoring paused is still credited for what it finds. Dropping both slots
-	/// answers every submit `Block expired` for the length of the pause, which on
-	/// a long initial sync is hours of a rig burning power at a visible 0/N.
+	/// Authoring pauses on a stale tip, on no peers, and for the length of an
+	/// initial sync, and it is the enabled-to-disabled edge that calls this, so
+	/// nothing rolls the template out of the grace slot until authoring comes
+	/// back. A rig that stayed connected through that was answered `OK` for
+	/// every share it found, for hours, against a template with no build behind
+	/// it: a 100% accept rate on work that could never become a block, while a
+	/// rig that connected during the same pause was told `No job available yet`
+	/// and closed. The two paths disagreed about whether the endpoint was open
+	/// and the one that looked healthy was the one that was lying.
+	///
+	/// So the pause reaches the connections too: a reason, then the same EOF a
+	/// fresh login gets, so xmrig counts a failure and retries on its own timer
+	/// and the operator sees it in the rig's log. The grace slot stays for what
+	/// it was built for, a genuine template roll, which `broadcast_job` drives.
 	pub async fn clear_current_job(&self) {
 		let mut jobs = self.jobs.write().await;
 		jobs.previous = jobs.current.take();
 		self.seen_shares.write().await.retain(|(job_id, _, _)| jobs.is_live(job_id));
+		// The file's lock order: `jobs` first, then `sessions`.
+		let line = error_response(&Value::Null, -1, PAUSED_MESSAGE);
+		let mut sessions = self.sessions.write().await;
+		for (id, session) in sessions.drain() {
+			// The reason is queued before the close, so the writer drains it on
+			// its way out. A miner that is not reading gets the EOF alone.
+			let _ = session.out.try_send(line.clone());
+			session.close.notify_one();
+			log::debug!(target: LOG_TARGET, "session {id} closed: the node stopped authoring");
+		}
 	}
 
 	/// Wait for a share that was good enough to be a block.
@@ -575,6 +606,8 @@ impl StratumServer {
 		});
 
 		let authenticated_deadline = idle_timeout(self.config.share_difficulty);
+		// Handed to the session at login, so the server can end this loop.
+		let closed = Arc::new(tokio::sync::Notify::new());
 		let mut session_id: Option<u64> = None;
 		let mut budget = SubmitBudget::new();
 		let mut reader = BufReader::new(read_half);
@@ -616,7 +649,14 @@ impl StratumServer {
 			// would sit inside one read for all of it.
 			let remaining = remaining.min(silence_left);
 
-			let read = tokio::time::timeout(remaining, read_one_line(&mut reader, &mut line)).await;
+			let read = tokio::select! {
+				biased;
+				// A close the server asked for wins over anything still
+				// buffered: the template it belongs to is gone.
+				_ = closed.notified() => break Err("the node stopped authoring".to_string()),
+				read = tokio::time::timeout(remaining, read_one_line(&mut reader, &mut line)) =>
+					read,
+			};
 			let read = match read {
 				Ok(read) => read,
 				// A job push written while this waited counts as activity, so the
@@ -642,7 +682,8 @@ impl StratumServer {
 			}
 			let reply = match request {
 				Ok(request) =>
-					self.handle(&request, &out_tx, &mut session_id, &mut budget, peer).await,
+					self.handle(&request, &out_tx, &mut session_id, &mut budget, &closed, peer)
+						.await,
 				Err(error) => Reply::open(error_response(&Value::Null, -32700, &error.to_string())),
 			};
 			if let Some(body) = reply.body {
@@ -672,12 +713,14 @@ impl StratumServer {
 		result
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	async fn handle(
 		&self,
 		request: &Value,
 		out_tx: &mpsc::Sender<String>,
 		session_id: &mut Option<u64>,
 		budget: &mut SubmitBudget,
+		closed: &Arc<tokio::sync::Notify>,
 		peer: SocketAddr,
 	) -> Reply {
 		let id = request.get("id").cloned().unwrap_or(Value::Null);
@@ -685,7 +728,7 @@ impl StratumServer {
 		let params = request.get("params").cloned().unwrap_or(Value::Null);
 
 		match method {
-			"login" => self.handle_login(&id, &params, out_tx, session_id, peer).await,
+			"login" => self.handle_login(&id, &params, out_tx, session_id, closed, peer).await,
 			"submit" => Reply::open(self.handle_submit(&id, &params, session_id, budget).await),
 			"keepalived" => Reply::open(ok_response(&id, json!({"status": "KEEPALIVED"}))),
 			"" => Reply::open(error_response(&id, -32600, "Missing method")),
@@ -696,12 +739,14 @@ impl StratumServer {
 	/// Log in, register the session and queue the reply, all under one read of
 	/// `jobs`, so a `broadcast_job` racing this cannot leave the new session
 	/// holding a superseded job.
+	#[allow(clippy::too_many_arguments)]
 	async fn handle_login(
 		&self,
 		id: &Value,
 		params: &Value,
 		out_tx: &mpsc::Sender<String>,
 		session_id: &mut Option<u64>,
+		closed: &Arc<tokio::sync::Notify>,
 		peer: SocketAddr,
 	) -> Reply {
 		let jobs = self.jobs.read().await;
@@ -733,7 +778,12 @@ impl StratumServer {
 			}
 			sessions.insert(
 				new_id,
-				Session { worker: worker.clone(), extra_nonce, out: out_tx.clone() },
+				Session {
+					worker: worker.clone(),
+					extra_nonce,
+					out: out_tx.clone(),
+					close: closed.clone(),
+				},
 			);
 		}
 

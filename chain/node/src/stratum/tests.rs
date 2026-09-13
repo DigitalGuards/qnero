@@ -698,24 +698,37 @@ async fn a_login_before_the_first_template_is_refused_and_the_socket_closes() {
 	);
 }
 
-/// Authoring pausing must not cost a rig the share it is in the middle of.
+/// A pause has to reach the rigs that are already connected.
+///
+/// Authoring pauses on a stale tip, on no peers, and for the length of an
+/// initial sync, and nothing rolls the template out of the grace slot until it
+/// comes back. A connected rig was answered `OK` for every share it found, for
+/// as long as that lasted, against a template with no build behind it, while a
+/// rig connecting during the same pause was refused and closed. The healthy
+/// looking path was the lying one.
 #[tokio::test]
-async fn a_paused_template_is_still_creditable() {
-	let (server, engine) = server_with_job(u64::MAX, 1).await;
+async fn a_pause_disconnects_the_rigs_it_can_no_longer_serve() {
+	let (server, _engine) = server_with_job(u64::MAX, 1).await;
 	let mut miner = FakeMiner::connect(server.local_addr()).await;
-	let login = miner.login("qnero-worker").await;
-	let (nonce, result) = mine_from_job(&engine, &login["result"]["job"]);
+	assert_eq!(miner.login("qnero-worker").await["result"]["status"], "OK");
 
 	// What `pause_authoring` does on the enabled-to-disabled edge.
 	server.clear_current_job().await;
 
-	let response = miner.submit("1", nonce, Some(&result)).await;
+	// The reason first, and it must not be one xmrig treats as critical: the
+	// node wants this rig back as soon as it is authoring again.
+	let reason = miner.recv().await;
+	assert_eq!(reason["error"]["message"], PAUSED_MESSAGE);
 	assert!(
-		response["error"].is_null(),
-		"a share found before the pause was still earned: {response}",
+		!is_xmrig_critical(PAUSED_MESSAGE),
+		"{PAUSED_MESSAGE:?} makes xmrig drop the pool instead of retrying",
 	);
-	let (accepted, rejected, _blocks) = server.stats();
-	assert_eq!((accepted, rejected), (1, 0));
+	// Then the same EOF a fresh login gets, which is what makes the rig count a
+	// failure and stop hashing a template that cannot become a block.
+	assert!(
+		is_closed(&mut miner, Duration::from_secs(5)).await,
+		"a paused endpoint must close the connections it can no longer serve",
+	);
 
 	// And a fresh login is still refused, because there is no template to hand
 	// it.
