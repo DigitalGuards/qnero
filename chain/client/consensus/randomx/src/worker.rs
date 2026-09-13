@@ -16,8 +16,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// use client directly; QPowAlgorithm removed
-use crate::LOG_TARGET;
+use crate::{check_seal, RandomxEngine, LOG_TARGET};
 use futures::{
 	prelude::*,
 	task::{Context, Poll},
@@ -50,7 +49,7 @@ use std::{
 pub struct MiningMetadata<H, D> {
 	/// Currently known best hash which the pre-hash is built on.
 	pub best_hash: H,
-	/// Mining pre-hash.
+	/// Mining pre-hash. The 32 bytes that go into the mining blob.
 	pub pre_hash: H,
 	/// The block's author label (32 bytes), as it goes into the header's
 	/// `PreRuntime` item. The runtime hashes it into the account it calls the
@@ -59,6 +58,18 @@ pub struct MiningMetadata<H, D> {
 	pub author_label: [u8; 32],
 	/// Mining target difficulty.
 	pub difficulty: D,
+	/// The height of the block being mined, which the blob commits to and a
+	/// stratum job advertises.
+	pub height: u64,
+	/// The RandomX seed this candidate hashes under, resolved along its own
+	/// ancestry.
+	pub seed_hash: H256,
+	/// The seed the next epoch will use, so a rig can build the next dataset
+	/// before it needs it. Equal to `seed_hash` when the epoch is not about to
+	/// turn.
+	pub next_seed_hash: H256,
+	/// The height `seed_hash` came from, for logs.
+	pub seed_height: u64,
 }
 
 /// A build of mining, containing the metadata and the block proposal.
@@ -93,6 +104,7 @@ pub struct MiningHandle<Block: BlockT, AC, L: sc_consensus::JustificationSyncLin
 	version: Arc<AtomicUsize>,
 	authoring_gate: AuthoringGate,
 	client: Arc<AC>,
+	engine: Arc<RandomxEngine>,
 	justification_sync_link: Arc<L>,
 	build: Arc<Mutex<Option<MiningBuild<Block, Proof>>>>,
 	block_import: Arc<BoxBlockImport<Block>>,
@@ -115,6 +127,7 @@ where
 
 	pub(crate) fn new(
 		client: Arc<AC>,
+		engine: Arc<RandomxEngine>,
 		block_import: BoxBlockImport<Block>,
 		justification_sync_link: L,
 		pending_build: Arc<Mutex<Option<Block::Hash>>>,
@@ -124,12 +137,19 @@ where
 			version: Arc::new(AtomicUsize::new(0)),
 			authoring_gate: AuthoringGate::default(),
 			client,
+			engine,
 			justification_sync_link: Arc::new(justification_sync_link),
 			build: Arc::new(Mutex::new(None)),
 			block_import: Arc::new(block_import),
 			pending_build,
 			rebuild_notify,
 		}
+	}
+
+	/// The RandomX engine this worker verifies with, so a caller that mines
+	/// (in process or over stratum) hashes with the same caches.
+	pub fn engine(&self) -> Arc<RandomxEngine> {
+		self.engine.clone()
 	}
 
 	/// Enable or pause proposal building, mining, and seal submission together.
@@ -212,25 +232,34 @@ where
 			}
 
 			// Extract metadata for verification while keeping the build in place
-			let (pre_hash, best_hash) = match build_guard.as_ref() {
-				Some(b) => (b.metadata.pre_hash.0, b.metadata.best_hash),
+			let metadata = match build_guard.as_ref() {
+				Some(b) => b.metadata.clone(),
 				None => {
 					warn!(target: LOG_TARGET, "Unable to import mined block: build does not exist");
 					return false;
 				},
 			};
 
-			// Verify seal before consuming the build
-			let nonce: [u8; 64] = match seal.as_slice().try_into() {
-				Ok(arr) => arr,
-				Err(_) => {
-					warn!(target: LOG_TARGET, "Seal does not have exactly 64 bytes, got {}", seal.len());
+			// Shape first: 64 bytes, pinned padding, nothing hashed yet.
+			let decoded = match crate::Seal::decode(&seal) {
+				Ok(decoded) => decoded,
+				Err(error) => {
+					warn!(target: LOG_TARGET, "Refusing a malformed seal: {error}");
 					return false;
 				},
 			};
 
-			match self.client.runtime_api().verify_nonce_local_mining(best_hash, pre_hash, nonce) {
-				Ok(true) => {
+			// The same comparison the importer will make, against the template
+			// this worker actually built.
+			match check_seal::<Block>(
+				&self.engine,
+				metadata.pre_hash,
+				metadata.height,
+				metadata.seed_hash,
+				decoded,
+				metadata.difficulty,
+			) {
+				Ok(_) => {
 					// Seal is valid, take the build. This cannot be None because:
 					// - We hold the lock continuously since checking as_ref() above
 					// - No other code path modifies build_guard between check and take
@@ -247,16 +276,12 @@ where
 						},
 					}
 				},
-				Ok(false) => {
+				Err(error) => {
 					warn!(
 						target: LOG_TARGET,
-						"Seal verification failed: pre_hash={:?}, best_hash={:?}",
-						pre_hash, best_hash
+						"Seal verification failed: {error}: pre_hash={:?}, best_hash={:?}",
+						metadata.pre_hash, metadata.best_hash
 					);
-					return false;
-				},
-				Err(e) => {
-					warn!(target: LOG_TARGET, "Runtime API error verifying seal: {:?}", e);
 					return false;
 				},
 			}
@@ -304,6 +329,7 @@ where
 			version: self.version.clone(),
 			authoring_gate: self.authoring_gate.clone(),
 			client: self.client.clone(),
+			engine: self.engine.clone(),
 			justification_sync_link: self.justification_sync_link.clone(),
 			build: self.build.clone(),
 			block_import: self.block_import.clone(),

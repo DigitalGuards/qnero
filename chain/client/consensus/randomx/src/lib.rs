@@ -1,16 +1,51 @@
+//! RandomX proof of work for Qnero.
+//!
+//! This crate is the consensus client: it seals blocks, verifies seals and
+//! decides fork choice. It replaces the Poseidon-hash QPoW engine and keeps
+//! everything M6 built around it, byte for byte.
+//!
+//! **What is the same.** The header shape: one `PreRuntime` item of 32 bytes
+//! under [`POW_ENGINE_ID`] and one 64-byte `Seal`, filling the header's
+//! 110-byte digest commitment window exactly. The author label: the node still
+//! publishes `H(cvk, parent_hash)` and the runtime still derives the block's
+//! author from it through one `FindAuthor` implementation. The coinbase: still
+//! an inherent, still minted from the node's own miner key, and it reads
+//! nothing about the proof of work. Fork choice: still cumulative work in the
+//! aux store, still `parent_work + difficulty`. The difficulty pallet: still
+//! `pallet-qpow`, whose retarget is a function of block times and knows nothing
+//! about the hash.
+//!
+//! **What is different.** The hash is RandomX (`rx/0`), so a Monero rig mines
+//! Qnero with a config change. The proof is a 4-byte nonce plus a 4-byte extra
+//! nonce over a 76-byte blob ([`blob`]), packed into the 64-byte seal
+//! ([`seal`]). The comparison is Monero's, little-endian and 256-bit
+//! ([`target`]). And verification is **client side**: RandomX cannot run in a
+//! wasm runtime (a 256 MiB Argon2d cache, no JIT, and a floating-point
+//! rounding mode wasm cannot set), so the runtime no longer verifies a nonce.
+//! It answers what the difficulty is and the client does the rest.
+
 mod chain_management;
 mod worker;
+
+pub mod blob;
+pub mod seal;
+pub mod seed;
+pub mod target;
+pub mod vm;
 
 pub use chain_management::{
 	delete_cumulative_achieved_work, finalize_canonical_at_depth, get_chain_work,
 	get_cumulative_achieved_work, initialize_genesis_achieved_work, is_heavier,
 	store_cumulative_achieved_work, ChainManagementError,
 };
+pub use seal::{Seal, SealError, SEAL_LEN};
+pub use vm::{EngineError, RandomxEngine, VmLease};
+
 use primitive_types::{H256, U512};
 use sc_client_api::BlockBackend;
 use sp_api::ProvideRuntimeApi;
 use sp_consensus_qpow::{QPoWApi, Seal as RawSeal};
-use sp_runtime::traits::Block as BlockT;
+use sp_runtime::traits::{Block as BlockT, NumberFor, UniqueSaturatedFrom};
 use std::{marker::PhantomData, sync::Arc, time::Duration};
 
 use qp_header::{check_digest_commitment_window, DIGEST_LOGS_SIZE};
@@ -29,7 +64,11 @@ pub use crate::worker::{MiningBuild, MiningHandle, MiningMetadata, RebuildTrigge
 /// supplies a function rather than a value for that reason. It must return
 /// four canonical Goldilocks limbs, because the runtime treats an item it
 /// cannot derive an account from as a block with no author.
+///
+/// The engine swap does not touch this. RandomX decides what a valid seal is
+/// and nothing else.
 pub type AuthorLabel = Arc<dyn Fn(H256) -> [u8; 32] + Send + Sync>;
+
 use futures::{Future, Stream, StreamExt};
 use log::*;
 use prometheus_endpoint::Registry;
@@ -49,7 +88,11 @@ use sp_runtime::{
 	traits::Header as HeaderT,
 };
 
-const LOG_TARGET: &str = "pow";
+pub(crate) const LOG_TARGET: &str = "randomx";
+
+/// The stratum algorithm name a job advertises. Stock RandomX, stock
+/// constants, so this is the same algorithm Monero mines.
+pub const ALGO: &str = "rx/0";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error<B: BlockT> {
@@ -59,6 +102,8 @@ pub enum Error<B: BlockT> {
 	HeaderUnsealed(B::Hash),
 	#[error("PoW validation error: invalid seal")]
 	InvalidSeal,
+	#[error("PoW validation error: malformed seal: {0}")]
+	MalformedSeal(SealError),
 	#[error("PoW validation error: preliminary verification failed")]
 	FailedPreliminaryVerify,
 	#[error("Rejecting block too far in future")]
@@ -84,6 +129,10 @@ pub enum Error<B: BlockT> {
 	MultiplePreRuntimeDigests,
 	#[error("Header has an encoded digest of {0} bytes; expected {1}-byte commitment window")]
 	DigestWindowMismatch(usize, usize),
+	#[error("Seed block #{0} is not reachable from the block being verified")]
+	SeedUnreachable(u64),
+	#[error("RandomX engine error: {0}")]
+	Engine(EngineError),
 	#[error(transparent)]
 	Client(sp_blockchain::Error),
 	#[error(transparent)]
@@ -108,10 +157,161 @@ impl<B: BlockT> From<Error<B>> for ConsensusError {
 	}
 }
 
-/// A block importer for PoW.
+/// The seed a block at `height` hashes under, the seed the next epoch will use,
+/// and the height the first of those came from.
+///
+/// Resolved along the candidate's **own ancestry**, never by canonical height
+/// alone: a fork candidate has to use the seed block that is its own ancestor,
+/// which is what Monero does for alt chains. The fast path is one hash lookup,
+/// because a parent that is on the canonical chain shares its ancestry with it.
+pub fn seed_hashes<B, C>(
+	client: &C,
+	parent_hash: B::Hash,
+	height: u64,
+) -> Result<(H256, H256, u64), Error<B>>
+where
+	B: BlockT<Hash = H256>,
+	C: ProvideRuntimeApi<B> + HeaderBackend<B>,
+	C::Api: QPoWApi<B>,
+{
+	let api = client.runtime_api();
+	let epoch = api
+		.get_seed_epoch_blocks(parent_hash)
+		.map_err(|e| Error::Runtime(format!("seed epoch length: {e:?}")))? as u64;
+	let lag = api
+		.get_seed_epoch_lag(parent_hash)
+		.map_err(|e| Error::Runtime(format!("seed epoch lag: {e:?}")))? as u64;
+
+	let seed_height = seed::seed_height(height, epoch, lag);
+	let next_seed_height = seed::next_seed_height(height, epoch, lag);
+
+	let seed = hash_at_ancestor::<B, C>(client, parent_hash, height, seed_height, epoch + lag)?;
+	let next = if next_seed_height == seed_height {
+		seed
+	} else {
+		hash_at_ancestor::<B, C>(client, parent_hash, height, next_seed_height, epoch + lag)?
+	};
+	Ok((seed, next, seed_height))
+}
+
+/// The client, seen as the two questions the seed walk asks it.
+struct BackendView<'a, B, C> {
+	client: &'a C,
+	_block: PhantomData<B>,
+}
+
+impl<B, C> seed::ChainView for BackendView<'_, B, C>
+where
+	B: BlockT<Hash = H256>,
+	C: HeaderBackend<B>,
+{
+	fn canonical_hash(&self, number: u64) -> Result<Option<H256>, String> {
+		let number: NumberFor<B> = UniqueSaturatedFrom::unique_saturated_from(number);
+		self.client.hash(number).map_err(|e| e.to_string())
+	}
+
+	fn parent_of(&self, hash: H256) -> Result<Option<H256>, String> {
+		Ok(self.client.header(hash).map_err(|e| e.to_string())?.map(|h| *h.parent_hash()))
+	}
+}
+
+/// The hash of the block at `target_height` on the branch that ends at
+/// `parent_hash`.
+fn hash_at_ancestor<B, C>(
+	client: &C,
+	parent_hash: B::Hash,
+	height: u64,
+	target_height: u64,
+	max_walk: u64,
+) -> Result<H256, Error<B>>
+where
+	B: BlockT<Hash = H256>,
+	C: HeaderBackend<B>,
+{
+	let view = BackendView::<B, C> { client, _block: PhantomData };
+	seed::resolve_on_branch(&view, parent_hash, height, target_height, max_walk)
+		.map_err(Error::Other)?
+		.ok_or(Error::SeedUnreachable(target_height))
+}
+
+/// Verify one block's proof of work, and return the work it contributes.
+///
+/// This is the single implementation of the rule. The import queue's verifier
+/// calls it so a bad seal is `VerificationFailed` and the peer can be
+/// penalised, and `import_block` calls it so nothing reaches the database
+/// unverified, including blocks this node mined itself. There is no second
+/// copy of the comparison anywhere: the miner in `MiningHandle::submit` and the
+/// stratum server both go through [`check_seal`] below, which is what this
+/// function calls once it has resolved the seed and the difficulty.
+pub fn verify_pow<B, C>(
+	client: &C,
+	engine: &Arc<RandomxEngine>,
+	parent_hash: B::Hash,
+	height: u64,
+	pre_hash: B::Hash,
+	seal_bytes: &[u8],
+) -> Result<U512, Error<B>>
+where
+	B: BlockT<Hash = H256>,
+	C: ProvideRuntimeApi<B> + HeaderBackend<B>,
+	C::Api: QPoWApi<B>,
+{
+	// Shape first, before anything is hashed: a seal that is not exactly 64
+	// bytes with the pinned padding is refused whatever it hashes to.
+	let seal = Seal::decode(seal_bytes).map_err(Error::MalformedSeal)?;
+
+	let difficulty = client
+		.runtime_api()
+		.get_difficulty(parent_hash)
+		.map_err(|e| Error::Runtime(format!("difficulty: {e:?}")))?;
+
+	let (seed, _next_seed, seed_height) = seed_hashes::<B, C>(client, parent_hash, height)?;
+
+	check_seal::<B>(engine, pre_hash, height, seed, seal, difficulty)?;
+
+	log::trace!(
+		target: LOG_TARGET,
+		"verified rx/0 seal for #{height} (seed #{seed_height} {}, difficulty {difficulty})",
+		hex::encode(seed),
+	);
+
+	// The block's work is the difficulty it had to beat. Every block at one
+	// difficulty then contributes the same deterministic amount, which is
+	// Bitcoin's and Ethereum's rule and is what makes cumulative work track
+	// expended hash power; the difficulty a block happened to achieve would
+	// make one lucky hash dominate the sum.
+	Ok(difficulty)
+}
+
+/// The proof-of-work comparison itself, given everything already resolved.
+///
+/// Separated out so that authoring, which already knows the seed and the
+/// difficulty for the template it built, checks exactly the same rule the
+/// importer will apply, without re-walking the chain.
+pub fn check_seal<B>(
+	engine: &Arc<RandomxEngine>,
+	pre_hash: B::Hash,
+	height: u64,
+	seed: H256,
+	seal: Seal,
+	difficulty: U512,
+) -> Result<[u8; 32], Error<B>>
+where
+	B: BlockT<Hash = H256>,
+{
+	let blob = blob::build_blob(&pre_hash.0, height, seal.extra_nonce, seal.nonce);
+	let hash = engine.hash(seed.0, &blob).map_err(Error::Engine)?;
+	if !target::meets_difficulty(&hash, difficulty) {
+		return Err(Error::InvalidSeal);
+	}
+	Ok(hash)
+}
+
+/// A block importer for RandomX proof of work.
 pub struct PowBlockImport<B: BlockT<Hash = H256>, I, C, CIDP, BE, const LOGGING_FREQUENCY: u64> {
 	inner: I,
 	client: Arc<C>,
+	engine: Arc<RandomxEngine>,
 	create_inherent_data_providers: Arc<CIDP>,
 	check_inherents_after: <<B as BlockT>::Header as HeaderT>::Number,
 	// Serializes the best-work read, fork-choice decision and inner import so
@@ -133,6 +333,7 @@ impl<
 		Self {
 			inner: self.inner.clone(),
 			client: self.client.clone(),
+			engine: self.engine.clone(),
 			create_inherent_data_providers: self.create_inherent_data_providers.clone(),
 			check_inherents_after: self.check_inherents_after,
 			import_lock: self.import_lock.clone(),
@@ -164,12 +365,14 @@ where
 	pub fn new(
 		inner: I,
 		client: Arc<C>,
+		engine: Arc<RandomxEngine>,
 		check_inherents_after: <<B as BlockT>::Header as HeaderT>::Number,
 		create_inherent_data_providers: CIDP,
 	) -> Self {
 		Self {
 			inner,
 			client,
+			engine,
 			check_inherents_after,
 			create_inherent_data_providers: Arc::new(create_inherent_data_providers),
 			import_lock: Arc::new(futures::lock::Mutex::new(())),
@@ -288,33 +491,28 @@ where
 
 		let pre_hash = block_import_params.header.hash();
 
-		// Convert seal to nonce
-		let nonce: [u8; 64] = inner_seal
-			.as_slice()
-			.try_into()
-			.map_err(|_| Error::<B>::Runtime("Seal does not have exactly 64 bytes".to_string()))?;
-		let pre_hash_arr: [u8; 32] = pre_hash.0;
-
-		// Verify nonce and get achieved difficulty in a single call
-		// This avoids computing the nonce hash twice
-		let (verified, achieved_difficulty) = self
-			.client
-			.runtime_api()
-			.verify_and_get_achieved_difficulty(parent_hash, pre_hash_arr, nonce)
-			.map_err(|e| {
-				Error::<B>::Runtime(format!(
-					"API error in verify_and_get_achieved_difficulty: {:?}",
-					e
-				))
-			})?;
-
-		if !verified {
-			log::error!("Invalid Seal {:?} for parent hash {:?}", inner_seal, parent_hash);
-			return Err(Error::<B>::InvalidSeal.into());
-		}
+		// The same rule the import queue's verifier applied, applied again:
+		// blocks this node mined itself reach `import_block` without passing
+		// through the verifier at all.
+		let achieved_difficulty = verify_pow::<B, _>(
+			&*self.client,
+			&self.engine,
+			parent_hash,
+			number,
+			pre_hash,
+			&inner_seal,
+		)
+		.map_err(|error| {
+			log::error!(
+				target: LOG_TARGET,
+				"Invalid seal for block #{number} on parent {parent_hash:?}: {error}"
+			);
+			error
+		})?;
 
 		// Get parent's cumulative achieved work from aux storage. A backend/decode
-		// failure must fail the import, not silently seed fork choice with zero.
+		// failure must fail the import: seeding fork choice with zero would be
+		// silent corruption.
 		let parent_work = get_chain_work::<B, C>(&*self.client, parent_hash)?;
 
 		// Calculate new cumulative achieved work
@@ -356,7 +554,7 @@ where
 			);
 		} else {
 			log::debug!(
-				target: "qpow",
+				target: LOG_TARGET,
 				"⛏️ Importing block #{}: {:?} - extrinsics_root={:?}, state_root={:?}",
 				block_number,
 				block_import_params.header.hash(),
@@ -443,6 +641,11 @@ where
 	let seal_item = match header.digest_mut().pop() {
 		Some(DigestItem::Seal(id, seal)) =>
 			if id == POW_ENGINE_ID {
+				// The shape of the seal is a property of the header, so it is
+				// checked here, where the header is taken apart, and again
+				// inside `verify_pow`. A seal with unpinned padding is a
+				// grinding attempt.
+				Seal::decode(&seal).map_err(|e| Error::<B>::MalformedSeal(e).to_string())?;
 				DigestItem::Seal(id, seal)
 			} else {
 				return Err(Error::<B>::WrongEngine(id).into());
@@ -461,18 +664,19 @@ pub type PowImportQueue<B> = BasicQueue<B>;
 /// proof-of-work before the block reaches `import_block`.
 ///
 /// The check lives here, in the `Verifier` the import queue calls, so that a
-/// bad seal surfaces as `BlockImportError::VerificationFailed` — the variant
+/// bad seal surfaces as `BlockImportError::VerificationFailed`, the variant
 /// that carries the peer id and lets the sync layer penalise and drop the
 /// sending peer. It also runs before the expensive `check_inherents` call in
-/// `import_block`, so a junk block is discarded for one runtime call instead
+/// `import_block`, so a junk block is discarded for one RandomX hash instead
 /// of a full-body inherent check.
 struct PowVerifier<C> {
 	client: Arc<C>,
+	engine: Arc<RandomxEngine>,
 }
 
 impl<C> PowVerifier<C> {
-	fn new(client: Arc<C>) -> Self {
-		Self { client }
+	fn new(client: Arc<C>, engine: Arc<RandomxEngine>) -> Self {
+		Self { client, engine }
 	}
 }
 
@@ -480,7 +684,7 @@ impl<C> PowVerifier<C> {
 impl<B, C> Verifier<B> for PowVerifier<C>
 where
 	B: BlockT<Hash = H256>,
-	C: ProvideRuntimeApi<B> + Send + Sync,
+	C: ProvideRuntimeApi<B> + HeaderBackend<B> + Send + Sync,
 	C::Api: QPoWApi<B>,
 {
 	async fn verify(&self, block: BlockImportParams<B>) -> Result<BlockImportParams<B>, String> {
@@ -491,48 +695,38 @@ where
 		let block = extract_pow_seal::<B>(block).await?;
 
 		let parent_hash = *block.header.parent_hash();
+		let number = (*block.header.number()).try_into().unwrap_or(u64::MAX);
 		let pre_hash = block.header.hash();
 		let inner_seal = fetch_seal::<B>(block.post_digests.last(), pre_hash)?;
 
-		let nonce: [u8; 64] = inner_seal
-			.as_slice()
-			.try_into()
-			.map_err(|_| Error::<B>::Runtime("Seal does not have exactly 64 bytes".to_string()))?;
-
-		let (verified, _achieved_difficulty) = self
-			.client
-			.runtime_api()
-			.verify_and_get_achieved_difficulty(parent_hash, pre_hash.0, nonce)
-			.map_err(|e| {
-				Error::<B>::Runtime(format!(
-					"API error in verify_and_get_achieved_difficulty: {:?}",
-					e
-				))
+		verify_pow::<B, _>(&*self.client, &self.engine, parent_hash, number, pre_hash, &inner_seal)
+			.map_err(|error| {
+				log::error!(
+					target: LOG_TARGET,
+					"Invalid seal for block #{number} on parent {parent_hash:?}: {error}"
+				);
+				String::from(error)
 			})?;
-
-		if !verified {
-			log::error!("Invalid Seal {:?} for parent hash {:?}", inner_seal, parent_hash);
-			return Err(Error::<B>::InvalidSeal.into());
-		}
 
 		Ok(block)
 	}
 }
 
-/// Import queue for QPoW engine.
+/// Import queue for the RandomX engine.
 pub fn import_queue<B, C>(
 	block_import: BoxBlockImport<B>,
 	justification_import: Option<BoxJustificationImport<B>>,
 	client: Arc<C>,
+	engine: Arc<RandomxEngine>,
 	spawner: &impl sp_core::traits::SpawnEssentialNamed,
 	registry: Option<&Registry>,
 ) -> Result<PowImportQueue<B>, sp_consensus::Error>
 where
 	B: BlockT<Hash = H256>,
-	C: ProvideRuntimeApi<B> + BlockBackend<B> + Send + Sync + 'static,
+	C: ProvideRuntimeApi<B> + BlockBackend<B> + HeaderBackend<B> + Send + Sync + 'static,
 	C::Api: QPoWApi<B>,
 {
-	let verifier = PowVerifier::new(client);
+	let verifier = PowVerifier::new(client, engine);
 	Ok(BasicQueue::new(verifier, block_import, justification_import, spawner, registry))
 }
 
@@ -541,7 +735,7 @@ where
 /// time dominates and effective mining time approaches zero, causing block times to spike.
 const MIN_INTERVAL_BETWEEN_TX_REBUILDS: Duration = Duration::from_secs(2);
 
-/// Start the mining worker for QPoW. This function provides the necessary helper functions that can
+/// Start the mining worker. This function provides the necessary helper functions that can
 /// be used to implement a miner. However, it does not do the CPU-intensive mining itself.
 ///
 /// Two values are returned -- a worker, which contains functions that allows querying the current
@@ -564,6 +758,7 @@ const MIN_INTERVAL_BETWEEN_TX_REBUILDS: Duration = Duration::from_secs(2);
 pub fn start_mining_worker<Block, C, E, L, CIDP, TxHash, TxStream>(
 	block_import: BoxBlockImport<Block>,
 	client: Arc<C>,
+	engine: Arc<RandomxEngine>,
 	mut env: E,
 	justification_sync_link: L,
 	author_label: AuthorLabel,
@@ -602,6 +797,7 @@ where
 
 	let worker = MiningHandle::new(
 		client.clone(),
+		engine.clone(),
 		block_import,
 		justification_sync_link,
 		pending_build.clone(),
@@ -699,13 +895,27 @@ where
 		},
 	};
 
-	let difficulty = match qpow_get_difficulty::<Block, C>(client, best_hash) {
+	let difficulty = match get_difficulty::<Block, C>(&**client, best_hash) {
 		Ok(d) => d,
 		Err(e) => {
 			warn!(target: LOG_TARGET, "Fetch difficulty failed: {}", e);
 			return None;
 		},
 	};
+
+	let parent_number: u64 = (*best_header.number()).try_into().unwrap_or(u64::MAX);
+	let height = parent_number.saturating_add(1);
+
+	// The seed is resolved on the branch this candidate extends, so a candidate
+	// on a fork hashes under its own ancestry's seed.
+	let (seed_hash, next_seed_hash, seed_height) =
+		match seed_hashes::<Block, C>(&**client, best_hash, height) {
+			Ok(seeds) => seeds,
+			Err(e) => {
+				warn!(target: LOG_TARGET, "Resolving the RandomX seed failed: {}", e);
+				return None;
+			},
+		};
 
 	let inherent_data_providers = match create_inherent_data_providers
 		.create_inherent_data_providers(best_hash, ())
@@ -761,12 +971,16 @@ where
 			pre_hash: proposal.block.header().hash(),
 			author_label,
 			difficulty,
+			height,
+			seed_hash,
+			next_seed_hash,
+			seed_height,
 		},
 		proposal,
 	})
 }
 
-/// Fetch the QPoW seal from the given digest, if present and valid.
+/// Fetch the seal from the given digest, if present and valid.
 fn fetch_seal<B: BlockT>(digest: Option<&DigestItem>, hash: B::Hash) -> Result<RawSeal, Error<B>> {
 	match digest {
 		Some(DigestItem::Seal(id, seal)) if *id == POW_ENGINE_ID => Ok(seal.clone()),
@@ -775,8 +989,9 @@ fn fetch_seal<B: BlockT>(digest: Option<&DigestItem>, hash: B::Hash) -> Result<R
 	}
 }
 
-// Helper function to get difficulty via runtime API
-pub fn qpow_get_difficulty<B, C>(client: &C, parent: B::Hash) -> Result<U512, Error<B>>
+/// The difficulty a block built on `parent` must beat, from the chain state at
+/// that parent.
+pub fn get_difficulty<B, C>(client: &C, parent: B::Hash) -> Result<U512, Error<B>>
 where
 	B: BlockT<Hash = H256>,
 	C: ProvideRuntimeApi<B>,
@@ -789,272 +1004,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-	use super::*;
-	use codec::Encode;
-	use sp_consensus::BlockOrigin;
-	use sp_runtime::{traits::BlakeTwo256, OpaqueExtrinsic};
-
-	type TestHeader = qp_header::Header<u32, BlakeTwo256>;
-	type TestBlock = sp_runtime::generic::Block<TestHeader, OpaqueExtrinsic>;
-
-	fn sealed_header(digest: Digest) -> TestHeader {
-		sealed_header_at(1, digest)
-	}
-
-	fn sealed_header_at(number: u32, digest: Digest) -> TestHeader {
-		<TestHeader as HeaderT>::new(
-			number,
-			Default::default(),
-			Default::default(),
-			Default::default(),
-			digest,
-		)
-	}
-
-	/// The canonical QPoW digest: a 32-byte author preimage plus a 64-byte
-	/// seal, which together encode to exactly `DIGEST_LOGS_SIZE` bytes.
-	fn canonical_digest() -> Digest {
-		Digest {
-			logs: vec![
-				DigestItem::PreRuntime(POW_ENGINE_ID, vec![1u8; 32]),
-				DigestItem::Seal(POW_ENGINE_ID, vec![2u8; 64]),
-			],
-		}
-	}
-
-	/// Regression test for the remotely triggerable debug panic: the verifier
-	/// must reject a header whose encoded digest overflows the commitment
-	/// window with a clean error, *without* ever hashing it (`Header::hash()`
-	/// silently truncates past the window, so hashing must not be relied on —
-	/// and used to `debug_assert!` on exactly this input).
-	#[test]
-	fn verifier_rejects_oversized_digest_cleanly() {
-		let mut digest = canonical_digest();
-		// Push the encoded digest past the window while keeping a valid seal
-		// last, so only the length check can be the thing that rejects it.
-		digest.logs.insert(1, DigestItem::Other(vec![0u8; 64]));
-		assert!(digest.encode().len() > qp_header::MAX_ENCODED_DIGEST_SIZE);
-
-		let params = BlockImportParams::<TestBlock>::new(
-			BlockOrigin::NetworkBroadcast,
-			sealed_header(digest),
-		);
-		let result = futures::executor::block_on(extract_pow_seal::<TestBlock>(params));
-
-		let err = result.err().expect("oversized digest must be rejected");
-		assert!(
-			err.contains("commitment window"),
-			"expected the digest-window rejection, got: {err}"
-		);
-	}
-
-	#[test]
-	fn verifier_rejects_undersized_digest() {
-		let digest = Digest { logs: vec![DigestItem::Seal(POW_ENGINE_ID, vec![2u8; 64])] };
-		assert!(digest.encode().len() < qp_header::DIGEST_LOGS_SIZE);
-
-		let params = BlockImportParams::<TestBlock>::new(
-			BlockOrigin::NetworkBroadcast,
-			sealed_header(digest),
-		);
-		let result = futures::executor::block_on(extract_pow_seal::<TestBlock>(params));
-		let err = result.err().expect("undersized digest must be rejected");
-		assert!(
-			err.contains("commitment window"),
-			"expected the digest-window rejection, got: {err}"
-		);
-	}
-
-	/// Historical blocks minted before the runtime stopped depositing
-	/// `RuntimeEnvironmentUpdated` on `set_code` encode to exactly one byte
-	/// past the committed window and must stay importable.
-	#[test]
-	fn verifier_accepts_historical_environment_updated_digest() {
-		let mut digest = canonical_digest();
-		digest.logs.insert(1, DigestItem::RuntimeEnvironmentUpdated);
-		assert_eq!(digest.encode().len(), qp_header::MAX_ENCODED_DIGEST_SIZE);
-
-		let params = BlockImportParams::<TestBlock>::new(
-			BlockOrigin::NetworkBroadcast,
-			sealed_header(digest),
-		);
-		let result = futures::executor::block_on(extract_pow_seal::<TestBlock>(params))
-			.expect("historical 111-byte sealed header must pass");
-
-		assert_eq!(
-			result.post_digests.last(),
-			Some(&DigestItem::Seal(POW_ENGINE_ID, vec![2u8; 64])),
-			"seal must be moved into post_digests"
-		);
-	}
-
-	/// The 1-byte allowance is strictly historical: above the legacy cutoff
-	/// every digest byte must be inside the hash-committed window, so the
-	/// same 111-byte shape that imports below the cutoff is rejected.
-	#[test]
-	fn verifier_rejects_environment_updated_digest_above_legacy_cutoff() {
-		let mut digest = canonical_digest();
-		digest.logs.insert(1, DigestItem::RuntimeEnvironmentUpdated);
-		assert_eq!(digest.encode().len(), qp_header::MAX_ENCODED_DIGEST_SIZE);
-
-		let number = u32::try_from(qp_header::LEGACY_DIGEST_CUTOFF + 1).expect("cutoff fits u32");
-		let params = BlockImportParams::<TestBlock>::new(
-			BlockOrigin::NetworkBroadcast,
-			sealed_header_at(number, digest),
-		);
-		let result = futures::executor::block_on(extract_pow_seal::<TestBlock>(params));
-
-		let err = result.err().expect("111-byte digest above the cutoff must be rejected");
-		assert!(
-			err.contains("commitment window"),
-			"expected the digest-window rejection, got: {err}"
-		);
-	}
-
-	/// The compat allowance is exactly one byte: anything past it is rejected.
-	#[test]
-	fn verifier_rejects_digest_past_compat_allowance() {
-		let mut digest = canonical_digest();
-		digest.logs.insert(1, DigestItem::RuntimeEnvironmentUpdated);
-		digest.logs.insert(1, DigestItem::RuntimeEnvironmentUpdated);
-		assert_eq!(digest.encode().len(), qp_header::MAX_ENCODED_DIGEST_SIZE + 1);
-
-		let params = BlockImportParams::<TestBlock>::new(
-			BlockOrigin::NetworkBroadcast,
-			sealed_header(digest),
-		);
-		let result = futures::executor::block_on(extract_pow_seal::<TestBlock>(params));
-
-		let err = result.err().expect("digest past the allowance must be rejected");
-		assert!(
-			err.contains("commitment window"),
-			"expected the digest-window rejection, got: {err}"
-		);
-	}
-
-	/// The canonical digest fits the window exactly and must pass the length
-	/// check, with the seal popped into `post_digests`.
-	#[test]
-	fn verifier_accepts_window_sized_digest_and_extracts_seal() {
-		let digest = canonical_digest();
-		assert_eq!(digest.encode().len(), qp_header::DIGEST_LOGS_SIZE);
-
-		let params = BlockImportParams::<TestBlock>::new(
-			BlockOrigin::NetworkBroadcast,
-			sealed_header(digest),
-		);
-		let result = futures::executor::block_on(extract_pow_seal::<TestBlock>(params))
-			.expect("window-sized sealed header must pass");
-
-		assert_eq!(
-			result.post_digests.last(),
-			Some(&DigestItem::Seal(POW_ENGINE_ID, vec![2u8; 64])),
-			"seal must be moved into post_digests"
-		);
-		assert!(
-			!result.header.digest().logs.iter().any(|l| matches!(l, DigestItem::Seal(..))),
-			"seal must be removed from the pre-seal header"
-		);
-	}
-
-	// The mock macro references the block type as `Block` in a few of the
-	// common trait impls it generates, so alias it here.
-	type Block = TestBlock;
-
-	/// Mock runtime API whose seal verdict is fixed at construction, so the
-	/// verifier can be exercised without a real client or runtime.
-	#[derive(Clone)]
-	struct MockRuntimeApi {
-		seal_valid: bool,
-	}
-
-	sp_api::mock_impl_runtime_apis! {
-		impl QPoWApi<Block> for MockRuntimeApi {
-			fn get_max_reorg_depth() -> u32 { 0 }
-			fn get_max_difficulty() -> U512 { U512::one() }
-			fn get_difficulty() -> U512 { U512::one() }
-			fn get_last_block_time() -> u64 { 0 }
-			fn get_last_block_duration() -> u64 { 0 }
-			fn get_chain_height() -> u32 { 0 }
-			fn verify_nonce_on_import_block(&self, _block_hash: [u8; 32], _nonce: [u8; 64]) -> bool {
-				self.seal_valid
-			}
-			fn verify_nonce_local_mining(&self, _block_hash: [u8; 32], _nonce: [u8; 64]) -> bool {
-				self.seal_valid
-			}
-			fn verify_and_get_achieved_difficulty(
-				&self,
-				_block_hash: [u8; 32],
-				_nonce: [u8; 64],
-			) -> (bool, U512) {
-				(self.seal_valid, U512::one())
-			}
-		}
-	}
-
-	// The mock implements the API traits on the value itself; wire up
-	// `ProvideRuntimeApi` so it can stand in for a client.
-	impl ProvideRuntimeApi<Block> for MockRuntimeApi {
-		type Api = Self;
-
-		fn runtime_api(&self) -> sp_api::ApiRef<'_, Self::Api> {
-			self.clone().into()
-		}
-	}
-
-	fn verify_canonical(seal_valid: bool) -> Result<BlockImportParams<TestBlock>, String> {
-		let params = BlockImportParams::<TestBlock>::new(
-			BlockOrigin::NetworkBroadcast,
-			sealed_header(canonical_digest()),
-		);
-		let verifier = PowVerifier::new(Arc::new(MockRuntimeApi { seal_valid }));
-		futures::executor::block_on(verifier.verify(params))
-	}
-
-	/// The core regression test for report 88219: a block whose proof-of-work
-	/// does not verify must be rejected *by the verifier*, so the failure
-	/// surfaces as `VerificationFailed` and the peer can be penalised.
-	#[test]
-	fn verifier_rejects_invalid_pow() {
-		let err = verify_canonical(false).err().expect("invalid PoW must be rejected");
-		assert!(err.contains("invalid seal"), "expected the seal rejection, got: {err}");
-	}
-
-	/// A block with valid proof-of-work passes the verifier, with the seal
-	/// moved into `post_digests` for `import_block`.
-	#[test]
-	fn verifier_accepts_valid_pow() {
-		let result = verify_canonical(true).expect("valid PoW must pass the verifier");
-		assert_eq!(
-			result.post_digests.last(),
-			Some(&DigestItem::Seal(POW_ENGINE_ID, vec![2u8; 64])),
-			"seal must be moved into post_digests"
-		);
-	}
-
-	/// A seal that is not exactly 64 bytes is rejected before the runtime call,
-	/// so a malformed seal cannot reach proof-of-work verification.
-	#[test]
-	fn verifier_rejects_wrong_length_seal() {
-		// Window-sized encoding so the digest-shape check cannot be the
-		// rejection: a 64-byte preimage + 32-byte seal fills the 110-byte
-		// window, then the seal-length check must fire.
-		let digest = Digest {
-			logs: vec![
-				DigestItem::PreRuntime(POW_ENGINE_ID, vec![1u8; 64]),
-				DigestItem::Seal(POW_ENGINE_ID, vec![2u8; 32]),
-			],
-		};
-		assert_eq!(digest.encode().len(), qp_header::DIGEST_LOGS_SIZE);
-		let params = BlockImportParams::<TestBlock>::new(
-			BlockOrigin::NetworkBroadcast,
-			sealed_header(digest),
-		);
-		let verifier = PowVerifier::new(Arc::new(MockRuntimeApi { seal_valid: true }));
-		let err = futures::executor::block_on(verifier.verify(params))
-			.err()
-			.expect("a wrong-length seal must be rejected");
-		assert!(err.contains("64 bytes"), "expected the length rejection, got: {err}");
-	}
-}
+mod tests;

@@ -8,7 +8,7 @@ repository = "https://github.com/quantus-network/chain#"
 [workspace]
 members = [
 	"client/cli",
-	"client/consensus/qpow",
+	"client/consensus/randomx",
 	"client/executor-wasmtime",
 	"client/informant",
 	"client/litep2p",
@@ -31,7 +31,6 @@ members = [
 	"frame/system-benchmarking",
 	"frame/system-rpc-runtime-api",
 	"frame/try-runtime",
-	"miner-api",
 	"node",
 	"pallets/balances",
 	"pallets/frame-system",
@@ -60,7 +59,6 @@ members = [
 	"primitives/scheduler",
 	"primitives/coinbase",
 	"primitives/wormhole",
-	"qpow-math",
 	"runtime",
 ]
 resolver = "2"
@@ -202,6 +200,9 @@ prost-build = { version = "0.14" }
 quickcheck = { version = "1.0.3" }
 quinn = { version = "0.11.11", default-features = false, features = ["bloom", "log", "runtime-tokio", "rustls-ring"] }
 rand = { version = "0.8.5", default-features = false }
+# Tari's bindings over tevador's librandomx, which the crate vendors and builds
+# with cmake. Stock upstream constants, so the hash is rx/0.
+randomx-rs = { version = "1.6.0" }
 rcgen = { version = "0.13" }
 regex = { version = "1.10.2" }
 reqwest = { version = "0.11.24", default-features = false, features = ["json"] }
@@ -269,9 +270,7 @@ qp-high-security = { path = "./primitives/high-security", default-features = fal
 qp-scheduler = { path = "./primitives/scheduler", default-features = false }
 qp-coinbase = { path = "./primitives/coinbase", default-features = false }
 qp-wormhole = { path = "./primitives/wormhole", default-features = false }
-qpow-math = { path = "./qpow-math", default-features = false }
-quantus-miner-api = { path = "./miner-api", version = "0.3.0", default-features = false }
-sc-consensus-qpow = { path = "./client/consensus/qpow", default-features = false }
+sc-consensus-randomx = { path = "./client/consensus/randomx", default-features = false }
 sp-consensus-qpow = { path = "./primitives/consensus/qpow", default-features = false }
 
 # Quantus network dependencies
