@@ -69,6 +69,13 @@ const STRATUM_POLL_WHILE_MINING: Duration = Duration::from_millis(1);
 /// How long the loop waits on a stratum share when it is not mining in process.
 const STRATUM_POLL_IDLE: Duration = Duration::from_millis(500);
 
+/// Idle RandomX VMs the pool holds before the mining thread count is known:
+/// enough for the verifier, the importer and one share check.
+const DEFAULT_IDLE_VMS: usize = 8;
+
+/// Idle VMs the pool holds beyond the mining threads, for the same three.
+const IDLE_VMS_BESIDE_MINING: usize = 4;
+
 /// The job a template becomes, for whoever is mining it.
 fn job_from_metadata(
 	job_id: String,
@@ -751,9 +758,11 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 	// One RandomX engine per node, shared by the verifier, the importer, the
 	// in-process miner and the stratum server, so they share seed caches: a
 	// cache is 256 MiB and an Argon2d fill, and nothing here should pay for it
-	// twice. The pool holds up to eight idle VMs, which is a 2 MiB scratchpad
-	// each and covers a verifier plus a handful of mining threads.
-	let engine = RandomxEngine::light(8);
+	// twice. Eight idle VMs to start with, which is a 2 MiB scratchpad each and
+	// covers a verifier, an importer and a share check. `new_full` raises the
+	// floor to the mining thread count, because a VM the pool cannot hold is a
+	// create and a destroy on every mining round.
+	let engine = RandomxEngine::light(DEFAULT_IDLE_VMS);
 
 	let telemetry = telemetry.map(|(worker, telemetry)| {
 		task_manager.spawn_handle().spawn("telemetry", None, worker.run());
@@ -850,6 +859,12 @@ pub fn new_full<
 		transaction_pool,
 		other: (pow_block_import, mut telemetry, engine),
 	} = new_partial(&config)?;
+
+	// The pool has to be at least as deep as the number of threads leasing from
+	// it, or every mining round past its depth creates and destroys a VM: a
+	// 2 MiB scratchpad and, with the JIT on, an executable code buffer, twice a
+	// second per thread.
+	engine.reserve_idle_vms(mining_threads.saturating_add(IDLE_VMS_BESIDE_MINING));
 
 	let tx_stream_for_worker = transaction_pool.clone().import_notification_stream();
 	#[cfg(feature = "tx-logging")]

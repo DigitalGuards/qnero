@@ -208,8 +208,11 @@ async fn a_share_below_the_block_difficulty_is_counted_and_acknowledged() {
 	assert!(server.recv_seal_timeout(Duration::from_millis(200)).await.is_none());
 }
 
+/// A share that was in flight when the template rolled was still earned: it is
+/// hashed, credited and acknowledged. It cannot become a block, because the
+/// build it belongs to is gone.
 #[tokio::test]
-async fn a_share_for_a_job_that_moved_on_is_refused() {
+async fn a_share_for_the_job_that_just_moved_on_is_credited_and_seals_nothing() {
 	let (server, engine) = server_with_job(8, 8).await;
 	let mut miner = FakeMiner::connect(server.local_addr()).await;
 	let login = miner.login("qnero-worker").await;
@@ -226,7 +229,137 @@ async fn a_share_for_a_job_that_moved_on_is_refused() {
 	assert_eq!(pushed["params"]["job_id"], "2");
 
 	let response = miner.submit("1", nonce, Some(&result)).await;
-	assert_eq!(response["error"]["message"], "Invalid job id");
+	assert!(response["error"].is_null(), "the grace job must be credited: {response}");
+	assert_eq!(response["result"]["status"], "OK");
+
+	let (accepted, rejected, blocks) = server.stats();
+	assert_eq!((accepted, rejected, blocks), (1, 0, 0));
+	assert!(
+		server.recv_seal_timeout(Duration::from_millis(200)).await.is_none(),
+		"a superseded template has no build left to seal",
+	);
+}
+
+/// One generation of grace, and no more. A job two templates back is gone, and
+/// saying so must not cost the rig its connection.
+#[tokio::test]
+async fn a_share_two_templates_back_is_expired_and_not_a_critical_error() {
+	let (server, engine) = server_with_job(8, 8).await;
+	let mut miner = FakeMiner::connect(server.local_addr()).await;
+	let login = miner.login("qnero-worker").await;
+	let (nonce, result) = mine_from_job(&engine, &login["result"]["job"]);
+
+	for id in ["2", "3"] {
+		let mut next = test_job(8);
+		next.job_id = id.to_string();
+		server.broadcast_job(next).await;
+		assert_eq!(miner.recv().await["params"]["job_id"], id);
+	}
+
+	let response = miner.submit("1", nonce, Some(&result)).await;
+	let message = response["error"]["message"].as_str().expect("a rejection message");
+	assert_eq!(message, "Block expired");
+	assert!(
+		!XMRIG_CRITICAL_ERRORS.contains(&message),
+		"{message:?} makes xmrig close the socket and drop the pool",
+	);
+}
+
+/// xmrig closes the connection on exactly four error strings. A stale share is
+/// the ordinary outcome of a template roll, so none of the share-level
+/// rejections may be one of them: the measured cost of getting this wrong was
+/// six reconnects in 69 s, about half the wall time at zero hash rate.
+#[tokio::test]
+async fn no_share_level_rejection_is_a_string_xmrig_treats_as_critical() {
+	// Difficulty and share difficulty both at the ceiling, so no nonce clears
+	// either rule and the low-difficulty path is reachable.
+	let (server, _engine) = server_with_job(u64::MAX, u64::MAX).await;
+	let mut miner = FakeMiner::connect(server.local_addr()).await;
+	miner.login("qnero-worker").await;
+
+	let mut messages = Vec::new();
+	// A job the node has never issued.
+	messages.push(miner.submit("no-such-job", 1, None).await);
+	// A nonce that is not four bytes of hex.
+	miner
+		.send("submit", json!({"id": miner.session, "job_id": "1", "nonce": "zz"}))
+		.await;
+	messages.push(miner.recv().await);
+	// A hash the node does not compute.
+	messages.push(miner.submit("1", 2, Some(&"00".repeat(32))).await);
+	// A share that clears nothing, then the same nonce again.
+	messages.push(miner.submit("1", 3, None).await);
+	messages.push(miner.submit("1", 3, None).await);
+
+	let messages: Vec<String> = messages
+		.iter()
+		.map(|response| {
+			response["error"]["message"]
+				.as_str()
+				.unwrap_or_else(|| panic!("expected a rejection, got {response}"))
+				.to_string()
+		})
+		.collect();
+	assert!(
+		messages.iter().any(|m| m == "Low difficulty share") &&
+			messages.iter().any(|m| m == "Duplicate share"),
+		"the test must actually reach those paths: {messages:?}",
+	);
+	for message in &messages {
+		assert!(
+			!XMRIG_CRITICAL_ERRORS.contains(&message.as_str()),
+			"{message:?} makes xmrig close the socket and drop the pool",
+		);
+	}
+}
+
+/// The line bound has to be on the reader. `read_line` on its own appends until
+/// it sees a newline, so a peer that never sends one could allocate for as long
+/// as the idle deadline allowed: tens of gigabytes on a fast link, times as
+/// many sockets as it opened.
+#[tokio::test]
+async fn a_line_that_never_ends_is_bounded_and_drops_the_connection() {
+	let (server, _engine) = server_with_job(8, 8).await;
+	let mut miner = FakeMiner::connect(server.local_addr()).await;
+	let flood = vec![b'a'; MAX_LINE_BYTES + 1];
+	let _ = miner.writer.write_all(&flood).await;
+
+	let mut line = String::new();
+	let read = tokio::time::timeout(Duration::from_secs(10), miner.reader.read_line(&mut line))
+		.await
+		.expect("the server must close rather than keep buffering");
+	assert!(
+		matches!(read, Ok(0) | Err(_)),
+		"the connection must be closed, got {read:?} with {line:?}",
+	);
+}
+
+/// The cap is what stops one peer from multiplying whatever per-connection
+/// allowance is left across sockets.
+#[tokio::test]
+async fn the_listener_stops_accepting_past_the_connection_cap() {
+	let (server, _engine) = server_with_job(8, 8).await;
+	let mut held = Vec::new();
+	for _ in 0..MAX_CONNECTIONS {
+		held.push(FakeMiner::connect(server.local_addr()).await);
+	}
+	// Let the accept loop drain the backlog, so the cap is what refuses the
+	// next connection rather than the listen queue.
+	tokio::time::sleep(Duration::from_millis(300)).await;
+	// The listen backlog still completes the handshake, so the refusal shows up
+	// as the server closing the socket without a word.
+	let mut extra = FakeMiner::connect(server.local_addr()).await;
+	let mut line = String::new();
+	let read = tokio::time::timeout(Duration::from_secs(10), extra.reader.read_line(&mut line))
+		.await
+		.expect("the refusal must not hang");
+	assert!(matches!(read, Ok(0) | Err(_)), "expected a closed socket, got {line:?}");
+
+	// Freeing one lets the next connection in.
+	drop(held.pop());
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	let mut next = FakeMiner::connect(server.local_addr()).await;
+	assert_eq!(next.login("qnero-worker").await["result"]["status"], "OK");
 }
 
 #[tokio::test]

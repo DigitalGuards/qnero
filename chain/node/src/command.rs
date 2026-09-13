@@ -790,6 +790,16 @@ pub fn run() -> sc_cli::Result<()> {
 						"--stratum-share-difficulty requires --stratum-port".into(),
 					));
 				}
+				if cli.stratum_port.is_none() &&
+					cli.stratum_host != crate::cli::DEFAULT_STRATUM_HOST
+				{
+					eprintln!("Error: --stratum-host is only used with --stratum-port.\n");
+					eprintln!("Without a port there is no listener to bind, so the address would");
+					eprintln!("be accepted and never used.");
+					return Err(sc_cli::Error::Input(
+						"--stratum-host requires --stratum-port".into(),
+					));
+				}
 				if cli.stratum_share_difficulty == 0 {
 					eprintln!("Error: --stratum-share-difficulty must be at least 1.\n");
 					return Err(sc_cli::Error::Input("--stratum-share-difficulty is zero".into()));

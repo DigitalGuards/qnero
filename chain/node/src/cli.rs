@@ -7,6 +7,11 @@ use sc_cli::RunCmd;
 /// the block difficulty, so on an easy chain every share is a block anyway.
 pub const DEFAULT_SHARE_DIFFICULTY: u64 = 5_000;
 
+/// Default address the stratum endpoint binds: loopback, so opening the port
+/// to a rig on another machine is a decision an operator makes on purpose.
+pub const DEFAULT_STRATUM_HOST: std::net::IpAddr =
+	std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+
 #[derive(Debug, clap::Parser)]
 #[command(arg_required_else_help = true)]
 pub struct Cli {
@@ -55,6 +60,9 @@ pub struct Cli {
 	/// Address the stratum endpoint binds. Loopback by default: a rig on
 	/// another machine needs `0.0.0.0` and a firewall rule you chose on
 	/// purpose.
+	///
+	/// Requires `--stratum-port`; startup fails otherwise, because an address
+	/// with no listener behind it is a flag that silently did nothing.
 	#[arg(long, value_name = "ADDRESS", default_value = "127.0.0.1")]
 	pub stratum_host: std::net::IpAddr,
 
