@@ -367,3 +367,201 @@ With xmrig attached the same chain produced blocks as fast as the node could
 build templates, which is what a 3.5 kH/s rig against a difficulty of 175
 means: the proof of work stopped being the constraint and block building became
 one.
+
+# M8: the prover budget on a phone-class device (2026-09-14)
+
+The milestone question is whether a wallet can prove its own transaction on a
+phone. This section answers it with two columns that differ in the compilation
+target and in nothing else: the same crate, the same synthetic 2-in/2-out
+request and the same code path, once natively and once as
+`wasm32-unknown-unknown` in headless Chromium.
+
+`crates/qnero-prover-wasm` is the subject. Three runs per figure, medians with
+the min and max beside them.
+
+```
+RAYON_NUM_THREADS=1 nice -n 19 cargo test -j 2 --release \
+  -p qnero-prover-wasm --test native_bench -- --ignored --nocapture --test-threads 1
+
+cd crates/qnero-prover-wasm/www && node run.mjs --runs 3              # artifact mode, ZK leaf on
+cd crates/qnero-prover-wasm/www && node run.mjs --runs 3 --mode source --no-zk
+```
+
+## The phone proxy, stated
+
+**There is no phone in these numbers.** This box has no aarch64 cross toolchain
+and no qemu, so a phone CPU is out of reach and the single-threaded wasm run in
+headless Chromium is the proxy. A desktop core under Chrome for Testing 149 is
+faster than a phone core, and the honest way to read the wasm column is to
+multiply it by **2 to 4**. That factor is an estimate and it is the widest
+source of error in everything below; it is not measured here, and a device test
+is what would replace it.
+
+Everything else is measured. Both columns ran on the dev workstation (AMD Ryzen
+AI 9 365, 10C/20T, WSL2) with `nice -n 19`, plonky2's `parallel` feature off
+everywhere, one browser at a time, the browser closed between runs.
+
+## Native, single threaded, `N = 6`
+
+| | median | min | max |
+|---|---:|---:|---:|
+| leaf + private batch circuit build, once per process | 4.22 s | one sample | |
+| leaf prove, non-ZK | 266.8 ms | 195.5 ms | 324.8 ms |
+| private batch prove | 9.95 s | 9.93 s | 9.99 s |
+| private batch verify | 4.0 ms | 4.0 ms | 4.1 ms |
+
+Proof 150908 bytes, leaf `degree_bits` 9, private batch `degree_bits` 15, which
+matches M5's figures at four threads scaled by the threading factor M3
+measured.
+
+## wasm32, single threaded, headless Chromium 149
+
+Chrome for Testing 149.0.7827.55 from the Playwright cache, launched with
+`--js-flags=--wasm-max-mem-pages=32768`, so the run states the ceiling it
+passed under: **2 GiB**. Served over `http://localhost` with COOP and COEP set.
+All proving happens in a dedicated Worker.
+
+| | median | min | max |
+|---|---:|---:|---:|
+| circuit build from source | 12.11 s | 12.02 s | 12.53 s |
+| circuit build from a fetched artifact set | 11.63 s | 11.59 s | 12.35 s |
+| fetch of that set, 107109 bytes | 8.7 ms | 8.1 ms | 9.3 ms |
+| leaf prove, non-ZK | 549.3 ms | 548.9 ms | 905.4 ms |
+| private batch prove | 32.97 s | 32.68 s | 33.02 s |
+| private batch verify | 20.9 ms | 20.1 ms | 21.0 ms |
+| whole `proveTransfer` call | 33.60 s | 33.55 s | 33.61 s |
+| linear memory after module init | 8.2 MiB | | |
+| **peak linear memory** | **910.4 MiB** | 910.4 MiB | 910.4 MiB |
+
+The peak was byte-identical across all three runs (954597376 bytes), which is
+what a deterministic circuit over a fixed witness shape should do. The module
+is 3069123 bytes uncompressed, with no `wasm-opt` pass.
+
+A browser wallet therefore pays **12.1 s once per worker and 33.6 s per
+payment**, and 45.7 s for the first payment after a cold start.
+
+## The wasm penalty, by stage
+
+| stage | native | wasm | ratio |
+|---|---:|---:|---:|
+| circuit build | 4.22 s | 12.11 s | 2.87x |
+| leaf prove | 266.8 ms | 549.3 ms | 2.06x |
+| private batch prove | 9.95 s | 32.97 s | 3.31x |
+| private batch verify | 4.0 ms | 20.9 ms | 5.22x |
+| ZK leaf build | 2.26 s | 6.53 s | 2.89x |
+| ZK leaf prove | 4.78 s | 16.68 s | 3.49x |
+
+The heavy proving stages cluster at about 3.3x. Verify is the worst ratio and
+the least interesting one: 21 ms is 21 ms.
+
+## The zero-knowledge leaf
+
+A ZK leaf is the artifact a phone could hand to somebody else's batcher, so
+what it costs decides whether that path is worth designing. Measured on its
+own, building its own circuit per call.
+
+| | native | wasm |
+|---|---:|---:|
+| build | 2.26 s (2.25 to 2.42) | 6.53 s (6.50 to 6.54) |
+| prove | 4.78 s (4.72 to 4.78) | 16.68 s (16.65 to 17.30) |
+| proof bytes | 150932 | 150932 |
+| `degree_bits` | 14 | 14 |
+
+Two numbers in that table decide the delegation question.
+
+- **Blinding takes the leaf from `degree_bits` 9 to 14.** That is 32x the rows
+  before anything is proved, and it is why a ZK leaf costs 16.7 s in wasm
+  where the non-ZK leaf costs 0.55 s. The leaf is cheap because it does not
+  blind; blinding is what the private batch already pays for, one layer up.
+- **A ZK leaf is 150932 bytes and a whole private batch is 150908.** The leaf
+  carrying one transfer is 24 bytes *larger* than the batch that settles up to
+  six. Proof size here is a property of the FRI config, so delegating uploads
+  the same bytes and buys the batcher's recursion with them.
+
+So the trade is 16.7 s of local work against 33.6 s, a 2.0x saving, for an
+upload of the same size. Section 8 of `docs/DESIGN.md` prices what that saving
+costs in privacy.
+
+## Fetching the artifact set buys almost nothing
+
+The artifact set saves one padding-leaf prove: 11.63 s of circuit build
+against 12.11 s, **0.48 s off a 12.1 s build**, or 4 percent. Against that it
+adds a fetch, a cache, a pinning step and a way for a wallet to be serving
+proofs against the wrong `N`. `leaf_verifier.bin` saves nothing at all, because
+the loader pins it to a canonical rebuild and then uses the rebuild.
+
+The browser prover therefore defaults to building from source and fetching
+nothing, and the harness keeps the artifact path only so this row exists.
+
+## What this means against the design's targets
+
+The target is proving under 60 s on a phone. Reading the wasm column through
+the stated 2 to 4 factor:
+
+| | wasm measured | phone at 2x | phone at 3x | phone at 4x |
+|---|---:|---:|---:|---:|
+| private batch prove, per payment | 33.6 s | 67 s | 101 s | 134 s |
+| circuit build, once per worker | 12.1 s | 24 s | 36 s | 48 s |
+| first payment after a cold start | 45.7 s | 91 s | 137 s | 183 s |
+| ZK leaf alone, per payment | 16.7 s | 33 s | 50 s | 67 s |
+
+**A phone misses the 60 s target on a single thread, at every point of the
+range.** The most optimistic reading puts one payment at 67 s, and that is
+before the first-payment circuit build. The ZK leaf alone fits at 2x and 3x.
+
+Memory is the part that came in comfortably. 910 MiB peak against a 2 GiB
+ceiling this run pinned, and against the 4 GiB a 32-bit linear memory can
+address at all. That is a third of the address space and it leaves room: a
+6 GB or 8 GB Android device has it, a 3 GB or 4 GB device is marginal once the
+renderer's own footprint is counted, and iOS Safari polices per-tab memory hard
+enough that the failure there is a reloaded tab with no catchable error. Note
+that linear memory never shrinks, so the 910 MiB is sticky for the life of the
+worker and a second prover would add its own.
+
+This also confirms what M4 chose `N = 6` for. `docs/CIRCUIT.md` section 9.1
+called six slots against seven "the difference between a phone that can prove
+and one that cannot". At `N = 7` and `degree_bits = 16` the same run would be
+roughly twice this, so about 67 s of wasm proving and near 2 GiB: over the
+ceiling this run pinned, and far outside anything a phone would survive. Six
+slots put the number within reach of one change, which is threads.
+
+## The anchor window is not the constraint here
+
+A segment must name a block inside `BlockHashWindow`, 256 blocks, which at the
+12 s target is about 51 minutes. A browser payment is 45.7 s cold and 33.6 s
+warm, so the window has room to spare even at 4x. The ordering still matters:
+the harness builds every circuit before it takes an anchor, and a wallet that
+anchored first would spend a third of a browser payment on work that has
+nothing to do with the anchor.
+
+## Acceptance: the browser's proof verifies natively
+
+The proof the browser produced was written out and verified on this box
+against `private_batch_verifier.bin`, the same artifact a runtime embeds:
+
+```
+QNERO_WASM_PROOF=<abs>/www/results/private_batch.proof \
+QNERO_ARTIFACT_DIR=<abs>/www/artifacts \
+  cargo test -p qnero-prover-wasm --release --test wasm_proof -- --ignored --nocapture
+```
+
+150908 bytes, 6 slots, 1 real, 131 public-input felts, under the 512 KiB
+`MAX_PROOF_BYTES` gate. Both the source-built and the artifact-built proof pass
+it. The circuits are deterministic and no floating point is involved, so this
+is the check that the two builds did not diverge in their feature graph, which
+is the failure a `zk` flag or a plonky2 version skew would produce.
+
+## What is still unmeasured
+
+- **A phone.** The 2 to 4 factor is an estimate. A device test on a mid-range
+  Android and on an iPhone is what replaces it, and the iOS answer may be that
+  the tab is reclaimed before it finishes.
+- **Threads.** The single-threaded wasm number is the one that misses the
+  target, and M3 measured about 3.1x from four native threads. Whether
+  wasm threads deliver that is unmeasured, and `docs/DESIGN.md` section 8
+  carries what trying would cost.
+- **`wasm-opt`.** The module ships unoptimized at 3069123 bytes. Neither the
+  size nor the speed after a `wasm-opt -O` pass is known.
+- **Scanning at chain scale.** `decryptNote` is measured only as part of the
+  round-trip test. A wallet scanning thousands of ciphertexts per sync is a
+  different budget and nothing here bounds it.

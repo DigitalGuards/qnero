@@ -52,6 +52,7 @@ One workstation, 20 cores, WSL2. `docs/BENCH.md` is the log.
 - Private batch at the chain default N = 6, four threads: proof 150908 bytes, 131 felts, prove 3.34 to 3.61 s. N = 7 is 24530 gates, 6.4 s and 2.06 GiB peak, about 2x the cost of six for one more slot.
 - Public batch at n = 53: proof 237544 bytes, prove 29 s, a 2.2x margin under `MAX_PROOF_BYTES` of 524288, 318 real slots.
 - Verify is flat in what a proof wraps: 2.2 ms for a leaf, 4.2 ms for a private batch, 6.04 ms for the public-batch check, all native. `WASM_VERIFY_FACTOR = 5` is unmeasured.
+- In a browser, single threaded: a payment is 33.6 s of wasm and 910 MiB of peak linear memory, on top of 12.1 s of circuit build once per worker. Natively on one thread the same batch is 9.95 s, so wasm costs about 3.3x. There is no phone in these figures: a desktop core under headless Chromium is the proxy, the stated factor is 2 to 4, and a phone therefore lands at 67 to 134 s per payment. The memory fits a 6 GB device and the single-threaded clock misses the 60 s target, so threads are the measured gap.
 - An address `qn1...` is 2571 characters, mostly its 1568-byte ML-KEM-1024 key. Amounts are pool quanta of 10^10 planck, 0.01 QNR; a `send` defaults to a fee of 8 quanta and takes 6.47 to 7.81 s, and emission at genesis supply is 41 quanta a block.
 
 ## Running it
@@ -114,7 +115,7 @@ another machine needs `0.0.0.0` and a firewall rule you chose.
 
 ## Status, audits and caveats
 
-M1 through M7 are done, through the wallet CLI, v1 mandatory privacy and RandomX proof of work. The audits are upstream's: Eiger on the Wormhole circuits (2026-03-20), a Substrate audit of the chain (2026-05-13), a proof-of-work and Poseidon review. **No external audit of the Qnero delta exists.** That delta is the leaf circuit's note fragments, the public-input layouts at all three layers, the aggregator rules, and `pallet-shielded`. The design claims a reviewer can read it in a day, and Plonky2's 100-bit security here is a conjecture.
+M1 through M8 are done, through the wallet CLI, v1 mandatory privacy, RandomX proof of work and a measured browser prover. The audits are upstream's: Eiger on the Wormhole circuits (2026-03-20), a Substrate audit of the chain (2026-05-13), a proof-of-work and Poseidon review. **No external audit of the Qnero delta exists.** That delta is the leaf circuit's note fragments, the public-input layouts at all three layers, the aggregator rules, and `pallet-shielded`. The design claims a reviewer can read it in a day, and Plonky2's 100-bit security here is a conjecture.
 
 - Key storage is dev grade: 32 bytes of hex in a `0600` file, no passphrase or encryption, beside a note store holding every `rho` and `r` in clear text.
 - Weights are unbenchmarked, and admission work is unpaid per gossiped blob: a settlement walk and a verify each, with no rate limit.
@@ -122,7 +123,7 @@ M1 through M7 are done, through the wallet CLI, v1 mandatory privacy and RandomX
 - The real-transfer count is public: a padding slot publishes zero commitments, which the chain needs to append correctly.
 - One transfer per submission today: six slots, one filled, so 150908 bytes carries one transfer, about 22 KB each when full.
 
-M7 is done: the proof of work is RandomX, so a Monero rig mines Qnero through the node's stratum port. Queued next: real key storage, a keccak pin on the first tagged circuit release, hiding the real-transfer count. Testnet targets: a proof per transaction under 105 KB or amortized below it, proving under 5 s on a laptop, no cryptographic component without a firm's review.
+M7 is done: the proof of work is RandomX, so a Monero rig mines Qnero through the node's stratum port. M8 measured the browser prover and found the one number short: a phone has the memory and does not have the single-threaded clock. Queued next: wasm threads, which is the measured gap and needs a nightly toolchain and cross-origin isolation to try; then a device test to replace the 2 to 4 proxy factor; then real key storage, a keccak pin on the first tagged circuit release, and hiding the real-transfer count. Testnet targets: a proof per transaction under 105 KB or amortized below it, proving under 5 s on a laptop and under 60 s on a phone, no cryptographic component without a firm's review.
 
 ## Credits and licence
 

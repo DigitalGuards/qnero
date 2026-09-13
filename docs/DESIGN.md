@@ -466,9 +466,85 @@ author derivation lives there and the runtime's one author seam calls it.
 
 | M7 | RandomX proof of work, so a Monero rig mines Qnero | DONE 2026-09-13 (the engine is RandomX `rx/0`, stock upstream constants, so the hash is bit-identical to what a stock xmrig computes and a Monero rig moves over with a config change; `chain/client/consensus/randomx` is the whole engine, the runtime no longer verifies a nonce because RandomX cannot run in wasm, `pallet-qpow` keeps the difficulty storage and the Homestead retarget because both are functions of block times rather than of the hash, and the node grew a stratum endpoint behind `--stratum-port` speaking the dialect xmrig speaks to a Monero pool. The M6 author seam did what it was built for: `H(cvk, parent_hash)`, `configs::QpowAuthor`, the coinbase inherent, the header shape and fork choice are untouched, and `POW_ENGINE_ID` is still `pow_`. The proof is a 4-byte nonce and a 4-byte extra nonce over a fixed 76-byte blob with the nonce at offset 39 where xmrig writes it, packed into the 64-byte seal the digest window needs with the remaining 56 bytes pinned to zero, because free seal bytes would be free block-hash grinding. The comparison is Monero's: the hash read little-endian, accepted when `hash * difficulty <= 2^256 - 1`. Seed rotation is Monero's rule with the epoch and lag as runtime constants. `spec_version` moved to 102 for the three runtime-API methods and the event that went away; `transaction_version` stayed at 7. See section 10, `docs/OPS-DEV.md` and `docs/BENCH.md`) |
 
-About 10 to 12 weeks to a private testnet. The measured risk to retire first
-is wallet-side proving time and memory for a 2-in/2-out leaf plus a
-6-slot private batch (see `docs/BENCH.md`).
+| M8 | Prover budget on a phone-class device: a browser prover, measured | DONE 2026-09-14 (`crates/qnero-prover-wasm` is the browser surface, compiled to `wasm32-unknown-unknown`, single threaded, rayon-free: derive an address, decrypt a ciphertext while scanning, and prove one private batch at `N = 6`, with a headless-Chromium harness under `www/` and its Node runner. Measured three times per figure: **33.6 s per payment and 910 MiB peak** in single-threaded wasm, on top of 12.1 s of circuit build once per worker, against 9.95 s and the same shape natively. A desktop core under headless Chromium is the phone proxy and the stated factor is 2 to 4, so a phone is 67 to 134 s per payment: **memory fits and the single-threaded clock misses the 60 s target at every point of the range**. The ZK leaf a delegated batcher would take is measured too, at 16.7 s and 150932 bytes, which is 24 bytes larger than the whole six-slot batch it would be handed to. See the section below and `docs/BENCH.md`)
+
+About 10 to 12 weeks to a private testnet. M8 retired the measured risk this
+line used to name, wallet-side proving time and memory for a 2-in/2-out leaf
+plus a 6-slot private batch, and it came back with one number good and one
+number short: the memory fits a phone and the single-threaded clock does not.
+
+### M8: what a phone can actually prove
+
+The measurement is in `docs/BENCH.md`. The decisions it forces are here.
+
+**Can a phone prove a full private batch locally, under the 60 s target?**
+Not on one thread. A payment is 33.6 s of single-threaded wasm on a desktop
+core under headless Chromium, plus 12.1 s of circuit build once per worker.
+Read through the stated 2 to 4 phone factor that is 67 to 134 s per payment
+and 91 to 183 s for the first payment after a cold start. The most optimistic
+end of the range still misses 60 s.
+
+**What memory does it need?** 910 MiB peak, identical across all three runs,
+against the 2 GiB ceiling the run pinned and the 4 GiB a 32-bit linear memory
+can address. The sticky part is the wasm part: linear memory grows and never
+shrinks, so the peak stands for the life of the worker and a second prover
+would add its own gigabyte. A 6 GB or 8 GB Android device has this comfortably.
+A 3 GB or 4 GB device is marginal once the renderer's own footprint counts. iOS
+Safari polices per-tab memory hard enough that its failure mode is a reclaimed
+tab with no catchable error. Settling that one takes a device test.
+
+This settles the `N = 6` choice with a measurement. `docs/CIRCUIT.md` section
+9.1 argued six slots against seven as "the difference between a phone that can
+prove and one that cannot" on an estimate. At `degree_bits = 16` the same run
+would be roughly twice this, about 67 s of wasm proving and near 2 GiB, which
+is over the pinned ceiling and outside what a phone survives. The argument was
+right and the margin is smaller than it reads.
+
+**So the deciding change is threads.** The map written before this milestone
+assumed threading was a comfort improvement that could not turn a no into a
+yes. The measurement reverses that: memory has 3x of headroom and the clock is
+the only thing failing, so the 3.1x that M3 measured from four native threads
+is exactly the size of the gap. Four threads at that factor put a payment at
+about 11 s of wasm and 22 to 44 s on a phone, inside the target. Nothing is
+promised here: wasm threads need a nightly toolchain with `-Z build-std`
+(the workspace is pinned to stable 1.93.0), `wasm-bindgen-rayon`, a
+SharedArrayBuffer, and cross-origin isolation on whatever origin serves the
+wallet. The harness already sets COOP and COEP so that experiment needs no
+different server. That is the next thing to measure, and it should be measured
+before anything is designed around delegation.
+
+**Is the ZK-leaf-plus-delegated-batch path worth building? No.** A phone proves
+a blinded leaf, hands it to a batcher it does not run, and the batcher pays the
+recursion. The measurement prices both halves of that trade and both come out
+badly.
+
+What it buys is 16.7 s against 33.6 s, a 2.0x saving, which lands a phone at 33
+to 67 s. That is the same order as what threads would buy for free, and it is
+still over the target at the pessimistic end.
+
+What it costs is stated plainly. A leaf publishes 26 felts
+(`crates/qnero-circuit/src/layout.rs`): the anchor block hash and number, both
+input nullifiers, both output commitments, the fee, and the ciphertext digest.
+Zero knowledge hides the witness and publishes all of that. So the batcher
+learns the complete public record of the spend before the chain does, bound to
+whoever asked: the nullifiers it is about to burn, the commitments it is about
+to create, and the fee. It can sit on a leaf, drop it, order it against
+another, or sell the foreknowledge, and the wallet has no way to tell a slow
+batcher from a hostile one. The client's network identity rides along with it,
+so a batcher also holds the IP-to-spend mapping that
+`tests/node_learns_nothing.rs` exists to keep a node from building.
+
+There is also a size argument, and it is the one that removes any doubt. A ZK
+leaf is 150932 bytes. The whole six-slot private batch is 150908. Delegation
+uploads 24 bytes more than proving the transaction outright, so it does not
+even buy bandwidth.
+
+The honest summary: the delegated-batch path trades a privacy property the
+design spends real complexity to hold for a speedup that threads look able to
+beat without it. Build threads first. If threads fail to deliver and a phone
+still cannot prove, delegation comes back as a deliberate privacy tradeoff
+offered to a user who is told what it costs, and it is a poor default either
+way.
 
 ## 9. Open questions
 
