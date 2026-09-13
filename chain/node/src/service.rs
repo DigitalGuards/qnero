@@ -11,7 +11,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use qnero_runtime::{self, apis::RuntimeApi, opaque::Block};
 use sc_client_api::Backend;
-use sc_consensus_qpow::MiningHandle;
+use sc_consensus_randomx::{blob, target, MiningHandle, MiningMetadata, RandomxEngine, Seal};
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
 #[cfg(feature = "tx-logging")]
@@ -20,21 +20,15 @@ use sc_transaction_pool_api::{OffchainTransactionPoolFactory, TransactionPool};
 use sp_inherents::CreateInherentDataProviders;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-	coinbase,
-	miner_server::{MinerServer, MinerServerConfig, DEFAULT_MINER_AUTH_TOKEN_FILENAME},
-	prometheus::BusinessMetrics,
-};
-use codec::Encode;
+use crate::{coinbase, prometheus::BusinessMetrics, stratum};
 use jsonrpsee::tokio;
-use quantus_miner_api::{ApiResponseStatus, MiningRequest, MiningResult};
 use sc_basic_authorship::ProposerFactory;
 use sp_api::ProvideRuntimeApi;
 use sp_blockchain::HeaderBackend;
 use sp_consensus::SyncOracle;
 use sp_consensus_qpow::QPoWApi;
 use sp_core::{crypto::AccountId32, U512};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 /// Frequency of block import logging. Every 1000 blocks.
 const LOG_FREQUENCY: u64 = 1000;
@@ -56,265 +50,95 @@ fn tip_is_stale(now_ms: u64, tip_timestamp_ms: u64, max_tip_age_ms: u64) -> bool
 fn freshness_gate_applies(allow_mining_without_peers: bool, tip_has_been_fresh: bool) -> bool {
 	!allow_mining_without_peers && !tip_has_been_fresh
 }
-
 // ============================================================================
-// External Mining Helper Functions
-// ============================================================================
-
-/// Parse a mining result and extract the seal if valid.
-fn parse_mining_result(result: &MiningResult, expected_job_id: &str) -> Option<Vec<u8>> {
-	let miner_id = result.miner_id.unwrap_or(0);
-
-	// Check job ID matches
-	if result.job_id != expected_job_id {
-		log::debug!(target: "miner", "Received stale result from miner {} for job {}, ignoring", miner_id, result.job_id);
-		return None;
-	}
-
-	// Check status
-	if result.status != ApiResponseStatus::Completed {
-		match result.status {
-			ApiResponseStatus::Failed => log::warn!("⛏️ Mining job failed (miner {})", miner_id),
-			ApiResponseStatus::Cancelled => {
-				log::debug!(target: "miner", "Mining job was cancelled (miner {})", miner_id)
-			},
-			_ => {
-				log::debug!(target: "miner", "Unexpected result status from miner {}: {:?}", miner_id, result.status)
-			},
-		}
-		return None;
-	}
-
-	// Extract and decode work
-	let work_hex = result.work.as_ref()?;
-	match hex::decode(work_hex) {
-		Ok(seal) if seal.len() == 64 => Some(seal),
-		Ok(seal) => {
-			log::error!(
-				"🚨🚨🚨 INVALID SEAL LENGTH FROM MINER {}! Expected 64 bytes, got {} bytes",
-				miner_id,
-				seal.len()
-			);
-			None
-		},
-		Err(e) => {
-			log::error!("🚨🚨🚨 FAILED TO DECODE SEAL HEX FROM MINER {}: {}", miner_id, e);
-			None
-		},
-	}
-}
-
-/// Wait for a mining result from the miner server.
-///
-/// Returns `Some((miner_id, seal))` if a valid 64-byte seal is received, `None` otherwise
-/// (interrupted, failed, invalid, or stale).
-///
-/// The `should_stop` closure should return `true` if we should stop waiting
-/// (e.g., new block arrived or shutdown requested).
-///
-/// This function will keep waiting even if all miners disconnect, since newly
-/// connecting miners automatically receive the current job and can submit results.
-async fn wait_for_mining_result<F>(
-	server: &Arc<MinerServer>,
-	job_id: &str,
-	should_stop: F,
-) -> Option<(u64, Vec<u8>)>
-where
-	F: Fn() -> bool,
-{
-	loop {
-		if should_stop() {
-			return None;
-		}
-
-		match server.recv_result_timeout(Duration::from_millis(500)).await {
-			Some(result) => {
-				let miner_id = result.miner_id.unwrap_or(0);
-				if let Some(seal) = parse_mining_result(&result, job_id) {
-					// The template can rebuild while we were blocked on recv. Re-check
-					// before returning a seal so we never submit work for a superseded
-					// pre_hash (stress tests hit this: job N completes after rebuild).
-					if should_stop() {
-						return None;
-					}
-					return Some((miner_id, seal));
-				}
-				// Keep waiting for other miners (stale, failed, or invalid parse)
-			},
-			None => {
-				// Timeout, continue waiting
-			},
-		}
-	}
-}
-
-// ============================================================================
-// Mining Loop Helpers
+// Mining
 // ============================================================================
 
-/// Result of attempting to mine with an external miner.
-enum ExternalMiningOutcome {
-	/// Successfully found and imported a seal.
-	Success,
-	/// Mining was interrupted (new block, cancellation, or failure).
-	Interrupted,
-}
-
-/// Handle a single round of external mining.
+/// Nonces one in-process mining round tries per thread before it looks up to
+/// see whether the template moved.
 ///
-/// Broadcasts the job to connected miners and waits for results.
-/// If a seal fails validation, continues waiting for more seals.
-/// Only returns when a seal is successfully imported, or when interrupted.
-async fn handle_external_mining(
-	server: &Arc<MinerServer>,
-	client: &Arc<FullClient>,
-	worker_handle: &MiningHandle<
-		Block,
-		FullClient,
-		Arc<sc_network_sync::SyncingService<Block>>,
-		(),
-	>,
-	cancellation_token: &CancellationToken,
-	job_counter: &mut u64,
-	mining_start_time: &mut std::time::Instant,
-) -> ExternalMiningOutcome {
-	// Read the version BEFORE snapshotting metadata (same pattern as
-	// handle_local_mining) so a concurrent rebuild between the two reads is
-	// caught by the version comparisons below.
-	let job_version = worker_handle.version();
-	let metadata = match worker_handle.metadata() {
-		Some(m) => m,
-		None => return ExternalMiningOutcome::Interrupted,
-	};
+/// Sixteen is about half a second on one light-mode thread at the ~33 H/s this
+/// workstation manages, which keeps a `--dev` node responsive without making
+/// the version check the dominant cost.
+const LOCAL_MINING_BATCH: u32 = 16;
 
-	// Get difficulty from runtime
-	let difficulty = match client.runtime_api().get_difficulty(metadata.best_hash) {
-		Ok(d) => d,
-		Err(e) => {
-			log::warn!("⛏️ Failed to get difficulty: {:?}", e);
-			return ExternalMiningOutcome::Interrupted;
-		},
-	};
+/// How long the loop waits on a stratum share when it is also mining in
+/// process, so the two producers interleave instead of one starving the other.
+const STRATUM_POLL_WHILE_MINING: Duration = Duration::from_millis(1);
 
-	// Create and broadcast job
-	*job_counter += 1;
-	let job_id = job_counter.to_string();
-	let mining_hash = hex::encode(metadata.pre_hash.as_bytes());
-	log::info!(
-		"⛏️ Broadcasting job {}: pre_hash={}, difficulty={}",
+/// How long the loop waits on a stratum share when it is not mining in process.
+const STRATUM_POLL_IDLE: Duration = Duration::from_millis(500);
+
+/// The job a template becomes, for whoever is mining it.
+fn job_from_metadata(
+	job_id: String,
+	metadata: &MiningMetadata<sp_core::H256, U512>,
+) -> stratum::MiningJob {
+	stratum::MiningJob {
 		job_id,
-		mining_hash,
-		difficulty
-	);
-	let job =
-		MiningRequest { job_id: job_id.clone(), mining_hash, difficulty: difficulty.to_string() };
-
-	server.broadcast_job(job).await;
-
-	// Any rebuild, sync-clear, or consumed build bumps the worker version,
-	// superseding this job. Note submit() re-verifies the seal against the
-	// current build under its own lock, so a stale seal can never be imported;
-	// these checks only avoid wasted verification and misleading logs.
-	let superseded = || cancellation_token.is_cancelled() || worker_handle.version() != job_version;
-	let best_hash = metadata.best_hash;
-	let original_pre_hash = metadata.pre_hash;
-	let log_if_rebuilt = || {
-		if let Some(current) = worker_handle.metadata() {
-			if current.best_hash == best_hash && current.pre_hash != original_pre_hash {
-				log::info!(
-					"⛏️ Block template rebuilt while mining job {}. Old pre_hash: {}, New pre_hash: {}. Rebroadcasting...",
-					job_id,
-					hex::encode(original_pre_hash.as_bytes()),
-					hex::encode(current.pre_hash.as_bytes())
-				);
-			}
-		}
-	};
-
-	// Wait for results from miners, retrying on invalid seals
-	loop {
-		let (miner_id, seal) = match wait_for_mining_result(server, &job_id, superseded).await {
-			Some(result) => result,
-			None => {
-				log_if_rebuilt();
-				return ExternalMiningOutcome::Interrupted;
-			},
-		};
-
-		// Submit the seal (submit verifies atomically before consuming the build)
-		if worker_handle.submit(seal).await {
-			let mining_time = mining_start_time.elapsed().as_secs();
-			log::info!(
-				"🥇 Successfully mined and submitted a new block via external miner {} (mining time: {}s)",
-				miner_id,
-				mining_time
-			);
-			*mining_start_time = std::time::Instant::now();
-			return ExternalMiningOutcome::Success;
-		}
-
-		// If the template moved while we were submitting, the failure is not the
-		// miner's fault — interrupt and rebroadcast instead of blaming the seal.
-		if superseded() {
-			log_if_rebuilt();
-			return ExternalMiningOutcome::Interrupted;
-		}
-
-		// Submit failed (seal invalid or import error)
-		log::warn!(
-			"⛏️ Failed to submit seal from miner {}, continuing to wait (job {})",
-			miner_id,
-			job_id
-		);
+		pre_hash: metadata.pre_hash,
+		height: metadata.height,
+		difficulty: metadata.difficulty,
+		seed_hash: metadata.seed_hash,
+		next_seed_hash: metadata.next_seed_hash,
 	}
 }
 
-/// Try to find a valid nonce for local mining.
+/// One round of in-process mining: `LOCAL_MINING_BATCH` nonces per thread,
+/// each thread on its own RandomX VM, all of them light mode.
 ///
-/// Tries 50k nonces from a random starting point, then yields to check for new blocks.
-/// With Poseidon2 hashing this takes ~50-100ms, keeping the node responsive.
-async fn handle_local_mining(
-	client: &Arc<FullClient>,
-	worker_handle: &MiningHandle<
-		Block,
-		FullClient,
-		Arc<sc_network_sync::SyncingService<Block>>,
-		(),
-	>,
-) -> Option<Vec<u8>> {
-	// Read the version BEFORE snapshotting metadata so any concurrent rebuild
-	// between the two reads is caught by the post-search version check below.
-	let version = worker_handle.version();
-	let metadata = worker_handle.metadata()?;
-	let block_hash = metadata.pre_hash.0;
-	let difficulty = client.runtime_api().get_difficulty(metadata.best_hash).unwrap_or_else(|e| {
-		log::warn!("API error getting difficulty: {:?}", e);
-		U512::zero()
-	});
-
-	if difficulty.is_zero() {
-		return None;
+/// This is what keeps a `--dev` node producing blocks with no rig attached. It
+/// is not meant to be competitive: a light-mode VM is an order of magnitude
+/// slower than the full-mode dataset a real miner builds, which is the whole
+/// reason the stratum endpoint exists.
+async fn local_mining_round(
+	engine: Arc<RandomxEngine>,
+	metadata: MiningMetadata<sp_core::H256, U512>,
+	threads: usize,
+	start_nonce: u32,
+	extra_nonce: u32,
+) -> Option<Seal> {
+	let (pre_hash, height, seed, difficulty) =
+		(metadata.pre_hash, metadata.height, metadata.seed_hash, metadata.difficulty);
+	let mut workers = Vec::with_capacity(threads);
+	for thread in 0..threads {
+		let engine = engine.clone();
+		workers.push(tokio::task::spawn_blocking(move || {
+			let lease = match engine.acquire(seed.0) {
+				Ok(lease) => lease,
+				Err(error) => {
+					log::error!("⛏️ RandomX could not start: {error}");
+					return None;
+				},
+			};
+			for step in 0..LOCAL_MINING_BATCH {
+				// Threads interleave rather than take disjoint ranges, so a
+				// short round still spreads over the space.
+				let nonce = start_nonce
+					.wrapping_add(step.wrapping_mul(threads as u32))
+					.wrapping_add(thread as u32);
+				let blob = blob::build_blob(&pre_hash.0, height, extra_nonce, nonce);
+				match lease.hash(&blob) {
+					Ok(hash) if target::meets_difficulty(&hash, difficulty) =>
+						return Some(Seal { nonce, extra_nonce }),
+					Ok(_) => {},
+					Err(error) => {
+						log::error!("⛏️ RandomX hashing failed: {error}");
+						return None;
+					},
+				}
+			}
+			None
+		}));
 	}
 
-	let start_nonce = U512::from(rand::random::<u128>());
-	let target = U512::MAX / difficulty;
-
-	let found = tokio::task::spawn_blocking(move || {
-		let mut nonce = start_nonce;
-		for _ in 0..50_000 {
-			let nonce_bytes = nonce.to_big_endian();
-			if qpow_math::get_nonce_hash(block_hash, nonce_bytes) < target {
-				return Some(nonce_bytes);
-			}
-			nonce = nonce.overflowing_add(U512::one()).0;
+	let mut found = None;
+	for worker in workers {
+		if let Ok(Some(seal)) = worker.await {
+			found = found.or(Some(seal));
 		}
-		None
-	})
-	.await
-	.ok()
-	.flatten();
-
-	found.filter(|_| worker_handle.version() == version).map(|nonce| nonce.encode())
+	}
+	found
 }
 
 /// Submit a mined seal to the worker handle.
@@ -346,11 +170,12 @@ async fn submit_mined_block(
 	}
 }
 
-/// Pause proposal building and drop the stored external-miner job on the
-/// enabled-to-disabled edge. The protocol has no cancel, so already-connected
-/// miners keep the last job; `clear_current_job` only stops *new* connections
-/// from being handed stale work. Repeated pauses while already disabled are
-/// no-ops so the 5s retry loop does not log a clear every iteration.
+/// Pause proposal building and drop the stratum server's current job on the
+/// enabled-to-disabled edge. Stratum has no cancel message, so a miner that is
+/// already connected keeps grinding the last job it was pushed;
+/// `clear_current_job` only stops *new* logins from being handed stale work.
+/// Repeated pauses while already disabled are no-ops so the 5s retry loop does
+/// not log a clear every iteration.
 async fn pause_authoring(
 	worker_handle: &MiningHandle<
 		Block,
@@ -358,34 +183,152 @@ async fn pause_authoring(
 		Arc<sc_network_sync::SyncingService<Block>>,
 		(),
 	>,
-	miner_server: &Option<Arc<MinerServer>>,
+	stratum_server: &Option<Arc<stratum::StratumServer>>,
 ) {
 	let was_enabled = worker_handle.is_authoring_enabled();
 	worker_handle.set_authoring_enabled(false);
 	if was_enabled {
-		if let Some(server) = miner_server {
+		if let Some(server) = stratum_server {
 			server.clear_current_job().await;
 		}
 	}
 }
 
-/// The main mining loop that coordinates local and external mining.
+/// Mine one template, until it is won or superseded.
+///
+/// Both producers run against the same template: the in-process miner for a
+/// devnet with no rig attached, and the stratum server for the rigs that are.
+/// Either one's seal goes through `MiningHandle::submit`, which re-checks it
+/// under the build lock before it consumes the build.
+async fn mine_one_template(
+	worker_handle: &MiningHandle<
+		Block,
+		FullClient,
+		Arc<sc_network_sync::SyncingService<Block>>,
+		(),
+	>,
+	stratum_server: &Option<Arc<stratum::StratumServer>>,
+	cancellation_token: &CancellationToken,
+	job_counter: &mut u64,
+	mining_start_time: &mut std::time::Instant,
+	mining_threads: usize,
+) {
+	let job_version = worker_handle.version();
+	let Some(metadata) = worker_handle.metadata() else {
+		return;
+	};
+
+	*job_counter += 1;
+	let job_id = job_counter.to_string();
+	log::info!(
+		"⛏️ Mining #{} with {}: pre_hash={}, difficulty={}, seed #{} {}",
+		metadata.height,
+		sc_consensus_randomx::ALGO,
+		hex::encode(metadata.pre_hash.as_bytes()),
+		metadata.difficulty,
+		metadata.seed_height,
+		hex::encode(metadata.seed_hash.as_bytes()),
+	);
+
+	if let Some(server) = stratum_server {
+		let (accepted, rejected, blocks) = server.stats();
+		log::info!(
+			"⛏️ Stratum so far: {accepted} shares accepted, {rejected} rejected, {blocks} of them blocks",
+		);
+		server.broadcast_job(job_from_metadata(job_id.clone(), &metadata)).await;
+	}
+
+	// Any rebuild, sync-clear, or consumed build bumps the worker version,
+	// superseding this template. `submit` re-verifies against the current
+	// build under its own lock, so a stale seal can never be imported; these
+	// checks only avoid wasted hashing and misleading logs.
+	let superseded = || cancellation_token.is_cancelled() || worker_handle.version() != job_version;
+
+	let engine = worker_handle.engine();
+	// A fresh extra nonce per template, so a node restarting on the same
+	// template does not re-walk the nonces it already tried.
+	let extra_nonce: u32 = rand::random();
+	let mut nonce_cursor: u32 = rand::random();
+
+	while !superseded() {
+		if mining_threads > 0 {
+			let found = local_mining_round(
+				engine.clone(),
+				metadata.clone(),
+				mining_threads,
+				nonce_cursor,
+				extra_nonce,
+			)
+			.await;
+			nonce_cursor =
+				nonce_cursor.wrapping_add(LOCAL_MINING_BATCH.wrapping_mul(mining_threads as u32));
+			if let Some(seal) = found {
+				if superseded() {
+					return;
+				}
+				submit_mined_block(
+					worker_handle,
+					seal.encode().to_vec(),
+					mining_start_time,
+					" in process",
+				)
+				.await;
+				return;
+			}
+		}
+
+		match stratum_server {
+			Some(server) => {
+				let wait =
+					if mining_threads > 0 { STRATUM_POLL_WHILE_MINING } else { STRATUM_POLL_IDLE };
+				if let Some(mined) = server.recv_seal_timeout(wait).await {
+					if mined.job_id != job_id {
+						log::debug!(target: "stratum", "dropping a seal for the superseded job {}", mined.job_id);
+						continue;
+					}
+					if superseded() {
+						return;
+					}
+					let source = format!(" by stratum miner {:?}", mined.worker);
+					submit_mined_block(worker_handle, mined.seal, mining_start_time, &source).await;
+					return;
+				}
+			},
+			None =>
+				if mining_threads == 0 {
+					// Neither producer is configured: nothing to do but wait
+					// for the operator to fix it.
+					tokio::time::sleep(STRATUM_POLL_IDLE).await;
+				},
+		}
+
+		tokio::task::yield_now().await;
+	}
+}
+
+/// The main mining loop.
 ///
 /// This function runs continuously until the cancellation token is triggered.
 /// It handles:
 /// - Waiting for the initial tip to become fresh
-/// - Coordinating with external miners (if server is available)
-/// - Falling back to local mining
+/// - Publishing each template to connected rigs, and mining it in process
+#[allow(clippy::too_many_arguments)]
 async fn mining_loop(
 	client: Arc<FullClient>,
 	worker_handle: MiningHandle<Block, FullClient, Arc<sc_network_sync::SyncingService<Block>>, ()>,
 	sync_service: Arc<sc_network_sync::SyncingService<Block>>,
-	miner_server: Option<Arc<MinerServer>>,
+	stratum_server: Option<Arc<stratum::StratumServer>>,
 	cancellation_token: CancellationToken,
 	allow_mining_without_peers: bool,
 	max_tip_age_ms: u64,
+	mining_threads: usize,
 ) {
-	log::info!("⛏️ QPoW Mining task spawned");
+	log::info!(
+		"⛏️ RandomX mining task spawned ({}, {} in-process thread(s), flags {:?})",
+		sc_consensus_randomx::ALGO,
+		mining_threads,
+		worker_handle.engine().flags(),
+	);
 
 	let mut mining_start_time = std::time::Instant::now();
 	let mut job_counter: u64 = 0;
@@ -399,8 +342,8 @@ async fn mining_loop(
 
 	loop {
 		if cancellation_token.is_cancelled() {
-			pause_authoring(&worker_handle, &miner_server).await;
-			log::info!("⛏️ QPoW Mining task shutting down gracefully");
+			pause_authoring(&worker_handle, &stratum_server).await;
+			log::info!("⛏️ RandomX mining task shutting down gracefully");
 			break;
 		}
 
@@ -431,7 +374,7 @@ async fn mining_loop(
 				Ok((now_ms, tip_timestamp_ms)) => {
 					logged_tip_error = false;
 					if tip_is_stale(now_ms, tip_timestamp_ms, max_tip_age_ms) {
-						pause_authoring(&worker_handle, &miner_server).await;
+						pause_authoring(&worker_handle, &stratum_server).await;
 						if !logged_stale_tip {
 							log::info!(
 								"⛏️ Mining paused: best block timestamp is {}s old (limit {}s); waiting to catch up with the network",
@@ -440,7 +383,7 @@ async fn mining_loop(
 							);
 							logged_stale_tip = true;
 						} else {
-							log::debug!(target: "pow", "Mining paused: tip is stale");
+							log::debug!(target: "randomx", "Mining paused: tip is stale");
 						}
 						tokio::select! {
 							_ = tokio::time::sleep(Duration::from_secs(5)) => {}
@@ -454,7 +397,7 @@ async fn mining_loop(
 					tip_has_been_fresh = true;
 				},
 				Err(error) => {
-					pause_authoring(&worker_handle, &miner_server).await;
+					pause_authoring(&worker_handle, &stratum_server).await;
 					// Fail closed: this is the only freshness gate for
 					// authoring, so an unreadable clock or tip timestamp
 					// pauses mining just like a stale one
@@ -480,12 +423,12 @@ async fn mining_loop(
 				None => {
 					// First time detecting offline, start grace period
 					offline_since = Some(now);
-					log::debug!(target: "pow", "No peers detected, starting {}s grace period before pausing mining", OFFLINE_GRACE_PERIOD.as_secs());
+					log::debug!(target: "randomx", "No peers detected, starting {}s grace period before pausing mining", OFFLINE_GRACE_PERIOD.as_secs());
 				},
 				Some(since) if now.duration_since(since) >= OFFLINE_GRACE_PERIOD => {
 					// Grace period exceeded, pause mining
-					pause_authoring(&worker_handle, &miner_server).await;
-					log::warn!(target: "pow", "Mining paused: no connected peers for {}s (node is offline)", OFFLINE_GRACE_PERIOD.as_secs());
+					pause_authoring(&worker_handle, &stratum_server).await;
+					log::warn!(target: "randomx", "Mining paused: no connected peers for {}s (node is offline)", OFFLINE_GRACE_PERIOD.as_secs());
 					tokio::select! {
 						_ = tokio::time::sleep(Duration::from_secs(5)) => {}
 						_ = cancellation_token.cancelled() => continue
@@ -494,13 +437,13 @@ async fn mining_loop(
 				},
 				Some(_) => {
 					// Still within grace period, continue mining but log
-					log::debug!(target: "pow", "No peers but still within grace period, continuing mining");
+					log::debug!(target: "randomx", "No peers but still within grace period, continuing mining");
 				},
 			}
 		} else {
 			// We have peers (or are in dev mode), reset offline tracking
 			if offline_since.is_some() {
-				log::info!(target: "pow", "Peers reconnected, resuming normal mining");
+				log::info!(target: "randomx", "Peers reconnected, resuming normal mining");
 			}
 			offline_since = None;
 		}
@@ -512,7 +455,7 @@ async fn mining_loop(
 		// failed to import) request a rebuild so mining resumes without
 		// waiting for an external block/tx trigger.
 		if worker_handle.metadata().is_none() {
-			log::debug!(target: "pow", "No mining metadata available, requesting rebuild");
+			log::debug!(target: "randomx", "No mining metadata available, requesting rebuild");
 			worker_handle.request_rebuild();
 			tokio::select! {
 				_ = tokio::time::sleep(Duration::from_millis(250)) => {}
@@ -521,27 +464,21 @@ async fn mining_loop(
 			continue;
 		}
 
-		if let Some(ref server) = miner_server {
-			// External mining path
-			handle_external_mining(
-				server,
-				&client,
-				&worker_handle,
-				&cancellation_token,
-				&mut job_counter,
-				&mut mining_start_time,
-			)
-			.await;
-		} else if let Some(seal) = handle_local_mining(&client, &worker_handle).await {
-			// Local mining path
-			submit_mined_block(&worker_handle, seal, &mut mining_start_time, "").await;
-		}
+		mine_one_template(
+			&worker_handle,
+			&stratum_server,
+			&cancellation_token,
+			&mut job_counter,
+			&mut mining_start_time,
+			mining_threads,
+		)
+		.await;
 
 		// Yield to let other async tasks run
 		tokio::task::yield_now().await;
 	}
 
-	log::info!("⛏️ QPoW Mining task terminated");
+	log::info!("⛏️ RandomX mining task terminated");
 }
 
 /// Spawn the transaction logger task.
@@ -578,11 +515,13 @@ fn spawn_authority_tasks(
 	client: Arc<FullClient>,
 	transaction_pool: Arc<sc_transaction_pool::TransactionPoolHandle<Block, FullClient>>,
 	pow_block_import: PowBlockImport,
+	engine: Arc<RandomxEngine>,
 	sync_service: Arc<sc_network_sync::SyncingService<Block>>,
 	prometheus_registry: Option<prometheus::Registry>,
 	rewards_address: AccountId32,
 	miner_key: Option<qnero_note_core::MinerKey>,
-	miner_config: Option<MinerServerConfig>,
+	stratum_config: Option<stratum::StratumConfig>,
+	mining_threads: usize,
 	tx_stream_for_worker: impl futures::Stream<Item = sp_core::H256> + Send + Unpin + 'static,
 	#[cfg(feature = "tx-logging")] tx_stream_for_logger: impl futures::Stream<Item = sp_core::H256>
 		+ Send
@@ -641,16 +580,17 @@ fn spawn_authority_tasks(
 	// and its own import would refuse it. With a miner key the label is
 	// `H(cvk, parent)`, so the 32 bytes in the header change every block and
 	// nothing groups a miner's blocks, or the coinbase notes in them, for an
-	// observer. See `sc_consensus_qpow::AuthorLabel`.
+	// observer. See `sc_consensus_randomx::AuthorLabel`.
 	let fallback_label: [u8; 32] = rewards_address.into();
-	let author_label: sc_consensus_qpow::AuthorLabel =
+	let author_label: sc_consensus_randomx::AuthorLabel =
 		Arc::new(move |parent: sp_core::H256| match label_key.as_ref() {
 			Some(key) => key.author_label(parent.as_ref()).to_bytes(),
 			None => fallback_label,
 		});
-	let (worker_handle, worker_task) = sc_consensus_qpow::start_mining_worker(
+	let (worker_handle, worker_task) = sc_consensus_randomx::start_mining_worker(
 		Box::new(pow_block_import),
 		client.clone(),
+		engine.clone(),
 		proposer,
 		sync_service.clone(),
 		author_label,
@@ -672,42 +612,61 @@ fn spawn_authority_tasks(
 
 	task_manager.spawn_handle().spawn("mining-shutdown-listener", None, async move {
 		tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
-		log::info!("🛑 Received Ctrl+C signal, shutting down qpow-mining worker");
+		log::info!("🛑 Received Ctrl+C signal, shutting down the mining worker");
 		mining_token_clone.cancel();
 	});
 
 	// Spawn the main mining loop
-	task_manager.spawn_essential_handle().spawn("qpow-mining", None, async move {
-		// Start miner server if port is specified. Failure must abort this essential
-		// task (and thus the node) instead of falling back to local mining — the
-		// operator explicitly opted into external mining with --miner-listen-port.
-		let miner_server: Option<Arc<MinerServer>> = if let Some(cfg) = miner_config {
-			let port = cfg.port;
-			match MinerServer::start(cfg) {
-				Ok(server) => Some(server),
-				Err(e) => {
+	task_manager.spawn_essential_handle().spawn("randomx-mining", None, async move {
+		// Start the stratum server if a port was given. Failure must abort this
+		// essential task (and thus the node) rather than quietly leaving the
+		// operator with in-process mining only: they asked for a rig endpoint.
+		let stratum_server: Option<Arc<stratum::StratumServer>> =
+			if let Some(config) = stratum_config {
+				let endpoint = (config.host, config.port);
+				match stratum::StratumServer::start(config, engine).await {
+					Ok(server) => {
+						log::info!(
+							"⛏️ Point a rig at {}: xmrig --algo {} -o {} -u <label>",
+							server.local_addr(),
+							sc_consensus_randomx::ALGO,
+							server.local_addr(),
+						);
+						Some(server)
+					},
+					Err(error) => {
+						log::error!(
+							"⛏️ Failed to start the stratum server on {}:{}: {error}",
+							endpoint.0,
+							endpoint.1,
+						);
+						return;
+					},
+				}
+			} else {
+				if mining_threads == 0 {
 					log::error!(
-						"⛏️ Failed to start miner server on port {}: {}. \
-						 Refusing to fall back to local mining.",
-						port,
-						e
+						"⛏️ Neither --stratum-port nor --mining-threads is set to anything \
+						 that mines: this authority will never author a block."
 					);
-					return;
-				},
-			}
-		} else {
-			log::warn!("⚠️  No --miner-listen-port specified. Using LOCAL mining only.");
-			None
-		};
+				} else {
+					log::info!(
+						"⛏️ No --stratum-port given: mining in process on {mining_threads} \
+						 thread(s), light mode."
+					);
+				}
+				None
+			};
 
 		mining_loop(
 			client,
 			worker_handle,
 			sync_service,
-			miner_server,
+			stratum_server,
 			mining_cancellation_token,
 			allow_mining_without_peers,
 			max_tip_age_ms,
+			mining_threads,
 		)
 		.await;
 	});
@@ -716,7 +675,7 @@ fn spawn_authority_tasks(
 	#[cfg(feature = "tx-logging")]
 	spawn_transaction_logger(task_manager, transaction_pool, tx_stream_for_logger);
 
-	log::info!(target: "miner", "⛏️  Pow miner spawned");
+	log::info!(target: "randomx", "⛏️  Miner spawned");
 }
 
 // ============================================================================
@@ -734,7 +693,7 @@ pub type HostFunctions =
 pub(crate) type FullClient =
 	sc_service::TFullClient<Block, RuntimeApi, sc_executor::WasmExecutor<HostFunctions>>;
 type FullBackend = sc_service::TFullBackend<Block>;
-pub type PowBlockImport = sc_consensus_qpow::PowBlockImport<
+pub type PowBlockImport = sc_consensus_randomx::PowBlockImport<
 	Block,
 	Arc<FullClient>,
 	FullClient,
@@ -758,7 +717,7 @@ pub type Service = sc_service::PartialComponents<
 	(),
 	sc_consensus::DefaultImportQueue<Block>,
 	sc_transaction_pool::TransactionPoolHandle<Block, FullClient>,
-	(PowBlockImport, Option<Telemetry>),
+	(PowBlockImport, Option<Telemetry>, Arc<RandomxEngine>),
 >;
 
 #[allow(clippy::result_large_err)]
@@ -785,9 +744,16 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 
 	// Initialize genesis block's achieved work if not already set.
 	// Genesis has achieved work = 1 (represents the start of the chain).
-	if let Err(e) = sc_consensus_qpow::initialize_genesis_achieved_work::<Block, _>(&*client) {
-		log::warn!(target: "qpow", "Failed to initialize genesis achieved work: {:?}", e);
+	if let Err(e) = sc_consensus_randomx::initialize_genesis_achieved_work::<Block, _>(&*client) {
+		log::warn!(target: "randomx", "Failed to initialize genesis achieved work: {:?}", e);
 	}
+
+	// One RandomX engine per node, shared by the verifier, the importer, the
+	// in-process miner and the stratum server, so they share seed caches: a
+	// cache is 256 MiB and an Argon2d fill, and nothing here should pay for it
+	// twice. The pool holds up to eight idle VMs, which is a 2 MiB scratchpad
+	// each and covers a verifier plus a handful of mining threads.
+	let engine = RandomxEngine::light(8);
 
 	let telemetry = telemetry.map(|(worker, telemetry)| {
 		task_manager.spawn_handle().spawn("telemetry", None, worker.run());
@@ -828,17 +794,19 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 			>,
 		>;
 
-	let pow_block_import = sc_consensus_qpow::PowBlockImport::new(
+	let pow_block_import = sc_consensus_randomx::PowBlockImport::new(
 		Arc::clone(&client),
 		Arc::clone(&client),
+		Arc::clone(&engine),
 		0, // check inherents starting at block 0
 		inherent_data_providers,
 	);
 
-	let import_queue = sc_consensus_qpow::import_queue::<Block, FullClient>(
+	let import_queue = sc_consensus_randomx::import_queue::<Block, FullClient>(
 		Box::new(pow_block_import.clone()),
 		None,
 		Arc::clone(&client),
+		Arc::clone(&engine),
 		&task_manager.spawn_essential_handle(),
 		config.prometheus_registry(),
 	)?;
@@ -851,7 +819,7 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 		keystore_container,
 		select_chain: (),
 		transaction_pool,
-		other: (pow_block_import, telemetry),
+		other: (pow_block_import, telemetry, engine),
 	})
 }
 
@@ -863,8 +831,8 @@ pub fn new_full<
 	config: Configuration,
 	rewards_address: AccountId32,
 	miner_key: Option<qnero_note_core::MinerKey>,
-	miner_listen_port: Option<u16>,
-	miner_auth_token_file: Option<PathBuf>,
+	stratum_config: Option<stratum::StratumConfig>,
+	mining_threads: usize,
 	enable_peer_sharing: bool,
 	sync_max_timeouts_before_drop: u32,
 	sync_disable_major_sync_gating: bool,
@@ -880,7 +848,7 @@ pub fn new_full<
 		keystore_container,
 		select_chain: _,
 		transaction_pool,
-		other: (pow_block_import, mut telemetry),
+		other: (pow_block_import, mut telemetry, engine),
 	} = new_partial(&config)?;
 
 	let tx_stream_for_worker = transaction_pool.clone().import_notification_stream();
@@ -943,13 +911,6 @@ pub fn new_full<
 
 	let role = config.role;
 	let prometheus_registry = config.prometheus_registry().cloned();
-	let miner_config = miner_listen_port.map(|port| MinerServerConfig {
-		port,
-		auth_token_path: miner_auth_token_file
-			.unwrap_or_else(|| config.data_path.join(DEFAULT_MINER_AUTH_TOKEN_FILENAME)),
-		tls_dir: config.data_path.clone(),
-	});
-
 	let rpc_extensions_builder = {
 		let client = client.clone();
 		let pool = transaction_pool.clone();
@@ -991,11 +952,13 @@ pub fn new_full<
 			client,
 			transaction_pool,
 			pow_block_import,
+			engine,
 			sync_service,
 			prometheus_registry,
 			rewards_address,
 			miner_key,
-			miner_config,
+			stratum_config,
+			mining_threads,
 			tx_stream_for_worker,
 			tx_stream_for_logger,
 			allow_mining_without_peers,
@@ -1007,11 +970,13 @@ pub fn new_full<
 			client,
 			transaction_pool,
 			pow_block_import,
+			engine,
 			sync_service,
 			prometheus_registry,
 			rewards_address,
 			miner_key,
-			miner_config,
+			stratum_config,
+			mining_threads,
 			tx_stream_for_worker,
 			allow_mining_without_peers,
 			max_tip_age_secs.saturating_mul(1000),

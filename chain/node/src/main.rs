@@ -7,10 +7,10 @@ mod chain_spec;
 mod cli;
 mod coinbase;
 mod command;
-mod miner_server;
 mod prometheus;
 mod rpc;
 mod service;
+mod stratum;
 #[cfg(test)]
 mod tests;
 mod txwatch;

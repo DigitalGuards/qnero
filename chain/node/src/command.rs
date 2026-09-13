@@ -772,22 +772,45 @@ pub fn run() -> sc_cli::Result<()> {
 						},
 				};
 
-				// External mining only runs on authorities; fail fast instead of
+				// Mining only runs on authorities; fail fast instead of
 				// silently ignoring the flags (matches --rewards-inner-hash above).
-				if cli.miner_listen_port.is_some() && !config.role.is_authority() {
-					eprintln!("Error: --miner-listen-port requires running with --validator.\n");
-					return Err(sc_cli::Error::Input(
-						"--miner-listen-port requires --validator".into(),
-					));
+				if cli.stratum_port.is_some() && !config.role.is_authority() {
+					eprintln!("Error: --stratum-port requires running with --validator.\n");
+					eprintln!("A node that does not author has no template to hand a rig, so the");
+					eprintln!("endpoint would accept logins and never issue a job.");
+					return Err(sc_cli::Error::Input("--stratum-port requires --validator".into()));
 				}
-				if cli.miner_auth_token_file.is_some() && cli.miner_listen_port.is_none() {
+				if cli.stratum_port.is_none() &&
+					cli.stratum_share_difficulty != crate::cli::DEFAULT_SHARE_DIFFICULTY
+				{
 					eprintln!(
-						"Error: --miner-auth-token-file is only used with --miner-listen-port.\n"
+						"Error: --stratum-share-difficulty is only used with --stratum-port.\n"
 					);
 					return Err(sc_cli::Error::Input(
-						"--miner-auth-token-file requires --miner-listen-port".into(),
+						"--stratum-share-difficulty requires --stratum-port".into(),
 					));
 				}
+				if cli.stratum_share_difficulty == 0 {
+					eprintln!("Error: --stratum-share-difficulty must be at least 1.\n");
+					return Err(sc_cli::Error::Input("--stratum-share-difficulty is zero".into()));
+				}
+				if cli.mining_threads == 0 &&
+					cli.stratum_port.is_none() &&
+					config.role.is_authority()
+				{
+					eprintln!(
+						"Error: --mining-threads 0 without --stratum-port leaves an authority \
+						 with nothing mining.\n"
+					);
+					eprintln!("Either raise --mining-threads or open a stratum port for a rig.");
+					return Err(sc_cli::Error::Input("no mining source configured".into()));
+				}
+
+				let stratum_config = cli.stratum_port.map(|port| crate::stratum::StratumConfig {
+					host: cli.stratum_host,
+					port,
+					share_difficulty: cli.stratum_share_difficulty,
+				});
 
 				// Allow mining without peers if --dev or --force-authoring is set
 				let allow_mining_without_peers = config.force_authoring;
@@ -797,8 +820,8 @@ pub fn run() -> sc_cli::Result<()> {
 					config,
 					rewards_account,
 					miner_key,
-					cli.miner_listen_port,
-					cli.miner_auth_token_file,
+					stratum_config,
+					cli.mining_threads,
 					cli.enable_peer_sharing,
 					cli.sync_max_timeouts_before_drop,
 					cli.sync_disable_major_sync_gating,

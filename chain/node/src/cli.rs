@@ -1,5 +1,12 @@
 use sc_cli::RunCmd;
 
+/// Default share difficulty handed to a stratum connection.
+///
+/// About one share every few seconds from a 4 kH/s rig, which is enough to see
+/// that a miner is alive without flooding the node. It is clamped per job to
+/// the block difficulty, so on an easy chain every share is a block anyway.
+pub const DEFAULT_SHARE_DIFFICULTY: u64 = 5_000;
+
 #[derive(Debug, clap::Parser)]
 #[command(arg_required_else_help = true)]
 pub struct Cli {
@@ -32,21 +39,42 @@ pub struct Cli {
 	#[arg(long, value_name = "QNM_KEY", env = "QNERO_MINER_KEY")]
 	pub rewards_miner_key: Option<String>,
 
-	/// Port to listen for external miner connections (e.g., 9833).
-	/// When set, the node waits for miners instead of mining locally.
-	/// Requires `--validator`; startup fails otherwise.
-	#[arg(long, value_name = "PORT")]
-	pub miner_listen_port: Option<u16>,
-
-	/// Path to the miner auth token file.
+	/// Port for the stratum endpoint rigs connect to (e.g. 3333). Off by
+	/// default.
 	///
-	/// Requires `--miner-listen-port` (startup fails otherwise). Defaults to
-	/// `<base-path>/chains/<chain>/miner-auth-token`. If the file does not exist,
-	/// the node generates a random token and writes it there (mode 0600 on Unix).
-	/// The token itself is never logged — read the file to configure miners.
-	/// Startup fails if this path is empty/unreadable or cannot be created.
-	#[arg(long, value_name = "PATH")]
-	pub miner_auth_token_file: Option<std::path::PathBuf>,
+	/// The dialect is the one xmrig speaks to a Monero pool, so a stock
+	/// `xmrig --algo rx/0 -o <host>:<port> -u <label>` mines this chain.
+	/// Requires `--validator`; startup fails otherwise.
+	///
+	/// Nothing is paid to the login. The block reward is a shielded note for
+	/// the key in `--rewards-miner-key`, so this is a solo-mining endpoint and
+	/// the login string is a worker label.
+	#[arg(long, value_name = "PORT")]
+	pub stratum_port: Option<u16>,
+
+	/// Address the stratum endpoint binds. Loopback by default: a rig on
+	/// another machine needs `0.0.0.0` and a firewall rule you chose on
+	/// purpose.
+	#[arg(long, value_name = "ADDRESS", default_value = "127.0.0.1")]
+	pub stratum_host: std::net::IpAddr,
+
+	/// Share difficulty handed to each stratum connection.
+	///
+	/// Clamped per job to the block difficulty, so it can never make a share
+	/// harder to find than a block. Lower means more shares and more traffic;
+	/// the block itself is always checked against the network difficulty.
+	#[arg(long, value_name = "DIFFICULTY", default_value_t = DEFAULT_SHARE_DIFFICULTY)]
+	pub stratum_share_difficulty: u64,
+
+	/// Threads the node mines with in process, in RandomX light mode.
+	///
+	/// One by default, which is what keeps a `--dev` chain producing blocks
+	/// with no rig attached. Light mode is roughly an order of magnitude slower
+	/// than the full-mode dataset a real miner builds, so this is for a devnet
+	/// and for keeping a node from idling, not for competing. Zero turns it
+	/// off, which is what an operator with a rig on `--stratum-port` wants.
+	#[arg(long, value_name = "THREADS", default_value_t = 1)]
+	pub mining_threads: usize,
 
 	/// Enable peer sharing via RPC endpoint (`peer_getNetworkInfo`).
 	///
