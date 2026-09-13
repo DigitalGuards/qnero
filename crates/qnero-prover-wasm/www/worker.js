@@ -3,11 +3,13 @@
 //
 // Memory is read the boring way, from `WebAssembly.Memory.prototype.buffer
 // .byteLength`, before and after every stage.
-// `performance.measureUserAgentSpecificMemory()` needs cross-origin isolation,
-// which this measurement deliberately does not take, and the byteLength is the
-// number that matters anyway: wasm linear memory grows and never shrinks, so
-// the value after a stage is the high-water mark of everything up to it and it
-// stays that way for the life of the worker.
+// `performance.measureUserAgentSpecificMemory()` is available here, because
+// `server.mjs` sends COOP and COEP and the page is therefore cross-origin
+// isolated. byteLength is used anyway: it is the same number on both sides of
+// the wasm boundary, it needs no await and no permission, and it is the
+// quantity that matters, because wasm linear memory grows and never shrinks,
+// so the value after a stage is the high-water mark of everything up to it and
+// it stays that way for the life of the worker.
 
 import init, {
   WasmWalletProver,
@@ -29,16 +31,24 @@ function memoryBytes() {
   return wasm ? wasm.memory.buffer.byteLength : 0;
 }
 
+/** What the module cost to ship, from the worker's own resource timing. */
+function moduleBytes() {
+  const entry = performance
+    .getEntriesByType("resource")
+    .find((resource) => resource.name.endsWith(".wasm"));
+  return entry ? entry.encodedBodySize || entry.transferSize || 0 : 0;
+}
+
 function progress(stage, detail) {
   postMessage({ type: "progress", stage, detail });
 }
 
-/** Run one stage, and record what it cost. */
-function stage(stages, name, run) {
+/** Run one stage, and record what it cost. Awaits, so init is a stage too. */
+async function stage(stages, name, run) {
   progress(name);
   const before = memoryBytes();
   const started = performance.now();
-  const value = run();
+  const value = await run();
   const millis = performance.now() - started;
   const after = memoryBytes();
   stages.push({
@@ -71,40 +81,68 @@ function base64(bytes) {
 async function run(config) {
   const stages = [];
 
-  progress("wasm_init");
-  wasm = await init();
-  progress("wasm_init", `module instantiated, linear memory ${(memoryBytes() / 1048576).toFixed(1)} MiB`);
+  // Module init is a stage like any other. Fetching and compiling three
+  // megabytes is part of a cold start, and a cold-start figure that silently
+  // left it out could not be scaled to a phone on a mobile network.
+  await stage(stages, "wasm_init", async () => {
+    wasm = await init();
+  });
   const memoryAfterInit = memoryBytes();
 
   // Both entropy paths, before anything offers to prove. A page served from a
   // non-secure context has no crypto.getRandomValues, and without this the
   // failure lands inside plonky2 tens of seconds into the private batch.
-  stage(stages, "entropy_self_check", () => entropySelfCheck());
+  await stage(stages, "entropy_self_check", () => entropySelfCheck());
 
   const numLeaves = config.numLeaves || chainNumLeaves();
+  const common = {
+    target: "wasm32-unknown-unknown",
+    threads: 1,
+    user_agent: navigator.userAgent,
+    mode: config.mode,
+    num_leaves: numLeaves,
+    module_bytes: moduleBytes(),
+  };
+
+  if (config.zkOnly) {
+    // The delegated-batcher shape, in a worker that has built nothing else.
+    // This is the run that sizes a leaf-only prover: with no private-batch
+    // circuit resident, the module's high-water mark is that prover's own.
+    const request = await stage(stages, "build_request", () =>
+      syntheticTransferRequest(SENDER_SEED, RECIPIENT_SEED, config.decoys ?? 2),
+    );
+    const zkLeaf = JSON.parse(await stage(stages, "zk_leaf", () => proveZkLeaf(request)));
+    return {
+      ...common,
+      zk_only: true,
+      stages,
+      rust_report: null,
+      zk_leaf: zkLeaf,
+      build_report: null,
+      memory: {
+        after_init_bytes: memoryAfterInit,
+        final_bytes: memoryBytes(),
+        peak_bytes: Math.max(memoryBytes(), peakLinearMemoryBytes()),
+      },
+    };
+  }
+
   let artifactBytes = { leaf_verifier: 0, padding_leaf_proof: 0 };
   let prover;
 
   if (config.mode === "artifacts") {
-    progress("fetch_artifacts");
-    const started = performance.now();
-    const [leafVerifier, paddingLeafProof, configJson] = await Promise.all([
-      fetchBytes(config.artifactBase + "leaf_verifier.bin"),
-      fetchBytes(config.artifactBase + "padding_leaf_proof.bin"),
-      fetch(config.artifactBase + "config.json").then((response) => response.json()),
-    ]);
-    const millis = performance.now() - started;
+    const fetched = await stage(stages, "fetch_artifacts", () =>
+      Promise.all([
+        fetchBytes(config.artifactBase + "leaf_verifier.bin"),
+        fetchBytes(config.artifactBase + "padding_leaf_proof.bin"),
+        fetch(config.artifactBase + "config.json").then((response) => response.json()),
+      ]),
+    );
+    const [leafVerifier, paddingLeafProof, configJson] = fetched;
     artifactBytes = {
       leaf_verifier: leafVerifier.length,
       padding_leaf_proof: paddingLeafProof.length,
     };
-    stages.push({
-      stage: "fetch_artifacts",
-      millis,
-      memory_before_bytes: memoryAfterInit,
-      memory_after_bytes: memoryBytes(),
-    });
-    progress("fetch_artifacts", `${leafVerifier.length + paddingLeafProof.length} bytes in ${millis.toFixed(1)} ms`);
 
     if (configJson.num_leaf_proofs !== numLeaves) {
       // A set built at another N produces proofs whose public-input length the
@@ -115,16 +153,19 @@ async function run(config) {
       );
     }
 
-    prover = stage(stages, "circuit_build_from_artifacts", () =>
+    prover = await stage(stages, "circuit_build_from_artifacts", () =>
       WasmWalletProver.fromArtifacts(leafVerifier, paddingLeafProof, numLeaves),
     );
   } else {
-    prover = stage(stages, "circuit_build_from_source", () =>
+    prover = await stage(stages, "circuit_build_from_source", () =>
       WasmWalletProver.fromSource(numLeaves),
     );
   }
 
-  const request = stage(stages, "build_request", () =>
+  // After the circuits, deliberately. A request names an anchor block and the
+  // whole payment has to land inside the 256-block window that anchor opens,
+  // so a wallet that anchored first would spend the circuit build inside it.
+  const request = await stage(stages, "build_request", () =>
     syntheticTransferRequest(SENDER_SEED, RECIPIENT_SEED, config.decoys ?? 2),
   );
 
@@ -132,22 +173,21 @@ async function run(config) {
   if (config.zkLeaf) {
     // A second leaf circuit, blinded. This is the shape a phone would hand to
     // a batcher it does not run, and it is measured because that path's cost
-    // is the only reason to consider its privacy price.
-    zkLeaf = JSON.parse(stage(stages, "zk_leaf", () => proveZkLeaf(request)));
+    // is the only reason to consider its privacy price. Its memory figures are
+    // contaminated by the circuits already resident here; `--zk-only` is the
+    // run that answers what a leaf-only prover needs.
+    zkLeaf = JSON.parse(await stage(stages, "zk_leaf", () => proveZkLeaf(request)));
   }
 
-  const submission = stage(stages, "prove_transfer", () => prover.proveTransfer(request));
+  const submission = await stage(stages, "prove_transfer", () => prover.proveTransfer(request));
   const report = JSON.parse(submission.reportJson);
   const proof = submission.proof;
 
-  const verifyMillis = stage(stages, "verify_proof", () => prover.verifyProof(proof));
+  const verifyMillis = await stage(stages, "verify_proof", () => prover.verifyProof(proof));
 
   return {
-    target: "wasm32-unknown-unknown",
-    threads: 1,
-    user_agent: navigator.userAgent,
-    mode: config.mode,
-    num_leaves: numLeaves,
+    ...common,
+    zk_only: false,
     artifact_bytes: artifactBytes,
     stages,
     // What the Rust side timed, phase by phase, from inside the module.
@@ -173,7 +213,7 @@ self.addEventListener("message", (event) => {
   run(event.data.config)
     .then((report) => {
       const { proofBase64, ...rest } = report;
-      postMessage({ type: "result", report: rest, proofBase64 });
+      postMessage({ type: "result", report: rest, proofBase64: proofBase64 ?? null });
     })
     .catch((error) => {
       postMessage({

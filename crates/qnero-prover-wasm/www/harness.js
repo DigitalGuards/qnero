@@ -19,6 +19,9 @@ const config = {
   // The ZK leaf is the delegated-batcher shape. It builds a second leaf
   // circuit, so it is opt-out.
   zkLeaf: params.get("zk") !== "0",
+  // The ZK leaf and nothing else, in a worker that never builds a private
+  // batch. That is the run whose peak sizes a delegated leaf-only prover.
+  zkOnly: params.get("zkonly") === "1",
   decoys: Number(params.get("decoys") ?? 2),
   artifactBase: "./artifacts/",
 };
