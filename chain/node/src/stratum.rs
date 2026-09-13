@@ -97,8 +97,35 @@ const SUBMIT_BURST: f64 = 64.0;
 const SUBMIT_REFILL_PER_SECOND: f64 = 32.0;
 
 /// Outgoing queue depth per connection. A miner that will not read its socket
-/// is disconnected rather than allowed to consume memory.
+/// is disconnected, so the memory one peer can claim stays bounded.
 const WRITE_QUEUE_DEPTH: usize = 32;
+
+/// How long one write to a miner may take before the connection is given up.
+///
+/// A peer that stops reading its socket shuts its receive window, and an
+/// undeadlined `write_all` then parks the writer task for as long as the peer
+/// likes. The connection task waits on that writer, so without this the
+/// connection never ends and the slot it holds never comes back.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a connection may go without logging in.
+///
+/// The share-scaled deadline below is a rig's allowance, and a peer earns it by
+/// logging in. Until then the connection is one line away from useful and is
+/// holding one of the endpoint's slots, so it gets a short window.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Connections one address may hold at once. The global cap alone lets a single
+/// host take the whole endpoint; this bounds what one address can claim of it.
+const MAX_CONNECTIONS_PER_IP: usize = 4;
+
+/// Entries the duplicate-share set may hold.
+///
+/// Eviction is driven by the template rolling, and a chain whose template has
+/// stalled does not roll one, so the set would otherwise grow at the
+/// share-check rate for as long as the stall lasts. Clearing at the ceiling
+/// costs at most one re-credited duplicate.
+const MAX_SEEN_SHARES: usize = 100_000;
 
 /// Floor and ceiling on how long a connection may stay silent.
 ///
@@ -117,12 +144,24 @@ const IDLE_SHARE_INTERVALS: u64 = 20;
 /// Error strings xmrig treats as critical: it closes the socket, drops the
 /// pool and sits out its retry pause.
 ///
-/// `Client::isCriticalError` in xmrig compares the pool's message against
-/// exactly these. A share-level rejection must never be one of them: a stale
-/// share is the normal outcome of a template roll, and answering it with a
-/// critical string costs the rig a reconnect every time the chain moves.
+/// These are **prefixes**, matched case-insensitively. `Client::isCriticalError`
+/// in xmrig compares the pool's message with `strncasecmp` over the length of
+/// each string, so `"invalid job id: 42"` is as fatal as `"Invalid job id"`. A
+/// share-level rejection must never be one of them: a stale share is the normal
+/// outcome of a template roll, and answering it with a critical string costs
+/// the rig a reconnect every time the chain moves.
 pub(crate) const XMRIG_CRITICAL_ERRORS: [&str; 4] =
 	["Unauthenticated", "your IP is banned", "IP Address currently banned", "Invalid job id"];
+
+/// Whether xmrig would treat this message as critical and drop the pool.
+/// Matched the way xmrig matches it: on the prefix, ignoring case.
+pub(crate) fn is_xmrig_critical(message: &str) -> bool {
+	XMRIG_CRITICAL_ERRORS.iter().any(|critical| {
+		message
+			.get(..critical.len())
+			.is_some_and(|head| head.eq_ignore_ascii_case(critical))
+	})
+}
 
 /// How long a silent connection is given, for a share difficulty.
 fn idle_timeout(share_difficulty: u64) -> Duration {
@@ -170,6 +209,34 @@ pub struct StratumConfig {
 	/// Share difficulty handed to a connection, clamped per job to the block
 	/// difficulty so a share is never harder to find than a block.
 	pub share_difficulty: u64,
+}
+
+/// The bounds one connection is served under.
+///
+/// Constants in production. The protocol tests set their own, so a cap can be
+/// reached without opening hundreds of sockets or waiting out a deadline
+/// measured in minutes.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+	/// How long a connection may go without logging in.
+	login_timeout: Duration,
+	/// How long one write to a miner may take.
+	write_timeout: Duration,
+	/// Connections open at once across the endpoint.
+	max_connections: usize,
+	/// Connections open at once from one address.
+	max_connections_per_ip: usize,
+}
+
+impl Default for Limits {
+	fn default() -> Self {
+		Self {
+			login_timeout: LOGIN_TIMEOUT,
+			write_timeout: WRITE_TIMEOUT,
+			max_connections: MAX_CONNECTIONS,
+			max_connections_per_ip: MAX_CONNECTIONS_PER_IP,
+		}
+	}
 }
 
 /// The template being mined, and the one before it.
@@ -259,6 +326,9 @@ pub struct StratumServer {
 	hash_slots: Semaphore,
 	/// Bounds how many sockets are open at once.
 	connection_slots: Arc<Semaphore>,
+	/// Sockets open per address, so one host cannot take every slot.
+	connections_per_ip: std::sync::Mutex<HashMap<IpAddr, usize>>,
+	limits: Limits,
 	seal_tx: mpsc::Sender<MinedSeal>,
 	seal_rx: tokio::sync::Mutex<mpsc::Receiver<MinedSeal>>,
 	counters: Counters,
@@ -270,6 +340,16 @@ impl StratumServer {
 	pub async fn start(
 		config: StratumConfig,
 		engine: Arc<RandomxEngine>,
+	) -> Result<Arc<Self>, String> {
+		Self::start_with_limits(config, engine, Limits::default()).await
+	}
+
+	/// Bind under explicit bounds. The protocol tests use this to reach a cap
+	/// without opening hundreds of sockets.
+	async fn start_with_limits(
+		config: StratumConfig,
+		engine: Arc<RandomxEngine>,
+		limits: Limits,
 	) -> Result<Arc<Self>, String> {
 		let addr = SocketAddr::new(config.host, config.port);
 		let listener = TcpListener::bind(addr)
@@ -286,7 +366,9 @@ impl StratumServer {
 			seen_shares: RwLock::new(HashSet::new()),
 			next_session_id: AtomicU64::new(1),
 			hash_slots: Semaphore::new(MAX_CONCURRENT_SHARE_CHECKS),
-			connection_slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+			connection_slots: Arc::new(Semaphore::new(limits.max_connections)),
+			connections_per_ip: std::sync::Mutex::new(HashMap::new()),
+			limits,
 			seal_tx,
 			seal_rx: tokio::sync::Mutex::new(seal_rx),
 			counters: Counters::default(),
@@ -305,14 +387,27 @@ impl StratumServer {
 			loop {
 				match listener.accept().await {
 					Ok((stream, peer)) => {
-						// A connection holds a slot for its lifetime. Refusing
-						// here, rather than queueing, keeps the accept loop
-						// answering and bounds the memory one peer can claim.
+						// A connection holds a slot for its lifetime. Refusing here
+						// keeps the accept loop answering and bounds the memory one
+						// peer can claim.
 						let Ok(slot) = accept_server.connection_slots.clone().try_acquire_owned()
 						else {
 							log::debug!(
 								target: LOG_TARGET,
-								"refusing {peer}: {MAX_CONNECTIONS} connections already open",
+								"refusing {peer}: {} connections already open",
+								accept_server.limits.max_connections,
+							);
+							drop(stream);
+							continue;
+						};
+						// And a second claim, on the address's own budget: the global
+						// cap alone lets one host hold every slot and lock the
+						// operator's rigs out.
+						let Some(ip_slot) = IpSlot::claim(&accept_server, peer.ip()) else {
+							log::debug!(
+								target: LOG_TARGET,
+								"refusing {peer}: that address already holds {} connections",
+								accept_server.limits.max_connections_per_ip,
 							);
 							drop(stream);
 							continue;
@@ -322,6 +417,7 @@ impl StratumServer {
 							if let Err(error) = server.serve(stream, peer).await {
 								log::debug!(target: LOG_TARGET, "miner {peer} disconnected: {error}");
 							}
+							drop(ip_slot);
 							drop(slot);
 						});
 					},
@@ -374,18 +470,38 @@ impl StratumServer {
 		}
 	}
 
-	/// Forget the current job, so a miner that connects next is not handed
-	/// stale work.
+	/// Stop handing the current template out, so a miner that logs in next is
+	/// not given work the node has stopped building on.
+	///
+	/// The template moves to the grace slot, so a rig that was mid-nonce when
+	/// authoring paused is still credited for what it finds. Dropping both slots
+	/// answers every submit `Block expired` for the length of the pause, which on
+	/// a long initial sync is hours of a rig burning power at a visible 0/N.
 	pub async fn clear_current_job(&self) {
 		let mut jobs = self.jobs.write().await;
-		*jobs = Jobs::default();
-		self.seen_shares.write().await.clear();
+		jobs.previous = jobs.current.take();
+		self.seen_shares.write().await.retain(|(job_id, _, _)| jobs.is_live(job_id));
 	}
 
 	/// Wait for a share that was good enough to be a block.
 	pub async fn recv_seal_timeout(&self, timeout: Duration) -> Option<MinedSeal> {
 		let mut rx = self.seal_rx.lock().await;
 		tokio::time::timeout(timeout, rx.recv()).await.ok().flatten()
+	}
+
+	/// Wait for such a share, with no deadline and no other outcome.
+	///
+	/// Cancel safe, which is what lets the mining loop race this against a round
+	/// of in-process hashing: dropping the future takes nothing off the channel.
+	/// A closed channel parks for good: the sender lives on this server, so the
+	/// case is unreachable, and a `None` returned into a `select!` would spin the
+	/// loop.
+	pub async fn recv_seal(&self) -> MinedSeal {
+		let mut rx = self.seal_rx.lock().await;
+		match rx.recv().await {
+			Some(seal) => seal,
+			None => std::future::pending().await,
+		}
 	}
 
 	/// Accepted shares, rejected shares, and shares that were blocks.
@@ -428,34 +544,67 @@ impl StratumServer {
 		let (read_half, mut write_half) = stream.into_split();
 		let (out_tx, mut out_rx) = mpsc::channel::<String>(WRITE_QUEUE_DEPTH);
 
-		let writer = tokio::spawn(async move {
+		// Milliseconds since `opened` at the last write that landed. xmrig
+		// re-arms its keepalive timer on every line it *receives*, so a job push
+		// proves the connection is alive exactly as an inbound line does, and the
+		// deadline below counts from whichever came last.
+		let opened = Instant::now();
+		let last_write = Arc::new(AtomicU64::new(0));
+
+		let write_timeout = self.limits.write_timeout;
+		let writer_activity = last_write.clone();
+		let mut writer = tokio::spawn(async move {
 			while let Some(line) = out_rx.recv().await {
-				if write_half.write_all(line.as_bytes()).await.is_err() {
+				// Deadlined: a peer that stops reading shuts its receive window,
+				// and an undeadlined `write_all` then parks this task, the
+				// connection behind it, and the slot the connection holds.
+				let write = async {
+					write_half.write_all(line.as_bytes()).await?;
+					write_half.write_all(b"\n").await
+				};
+				if !matches!(tokio::time::timeout(write_timeout, write).await, Ok(Ok(()))) {
 					break;
 				}
-				if write_half.write_all(b"\n").await.is_err() {
-					break;
-				}
+				writer_activity.store(opened.elapsed().as_millis() as u64, Ordering::Relaxed);
 			}
 		});
 
-		let deadline = idle_timeout(self.config.share_difficulty);
+		let authenticated_deadline = idle_timeout(self.config.share_difficulty);
 		let mut session_id: Option<u64> = None;
 		let mut budget = SubmitBudget::new();
 		let mut reader = BufReader::new(read_half);
 		let mut line = String::new();
+		let mut last_read = Instant::now();
 		let result = loop {
+			// A rig earns the long share-scaled window by logging in. Until then
+			// the connection is one line away from useful and is holding a slot,
+			// so it gets the short one.
+			let deadline = if session_id.is_some() {
+				authenticated_deadline
+			} else {
+				self.limits.login_timeout
+			};
+			let since_write = opened
+				.elapsed()
+				.saturating_sub(Duration::from_millis(last_write.load(Ordering::Relaxed)));
+			let Some(remaining) = deadline.checked_sub(last_read.elapsed().min(since_write)) else {
+				break Err("idle timeout".to_string());
+			};
+
 			line.clear();
-			// One byte past the limit, so an over-long line is detected by the
-			// reader stopping rather than by measuring what it buffered. This
-			// is the bound: without it a peer that never sends a newline can
-			// allocate for as long as the idle deadline allows.
+			// One byte past the limit, so an over-long line is caught by the
+			// reader stopping, before the length is measured on a buffer that
+			// has already grown. This is the bound: without it a peer that never
+			// sends a newline can allocate for as long as the deadline allows.
 			let mut limited = (&mut reader).take(MAX_LINE_BYTES as u64 + 1);
-			let read = tokio::time::timeout(deadline, limited.read_line(&mut line)).await;
+			let read = tokio::time::timeout(remaining, limited.read_line(&mut line)).await;
 			let read = match read {
 				Ok(read) => read,
-				Err(_) => break Err("idle timeout".to_string()),
+				// A job push written while this waited counts as activity, so the
+				// deadline is recomputed before the connection is given up.
+				Err(_) => continue,
 			};
+			last_read = Instant::now();
 			match read {
 				Ok(0) => break Ok(()),
 				// The unread tail is still queued, so there is nothing to
@@ -468,27 +617,35 @@ impl StratumServer {
 			if trimmed.is_empty() {
 				continue;
 			}
-			let request: Value = match serde_json::from_str(trimmed) {
-				Ok(value) => value,
-				Err(error) => {
-					let _ =
-						out_tx.send(error_response(&Value::Null, -32700, &error.to_string())).await;
-					continue;
-				},
+			let reply = match serde_json::from_str::<Value>(trimmed) {
+				Ok(request) =>
+					self.handle(&request, &out_tx, &mut session_id, &mut budget, peer).await,
+				Err(error) => Reply::open(error_response(&Value::Null, -32700, &error.to_string())),
 			};
-			let response = self.handle(&request, &out_tx, &mut session_id, &mut budget, peer).await;
-			if let Some(response) = response {
-				if out_tx.send(response).await.is_err() {
-					break Ok(());
+			if let Some(body) = reply.body {
+				// `try_send`, never `send().await`: waiting for queue capacity is
+				// waiting on a peer that may never read again, and this task
+				// holds one of the endpoint's connection slots while it waits.
+				if out_tx.try_send(body).is_err() {
+					break Err("not reading its socket".to_string());
 				}
+			}
+			if reply.close {
+				break Ok(());
 			}
 		};
 
 		if let Some(id) = session_id {
 			self.sessions.write().await.remove(&id);
 		}
+		// Dropping the sender ends the writer once the queue has drained, so a
+		// refusal queued just above still reaches the miner. Deadlined for the
+		// reason every write is: a wedged socket must not keep the slot.
 		drop(out_tx);
-		let _ = writer.await;
+		if tokio::time::timeout(write_timeout, &mut writer).await.is_err() {
+			writer.abort();
+			log::debug!(target: LOG_TARGET, "miner {peer} stopped reading; dropping the connection");
+		}
 		result
 	}
 
@@ -499,17 +656,17 @@ impl StratumServer {
 		session_id: &mut Option<u64>,
 		budget: &mut SubmitBudget,
 		peer: SocketAddr,
-	) -> Option<String> {
+	) -> Reply {
 		let id = request.get("id").cloned().unwrap_or(Value::Null);
 		let method = request.get("method").and_then(Value::as_str).unwrap_or("");
 		let params = request.get("params").cloned().unwrap_or(Value::Null);
 
 		match method {
 			"login" => self.handle_login(&id, &params, out_tx, session_id, peer).await,
-			"submit" => Some(self.handle_submit(&id, &params, session_id, budget).await),
-			"keepalived" => Some(ok_response(&id, json!({"status": "KEEPALIVED"}))),
-			"" => Some(error_response(&id, -32600, "Missing method")),
-			other => Some(error_response(&id, -32601, &format!("Unknown method {other}"))),
+			"submit" => Reply::open(self.handle_submit(&id, &params, session_id, budget).await),
+			"keepalived" => Reply::open(ok_response(&id, json!({"status": "KEEPALIVED"}))),
+			"" => Reply::open(error_response(&id, -32600, "Missing method")),
+			other => Reply::open(error_response(&id, -32601, &format!("Unknown method {other}"))),
 		}
 	}
 
@@ -523,13 +680,17 @@ impl StratumServer {
 		out_tx: &mpsc::Sender<String>,
 		session_id: &mut Option<u64>,
 		peer: SocketAddr,
-	) -> Option<String> {
+	) -> Reply {
 		let jobs = self.jobs.read().await;
 		let Some(job) = jobs.current.clone() else {
-			// Authoring has not produced a template yet. xmrig retries the
-			// connection, which is the right behaviour while a node is still
-			// syncing or paused.
-			return Some(error_response(id, -1, "No job available yet"));
+			// Authoring has not produced a template yet, which is where a node
+			// still syncing or paused sits. The socket closes with the refusal:
+			// xmrig clears its own timers on any line it receives and arms the
+			// keepalive only on a *successful* login, so a rig left holding an
+			// open socket here sits at zero hash rate with both timers at zero
+			// until the node's idle deadline fires. EOF is what makes it count a
+			// failure and reconnect.
+			return Reply::closing(error_response(id, -1, "No job available yet"));
 		};
 
 		let worker = truncate(params.get("login").and_then(Value::as_str).unwrap_or("anonymous"));
@@ -560,8 +721,8 @@ impl StratumServer {
 				"job": self.job_payload(&job, extra_nonce),
 				"status": "OK",
 				// `algo` so the per-job algorithm field is honoured, `keepalive`
-				// so xmrig sends keepalives instead of reconnecting on its idle
-				// timer. Deliberately not `nicehash`: that would take the top
+				// so xmrig answers its idle timer with a keepalive and keeps
+				// the connection. Deliberately not `nicehash`: that takes the top
 				// nonce byte away from the miner and the space is small enough
 				// already.
 				"extensions": ["algo", "keepalive"],
@@ -570,7 +731,7 @@ impl StratumServer {
 		// Never `send().await` under the `jobs` guard: a peer that stops
 		// reading its socket would then hold up every template.
 		if out_tx.try_send(reply).is_err() {
-			return Some(error_response(id, -1, "Busy"));
+			return Reply::closing(error_response(id, -1, "Busy"));
 		}
 		drop(jobs);
 
@@ -578,7 +739,7 @@ impl StratumServer {
 			target: LOG_TARGET,
 			"⛏️ Miner {peer} logged in as {worker:?} ({agent:?}), extra nonce {extra_nonce:#010x}",
 		);
-		None
+		Reply::silent()
 	}
 
 	async fn handle_submit(
@@ -624,7 +785,11 @@ impl StratumServer {
 			return self.reject_share(id, "Too many shares");
 		}
 
-		if !self.seen_shares.write().await.insert((job.job_id.clone(), session_id, nonce)) {
+		let mut seen = self.seen_shares.write().await;
+		let fresh =
+			insert_seen(&mut seen, (job.job_id.clone(), session_id, nonce), MAX_SEEN_SHARES);
+		drop(seen);
+		if !fresh {
 			return self.reject_share(id, "Duplicate share");
 		}
 
@@ -716,10 +881,11 @@ impl StratumServer {
 		ok_response(id, json!({"status": "OK"}))
 	}
 
-	/// Refuse one share. The message must not be one xmrig treats as critical.
+	/// Refuse one share. The message must not be one xmrig treats as critical,
+	/// prefix and case included, because that is how xmrig compares it.
 	fn reject_share(&self, id: &Value, message: &str) -> String {
 		debug_assert!(
-			!XMRIG_CRITICAL_ERRORS.contains(&message),
+			!is_xmrig_critical(message),
 			"{message:?} makes xmrig drop the pool; it is not a share-level rejection",
 		);
 		self.reject_fatal(id, message)
@@ -731,6 +897,82 @@ impl StratumServer {
 		log::debug!(target: LOG_TARGET, "share rejected: {message}");
 		error_response(id, -1, message)
 	}
+}
+
+/// What one request produced: the line to answer with, and whether the
+/// connection is finished.
+struct Reply {
+	body: Option<String>,
+	close: bool,
+}
+
+impl Reply {
+	/// Answer and keep serving.
+	fn open(body: String) -> Self {
+		Self { body: Some(body), close: false }
+	}
+
+	/// Answer already queued elsewhere, and keep serving.
+	fn silent() -> Self {
+		Self { body: None, close: false }
+	}
+
+	/// Answer, then close. A refusal a miner cannot act on has to arrive as an
+	/// EOF too, or xmrig holds the socket and stops its own retry timers.
+	fn closing(body: String) -> Self {
+		Self { body: Some(body), close: true }
+	}
+}
+
+/// One connection's claim on its address's budget, released when the
+/// connection ends however it ends.
+struct IpSlot {
+	server: Arc<StratumServer>,
+	ip: IpAddr,
+}
+
+impl IpSlot {
+	fn claim(server: &Arc<StratumServer>, ip: IpAddr) -> Option<Self> {
+		let mut open = server.connections_per_ip.lock().unwrap_or_else(|e| e.into_inner());
+		let count = open.entry(ip).or_insert(0);
+		if *count >= server.limits.max_connections_per_ip {
+			// Nothing was added: the entry only exists because it is already at
+			// the cap.
+			return None;
+		}
+		*count += 1;
+		drop(open);
+		Some(Self { server: server.clone(), ip })
+	}
+}
+
+impl Drop for IpSlot {
+	fn drop(&mut self) {
+		let mut open = self.server.connections_per_ip.lock().unwrap_or_else(|e| e.into_inner());
+		if let Some(count) = open.get_mut(&self.ip) {
+			*count = count.saturating_sub(1);
+			if *count == 0 {
+				open.remove(&self.ip);
+			}
+		}
+	}
+}
+
+/// Record a share against the duplicate set, and say whether it is new.
+///
+/// The ceiling is what keeps the set finite when the template does not roll:
+/// eviction is driven by `broadcast_job`, and a stalled chain broadcasts
+/// nothing. Clearing costs at most one re-credited duplicate, which is cheaper
+/// than a set that grows for as long as the stall lasts.
+fn insert_seen(
+	seen: &mut HashSet<(String, u64, u32)>,
+	share: (String, u64, u32),
+	ceiling: usize,
+) -> bool {
+	if seen.len() >= ceiling {
+		seen.clear();
+	}
+	seen.insert(share)
 }
 
 /// Bound a miner-supplied string before it is kept or logged.

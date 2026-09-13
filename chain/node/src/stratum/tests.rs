@@ -63,6 +63,29 @@ impl FakeMiner {
 		response
 	}
 
+	/// A login that tolerates a socket the server has already closed, for the
+	/// tests that poll until a connection slot comes back.
+	async fn try_login(&mut self, user: &str) -> Option<Value> {
+		let line = json!({
+			"id": 1,
+			"jsonrpc": "2.0",
+			"method": "login",
+			"params": {"login": user, "pass": "x", "agent": "XMRig/6.21.0"},
+		})
+		.to_string();
+		self.writer.write_all(line.as_bytes()).await.ok()?;
+		self.writer.write_all(b"\n").await.ok()?;
+		let mut reply = String::new();
+		let read = tokio::time::timeout(Duration::from_secs(2), self.reader.read_line(&mut reply))
+			.await
+			.ok()?
+			.ok()?;
+		if read == 0 {
+			return None;
+		}
+		serde_json::from_str(&reply).ok()
+	}
+
 	async fn submit(&mut self, job_id: &str, nonce: u32, result: Option<&str>) -> Value {
 		let mut params = json!({
 			"id": self.session,
@@ -93,15 +116,36 @@ async fn server_with_job(
 	difficulty: u64,
 	share_difficulty: u64,
 ) -> (Arc<StratumServer>, Arc<RandomxEngine>) {
+	server_with_limits(difficulty, share_difficulty, Limits::default()).await
+}
+
+/// The same, under bounds a test can reach: a cap of 64 connections and a
+/// deadline of half an hour are production numbers, and reaching either one
+/// honestly in a test would take hundreds of sockets or minutes of waiting.
+async fn server_with_limits(
+	difficulty: u64,
+	share_difficulty: u64,
+	limits: Limits,
+) -> (Arc<StratumServer>, Arc<RandomxEngine>) {
 	let engine = RandomxEngine::light(2);
-	let server = StratumServer::start(
+	let server = StratumServer::start_with_limits(
 		StratumConfig { host: IpAddr::from([127, 0, 0, 1]), port: 0, share_difficulty },
 		engine.clone(),
+		limits,
 	)
 	.await
 	.expect("bind");
 	server.broadcast_job(test_job(difficulty)).await;
 	(server, engine)
+}
+
+/// Whether the server has closed this connection, within a few seconds.
+async fn is_closed(miner: &mut FakeMiner, within: Duration) -> bool {
+	let mut line = String::new();
+	matches!(
+		tokio::time::timeout(within, miner.reader.read_line(&mut line)).await,
+		Ok(Ok(0)) | Ok(Err(_)),
+	)
 }
 
 /// Take the job apart the way a miner does, find a nonce that clears the
@@ -307,10 +351,45 @@ async fn no_share_level_rejection_is_a_string_xmrig_treats_as_critical() {
 	);
 	for message in &messages {
 		assert!(
-			!XMRIG_CRITICAL_ERRORS.contains(&message.as_str()),
+			!is_xmrig_critical(message),
 			"{message:?} makes xmrig close the socket and drop the pool",
 		);
 	}
+}
+
+/// xmrig compares those four strings with `strncasecmp`, so they are
+/// case-insensitive prefixes. A guard that tested whole-string equality would
+/// have passed `"Invalid job id (expired)"` and reinstated the reconnect loop
+/// this pass was written to remove.
+#[test]
+fn the_critical_error_guard_matches_the_way_xmrig_matches() {
+	for critical in XMRIG_CRITICAL_ERRORS {
+		assert!(is_xmrig_critical(critical));
+		assert!(is_xmrig_critical(&critical.to_ascii_lowercase()));
+		assert!(is_xmrig_critical(&critical.to_ascii_uppercase()));
+		assert!(is_xmrig_critical(&format!("{critical} (expired)")));
+	}
+	assert!(is_xmrig_critical("invalid job id: 42"));
+	assert!(!is_xmrig_critical("Block expired"));
+	assert!(!is_xmrig_critical("Low difficulty share"));
+	assert!(!is_xmrig_critical("Invalid"));
+	// A multi-byte character where the prefix would end must not panic.
+	assert!(!is_xmrig_critical("Unauthenticat€d"));
+}
+
+/// The duplicate set is evicted when the template rolls, and a stalled chain
+/// does not roll one. The ceiling is what keeps it finite regardless.
+#[test]
+fn the_duplicate_set_stops_growing_at_its_ceiling() {
+	let mut seen = HashSet::new();
+	for nonce in 0..1_000u32 {
+		assert!(insert_seen(&mut seen, ("1".to_string(), 1, nonce), 8));
+		assert!(seen.len() <= 8, "the set grew past its ceiling: {}", seen.len());
+	}
+	// And inside the ceiling it still catches a repeat.
+	let mut seen = HashSet::new();
+	assert!(insert_seen(&mut seen, ("1".to_string(), 1, 7), 8));
+	assert!(!insert_seen(&mut seen, ("1".to_string(), 1, 7), 8));
 }
 
 /// The line bound has to be on the reader. `read_line` on its own appends until
@@ -327,7 +406,7 @@ async fn a_line_that_never_ends_is_bounded_and_drops_the_connection() {
 	let mut line = String::new();
 	let read = tokio::time::timeout(Duration::from_secs(10), miner.reader.read_line(&mut line))
 		.await
-		.expect("the server must close rather than keep buffering");
+		.expect("the server must close the connection and stop buffering");
 	assert!(
 		matches!(read, Ok(0) | Err(_)),
 		"the connection must be closed, got {read:?} with {line:?}",
@@ -338,24 +417,141 @@ async fn a_line_that_never_ends_is_bounded_and_drops_the_connection() {
 /// allowance is left across sockets.
 #[tokio::test]
 async fn the_listener_stops_accepting_past_the_connection_cap() {
-	let (server, _engine) = server_with_job(8, 8).await;
+	let cap = 4;
+	let (server, _engine) = server_with_limits(
+		8,
+		8,
+		Limits { max_connections: cap, max_connections_per_ip: cap, ..Limits::default() },
+	)
+	.await;
 	let mut held = Vec::new();
-	for _ in 0..MAX_CONNECTIONS {
+	for _ in 0..cap {
 		held.push(FakeMiner::connect(server.local_addr()).await);
 	}
-	// Let the accept loop drain the backlog, so the cap is what refuses the
-	// next connection rather than the listen queue.
+	// Let the accept loop drain the backlog, so the refusal comes from the cap
+	// and not from the listen queue.
 	tokio::time::sleep(Duration::from_millis(300)).await;
 	// The listen backlog still completes the handshake, so the refusal shows up
 	// as the server closing the socket without a word.
 	let mut extra = FakeMiner::connect(server.local_addr()).await;
-	let mut line = String::new();
-	let read = tokio::time::timeout(Duration::from_secs(10), extra.reader.read_line(&mut line))
-		.await
-		.expect("the refusal must not hang");
-	assert!(matches!(read, Ok(0) | Err(_)), "expected a closed socket, got {line:?}");
+	assert!(is_closed(&mut extra, Duration::from_secs(10)).await, "expected a closed socket");
 
 	// Freeing one lets the next connection in.
+	drop(held.pop());
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	let mut next = FakeMiner::connect(server.local_addr()).await;
+	assert_eq!(next.login("qnero-worker").await["result"]["status"], "OK");
+}
+
+/// A peer that stops reading its socket must not keep the slot it holds.
+///
+/// The reply path used to be `send().await`, which waits for queue capacity,
+/// and the writer behind it had no deadline. A peer that filled its receive
+/// window then parked the connection task forever: with a connection cap in
+/// front of it, that is a handful of unauthenticated sockets taking the whole
+/// endpoint until the node is restarted.
+#[tokio::test]
+async fn a_peer_that_stops_reading_gives_its_slot_back() {
+	let (server, _engine) = server_with_limits(
+		8,
+		8,
+		Limits {
+			max_connections: 1,
+			max_connections_per_ip: 1,
+			write_timeout: Duration::from_millis(200),
+			..Limits::default()
+		},
+	)
+	.await;
+
+	// One socket, never read from, fed lines that each earn a reply. The
+	// server's queue fills, then the kernel buffers, and the writer wedges.
+	let mut wedged = FakeMiner::connect(server.local_addr()).await;
+	let line = json!({"id": 1, "method": "keepalived", "params": {}}).to_string() + "\n";
+	let flood = async {
+		let mut sent = 0usize;
+		while sent < 64 * 1024 * 1024 {
+			if wedged.writer.write_all(line.as_bytes()).await.is_err() {
+				break;
+			}
+			sent += line.len();
+		}
+		sent
+	};
+	// The flood ends when the server closes on us. Deadlined anyway, so a
+	// regression shows up as a failed assertion and not as a hung test.
+	let sent = tokio::time::timeout(Duration::from_secs(30), flood).await.unwrap_or_default();
+
+	// The slot comes back, which is the whole of the claim: a fresh connection
+	// is accepted and served.
+	let mut served = false;
+	for _ in 0..50 {
+		tokio::time::sleep(Duration::from_millis(100)).await;
+		let mut candidate = FakeMiner::connect(server.local_addr()).await;
+		if let Some(login) = candidate.try_login("qnero-worker").await {
+			if login["result"]["status"] == "OK" {
+				served = true;
+				break;
+			}
+		}
+	}
+	assert!(served, "the wedged connection never released its slot after {sent} bytes");
+}
+
+/// A connection that never logs in holds a slot, so it gets the short deadline
+/// and not the share-scaled one a rig earns by logging in.
+#[tokio::test]
+async fn a_connection_that_never_logs_in_gives_its_slot_back() {
+	let (server, _engine) = server_with_limits(
+		8,
+		// A share difficulty this high puts the authenticated deadline at its
+		// two-hour ceiling, so the short pre-login window is what is measured.
+		u64::MAX,
+		Limits {
+			max_connections: 1,
+			max_connections_per_ip: 1,
+			login_timeout: Duration::from_millis(400),
+			..Limits::default()
+		},
+	)
+	.await;
+
+	let mut silent = FakeMiner::connect(server.local_addr()).await;
+	assert!(
+		is_closed(&mut silent, Duration::from_secs(5)).await,
+		"a peer that never logs in must not hold a slot for the rig's deadline",
+	);
+
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	let mut next = FakeMiner::connect(server.local_addr()).await;
+	assert_eq!(next.login("qnero-worker").await["result"]["status"], "OK");
+}
+
+/// One address must not be able to take every slot on the endpoint.
+#[tokio::test]
+async fn one_address_cannot_take_every_connection_slot() {
+	let (server, _engine) = server_with_limits(
+		8,
+		8,
+		Limits { max_connections: 8, max_connections_per_ip: 2, ..Limits::default() },
+	)
+	.await;
+
+	let mut held = Vec::new();
+	for _ in 0..2 {
+		let mut miner = FakeMiner::connect(server.local_addr()).await;
+		assert_eq!(miner.login("qnero-worker").await["result"]["status"], "OK");
+		held.push(miner);
+	}
+	tokio::time::sleep(Duration::from_millis(200)).await;
+
+	// Six global slots are still free, and this address has used its two.
+	let mut extra = FakeMiner::connect(server.local_addr()).await;
+	assert!(
+		is_closed(&mut extra, Duration::from_secs(5)).await,
+		"the per-address budget must refuse this while the endpoint still has room",
+	);
+
 	drop(held.pop());
 	tokio::time::sleep(Duration::from_millis(200)).await;
 	let mut next = FakeMiner::connect(server.local_addr()).await;
@@ -420,8 +616,15 @@ async fn keepalived_is_answered_so_the_miner_does_not_reconnect() {
 	assert_eq!(response["result"]["status"], "KEEPALIVED");
 }
 
+/// A login the node cannot serve is answered and then the socket closes.
+///
+/// The answer alone is not enough. xmrig clears its expiry timer on every line
+/// it receives and arms its keepalive only inside a *successful* login, so a
+/// rig refused on an open socket sits with both timers at zero: measured
+/// against xmrig 6.21.3, one log line and then 75 s of nothing. The EOF is what
+/// makes it count a failure and reconnect.
 #[tokio::test]
-async fn a_login_before_the_first_template_is_refused_rather_than_answered_with_no_job() {
+async fn a_login_before_the_first_template_is_refused_and_the_socket_closes() {
 	let engine = RandomxEngine::light(1);
 	let server = StratumServer::start(
 		StratumConfig { host: IpAddr::from([127, 0, 0, 1]), port: 0, share_difficulty: 100 },
@@ -432,6 +635,35 @@ async fn a_login_before_the_first_template_is_refused_rather_than_answered_with_
 	let mut miner = FakeMiner::connect(server.local_addr()).await;
 	let response = miner.login("qnero-worker").await;
 	assert_eq!(response["error"]["message"], "No job available yet");
+	assert!(
+		is_closed(&mut miner, Duration::from_secs(5)).await,
+		"the refusal has to arrive as an EOF too, or the rig never retries",
+	);
+}
+
+/// Authoring pausing must not cost a rig the share it is in the middle of.
+#[tokio::test]
+async fn a_paused_template_is_still_creditable() {
+	let (server, engine) = server_with_job(u64::MAX, 1).await;
+	let mut miner = FakeMiner::connect(server.local_addr()).await;
+	let login = miner.login("qnero-worker").await;
+	let (nonce, result) = mine_from_job(&engine, &login["result"]["job"]);
+
+	// What `pause_authoring` does on the enabled-to-disabled edge.
+	server.clear_current_job().await;
+
+	let response = miner.submit("1", nonce, Some(&result)).await;
+	assert!(
+		response["error"].is_null(),
+		"a share found before the pause was still earned: {response}",
+	);
+	let (accepted, rejected, _blocks) = server.stats();
+	assert_eq!((accepted, rejected), (1, 0));
+
+	// And a fresh login is still refused, because there is no template to hand
+	// it.
+	let mut fresh = FakeMiner::connect(server.local_addr()).await;
+	assert_eq!(fresh.login("qnero-worker").await["error"]["message"], "No job available yet");
 }
 
 #[tokio::test]
