@@ -131,6 +131,10 @@ pub enum Error<B: BlockT> {
 	DigestWindowMismatch(usize, usize),
 	#[error("Seed block #{0} is not reachable from the block being verified")]
 	SeedUnreachable(u64),
+	#[error("Parent {0:?} is unknown")]
+	UnknownParent(B::Hash),
+	#[error("Block claims height {height}, but its parent is #{parent_number}")]
+	HeightMismatch { height: u64, parent_number: u64 },
 	#[error("RandomX engine error: {0}")]
 	Engine(EngineError),
 	#[error(transparent)]
@@ -234,6 +238,36 @@ where
 		.ok_or(Error::SeedUnreachable(target_height))
 }
 
+/// The height a header claims must be its parent's plus one.
+///
+/// The height is attacker-supplied and it is load bearing twice over: it picks
+/// the RandomX seed epoch, and it is hashed into the mining blob. The runtime
+/// does catch a mismatch in `frame_executive::initial_checks`, but only once
+/// the body executes, which is several expensive stages later. Checking it
+/// here, before the seed walk and before any hash, is what keeps a header that
+/// lies about its height from buying an ancestry walk the length of a whole
+/// seed epoch plus a RandomX hash for a few hundred bytes of input.
+pub fn check_height_follows_parent<B, C>(
+	client: &C,
+	parent_hash: B::Hash,
+	height: u64,
+) -> Result<(), Error<B>>
+where
+	B: BlockT<Hash = H256>,
+	C: HeaderBackend<B>,
+{
+	let parent_number: u64 = client
+		.number(parent_hash)
+		.map_err(Error::Client)?
+		.ok_or(Error::UnknownParent(parent_hash))?
+		.try_into()
+		.unwrap_or(u64::MAX);
+	if height != parent_number.saturating_add(1) {
+		return Err(Error::HeightMismatch { height, parent_number });
+	}
+	Ok(())
+}
+
 /// Verify one block's proof of work, and return the work it contributes.
 ///
 /// This is the single implementation of the rule. The import queue's verifier
@@ -259,6 +293,10 @@ where
 	// Shape first, before anything is hashed: a seal that is not exactly 64
 	// bytes with the pinned padding is refused whatever it hashes to.
 	let seal = Seal::decode(seal_bytes).map_err(Error::MalformedSeal)?;
+
+	// Then the position: the seed epoch and the blob both come off this height,
+	// so it has to agree with where the block actually sits.
+	check_height_follows_parent::<B, C>(client, parent_hash, height)?;
 
 	let difficulty = client
 		.runtime_api()
@@ -639,7 +677,7 @@ where
 	let header = &mut block.header;
 	let block_hash = hash;
 	let seal_item = match header.digest_mut().pop() {
-		Some(DigestItem::Seal(id, seal)) =>
+		Some(DigestItem::Seal(id, seal)) => {
 			if id == POW_ENGINE_ID {
 				// The shape of the seal is a property of the header, so it is
 				// checked here, where the header is taken apart, and again
@@ -649,7 +687,8 @@ where
 				DigestItem::Seal(id, seal)
 			} else {
 				return Err(Error::<B>::WrongEngine(id).into());
-			},
+			}
+		},
 		_ => return Err(Error::<B>::HeaderUnsealed(block_hash).into()),
 	};
 

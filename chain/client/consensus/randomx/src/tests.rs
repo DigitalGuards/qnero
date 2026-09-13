@@ -233,3 +233,91 @@ fn the_difficulty_is_what_decides() {
 		check_seal::<TestBlock>(&engine, pre_hash, 1, H256::zero(), seal, U512::one() << 200);
 	assert!(matches!(result, Err(Error::InvalidSeal)));
 }
+
+/// A chain the height check can be asked about: hash to header, nothing else.
+struct FakeBackend {
+	headers: std::collections::HashMap<H256, TestHeader>,
+}
+
+impl FakeBackend {
+	/// One block at `number`, and its hash.
+	fn with_block(number: u32) -> (Self, H256) {
+		let header = sealed_header_at(number, canonical_digest());
+		let hash = header.hash();
+		let mut headers = std::collections::HashMap::new();
+		headers.insert(hash, header);
+		(Self { headers }, hash)
+	}
+}
+
+impl HeaderBackend<TestBlock> for FakeBackend {
+	fn header(&self, hash: H256) -> sp_blockchain::Result<Option<TestHeader>> {
+		Ok(self.headers.get(&hash).cloned())
+	}
+
+	fn info(&self) -> sp_blockchain::Info<TestBlock> {
+		sp_blockchain::Info {
+			best_hash: H256::zero(),
+			best_number: 0,
+			genesis_hash: H256::zero(),
+			finalized_hash: H256::zero(),
+			finalized_number: 0,
+			finalized_state: None,
+			number_leaves: 0,
+			block_gap: None,
+		}
+	}
+
+	fn status(&self, hash: H256) -> sp_blockchain::Result<sp_blockchain::BlockStatus> {
+		Ok(if self.headers.contains_key(&hash) {
+			sp_blockchain::BlockStatus::InChain
+		} else {
+			sp_blockchain::BlockStatus::Unknown
+		})
+	}
+
+	fn number(&self, hash: H256) -> sp_blockchain::Result<Option<u32>> {
+		Ok(self.headers.get(&hash).map(|header| *header.number()))
+	}
+
+	fn hash(&self, number: u32) -> sp_blockchain::Result<Option<H256>> {
+		Ok(self
+			.headers
+			.values()
+			.find(|header| *header.number() == number)
+			.map(|header| header.hash()))
+	}
+}
+
+/// The height in a header is attacker-supplied, and it picks the RandomX seed
+/// epoch as well as going into the hashed blob. A header that claims a height
+/// far past its parent must be refused before the seed walk and before the
+/// hash, or a few hundred bytes of input buy an ancestry walk the length of a
+/// whole epoch plus a RandomX hash.
+#[test]
+fn a_height_that_does_not_follow_its_parent_is_refused() {
+	let (backend, parent) = FakeBackend::with_block(1_000);
+
+	check_height_follows_parent::<TestBlock, _>(&backend, parent, 1_001)
+		.expect("the only height that follows #1000 is #1001");
+
+	for claimed in [1_000u64, 1_002, 4_000, 0, u64::MAX] {
+		let error = check_height_follows_parent::<TestBlock, _>(&backend, parent, claimed)
+			.expect_err("a height that does not follow its parent must be refused");
+		assert!(
+			matches!(error, Error::HeightMismatch { height, parent_number }
+				if height == claimed && parent_number == 1_000),
+			"expected a height mismatch, got: {error}",
+		);
+	}
+}
+
+/// And a header whose parent the node has never seen is refused on the same
+/// path, before any walk begins.
+#[test]
+fn an_unknown_parent_is_refused_before_anything_is_walked() {
+	let (backend, _parent) = FakeBackend::with_block(1_000);
+	let error = check_height_follows_parent::<TestBlock, _>(&backend, H256([0xabu8; 32]), 1_001)
+		.expect_err("an unknown parent must be refused");
+	assert!(matches!(error, Error::UnknownParent(_)), "got: {error}");
+}

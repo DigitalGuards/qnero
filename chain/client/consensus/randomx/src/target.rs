@@ -15,6 +15,13 @@
 //! decides whether a share was worth counting. A share that passes it is not
 //! a block; the node re-hashes every accepted share and puts it through
 //! [`meets_difficulty`] before sealing.
+//!
+//! The two rules agree everywhere except at one value. The share rule reads
+//! only the top 64 bits, so a hash whose top 64 bits equal the target exactly
+//! fails it, while the block rule reads all 256 and passes the same hash when
+//! its low 192 bits are small enough. A caller that checks both must therefore
+//! evaluate [`meets_difficulty`] first and treat it as sufficient, or it will
+//! throw away a block at that one value.
 
 use primitive_types::{U256, U512};
 
@@ -163,20 +170,59 @@ mod tests {
 		assert!(!meets_share_target(&hash, target));
 	}
 
-	/// A share that clears the block rule always clears the share rule at the
-	/// same difficulty, which is what makes the two-stage check sound: the node
-	/// never rejects as a share something it would have accepted as a block.
+	/// The two rules agree everywhere except at one value, and the exception is
+	/// the reason the caller must evaluate the block rule first and treat it as
+	/// sufficient.
+	///
+	/// The share rule reads only the top 64 bits, so it rejects a hash whose top
+	/// 64 bits equal the target exactly. The block rule reads all 256, so the
+	/// same hash passes when its low 192 bits are small enough. Sampling the
+	/// boundary is what makes this test able to fail: a sample taken well inside
+	/// the accepting region passes both rules for every input and would stay
+	/// green with either comparison inverted.
 	#[test]
-	fn the_block_rule_is_stricter_than_the_share_rule() {
+	fn the_two_rules_agree_except_at_the_boundary() {
 		let difficulty = 4096u64;
 		let target = share_target_u64(difficulty);
-		for seed in 0..64u64 {
-			let mut hash = [0u8; 32];
-			hash[16..24].copy_from_slice(&seed.to_le_bytes());
-			hash[24..32].copy_from_slice(&(seed % 32).to_le_bytes());
-			if meets_difficulty(&hash, U512::from(difficulty)) {
-				assert!(meets_share_target(&hash, target), "seed {seed}");
+		let mut disagreements = 0;
+		let mut agreements = 0;
+		for top in target - 2..=target + 1 {
+			for low in [0u64, 1, u64::MAX] {
+				let mut hash = [0u8; 32];
+				hash[0..8].copy_from_slice(&low.to_le_bytes());
+				hash[24..32].copy_from_slice(&top.to_le_bytes());
+				let block = meets_difficulty(&hash, U512::from(difficulty));
+				let share = meets_share_target(&hash, target);
+				if block == share {
+					agreements += 1;
+				} else {
+					// Every disagreement runs one way: a hash the block rule
+					// accepts and the share rule refuses.
+					assert!(block && !share, "top {top:#x} low {low:#x}");
+					disagreements += 1;
+				}
 			}
+		}
+		assert!(agreements > 0 && disagreements > 0, "the sample must straddle the boundary");
+	}
+
+	/// The exact hash the share rule throws away and the block rule keeps, spelled
+	/// out: `hash_le * difficulty` still fits in 256 bits, and the top 64 bits are
+	/// the target itself, which `meets_share_target` refuses.
+	#[test]
+	fn a_block_at_the_boundary_is_not_a_share() {
+		for difficulty in [128u64, 164, 4096] {
+			let target = share_target_u64(difficulty);
+			let mut hash = [0u8; 32];
+			hash[24..32].copy_from_slice(&target.to_le_bytes());
+			assert!(
+				meets_difficulty(&hash, U512::from(difficulty)),
+				"difficulty {difficulty}: this hash is a block",
+			);
+			assert!(
+				!meets_share_target(&hash, target),
+				"difficulty {difficulty}: and the share rule rejects it",
+			);
 		}
 	}
 

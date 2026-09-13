@@ -95,7 +95,7 @@ pub struct RandomxEngine {
 	caches: Mutex<VecDeque<([u8; 32], Arc<SharedCache>)>>,
 	idle: Mutex<Vec<PooledVm>>,
 	max_caches: usize,
-	max_idle_vms: usize,
+	max_idle_vms: AtomicUsize,
 	cache_initialisations: AtomicUsize,
 }
 
@@ -117,7 +117,7 @@ impl RandomxEngine {
 			caches: Mutex::new(VecDeque::new()),
 			idle: Mutex::new(Vec::new()),
 			max_caches: max_caches.max(1),
-			max_idle_vms: max_idle_vms.max(1),
+			max_idle_vms: AtomicUsize::new(max_idle_vms.max(1)),
 			cache_initialisations: AtomicUsize::new(0),
 		})
 	}
@@ -125,6 +125,27 @@ impl RandomxEngine {
 	/// The flags this engine runs with, for logging.
 	pub fn flags(&self) -> RandomXFlag {
 		self.flags
+	}
+
+	/// Make sure the pool keeps at least `at_least` VMs between uses.
+	///
+	/// The pool exists to stop VM churn: every VM it cannot hold is a
+	/// `randomx_create_vm` (a 2 MiB scratchpad, and with the JIT a fresh
+	/// executable code buffer) and a `randomx_destroy_vm` on every round. A node
+	/// mining on more threads than the pool holds pays that on every batch, so
+	/// the caller that knows the thread count raises the floor.
+	pub fn reserve_idle_vms(&self, at_least: usize) {
+		self.max_idle_vms.fetch_max(at_least.max(1), Ordering::Relaxed);
+	}
+
+	/// How many VMs the pool keeps between uses.
+	pub fn max_idle_vms(&self) -> usize {
+		self.max_idle_vms.load(Ordering::Relaxed)
+	}
+
+	/// How many VMs are idle in the pool right now.
+	pub fn idle_vms(&self) -> usize {
+		self.idle.lock().len()
 	}
 
 	/// How many Argon2d cache fills have happened, which is how many times the
@@ -203,7 +224,7 @@ impl RandomxEngine {
 
 	fn release(&self, vm: OwnedVm, seed: [u8; 32]) {
 		let mut idle = self.idle.lock();
-		if idle.len() < self.max_idle_vms {
+		if idle.len() < self.max_idle_vms() {
 			idle.push(PooledVm { vm, seed });
 		}
 	}
@@ -289,7 +310,28 @@ mod tests {
 			let hash = vm.calculate_hash(input).expect("hash");
 			assert_eq!(hex::encode(hash), *expected, "key {:?}", String::from_utf8_lossy(key));
 		}
-		let _ = seed_from(b"test key 000");
+	}
+
+	/// The vectors above go through the raw bindings; the node never does. This
+	/// crosses the boundary: the same 32-byte seed and the same input, once
+	/// through `RandomXCache::new` directly and once through `engine.hash`, must
+	/// be the same bytes.
+	///
+	/// Without it, a change inside `cache_for` that domain-separated, truncated
+	/// or byte-swapped the seed would leave every vector green and every
+	/// engine-against-itself test green, while the node quietly stopped computing
+	/// what a stock xmrig computes. That is a chain split with no failing test.
+	#[test]
+	fn the_engine_passes_the_seed_to_randomx_unchanged() {
+		let engine = RandomxEngine::light(1);
+		let seed = seed_from(b"qnero seed a");
+		let input = b"the blob the node hashes";
+
+		let cache = RandomXCache::new(engine.flags(), &seed[..]).expect("cache");
+		let vm = RandomXVM::new(engine.flags(), Some(cache), None).expect("vm");
+		let direct = vm.calculate_hash(input).expect("hash");
+
+		assert_eq!(engine.hash(seed, input).expect("engine hash").to_vec(), direct);
 	}
 
 	#[test]
@@ -324,6 +366,26 @@ mod tests {
 		}
 		assert_eq!(seen.len(), 4);
 		assert_eq!(engine.cache_initialisations(), 1);
+	}
+
+	/// The pool has to be at least as deep as the number of threads leasing from
+	/// it, or every round past the pool's depth creates and destroys a VM.
+	#[test]
+	fn the_pool_depth_can_be_raised_to_the_thread_count() {
+		let engine = RandomxEngine::light(8);
+		assert_eq!(engine.max_idle_vms(), 8);
+		engine.reserve_idle_vms(20);
+		assert_eq!(engine.max_idle_vms(), 20);
+		// It is a floor, so a smaller reservation never shrinks the pool.
+		engine.reserve_idle_vms(4);
+		assert_eq!(engine.max_idle_vms(), 20);
+
+		// And the depth is what `release` honours: ten leases returned at once
+		// all stay pooled.
+		let seed = seed_from(b"qnero seed a");
+		let leases: Vec<_> = (0..10).map(|_| engine.acquire(seed).expect("lease")).collect();
+		drop(leases);
+		assert_eq!(engine.idle_vms(), 10);
 	}
 
 	#[test]
