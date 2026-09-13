@@ -472,10 +472,13 @@ nice -n 19 ./target/release/qnero-node --dev --tmp \
 | `--stratum-share-difficulty D` | 5000 | Per-connection share difficulty, clamped per job to the block difficulty. Requires `--stratum-port`. |
 
 An authority with `--mining-threads 0` and no `--stratum-port` has nothing
-mining, so the node refuses to start rather than idling silently. Every stratum
-flag that needs a port says so at startup for the same reason: an address or a
-share difficulty with no listener behind it is a flag that silently did
-nothing, and the operator finds out from the rig that cannot connect.
+mining, so the node refuses to start and says so. `--mining-threads` above the
+machine's own parallelism is refused too: every thread is a `spawn_blocking` on
+the pool rocksdb and block import share, so oversubscribing queues the node's
+hashing in front of its own import. Every stratum flag that needs a port says
+so at startup for the same reason: an address or a share difficulty with no
+listener behind it is a flag that silently did nothing, and the operator finds
+out from the rig that cannot connect.
 
 **What the endpoint bounds.** The port is off by default and binds loopback by
 default, and opening it to a network is a decision, so it is bounded like
@@ -483,22 +486,34 @@ anything an unauthenticated peer can reach:
 
 - a line is read through a `take` capped at 8 KiB, so a peer that never sends a
   newline cannot make the node buffer for it;
-- 64 connections at once, refused past that, so one peer cannot multiply a
-  per-connection allowance across sockets;
-- four share hashes at once, each on the blocking pool rather than on the async
+- 64 connections at once, and 4 from any one address, refused past either, so
+  one peer cannot multiply a per-connection allowance across sockets and one
+  host cannot take the endpoint away from the operator's rigs;
+- 30 seconds to log in. The long share-scaled deadline below is a rig's
+  allowance and a peer earns it by logging in;
+- 10 seconds for one write to land, and a 32-line outgoing queue. A peer that
+  stops reading its socket is disconnected, so it cannot park a connection task
+  on a stalled `write_all` and keep the slot that task holds;
+- four share hashes at once, each on the blocking pool and none on the async
   runtime, so a flood of submits cannot take the runtime away from block import
   and networking;
-- 64 submits of burst per connection, refilling at 32 a second, which is orders
-  of magnitude above any real rig and below what it takes to keep the hashing
-  bounded above busy;
+- 64 submits of burst per connection, refilling at 32 a second: far above any
+  real rig's submit rate and far below what it would take to keep all four hash
+  slots saturated;
+- 100 000 entries in the duplicate-share set, cleared at the ceiling. Eviction
+  is otherwise driven by the template rolling, and a stalled chain rolls none;
 - miner-supplied strings truncated to 64 characters and logged with `{:?}`, so
   a login cannot forge a log line or rewrite a terminal.
 
 The idle deadline scales with the share difficulty (`20` expected share
-intervals for a 100 H/s rig, floored at 5 minutes and capped at 2 hours). xmrig
-resets its own keepalive timer on every line it *receives*, so a rig that is
-taking job pushes and has not found a share sends nothing at all: a fixed
-5-minute read deadline disconnects healthy miners at a high share difficulty.
+intervals for a 100 H/s rig, floored at 5 minutes and capped at 2 hours), and
+it counts from the last line in **either** direction. xmrig resets its own
+keepalive timer on every line it *receives*, so a rig that is taking job pushes
+and has not found a share sends nothing at all: a deadline measured only on
+inbound lines is a bet on the rig's hash rate, and a fixed 5-minute one
+disconnects healthy miners at a high share difficulty. Counting the node's own
+job pushes as proof of life makes it an invariant, because a push is exactly
+what re-arms the timer on the other end.
 
 **The xmrig command line**, against a node with `--stratum-port 3333`:
 
@@ -4149,9 +4164,18 @@ xmrig**, every one of them verified by the node's own RandomX before import.
 Every share the node accepted it re-hashed itself, over a blob it rebuilt from
 the job it issued; the `result` field a miner sends is compared against that
 and never used in its place. The in-process miner wins most of this devnet
-because the loop hashes a whole batch before it looks at the share channel, and
-at a difficulty of 180 almost any nonce is a block: on a real difficulty the
-rig's 800 H/s against the node's 33 H/s decides it.
+because at a difficulty of 180 almost any nonce is a block and the node is
+holding the build: on a real difficulty the rig's 800 H/s against the node's
+33 H/s decides it.
+
+That run also measured what the loop did with the rig's winning shares. It
+hashed a whole batch before polling the seal channel for a millisecond, so a
+block-worthy share waited up to half a second and was then dropped if the
+template had moved: `48 + 17 = 65`, the node sealing 48 of the rig's 65
+block-worthy shares and logging `dropping a seal for the superseded job` for
+the other 17, each of them acknowledged to the miner with `status: OK` and then
+thrown away. The two producers are raced against each other now, so a seal is
+taken the moment it lands.
 
 The zero in that rejection count is the whole point of the run, and it was not
 zero the first time. xmrig's `Client::isCriticalError` treats four pool error
@@ -4215,3 +4239,123 @@ with the result. `cargo fmt` on stable reformats upstream crates that were
 never stable-clean, so the chain-side format gate is `cargo +nightly fmt`. The
 root workspace is stable-clean and its gate is the stable one.
 
+## The M7 review fix pass, 2026-09-13
+
+Thirteen findings against the M7 tip: three high, three medium, seven low. Two
+of the highs and one medium were the same shape, a connection the endpoint
+could not get rid of, and the third high was a rig that could not tell it had
+been refused.
+
+### What changed
+
+**A peer that stops reading can no longer keep a connection slot.** The reply
+path was `out_tx.send(...).await`, which waits for queue capacity, and the
+writer task behind it awaited `write_all` with no deadline. A peer that opened a
+socket, sent lines that each earn a reply, and then stopped reading filled its
+own receive window, then the node's send buffer, then the 32-line queue, and
+parked the connection task for good. With the 64-connection cap this pass added,
+64 such sockets from one address took the endpoint permanently: the accept loop
+refused every rig and the node fell back to its one light-mode thread, 33 H/s
+against a rig's 800. Three changes: every reply goes out with `try_send` and a
+full queue ends the connection, the same rule login and `broadcast_job` already
+used; each `write_all` is deadlined at 10 seconds; and the join that waits for
+the writer to drain is deadlined too, with an `abort()` behind it, so the slot
+comes back even when the socket is wedged. A test floods one connection from a
+client that never reads and asserts a fresh login is served afterwards. Against
+the previous code it fails after 35 s.
+
+**The pre-login window is 30 seconds, and the long one is earned.** The idle
+deadline was computed once from the share difficulty and applied from the first
+byte, so a peer that never authenticated held its slot for 300 s at the floor
+and 7200 s at the ceiling. It is now split: `LOGIN_TIMEOUT` until a session
+exists, the share-scaled deadline after. Alongside it, a per-address cap of 4
+connections, because the global cap alone lets one host hold every slot.
+
+**The deadline counts writes as well as reads.** xmrig re-arms its keepalive
+timer on every line it *receives*, so a rig taking job pushes sends nothing at
+all: over a 156 s session with pushes every 2 s it sent 66 submits and zero
+keepalives. A deadline measured only on inbound lines was therefore a bet on
+the rig's hash rate, and at 20 H/s against the default share difficulty it was
+four expected share intervals, about a 1.8 percent chance of a spurious
+disconnect per window. The connection now records the time of its last
+successful write and takes whichever of read or write came last.
+
+**A login the node cannot serve now closes the socket.** `No job available yet`
+is the answer while authoring is paused or before the first template, and
+measured against xmrig 6.21.3 the rig logged one line and then did nothing for
+75 s: `Client::parse` clears the expiry timer on every line received, and the
+keepalive timer is armed only inside a *successful* login, so both sat at zero.
+Answering `status: OK` with no job fails too: `parseLogin` runs `parseJob` over
+the result and fails the login when the job is missing. The refusal is queued and the connection then
+closes, which is the EOF xmrig counts as a failure and retries after.
+
+**A rig's seal is no longer gated behind a batch of local hashing.** The loop
+hashed `LOCAL_MINING_BATCH` nonces, about half a second on one light-mode
+thread, and only then polled the seal channel for a millisecond. A block-worthy
+share waited out that batch and was dropped if the template moved first. The
+two producers are raced against each other now, `tokio::select!` with the rig
+first, both futures cancel safe. The measurement is in the run below.
+
+**Authoring pausing keeps the template creditable.** `clear_current_job` reset
+both job slots, so every rig already connected was answered `Block expired` for
+the whole of a pause. The current template moves to the grace slot instead, so
+shares in flight when the pause began are still hashed and credited. A fresh
+login is still refused, which is the part of the behaviour that was wanted.
+
+**Smaller ones.** xmrig compares its four critical error strings with
+`strncasecmp`, so they are case-insensitive prefixes: the guard that stopped a
+share-level rejection from being one of them tested whole-string equality and
+would have passed `Invalid job id (expired)`. It matches on the prefix now,
+ignoring case, and a test enumerates the cases. The duplicate-share set is
+evicted when the template rolls and a stalled chain rolls none, so it has a
+100 000-entry ceiling. `--mining-threads` is refused above the machine's
+available parallelism, since every thread is a blocking task on the pool
+rocksdb and block import share.
+
+### The run
+
+```
+export QNERO_MINER_KEY=$(qnero-wallet miner-address)
+RUST_LOG=info nice -n 19 ./target/release/qnero-node --dev --tmp \
+  --stratum-port 3336 --mining-threads 1
+
+nice -n 19 xmrig --threads=2 -o 127.0.0.1:3336 -u qnero-rig --algo rx/0
+```
+
+The node mined blocks #1 to #12 on its own thread in 36 s, the rig logged in at
+13:37:41, and the chain reached #211 by 13:39:45. Of the 199 blocks in the
+rig's two-minute window, **190 were mined by xmrig**:
+
+```
+⛏️ Miner 127.0.0.1:47612 logged in as "qnero-rig" ("XMRig/6.21.3 (Linux x86_64) …"), extra nonce 0x3fc0afe9
+🥇 Share from "qnero-rig" meets the block difficulty 215 at height 89
+🥇 Successfully mined and submitted a new block by stratum miner "qnero-rig" (mining time: 0s)
+⛏️ Stratum so far: 478 shares accepted, 0 rejected, 469 of them blocks
+```
+
+One login, no reconnects, 0 rejected, and **zero `dropping a seal for the
+superseded job`**. The previous pass's run on the same workstation logged 17 of
+those against 65 block-worthy shares and sealed 10 blocks from the rig; this one
+sealed 190. The remaining gap between 469 block-worthy shares and 190 blocks is
+arithmetic: at a difficulty around 210 nearly every nonce clears it, so a rig
+sends several block-worthy shares against one template, and one template is one
+block by definition.
+
+### Gates
+
+```
+# the chain workspace
+SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
+  -p sc-consensus-randomx -p pallet-qpow -p qnero-runtime -p qnero-node --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 -p qnero-node --all-targets
+cargo +nightly fmt -p qnero-node -- --check
+
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+cargo fmt --all -- --check
+```
+
+All green. The node crate is at 84 tests, 22 of them stratum protocol tests
+driven by a fake miner that speaks xmrig's messages, with the node built once
+for the run above.
