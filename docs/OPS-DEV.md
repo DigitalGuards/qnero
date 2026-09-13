@@ -9,14 +9,134 @@ Every command below is prefixed with `nice -n 19`. The circuit generation and
 the proving tests are CPU and memory heavy, and a chain build at `-j 4` will
 occupy a machine for the better part of an hour.
 
+## What is renamed and what stays upstream
+
+`chain/` is a subtree of somebody else's repository, so the next merge from
+Quantus-Network/chain arrives carrying upstream's names in every file it
+touches. One rule decides each conflict: **what an operator types, reads or is
+answered with is Qnero's, and what only the build system sees stays
+upstream's.**
+
+Renamed. A merge that brings the old name back is a regression:
+
+| Upstream | Qnero | Where |
+|---|---|---|
+| package and binary `quantus-node` | `qnero-node` | `node/Cargo.toml` (`name`, `default-run`, `description`) and every `target/release/...` path in docs, scripts and tests |
+| package `quantus-runtime` | `qnero-runtime` | `runtime/Cargo.toml`, the workspace dependency in `chain/Cargo.toml`, and `node/Cargo.toml`'s dependency plus its `std`, `runtime-benchmarks` and `try-runtime` feature lists |
+| crate path `quantus_runtime::` | `qnero_runtime::` | every `use` in `node/src/` and `runtime/tests/` |
+| wasm blob `wbuild/quantus-runtime/quantus_runtime.wasm` | `wbuild/qnero-runtime/qnero_runtime.wasm` | follows the package rename; `scripts/regenerate_weights.sh` reads that path |
+| `key quantus` and its banners | `key qnero`, "Qnero Account Details", "Qnero Wormhole Details" | `node/src/cli.rs`, `node/src/command.rs` |
+| the `--rewards-inner-hash` error hints | `qnero-node key qnero --scheme wormhole` | `node/src/command.rs` |
+| two `--help` strings naming Quantus | ML-DSA-87, and "upstream" | `client/cli/src/params/transaction_pool_params.rs` |
+| the startup banner's byline | `DigitalGuards <https://github.com/DigitalGuards/qnero>` | `SubstrateCli::author` in `node/src/command.rs` |
+
+Three user-facing strings needed no edit of their own, and each is worth
+knowing about, because each looks like an omission until you check it:
+
+- **The version string and the `--help` about line.** `sc_cli` builds both from
+  the package: the version line names the executable file, and the about line
+  is `CARGO_PKG_DESCRIPTION`. Renaming the package and its description moved
+  both. `SubstrateCli::impl_name` has said `Qnero Node` since M6. The rest of
+  `--help` comes from the flags of every crate `RunCmd` flattens, which is why
+  two strings in `client/cli` had to move as well and why the guard runs the
+  binary instead of grepping `node/src`.
+- **The prometheus namespace.** The one metric this node registers is
+  `qpow_metrics` (`node/src/prometheus.rs`), named after the consensus engine.
+- **The miner server's log lines.** Every one of them is `⛏️ Miner ...`
+  (`node/src/miner_server.rs`). The ALPN beside them, `quantus-miner/2`, stays:
+  it is a wire identifier negotiated with the external `quantus-miner` program,
+  so changing it would refuse every miner that connects.
+
+Kept as upstream, deliberately:
+
+- **Every other crate under `chain/`**: `client/*`, `frame/*`, `pallets/*`,
+  `primitives/*`, `miner-api`'s `quantus-miner-api`, and the `qp-*`
+  dependencies. Renaming them buys nothing an operator sees and costs a
+  conflict in every merge.
+- **Module paths and Rust identifiers** inside the node crate:
+  `QuantusKeySubcommand`, `QuantusAddressType`, `generate_quantus_key`,
+  `QuantusKeyDetails`. The clap attribute `#[command(name = "qnero")]` is what
+  renames the typed subcommand, so the identifier and the word an operator
+  types are decoupled on purpose.
+- **`chain/LICENSE`, `chain/README.md`, `chain/MINING.md`, `chain/SECURITY.md`
+  and `chain/docs/`.** Upstream documents, and the attribution in them is the
+  licence condition.
+- **The release pipeline: `chain/.github/workflows/` and `chain/Dockerfile`.**
+  These build tags, release assets and images for Quantus-Network/chain, they
+  read the upstream repository's releases, and GitHub runs workflows only from
+  the repository root, so nothing here executes for this fork. They still say
+  `quantus-node`, and they are dead either way. `Dockerfile.local`, which
+  builds from this tree, is renamed.
+- **`scripts/install-quantus-node.sh`, `scripts/clean-quantus-node.sh`,
+  `scripts/genesis_generate_draft.sh` and `scripts/genesis_generate_spec.sh`.**
+  All four fetch upstream release binaries or upstream `quantus-runtime-v*.wasm`
+  release assets, and Qnero publishes no releases. The local-development
+  scripts beside them are renamed: `kill_chains.sh`, `run_local_nodes.sh`,
+  `start_testnet.sh`, `create_custom_chain_spec.sh`, `regenerate_weights.sh`.
+- **Generated weight headers** (`pallets/*/src/weights.rs`), which record the
+  benchmark command that produced them. `regenerate_weights.sh` rewrites those
+  headers the next time weights are measured.
+- **The FIPS 204 signing context `QUANTUS_EXTRINSIC`.** It is consensus, and
+  both ends of the wallet and the runtime hash it.
+
+### Chain specs
+
+`chain/node/src/chain-specs/` is gone. M6 deleted the three raw JSON specs that
+lived there, because `sc_cli` resolved an empty `--chain` to the first of them
+and that started an upstream network with none of v1's privacy rules. Every
+`--chain` id now builds its genesis from a preset compiled into this binary.
+
+Of the four presets the node builds, one is Qnero's and three are upstream
+identities kept for reference:
+
+- `dev` and `qnero-dev` are Qnero's: name `Qnero DevNet`, protocol id
+  `qnero-devnet`, token `QNR`. This is what `--dev` resolves to and the only
+  preset the project runs.
+- `heisenberg`, `planck` and `mainnet` carry upstream's network names,
+  bootnodes and telemetry endpoints, all under `quantus.cat`. They build this
+  tree's runtime genesis, so the peers they dial would refuse them. They are
+  kept because deleting them means deleting the runtime's own preset list, and
+  that is a change to genesis code with nothing to do with a rename. Treat them
+  as reference until Qnero has a live network of its own, and then replace
+  them. `mainnet` is the one that still answers with the name `Quantus`.
+
+The token symbol is `QNR` on all four, from the one `qnero_properties()` map
+that `every_preset_names_the_token_qnr` pins.
+
+### The guard
+
+`node/tests/naming_guard.rs` is what holds this. It runs the binary Cargo just
+built and asserts that `--version` names `qnero-node`, that `--help` says
+`Qnero`, and that `build-spec --chain dev` answers with name `Qnero DevNet`, id
+`qnero-dev`, protocol id `qnero-devnet` and token symbol `QNR`, with no
+case-insensitive `quantus` in any of the three outside the genesis blob. It
+runs under `cargo test -p qnero-node --release`, and the chain-spec third of it
+skips itself when `SKIP_WASM_BUILD` is set, since without the wasm there is no
+spec to build.
+
+### What `quantus` still means when you grep for it
+
+Two things, and they are worth telling apart:
+
+- **`quantus-runtime` in the entries below dated before the M6 run** is the
+  on-chain `spec_name` those chains answered with. M6 changed the chain's
+  identity to `qnero` / `qnero-node` at `spec_version` 101; this pass changed
+  the crate that builds it. Those lines record what a node reported at the
+  time, so they are left alone.
+- **The binary and package names in the transcripts below were updated in
+  place.** Passes before this one ran the node as `quantus-node` and tested
+  `-p quantus-runtime`. Every command in this file is runnable against the tree
+  as it stands, and the timings and outputs beside them are the ones those
+  older runs produced.
+
 ## Building
 
 ```
 cd chain
-LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
 ```
 
-The node binary lands at `chain/target/release/quantus-node`.
+The node binary lands at `chain/target/release/qnero-node`.
 
 `LIBCLANG_PATH` is not optional on Linux. `librocksdb-sys` runs bindgen, whose
 `clang-sys` build script panics with "couldn't find any valid shared libraries
@@ -73,11 +193,11 @@ dependency to `node`, `runtime` or any pallet.
 ```
 cd chain
 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p pallet-shielded -p pallet-mining-rewards --release
-SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p quantus-runtime --release --test call_filter
+SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p qnero-runtime --release --test call_filter
 nice -n 19 cargo clippy -j 4 -p pallet-shielded -p pallet-mining-rewards --all-targets
 ```
 
-The runtime's call-filter test is named, and `cargo test -p quantus-runtime`
+The runtime's call-filter test is named, and `cargo test -p qnero-runtime`
 without `--test call_filter` is not the gate: the `tests/mod.rs` target has not
 compiled since the M4 subtree fork, where `pallet-zk-tree` changed `Leaves` to a
 raw `Hash256` and `runtime/tests/governance/vesting.rs:58` still reads `leaf.to`
@@ -109,7 +229,7 @@ QNERO_NUM_LEAF_PROOFS=2 QNERO_NUM_PRIVATE_BATCH_PROOFS=2 \
 
 ```
 cd chain
-nice -n 19 ./target/release/quantus-node --dev --tmp
+nice -n 19 ./target/release/qnero-node --dev --tmp
 ```
 
 `--dev` is what picks the chain here. Every `--chain` id the node accepts
@@ -136,7 +256,7 @@ qnero-wallet miner-address          # the key alone on stdout
 
 # on the node
 export QNERO_MINER_KEY=qnm1...
-nice -n 19 ./target/release/quantus-node --dev --tmp
+nice -n 19 ./target/release/qnero-node --dev --tmp
 # or --rewards-miner-key qnm1...
 ```
 
@@ -181,7 +301,7 @@ only other symptom is a balance that never grows.
 ### The block-author seam
 
 Everything in the runtime that needs to know who authored a block reads it
-through one implementation, `quantus_runtime::configs::QpowAuthor`, which
+through one implementation, `qnero_runtime::configs::QpowAuthor`, which
 implements `frame_support::traits::FindAuthor<AccountId>`. It takes the first
 `PreRuntime` digest item under `POW_ENGINE_ID`, requires exactly 32 bytes, and
 derives the wormhole address from it (`qp_wormhole::derive_wormhole_address`).
@@ -273,7 +393,7 @@ Build:
 
 ```
 cd chain
-LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
 ```
 
 14 minutes 11 seconds of wall clock with a warm dependency cache, of which 41
@@ -281,12 +401,12 @@ seconds was `pallet-shielded`'s build script generating the circuit artifact
 set. A cold cache is longer: the earlier passes of this same build spent about
 an hour reaching the runtime, and `librocksdb-sys` alone compiles hundreds of
 C++ objects. The binary is 80 MB at
-`chain/target/release/quantus-node`.
+`chain/target/release/qnero-node`.
 
 Run:
 
 ```
-nice -n 19 ./target/release/quantus-node --dev --tmp
+nice -n 19 ./target/release/qnero-node --dev --tmp
 ```
 
 Blocks from the first second: `Imported #1` two seconds after genesis, height
@@ -330,7 +450,7 @@ and re-smoked.
 
 ```
 cd chain
-LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
 ```
 
 3 minutes 17 seconds of wall clock against the warm tree from the first pass,
@@ -344,7 +464,7 @@ emits any `rerun-if` directive at all opts out of Cargo's default "rerun when
 any file in the package changed" scan. What triggers a regeneration is one of
 those two vars changing, the build script or its build-dependency graph
 changing, or a fresh `OUT_DIR`. The binary is 80 MB at
-`chain/target/release/quantus-node`.
+`chain/target/release/qnero-node`.
 
 `--dev --tmp` again, stopped after about two minutes at height 17. Blocks from
 the first second, `Imported #1` through `#17`. What this run checked:
@@ -371,13 +491,13 @@ moved one constant, so the node was rebuilt and re-smoked.
 
 ```
 cd chain
-LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
 ```
 
 1 minute 6 seconds of wall clock against the warm tree, three crates recompiled
-(`pallet-shielded`, `quantus-runtime`, `quantus-node`). The circuit artifact set
+(`pallet-shielded`, `qnero-runtime`, `qnero-node`). The circuit artifact set
 did not regenerate this time: the build script's inputs did not change, only the
-pallet's Rust sources. The binary is at `chain/target/release/quantus-node`.
+pallet's Rust sources. The binary is at `chain/target/release/qnero-node`.
 
 `--dev --tmp`, stopped after about two minutes at height 73, 75 blocks imported
 from the first second. What this run checked:
@@ -402,7 +522,7 @@ from the first second. What this run checked:
 
 Same workstation. The pallet changed the settlement plan and the runtime gained
 one constant. **The node was deliberately not rebuilt in this pass**, so
-`chain/target/release/quantus-node` and the metadata it serves are still the
+`chain/target/release/qnero-node` and the metadata it serves are still the
 second pass's: they carry neither the `MaxPayloadSlotRatio` constant nor the
 `PayloadRatioExceeded` error. The next build of the node picks both up, and it
 will not regenerate the circuit artifact set, because this pass touched neither
@@ -415,7 +535,7 @@ Gates run for this pass, all green:
 cd chain
 RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p pallet-shielded -p pallet-zk-tree --release
 SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 -p pallet-shielded -p pallet-zk-tree --all-targets
-SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 4 -p quantus-runtime
+SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 4 -p qnero-runtime
 ```
 
 56 tests in `pallet-shielded` and 35 in `pallet-zk-tree`, no clippy warnings in
@@ -456,21 +576,21 @@ happened, and neither is in the metadata this binary serves.
 
 ```
 cd chain
-LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
 ```
 
 Two builds, because a comment and a whitespace revert landed after the first
 one: 1 minute 6 seconds for the build that was smoked first (three crates:
-`pallet-shielded`, `quantus-runtime`, `quantus-node`), then 2 minutes 0 seconds
-for the build of the tree as committed, which recompiled `quantus-node` alone.
+`pallet-shielded`, `qnero-runtime`, `qnero-node`), then 2 minutes 0 seconds
+for the build of the tree as committed, which recompiled `qnero-node` alone.
 The circuit artifact set did not regenerate in either: this pass touched neither
 `QNERO_NUM_*` nor `build.rs`. The binary is 80,468,704 bytes at
-`chain/target/release/quantus-node`, and the figures below are that binary's.
+`chain/target/release/qnero-node`, and the figures below are that binary's.
 
-`nice -n 19 ./target/release/quantus-node --dev --tmp`, 49 seconds from the
+`nice -n 19 ./target/release/qnero-node --dev --tmp`, 49 seconds from the
 first imported block to the stop, 48 blocks imported, height 48. Stopped by its
 pidfile; `ss -ltn` then shows no listener on 9944, a `curl` to it is refused,
-and `pgrep quantus-node` finds nothing, so the port is closed and no process is
+and `pgrep qnero-node` finds nothing, so the port is closed and no process is
 left. What this run checked:
 
 - `chain_getHeader`'s `zkTreeRoot` equals the root `zkTree_getState` reports
@@ -505,7 +625,7 @@ cargo fmt --all -- --check
 cd chain
 RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p pallet-shielded -p pallet-zk-tree --release
 SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 -p pallet-shielded --all-targets
-SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 4 -p quantus-runtime
+SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 4 -p qnero-runtime
 ```
 
 27 test binaries in the root workspace with no failure, 60 tests in
@@ -545,17 +665,17 @@ Independent re-check of the rebuild and smoke recorded above, at
 
 ```
 cd chain
-LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
 ```
 
 `Finished release profile in 0.50s`: nothing to recompile. The binary at
-`chain/target/release/quantus-node` is the one the entry above describes,
+`chain/target/release/qnero-node` is the one the entry above describes,
 80,468,704 bytes, so the tree as committed and the binary already agree and no
 second build was produced.
 
-`nice -n 19 ./target/release/quantus-node --dev --tmp`, 202 seconds, 214 blocks
+`nice -n 19 ./target/release/qnero-node --dev --tmp`, 202 seconds, 214 blocks
 imported, stopped by its pidfile. `ss -ltn` then shows no listener on 9944,
-`curl` to it returns no response, and `pgrep quantus-node` finds nothing.
+`curl` to it returns no response, and `pgrep qnero-node` finds nothing.
 
 `state_getMetadata` (229,604 hex characters) was searched for each name the
 pass claims to have moved:
@@ -575,7 +695,7 @@ Gates re-run for the review, all green:
 cd chain
 RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 2 -p pallet-shielded -p pallet-zk-tree --release
 SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 2 -p pallet-shielded --all-targets
-SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 2 -p quantus-runtime
+SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 2 -p qnero-runtime
 # in the repository root
 nice -n 19 cargo fmt --all -- --check
 ```
@@ -639,7 +759,7 @@ cargo fmt --all -- --check
 cd chain
 RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p pallet-shielded -p pallet-zk-tree --release
 SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 -p pallet-shielded --all-targets
-SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 4 -p quantus-runtime
+SKIP_WASM_BUILD=1 nice -n 19 cargo check -j 4 -p qnero-runtime
 ```
 
 27 test binaries in the root workspace with no failure, 61 tests in
@@ -656,25 +776,25 @@ the changes.
 
 ```
 cd chain
-LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
 ```
 
 Two builds, because three doc comments were tightened after the first one:
 1 minute 3 seconds, then 1 minute 5 seconds for the build of the tree as
 committed, each recompiling the same three crates (`pallet-shielded`,
-`quantus-runtime`, `quantus-node`). The circuit artifact set regenerated in 28.8
+`qnero-runtime`, `qnero-node`). The circuit artifact set regenerated in 28.8
 seconds on the first of them, which is the release profile's own `OUT_DIR`
 regenerating: this pass touched neither `QNERO_NUM_*` nor `build.rs`, so the
 dimensions are the ones every earlier build used. The binary of the committed
-tree is 80,465,200 bytes at `chain/target/release/quantus-node`, and the
+tree is 80,465,200 bytes at `chain/target/release/qnero-node`, and the
 figures below are that binary's.
 Both builds serve a byte-identical `state_getMetadata` blob, which is what a
 comment-only difference should produce.
 
-`nice -n 19 ./target/release/quantus-node --dev --tmp`, 77 seconds of uptime,
+`nice -n 19 ./target/release/qnero-node --dev --tmp`, 77 seconds of uptime,
 74 blocks imported, final height 74. Stopped by its pidfile; `ss -ltn` then
 shows no listener on 9944, `curl` to it exits 7 (connection refused), and
-`pgrep quantus-node` finds nothing, so the port is closed and no process is
+`pgrep qnero-node` finds nothing, so the port is closed and no process is
 left. What this run checked:
 
 - `chain_getHeader`'s `zkTreeRoot`
@@ -752,7 +872,7 @@ scratch directory with explicit `--file` paths.
 ```text
 === 1. start a fresh dev node ===
 
-$ nice -n 19 ./chain/target/release/quantus-node --dev --tmp   (backgrounded, pidfile)
+$ nice -n 19 ./chain/target/release/qnero-node --dev --tmp   (backgrounded, pidfile)
 
 $ ss -ltn | grep 9944
 LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*          
@@ -1037,7 +1157,7 @@ so each output ciphertext is a uniform 1987 bytes and the submission floor is
 ```text
 === 1. a fresh dev node ===
 
-$ nice -n 19 ./chain/target/release/quantus-node --dev --tmp   (backgrounded, pidfile)
+$ nice -n 19 ./chain/target/release/qnero-node --dev --tmp   (backgrounded, pidfile)
 $ ss -ltn | grep 9944
 LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*
 LISTEN 0      1024            [::1]:9944          [::]:*
@@ -1288,7 +1408,7 @@ quanta.
 ```text
 === 1. a fresh dev node ===
 
-$ nohup nice -n 19 ./chain/target/release/quantus-node --dev --tmp > node.log 2>&1 &
+$ nohup nice -n 19 ./chain/target/release/qnero-node --dev --tmp > node.log 2>&1 &
 $ echo $! > node.pid
 $ ss -ltn | grep 9944
 LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*
@@ -1578,7 +1698,7 @@ Fresh seed files, a fresh `--dev --tmp` node, addresses truncated in the middle.
 ```text
 === 1. start a fresh dev node ===
 
-$ nice -n 19 ./chain/target/release/quantus-node --dev --tmp   (backgrounded, pidfile)
+$ nice -n 19 ./chain/target/release/qnero-node --dev --tmp   (backgrounded, pidfile)
 
 $ ss -ltn | grep 9944
 LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*
@@ -1897,7 +2017,7 @@ middle.
 ```text
 === 1. a fresh dev node, and a wallet that has never seen a chain ===
 
-$ nice -n 19 ./chain/target/release/quantus-node --dev --tmp   (backgrounded, pidfile)
+$ nice -n 19 ./chain/target/release/qnero-node --dev --tmp   (backgrounded, pidfile)
 $ ss -ltn | grep 9944
 LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*
 LISTEN 0      1024            [::1]:9944          [::]:*
@@ -2172,7 +2292,7 @@ marked off chain while its secrets stay.
 ```text
 === 1. a fresh dev node and a wallet that has never seen a chain ===
 
-$ nice -n 19 ./chain/target/release/quantus-node --dev --tmp   (backgrounded, pidfile)
+$ nice -n 19 ./chain/target/release/qnero-node --dev --tmp   (backgrounded, pidfile)
 $ ss -ltn | grep 9944
 LISTEN 0      1024        127.0.0.1:9944       0.0.0.0:*
 LISTEN 0      1024            [::1]:9944          [::]:*
@@ -2292,7 +2412,7 @@ address qn1qywupkzeswff4n96l3ts7e9pxg5f… (2571 characters)
 $ QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6/miner.seed miner-address)
    qnm1qywupkzeswff…gemxynpz (114 characters)
 
-$ QNERO_MINER_KEY=$QNERO_MINER_KEY nice -n 19 ./target/release/quantus-node --dev --tmp
+$ QNERO_MINER_KEY=$QNERO_MINER_KEY nice -n 19 ./target/release/qnero-node --dev --tmp
 2026-09-12 17:24:32 Qnero Node
 2026-09-12 17:24:32 📋 Chain specification: Qnero DevNet
 2026-09-12 17:24:32 💾 Database: RocksDb at /tmp/substrate…/chains/qnero-dev/db/full
@@ -2402,17 +2522,17 @@ cargo fmt --all -- --check
 RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
   -p pallet-shielded -p pallet-mining-rewards -p pallet-zk-tree --release
    74 + 30 + 35 passed, 0 failed
-RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p quantus-runtime --release
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p qnero-runtime --release
    41 lib + 6 call_filter + 59 integration passed, 0 failed
 SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
-  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p quantus-runtime --all-targets
+  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p qnero-runtime --all-targets
    no warnings
 LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
-  -p quantus-node --all-targets
+  -p qnero-node --all-targets
    no warnings
 ```
 
-`cargo test -p quantus-runtime` is a gate again. It had not compiled since the
+`cargo test -p qnero-runtime` is a gate again. It had not compiled since the
 M4 subtree fork; see "Tests" above for what it covers now.
 
 ### Timings
@@ -2421,7 +2541,7 @@ Development workstation, 20 cores, WSL2, `nice -n 19`, `-j 4`.
 
 | Step | Wall | Peak RSS |
 |---|---|---|
-| `cargo build --release -p quantus-node`, cold for the runtime wasm | 10:35 | 5.4 GB |
+| `cargo build --release -p qnero-node`, cold for the runtime wasm | 10:35 | 5.4 GB |
 | the same after a runtime source change, artifacts cached | 1:05 | |
 | chain pallet tests (`pallet-shielded`, real proofs) | 25 s | |
 | runtime tests, all three targets | under 1 s | |
@@ -2479,7 +2599,7 @@ Fresh chain, fresh miner wallet, the binary built from the committed tree
 
 ```
 $ QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6fix2/miner.seed miner-address) \
-    nice -n 19 ./target/release/quantus-node --dev --tmp
+    nice -n 19 ./target/release/qnero-node --dev --tmp
 2026-09-12 19:46:13 Qnero Node
 2026-09-12 19:46:13 📋 Chain specification: Qnero DevNet
 2026-09-12 19:46:13 ⛏️ Coinbase notes are minted for miner key qnm1q9y0s6gq…wcagpvwl
@@ -2571,13 +2691,13 @@ cargo fmt --all -- --check
 RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
   -p pallet-shielded -p pallet-mining-rewards --release
    74 + 31 passed, 0 failed
-RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p quantus-runtime --release
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p qnero-runtime --release
    42 lib + 8 call_filter + 60 integration passed, 0 failed
 SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
-  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p quantus-runtime --all-targets
+  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p qnero-runtime --all-targets
    no warnings
 LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
-  -p quantus-node -p sc-consensus-qpow --all-targets
+  -p qnero-node -p sc-consensus-qpow --all-targets
    no warnings
 ```
 
@@ -2585,7 +2705,7 @@ LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 
 
 | Step | Wall | Peak RSS |
 |---|---|---|
-| `cargo build -j 4 --release -p quantus-node`, the one rebuild this pass owes | 10:06 | 5.4 GB |
+| `cargo build -j 4 --release -p qnero-node`, the one rebuild this pass owes | 10:06 | 5.4 GB |
 | chain pallet tests | 27 s | |
 | runtime tests, all three targets | under 1 s | |
 | root workspace tests | 2:20 | |
@@ -2679,7 +2799,7 @@ Fresh chain, fresh miner wallet, the rebuilt binary.
 
 ```
 $ QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6fix3/miner.seed miner-address) \
-    nice -n 19 ./target/release/quantus-node --dev --tmp
+    nice -n 19 ./target/release/qnero-node --dev --tmp
 2026-09-12 20:45:05 Qnero Node
 2026-09-12 20:45:05 📋 Chain specification: Qnero DevNet
 2026-09-12 20:45:05 ⛏️ Consensus author fallback, paid nothing: 6d6f646c70792f74727372790000… (qzmviwoP…)
@@ -2750,13 +2870,13 @@ cargo fmt --all -- --check
 RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
   -p pallet-shielded -p pallet-mining-rewards --release
    74 + 31 passed, 0 failed
-RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p quantus-runtime --release
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p qnero-runtime --release
    42 lib + 9 call_filter + 60 integration passed, 0 failed
 SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
-  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p quantus-runtime --all-targets
+  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p qnero-runtime --all-targets
    no warnings
 LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
-  -p quantus-node -p sc-consensus-qpow --all-targets
+  -p qnero-node -p sc-consensus-qpow --all-targets
    no warnings
 cargo +nightly-2026-08-30 fmt --all -- --check
    clean
@@ -2772,7 +2892,7 @@ the subtree carrying every runtime and node change in this milestone unchecked.
 
 | Step | Wall | Peak RSS |
 |---|---|---|
-| `cargo build -j 4 --release -p quantus-node`, the one rebuild this pass owes | 1:04 | 1.7 GB |
+| `cargo build -j 4 --release -p qnero-node`, the one rebuild this pass owes | 1:04 | 1.7 GB |
 | chain pallet tests | 26 s | |
 | runtime tests, all three targets | under 1 s | |
 | root workspace tests | 2:12 | |
@@ -2840,7 +2960,7 @@ Fresh chain, fresh miner wallet, the binary built from the committed tree
 
 ```
 $ QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6fix4/miner.seed miner-address | tail -1) \
-    nice -n 19 ./target/release/quantus-node --dev --tmp
+    nice -n 19 ./target/release/qnero-node --dev --tmp
 2026-09-12 22:19:28 Qnero Node
 2026-09-12 22:19:28 📋 Chain specification: Qnero DevNet
 2026-09-12 22:19:28 ⛏️ Coinbase notes are minted for miner key qnm1q998shke…636vsxqe
@@ -2931,13 +3051,13 @@ cargo fmt --all -- --check
 RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
   -p pallet-shielded -p pallet-mining-rewards --release
    74 + 31 passed, 0 failed
-RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p quantus-runtime --release
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p qnero-runtime --release
    42 lib + 9 call_filter + 60 integration passed, 0 failed
 SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
-  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p quantus-runtime --all-targets
+  -p pallet-shielded -p pallet-mining-rewards -p qp-coinbase -p qnero-runtime --all-targets
    no warnings
 LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
-  -p quantus-node -p sc-consensus-qpow --all-targets
+  -p qnero-node -p sc-consensus-qpow --all-targets
    no warnings
 cargo +nightly-2026-08-30 fmt --all -- --check
    clean
@@ -2947,7 +3067,7 @@ cargo +nightly-2026-08-30 fmt --all -- --check
 
 | Step | Wall | Peak RSS |
 |---|---|---|
-| `cargo build -j 4 --release -p quantus-node`, the one rebuild this pass owes | 9:40 | 5.4 GB |
+| `cargo build -j 4 --release -p qnero-node`, the one rebuild this pass owes | 9:40 | 5.4 GB |
 | chain pallet tests | 25 s | |
 | runtime tests, all three targets | under 1 s | |
 | root workspace tests | 2:10 | |
@@ -2983,7 +3103,7 @@ symbol was in scope for this pass whatever the review found.
   a missing `--dev` to the empty id, which resolved to the first of them. Their genesis `:code` is a
   775,278-byte compressed `quantus-runtime`: decompressed it holds zero occurrences of `qnero`,
   `Shielded`, `CoinbaseValues`, `coinbase` and `QneroCallFilter`, and fifteen of `Wormhole`. So
-  `quantus-node --validator --rewards-inner-hash 0x… --rewards-miner-key qnm1…`, the invocation this
+  `qnero-node --validator --rewards-inner-hash 0x… --rewards-miner-key qnm1…`, the invocation this
   runbook demands of an authority, started a node on the upstream Quantus network: transparent
   transfers succeeded there, no coinbase inherent existed so nothing read the miner key, and the
   wormhole exit was live, while the author-label seam still derived a fresh reward account every
@@ -3020,7 +3140,7 @@ symbol was in scope for this pass whatever the review found.
   two column diagrams naming that inner hash `chain` on its own line.
   `qnero_note_core::coinbase_r` stays the authority.
 - **The node crate's tests are a gate now.** Every earlier gate ran `cargo test` for the pallets and
-  the runtime and only `clippy --all-targets` for `quantus-node`, and clippy compiles a test without
+  the runtime and only `clippy --all-targets` for `qnero-node`, and clippy compiles a test without
   running it. The four tests pinning the node's inherent payload against `MinerKey::coinbase_note`
   had therefore never executed, including across the pass that edited both sides of that agreement.
   They pass. The gate list below runs them, and node tests stay wasm-independent so
@@ -3041,16 +3161,16 @@ cargo fmt --all -- --check
 
 # the chain workspace
 RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
-  -p pallet-shielded -p pallet-mining-rewards -p quantus-runtime --release
+  -p pallet-shielded -p pallet-mining-rewards -p qnero-runtime --release
    74 + 31 + (42 lib + 9 call_filter + 60 integration) passed, 0 failed
 LIBCLANG_PATH=/usr/lib/llvm-18/lib RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 \
-  cargo test -j 4 -p quantus-node --release
+  cargo test -j 4 -p qnero-node --release
    68 passed, 0 failed
 SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
   -p pallet-shielded -p pallet-mining-rewards --all-targets
    no warnings
 LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
-  -p quantus-node -p qp-coinbase -p quantus-runtime --all-targets
+  -p qnero-node -p qp-coinbase -p qnero-runtime --all-targets
    no warnings
 cargo +nightly-2026-08-30 fmt --all -- --check
    clean
@@ -3066,12 +3186,12 @@ The chain id resolution first, against the rebuilt binary, because that is the
 finding a green test suite would not have shown anybody:
 
 ```
-$ ./target/release/quantus-node build-spec
+$ ./target/release/qnero-node build-spec
 Error: Input("no chain was named. Pass --dev for a throwaway development chain,
 or --chain with one of dev, heisenberg, planck, mainnet, or the path to a chain
 spec file")
 
-$ ./target/release/quantus-node build-spec --chain heisenberg   # properties, genesis shape
+$ ./target/release/qnero-node build-spec --chain heisenberg   # properties, genesis shape
 {'ss58Format': 189, 'tokenDecimals': 12, 'tokenSymbol': 'QNR'}
 genesis keys ['runtimeGenesis']
 ```
@@ -3085,7 +3205,7 @@ Fresh chain, fresh miner wallet, the binary built from this tree
 
 ```
 $ QNERO_MINER_KEY=$(qnero-wallet --file /tmp/qnero-m6fix5/miner.seed miner-address | tail -1) \
-    nice -n 19 ./target/release/quantus-node --dev --tmp
+    nice -n 19 ./target/release/qnero-node --dev --tmp
 2026-09-12 23:42:58 📋 Chain specification: Qnero DevNet
 2026-09-12 23:42:58 ⛏️ Coinbase notes are minted for miner key qnm1qyuytz60…rdjtv2fg
 
@@ -3153,7 +3273,7 @@ answers at all with properties this tree's runtime did not build fails the test.
 
 | Step | Wall | Peak RSS |
 |---|---|---|
-| `cargo build -j 4 --release -p quantus-node`, the one rebuild this pass owes | 9:23 | 5.4 GB |
+| `cargo build -j 4 --release -p qnero-node`, the one rebuild this pass owes | 9:23 | 5.4 GB |
 | `pallet-shielded` suite | 25.3 s | |
 | node crate suite | under 1 s | |
 | the end-to-end, both tests, three proofs | 15.0 s | |
@@ -3161,3 +3281,191 @@ answers at all with properties this tree's runtime did not build fails the test.
 The rebuild is a full one because `qnero-note-core` changed: only doc comments
 moved, and it sits under `pallet-shielded`, so the runtime, its WASM and the
 node all rebuilt below it.
+
+## The Qnero rename pass, 2026-09-13
+
+The node binary and the runtime crate still carried upstream's names. Every
+build line in this file said `-p quantus-node`, every run line pointed at
+`chain/target/release/quantus-node`, `--help` opened with "Quantus Node - Echo
+Chamber", and the startup banner credited "Quantus Network Developers
+<hello@quantus.com>" at every start. The chain those commands start has
+answered `qnero` / `qnero-node` over `state_getRuntimeVersion` since M6, so the
+product and the binary an operator types had two different names, which is what
+makes a bug report unanswerable.
+
+"What is renamed and what stays upstream" above is the rule this pass applied
+and the contract for the next subtree merge. This entry is the run.
+
+### What changed
+
+- **`quantus-node` is `qnero-node`.** The package name, `default-run`, and the
+  package description, which `sc_cli` uses as the `--help` about line. There is
+  no explicit `[[bin]]` in `node/Cargo.toml`: the binary target is named after
+  the package, so the package rename is the binary rename, and the version line
+  follows because `sc_cli` builds it from the executable's file name.
+- **`quantus-runtime` is `qnero-runtime`.** The package, the workspace
+  dependency, the node's dependency and its three feature lists, and every
+  `quantus_runtime::` path in `node/src/` and `runtime/tests/`. The wasm builder
+  names its output after the package, so the blob is
+  `wbuild/qnero-runtime/qnero_runtime.wasm` and `scripts/regenerate_weights.sh`
+  reads the new path.
+- **Two `--help` strings under `client/cli`.** `--pool-limit` said "Default
+  sized for Quantus PQ signatures" and `--pool-type` said "to preserve prior
+  Quantus node behavior". The first is a property of ML-DSA-87 and now says so;
+  the second says upstream. They are the only two `quantus` strings in the whole
+  of `--help`, and they were found by running the built binary rather than by
+  grepping the node crate, which is why the guard runs the binary.
+- **The startup banner's byline.** `SubstrateCli::author` answered
+  `CARGO_PKG_AUTHORS`, which is the upstream workspace's attribution, so a Qnero
+  node printed somebody else's maintainer and somebody else's contact address at
+  every start. It answers `DigitalGuards <https://github.com/DigitalGuards/qnero>`
+  now. `chain/Cargo.toml` keeps upstream's `authors` field, and the credit that
+  the licence asks for is in `chain/LICENSE`, in each crate's `NOTICE` and in the
+  repository README. `copyright_start_year` moved from the Substrate template's
+  2017 to 2026, which is this repository's first commit.
+- **`key quantus` is `key qnero`,** through `#[command(name = "qnero")]`, so the
+  upstream Rust identifiers stay. Its two printed banners say Qnero, and the five
+  error hints that told an operator to run `quantus-node key quantus --scheme
+  wormhole` name the new command.
+- **The local-development scripts and `Dockerfile.local`** point at
+  `target/release/qnero-node`.
+- **Two new tests.** `node/tests/naming_guard.rs` runs the binary Cargo built and
+  checks `--version`, `--help` and `build-spec --chain dev`.
+  `the_startup_banner_names_qnero_and_no_upstream_maintainer` in
+  `node/src/command.rs` covers the banner, which appears under neither flag.
+
+No consensus rule moved: no storage item, no hash layout, no public-input layout
+and no derivation. The runtime's on-chain identity was already `qnero` /
+`qnero-node` at `spec_version` 101 and is unchanged, so a node built before this
+pass and one built after answer the same version triple, which is correct,
+because they are the same runtime.
+
+### Verifying the guard against the defect it names
+
+The binary from the previous commit is still on disk, which makes a negative
+control free. Against it:
+
+```
+$ ./chain/target/release/quantus-node --version
+quantus-node 1.0.1-3358f799ff8
+$ ./chain/target/release/quantus-node --version | grep -ic quantus
+1
+$ ./chain/target/release/quantus-node --help | grep -ic quantus
+5
+Quantus Node - Echo Chamber
+Usage: quantus-node [OPTIONS]
+       quantus-node <COMMAND>
+          Default sized for Quantus PQ signatures (~7300 bytes/tx) within ~256 MiB.
+```
+
+So `the_version_string_names_qnero_and_not_quantus` and
+`the_help_text_names_qnero_and_not_quantus` both fail against the tree as it
+stood. The third assertion is a tripwire rather than a fix: the same binary
+already answered `build-spec --chain dev` with name `Qnero DevNet`, id
+`qnero-dev`, protocol id `qnero-devnet` and symbol `QNR`, because M6 fixed the
+spec. It is in the guard so a merge cannot quietly undo M6.
+
+### The run
+
+`$SCRATCH` below is a temporary directory outside the repository.
+
+```
+$ qnero-wallet --file $SCRATCH/miner.seed keygen
+$ export QNERO_MINER_KEY=$(qnero-wallet --file $SCRATCH/miner.seed miner-address)
+$ nice -n 19 ./chain/target/release/qnero-node --dev --tmp   (backgrounded, pidfile)
+
+2026-09-13 09:32:39 Qnero Node
+2026-09-13 09:32:39 ✌️  version 1.0.1-709c604561e
+2026-09-13 09:32:39 ❤️  by DigitalGuards <https://github.com/DigitalGuards/qnero>, 2026-2026
+2026-09-13 09:32:39 📋 Chain specification: Qnero DevNet
+2026-09-13 09:32:39 👤 Role: AUTHORITY
+2026-09-13 09:32:39 💾 Database: RocksDb at /tmp/substrateiPOi5Y/chains/qnero-dev/db/full
+2026-09-13 09:32:39 ⛏️ Coinbase notes are minted for miner key qnm1qynvayhr…8ure20yn
+
+RPC up 3 s after start, height 6 after 8 s.
+```
+
+`grep -ci quantus` over the whole node log is 0.
+
+```
+$ curl ... state_getRuntimeVersion
+{"specName":"qnero","implName":"qnero-node","authoringVersion":1,
+ "specVersion":101,"implVersion":1,"transactionVersion":7,
+ "systemVersion":1,"stateVersion":1}
+
+$ curl ... system_name         "Qnero Node"
+$ curl ... system_version      "1.0.1-709c604561e"
+$ curl ... system_chain        "Qnero DevNet"
+$ curl ... system_chainType    "Development"
+$ curl ... system_properties   {"ss58Format":189,"tokenDecimals":12,"tokenSymbol":"QNR"}
+```
+
+The wallet end-to-end against that node, both tests:
+
+```
+$ QNERO_DEV_NODE=http://127.0.0.1:9944 QNERO_MINER_SEED=$SCRATCH/miner.seed \
+    RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --release -p qnero-wallet \
+    --features parallel --test dev_node_e2e -- --nocapture
+
+sync: 49 leaves, 49 coinbase leaves, 49 of them this wallet's, 2025 quanta
+shield of 1000 quanta included at block 50 (1.51s), leaf 49
+5 quanta to B at fee 8: included at block 59, change 29
+coinbase of block 59: 46 quanta against 41 to 43 elsewhere, author share 4
+system_dryRun of a transparent transfer: 0x0001030005000000
+300 quanta to B: proved in 3.20s, 150908 proof bytes, included at block 63
+100 quanta back to A: proved in 3.07s, included at block 67
+test result: ok. 2 passed; 0 failed; finished in 15.75s
+```
+
+Stopped by pidfile: the process exits 2 s after `kill`, `pgrep qnero-node` finds
+nothing, `ss -ltn` does not list 9944, and `curl` to it returns nothing, so the
+port is closed and no process is left behind.
+
+### Gates
+
+```
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   38 suites, 327 passed, 0 failed
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+
+# the chain workspace
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
+  -p qnero-runtime -p pallet-shielded --release
+   74 + (42 lib + 9 call_filter + 60 integration) passed, 0 failed, 2 ignored
+LIBCLANG_PATH=/usr/lib/llvm-18/lib RAYON_NUM_THREADS=4 nice -n 19 \
+  cargo test -j 4 -p qnero-node --release
+   69 unit + 3 naming_guard passed, 0 failed
+LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p qnero-node -p qnero-runtime -p pallet-shielded -p sc-cli --all-targets
+   no warnings
+cargo +nightly-2026-08-30 fmt --all -- --check
+   clean
+```
+
+The node test line runs without `SKIP_WASM_BUILD`, which is the change from the
+previous pass's list. The chain-spec third of the guard builds a preset spec and
+therefore needs `WASM_BINARY`; with the variable set it skips itself and says so,
+which is a third of the guard silently not running. Run it with the wasm.
+
+`sc-cli` joins the clippy line because this pass edited `client/cli`, which no
+earlier pass had touched.
+
+### What the rename cost
+
+| Step | Wall |
+|---|---|
+| `cargo build -j 4 --release -p qnero-node`, the package rename, cold for the runtime wasm | 10:09 |
+| the same after the two `client/cli` help strings, sc-cli and the node relinking | 0:43 |
+| the same after the banner byline, the node crate alone | 0:43 |
+| `cargo test -j 4 -p qnero-node --release` after the fmt pass, node relink only | 1:04 |
+| the end-to-end, both tests, three proofs | 15.8 s |
+
+Four node links rather than one, and the reason is worth writing down: the two
+`--help` strings and the banner byline live outside the node crate's own text and
+outside anything a grep of `chain/node` finds. Running the built binary is what
+found them. A rename pass that greps the crate it is renaming and stops there
+ships a binary that still says the old name in the first line it prints.

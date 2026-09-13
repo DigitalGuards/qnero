@@ -61,7 +61,7 @@ Each block starts at the repository root. Release builds are mandatory: a leaf t
 ```
 cd chain
 cargo update -p kem --precise 0.3.0-pre.0
-LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p quantus-node
+LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
 cd ..
 nice -n 19 cargo build -j 2 --release -p qnero-wallet --features parallel
 ```
@@ -71,7 +71,7 @@ The miner key is secret-bearing and cannot spend: its holder picks that miner's 
 ```
 ./target/release/qnero-wallet keygen
 export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)
-nice -n 19 ./chain/target/release/quantus-node --dev --tmp \
+nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
   --rewards-miner-key "$QNERO_MINER_KEY" --rewards-inner-hash <hash>
 ```
 

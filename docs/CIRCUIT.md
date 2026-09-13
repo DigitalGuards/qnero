@@ -301,7 +301,7 @@ across needs a `MigrateV0ToV1` that rehashes each stored `ZkLeaf` through
 The identity half of that problem is closed. M6 renamed the runtime: it is
 `qnero` / `qnero-node` at `spec_version` 101 and `transaction_version` 7, so
 the two runtimes no longer answer the same version triple, and the `spec_name`
-change is itself what makes a `set_code` from a `quantus-runtime` chain
+change is itself what makes a `set_code` from an upstream `quantus-runtime` chain
 impossible. For a storage layout that cannot be migrated in place that is the
 intended outcome rather than a limitation.
 
