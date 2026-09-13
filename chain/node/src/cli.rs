@@ -81,6 +81,11 @@ pub struct Cli {
 	/// than the full-mode dataset a real miner builds, so this is for a devnet
 	/// and for keeping a node from idling, not for competing. Zero turns it
 	/// off, which is what an operator with a rig on `--stratum-port` wants.
+	///
+	/// Capped at the machine's available parallelism; startup fails above it.
+	/// Every thread is a blocking task on the pool block import and rocksdb
+	/// share, so oversubscribing queues the node's hashing in front of its own
+	/// import.
 	#[arg(long, value_name = "THREADS", default_value_t = 1)]
 	pub mining_threads: usize,
 

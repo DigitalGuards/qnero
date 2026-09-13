@@ -815,6 +815,27 @@ pub fn run() -> sc_cli::Result<()> {
 					eprintln!("Either raise --mining-threads or open a stratum port for a rig.");
 					return Err(sc_cli::Error::Input("no mining source configured".into()));
 				}
+				// And a ceiling, for the same reason there is a floor. Every thread
+				// is a `spawn_blocking` on the pool rocksdb and block import share,
+				// and a RandomX VM the pool then keeps idle: a mistyped
+				// `--mining-threads 1000` starts without complaint and queues its own
+				// hashing in front of its own import.
+				let available = std::thread::available_parallelism()
+					.map(std::num::NonZeroUsize::get)
+					.unwrap_or(1);
+				if cli.mining_threads > available {
+					eprintln!(
+						"Error: --mining-threads {} is above the {available} this machine has.\n",
+						cli.mining_threads,
+					);
+					eprintln!("Mining threads run on the same blocking pool as block import, so");
+					eprintln!(
+						"oversubscribing them costs the node the work it needs to stay synced."
+					);
+					return Err(sc_cli::Error::Input(
+						"--mining-threads above available parallelism".into(),
+					));
+				}
 
 				let stratum_config = cli.stratum_port.map(|port| crate::stratum::StratumConfig {
 					host: cli.stratum_host,
