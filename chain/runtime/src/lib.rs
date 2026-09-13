@@ -92,13 +92,25 @@ impl_opaque_keys! {
 // pass, which added a `pallet-shielded` error variant and changed three event
 // layouts across `pallet-shielded` and `pallet-mining-rewards`.
 // `the_runtime_identity_is_pinned` in `tests/call_filter.rs` is the tripwire.
+//
+// Bump `impl_version` when the emitted wasm changes under an unchanged
+// specification. Renaming the crate to `qnero-runtime` changed the blob: the
+// panic paths carry the crate name, so the pre-rename and post-rename wasm
+// differ byte for byte while implementing the same runtime. Two blobs that
+// answer the same version triple are two blobs a `set_code` preflight, an
+// srtool reproducible-build comparison and `try-runtime
+// --disable-spec-version-check` all accept interchangeably, so the field that
+// exists for exactly this moved to 2. `impl_version` sits outside the metadata
+// hash, which covers `spec_name`, `spec_version`, the extrinsic version, the
+// SS58 prefix, decimals and symbol (RFC-0078), so transaction validity,
+// metadata and consensus are untouched by the bump.
 #[sp_version::runtime_version]
 pub const VERSION: RuntimeVersion = RuntimeVersion {
 	spec_name: alloc::borrow::Cow::Borrowed("qnero"),
 	impl_name: alloc::borrow::Cow::Borrowed("qnero-node"),
 	authoring_version: 1,
 	spec_version: 101,
-	impl_version: 1,
+	impl_version: 2,
 	apis: apis::RUNTIME_API_VERSIONS,
 	transaction_version: 7,
 	system_version: 1,

@@ -33,7 +33,7 @@ use std::{marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Duration};
 
 /// Default ready-pool transaction count.
 ///
-/// Sized for Quantus PQ signatures (~7300 bytes/tx) within ~256 MiB. Transaction gossip uses
+/// Sized for ML-DSA-87 signatures (~7300 bytes/tx) within ~256 MiB. Transaction gossip uses
 /// [`TransactionPoolOptions::known_transaction_cache_limit`] so this count and the per-peer
 /// known-hash cache stay aligned.
 pub const DEFAULT_READY_POOL_LIMIT: usize = 36_772;

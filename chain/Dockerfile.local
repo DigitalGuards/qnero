@@ -43,11 +43,13 @@ COPY --from=builder /app/target/release/qnero-node /usr/local/bin/
 EXPOSE 30333 9944
 
 # Run as unprivileged user
-RUN useradd --system --uid 10001 quantus \
-    && mkdir -p /var/lib/quantus \
-    && chown -R quantus:quantus /var/lib/quantus
+RUN useradd --system --uid 10001 --home-dir /var/lib/qnero qnero \
+    && mkdir -p /var/lib/qnero \
+    && chown -R qnero:qnero /var/lib/qnero
 
 USER 10001:10001
 
-# Start the node
-ENTRYPOINT ["qnero-node"]
+# Start the node. The base path is passed explicitly: sc_cli's default is
+# derived from the executable name under $HOME, and a container that is handed
+# a volume wants its data where the image prepared it.
+ENTRYPOINT ["qnero-node", "--base-path", "/var/lib/qnero"]

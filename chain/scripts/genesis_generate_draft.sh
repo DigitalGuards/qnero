@@ -51,19 +51,19 @@ echo "🏷️  Release tag: $RELEASE_TAG"
 echo "⚙️  Execution profile: $PROFILE_SPEC"
 echo ""
 
-QUANTUS_NODE_BIN="./target/release/quantus-node"
+QNERO_NODE_BIN="./target/release/qnero-node"
 GITHUB_REPO="Quantus-Network/chain"
 
 echo "🚀 Building node to generate chain spec..."
-cargo build --release --package quantus-node
+cargo build --release --package qnero-node
 
-if [ ! -f "$QUANTUS_NODE_BIN" ]; then
-    echo "❌ Build failed. Quantus node binary not found."
+if [ ! -f "$QNERO_NODE_BIN" ]; then
+    echo "❌ Build failed. Qnero node binary not found."
     exit 1
 fi
 
 echo "🔧 Generating chain spec from '$PROFILE_SPEC'..."
-$QUANTUS_NODE_BIN build-spec --chain "$PROFILE_SPEC" --raw > "$OUTPUT_FILE"
+$QNERO_NODE_BIN build-spec --chain "$PROFILE_SPEC" --raw > "$OUTPUT_FILE"
 
 if [ ! -s "$OUTPUT_FILE" ]; then
   echo "❌ Failed to generate chain spec. The output file is empty."
@@ -72,7 +72,9 @@ fi
 
 echo "🌐 Fetching runtime spec_version from GitHub release..."
 
-# Try to find in all releases (including drafts)
+# Try to find in all releases (including drafts). `quantus-runtime-v*` is the
+# asset name in $GITHUB_REPO's releases and stays upstream's: the node binary
+# above is built from this tree, and the wasm is downloaded from there.
 ALL_RELEASES_URL="https://api.github.com/repos/$GITHUB_REPO/releases"
 ASSETS_JSON=$(curl -fsSL "$ALL_RELEASES_URL" | jq -r --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag or .name == $tag) | .assets[] | select(.name | contains("quantus-runtime-v")) | .name' | head -1)
 
@@ -129,4 +131,4 @@ echo "📄 The chain spec at '$OUTPUT_FILE' has been updated with runtime from $
 echo "🎉 Genesis generation complete for profile: $PROFILE"
 echo ""
 echo "ℹ️ You can now use this chain spec with:"
-echo "   ./target/release/quantus-node --chain $OUTPUT_FILE"
+echo "   ./target/release/qnero-node --chain $OUTPUT_FILE"

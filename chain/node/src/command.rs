@@ -304,8 +304,17 @@ impl SubstrateCli for Cli {
 		"DigitalGuards <https://github.com/DigitalGuards/qnero>".into()
 	}
 
+	/// Where a panicking node tells its operator to send the report.
+	///
+	/// `sc_cli` prints this as the last line of `--help` and hands it to
+	/// `sp_panic_handler`, so it is the address every panic message names. The
+	/// Substrate node template's default is `support.anonymous.an`, a domain
+	/// nobody owns, which upstream carried and this fork inherited. A bug
+	/// report is unanswerable for the same reason a second name for the binary
+	/// makes it unanswerable, so the byline above and this line have to move
+	/// together.
 	fn support_url() -> String {
-		"support.anonymous.an".into()
+		"https://github.com/DigitalGuards/qnero/issues".into()
 	}
 
 	/// 2017 is the Substrate node template's own default, carried through
@@ -815,13 +824,17 @@ mod tests {
 		},
 	};
 
-	/// The startup banner names Qnero and its maintainer.
+	/// The startup banner names Qnero and its maintainer, and a panic names
+	/// Qnero's issue tracker.
 	///
 	/// `sc_cli` prints `impl_name`, the version, then `by {author}` before any
 	/// other line, and that banner is neither `--version` nor `--help`, so
 	/// `tests/naming_guard.rs` cannot see it: it reads only what the binary
 	/// writes for those two flags. This is the part of the rename guard that
-	/// covers the banner.
+	/// covers the banner. `support_url` is here too: `--help` carries it, so
+	/// the guard would catch an upstream name there, and the guard cannot
+	/// catch the Substrate template's placeholder, which names no project at
+	/// all.
 	#[test]
 	fn the_startup_banner_names_qnero_and_no_upstream_maintainer() {
 		use sc_cli::SubstrateCli;
@@ -829,11 +842,23 @@ mod tests {
 		let name = <Cli as SubstrateCli>::impl_name();
 		let author = <Cli as SubstrateCli>::author();
 		let description = <Cli as SubstrateCli>::description();
+		let support = <Cli as SubstrateCli>::support_url();
 
 		assert_eq!(name, "Qnero Node");
-		for (what, line) in
-			[("impl_name", &name), ("author", &author), ("description", &description)]
-		{
+		assert_eq!(
+			support, "https://github.com/DigitalGuards/qnero/issues",
+			"the address every panic message names is not Qnero's issue tracker"
+		);
+		assert!(
+			!support.contains("anonymous.an"),
+			"support_url is still the Substrate node template's placeholder: {support}"
+		);
+		for (what, line) in [
+			("impl_name", &name),
+			("author", &author),
+			("description", &description),
+			("support_url", &support),
+		] {
 			assert!(
 				!line.to_ascii_lowercase().contains("quantus"),
 				"the startup banner's {what} still says Quantus: {line}"

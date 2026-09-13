@@ -41,7 +41,7 @@ echo "🏷️  Release tag: $RELEASE_TAG"
 echo "⚙️  Execution profile: $PROFILE_SPEC"
 echo ""
 
-QUANTUS_NODE_BIN="./target/release/quantus-node"
+QNERO_NODE_BIN="./target/release/qnero-node"
 GITHUB_REPO="${GITHUB_REPO:-Quantus-Network/chain}"
 
 echo "🔄 Checking current git status..."
@@ -58,7 +58,9 @@ echo "✨ Creating and switching to new branch '$BRANCH_NAME'..."
 git checkout -b "$BRANCH_NAME" "tags/$RELEASE_TAG"
 
 echo "🌐 Fetching runtime spec_version from GitHub release ($GITHUB_REPO)..."
-# gh (not curl) so private repositories work through the caller's gh auth
+# gh, so private repositories work through the caller's gh auth. The asset name
+# `quantus-runtime-v*` is $GITHUB_REPO's and stays upstream's: the node binary
+# above is built from this tree, and the wasm is downloaded from there.
 ASSETS_JSON=$(gh release view "$RELEASE_TAG" -R "$GITHUB_REPO" --json assets --jq '[.assets[].name | select(contains("quantus-runtime-v"))] | first // empty')
 if [ -z "$ASSETS_JSON" ]; then
     echo "❌ Error: Could not find runtime assets in release $RELEASE_TAG of $GITHUB_REPO."
@@ -76,10 +78,10 @@ echo "📋 Using spec_version: $SPEC_VERSION"
 echo "🎯 Generating chain spec for profile: $PROFILE"
 
 echo "🚀 Building node to generate initial chain spec..."
-cargo build --release --package quantus-node
+cargo build --release --package qnero-node
 
-if [ ! -f "$QUANTUS_NODE_BIN" ]; then
-    echo "❌ Build failed. Quantus node binary not found."
+if [ ! -f "$QNERO_NODE_BIN" ]; then
+    echo "❌ Build failed. Qnero node binary not found."
     exit 1
 fi
 
@@ -87,7 +89,7 @@ echo "🔧 Generating initial chain spec from '$CHAIN_ID'..."
 # --disable-default-bootnode: without it, a spec with no declared bootnodes gets a
 # throwaway /ip4/127.0.0.1 bootnode injected (matters for mainnet, whose
 # bootnodes are added post-launch).
-$QUANTUS_NODE_BIN build-spec --chain "$PROFILE_SPEC" --raw --disable-default-bootnode > "$OUTPUT_FILE"
+$QNERO_NODE_BIN build-spec --chain "$PROFILE_SPEC" --raw --disable-default-bootnode > "$OUTPUT_FILE"
 
 if [ ! -s "$OUTPUT_FILE" ]; then
   echo "❌ Failed to generate chain spec. The output file is empty."

@@ -5,7 +5,6 @@ use qnero_runtime::{
 	WASM_BINARY,
 };
 use sc_service::{ChainType, Properties};
-use sc_telemetry::TelemetryEndpoints;
 use serde_json::json;
 
 /// Specialized `ChainSpec`. This is a specialization of the general Substrate ChainSpec type.
@@ -20,6 +19,11 @@ pub type ChainSpec = sc_service::GenericChainSpec;
 /// preset that shipped another symbol would keep naming another unit until
 /// every one of them was handed a new file. `every_preset_names_the_token_qnr`
 /// is the test.
+///
+/// The symbol is written in a second place, and the two have to agree:
+/// `runtime/build.rs` passes it to `enable_metadata_hash`, which is the label
+/// an offline or hardware signer displays when it decodes a call under the
+/// `on-chain-release-build` feature. Change one and change the other.
 pub(crate) fn qnero_properties() -> Properties {
 	let mut properties = Properties::new();
 	properties.insert("tokenDecimals".into(), json!(12));
@@ -44,7 +48,7 @@ pub fn development_chain_spec() -> Result<ChainSpec, String> {
 	.build())
 }
 
-/// Heisenberg — internal integration testnet, **not** mainnet.
+/// Heisenberg, an internal integration testnet.
 ///
 /// Genesis intentionally endows the well-known Dilithium accounts
 /// (`crystal_alice` / `dilithium_bob` / `crystal_charlie`, seeds `[0]/` /
@@ -53,23 +57,15 @@ pub fn development_chain_spec() -> Result<ChainSpec, String> {
 /// exercise governance, treasury, and transfer flows without distributing
 /// secrets. Tokens have no monetary value; the network may be reset. Do not
 /// treat Heisenberg key material, balances, or authority as production-grade.
+///
+/// The upstream telemetry endpoint and bootnodes are gone. This builder emits
+/// this tree's genesis, so upstream's peers refuse it on genesis hash, and an
+/// operator who started it published a node name, a client version and a block
+/// height to a third party's telemetry server for a network it was never on.
+/// Both fields sit outside genesis, so removing them changes no chain. Qnero
+/// fills them in when Qnero runs peers and a telemetry server of its own.
 pub fn heisenberg_chain_spec() -> Result<ChainSpec, String> {
 	let properties = qnero_properties();
-
-	let telemetry_endpoints = TelemetryEndpoints::new(vec![(
-		"/dns/shard-telemetry.quantus.cat/tcp/443/x-parity-wss/%2Fsubmit%2F".to_string(),
-		0,
-	)])
-	.expect("Telemetry endpoints config is valid; qed");
-
-	let boot_nodes = vec![
-		"/dns/a1-p2p-heisenberg.quantus.cat/tcp/30333/p2p/Qmdts9fu3NCMFnvLdD1dHAHFer8EPzVDXxVnyPxRKA3Gkt"
-			.parse()
-			.unwrap(),
-		"/dns/a2-p2p-heisenberg.quantus.cat/tcp/30333/p2p/QmcKHndoiNRdiT6iVp6ugj8bNse5Vd5WmCoE9YWn9kNaTM"
-			.parse()
-			.unwrap(),
-	];
 
 	Ok(ChainSpec::builder(
 		WASM_BINARY.ok_or_else(|| "Runtime wasm not available".to_string())?,
@@ -78,8 +74,6 @@ pub fn heisenberg_chain_spec() -> Result<ChainSpec, String> {
 	.with_name("Heisenberg")
 	.with_id("heisenberg")
 	.with_protocol_id("heisenberg")
-	.with_boot_nodes(boot_nodes)
-	.with_telemetry_endpoints(telemetry_endpoints)
 	.with_chain_type(ChainType::Live)
 	.with_genesis_config_preset_name(HEISENBERG_RUNTIME_PRESET)
 	.with_properties(properties)
@@ -90,50 +84,34 @@ pub fn heisenberg_chain_spec() -> Result<ChainSpec, String> {
 /// table is `runtime/src/genesis_config_presets/mainnet_vesting.rs`. Spec
 /// building panics until that table is finalized. Bootnodes are added once
 /// infrastructure exists (`bootNodes` is outside genesis).
+///
+/// The name and the protocol id are Qnero's. They answered `Quantus` and
+/// `quantus` until this pass, on a preset that builds this tree's runtime, and
+/// a spec file is the one artifact no runtime upgrade reaches: a wallet, an
+/// explorer or an exchange handed that file would have labelled a Qnero chain
+/// with upstream's name for as long as it held the file. The upstream
+/// telemetry endpoint is gone for the reason given on `heisenberg_chain_spec`.
 pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
 	let properties = qnero_properties();
-
-	let telemetry_endpoints = TelemetryEndpoints::new(vec![(
-		"/dns/shard-telemetry.quantus.cat/tcp/443/x-parity-wss/%2Fsubmit%2F".to_string(),
-		0,
-	)])
-	.expect("Telemetry endpoints config is valid; qed");
 
 	Ok(ChainSpec::builder(
 		WASM_BINARY.ok_or_else(|| "Runtime wasm not available".to_string())?,
 		None,
 	)
-	.with_name("Quantus")
+	.with_name("Qnero")
 	.with_id("mainnet")
-	.with_protocol_id("quantus")
-	.with_telemetry_endpoints(telemetry_endpoints)
+	.with_protocol_id("qnero")
 	.with_chain_type(ChainType::Live)
 	.with_genesis_config_preset_name(MAINNET_RUNTIME_PRESET)
 	.with_properties(properties)
 	.build())
 }
 
-/// Planck network — live treasury signers + faucet; dev dilithium accounts for testing.
+/// Planck network: live treasury signers plus a faucet, and dev dilithium
+/// accounts for testing. Upstream telemetry and bootnodes are gone, for the
+/// reason given on [`heisenberg_chain_spec`].
 pub fn planck_chain_spec() -> Result<ChainSpec, String> {
 	let properties = qnero_properties();
-
-	let telemetry_endpoints = TelemetryEndpoints::new(vec![(
-		"/dns/shard-telemetry.quantus.cat/tcp/443/x-parity-wss/%2Fsubmit%2F".to_string(),
-		0,
-	)])
-	.expect("Telemetry endpoints config is valid; qed");
-
-	let boot_nodes = vec![
-		"/dns/a1-p2p-planck.quantus.cat/tcp/30333/p2p/QmQ4AywkRZuv2L4XKb71Y3erk2DpQPNUTmMS2LGEEr5q8r"
-			.parse()
-			.unwrap(),
-		"/dns/a2-p2p-planck.quantus.cat/tcp/30333/p2p/QmZT5LVJjBWf3QeJY6JKcFY6bCJoWucji96pKwpgbfTgic"
-			.parse()
-			.unwrap(),
-		"/ip4/72.61.118.55/tcp/30333/p2p/QmbctLKQojifo6bym7a1ypph55n1nSw58YZGDkGtgRNVmF"
-			.parse()
-			.unwrap(),
-	];
 
 	Ok(ChainSpec::builder(
 		WASM_BINARY.ok_or_else(|| "Runtime wasm not available".to_string())?,
@@ -142,8 +120,6 @@ pub fn planck_chain_spec() -> Result<ChainSpec, String> {
 	.with_name("Planck")
 	.with_id("planck")
 	.with_protocol_id("planck")
-	.with_boot_nodes(boot_nodes)
-	.with_telemetry_endpoints(telemetry_endpoints)
 	.with_chain_type(ChainType::Live)
 	.with_genesis_config_preset_name(PLANCK_RUNTIME_PRESET)
 	.with_properties(properties)
@@ -172,9 +148,12 @@ mod tests {
 	/// nothing else.
 	///
 	/// It also pins the preset list. A preset added to the runtime without a
-	/// row here is a spec whose properties nothing checks, so the count is
-	/// asserted against `genesis_config_presets::preset_names`, which is the
-	/// runtime's own list.
+	/// row here is a spec whose properties nothing checks, so every name in
+	/// `genesis_config_presets::preset_names`, which is the runtime's own
+	/// list, has to find a builder below. The list is three or four names long
+	/// depending on `mainnet_vesting::FINALIZED`, so its length is the wrong
+	/// thing to assert: the builders are all checked, and the list is checked
+	/// against them by name.
 	#[test]
 	fn every_preset_names_the_token_qnr() {
 		let properties = qnero_properties();
@@ -187,18 +166,19 @@ mod tests {
 		assert_eq!(properties.get("ss58Format").and_then(|value| value.as_u64()), Some(189));
 
 		let built: [(&str, Result<ChainSpec, String>); 4] = [
-			("dev", development_chain_spec()),
+			(sp_genesis_builder::DEV_RUNTIME_PRESET, development_chain_spec()),
 			(HEISENBERG_RUNTIME_PRESET, heisenberg_chain_spec()),
 			(PLANCK_RUNTIME_PRESET, planck_chain_spec()),
 			(MAINNET_RUNTIME_PRESET, mainnet_chain_spec()),
 		];
 
-		assert_eq!(
-			built.len(),
-			qnero_runtime::genesis_config_presets::preset_names().len(),
-			"the runtime's preset list moved; every preset needs a builder here or its \
-			 chain properties are checked by nothing"
-		);
+		for listed in qnero_runtime::genesis_config_presets::preset_names() {
+			assert!(
+				built.iter().any(|(name, _)| *name == listed),
+				"the runtime lists the preset {listed:?} and this file has no builder for \
+				 it, so its chain properties are checked by nothing"
+			);
+		}
 
 		for (name, spec) in built {
 			match spec {

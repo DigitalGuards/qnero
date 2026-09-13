@@ -12,7 +12,9 @@ fi
 
 echo "Starting $NUM_NODES local nodes..."
 
-pkill -f "qnero-node"
+# The old spelling is matched for one release cycle: a `quantus-node` left
+# running from before the rename holds these ports against the new binary.
+pkill -f 'q(nero|uantus)-node'
 sleep 1
 
 # Clean up old data

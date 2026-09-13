@@ -22,7 +22,7 @@ echo "✅ Bootnode ID: $BOOTNODE_ID"
 
 # Generate the initial chain spec
 echo "🔧 Generating chain spec..."
-./target/release/qnero-node build-spec --chain local > custom-spec.json
+./target/release/qnero-node build-spec --chain dev > custom-spec.json
 
 # Update the chain spec to set the correct bootnode
 echo "🔧 Updating bootnode in chain spec..."
