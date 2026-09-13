@@ -19,55 +19,16 @@
 //! The fee is computed from the same total, so it republishes the length in
 //! `CiphertextBytesPerFeeQuantum` buckets even when nobody reads the
 //! ciphertexts.
+//!
+//! The padding itself is `qnero_notes::memo`, re-exported below. What stays
+//! here is the terminal side: a memo is remote input, and printing one byte
+//! for byte hands its sender the operator's terminal.
 
-use anyhow::{bail, Result};
-
-/// What a `NoteCiphertext` serializes to with an empty memo.
-///
-/// Fixed by the crypto suite: 19 bytes of framing, an
-/// ML-KEM-1024 encapsulation (1568), the note payload under a
-/// ChaCha20-Poly1305 tag (128) and the memo's own tag (16).
-/// `an_empty_memo_ciphertext_serializes_to_1731_bytes` in `qnero-pqcrypto`
-/// pins it against the serializer and `tests/ct_digest.rs` pins it here.
-/// Every size below is derived from it.
-pub const CIPHERTEXT_FIXED_BYTES: usize = 1731;
-
-/// Every memo this wallet encrypts is exactly this many bytes.
-///
-/// Two bounds decide it, and the tighter one wins.
-///
-/// The loose bound is `MaxCiphertextBytes` (2048 in the M4 runtime) minus
-/// [`CIPHERTEXT_FIXED_BYTES`], which leaves 317 bytes. A pad over that fails
-/// the extrinsic's SCALE decode, after the proof committing to those bytes
-/// exists.
-///
-/// The tight bound is the fee. A slot's payload term is
-/// `ceil((len(ct_1) + len(ct_2)) / CiphertextBytesPerFeeQuantum)`, and the
-/// runtime sizes that divisor (512) so that an honest pair and a pair padded
-/// to the cap land in different buckets: the chain never parses these bytes
-/// and `Shielded::Ciphertexts` is never pruned, so without the separation a
-/// settler pads both ciphertexts to the cap and writes the extra bytes of
-/// permanent state for no extra fee. A pad of 256 put this wallet's own pair
-/// at `2 * (1731 + 256) = 3974` bytes, in the same bucket as `2 * 2048 =
-/// 4096`, which voided that separation for every real spend on the chain.
-/// A pad of 61 puts the pair at 3584 bytes, one bucket below the cap's, and
-/// 61 is the largest pad that does.
-///
-/// `fee::the_wallets_own_pair_stays_a_bucket_below_a_padded_one` is the gate,
-/// and `fee::ensure_memo_pad_fits` checks **both** bounds against the runtime
-/// the wallet is actually talking to, since this constant is compiled in while
-/// `MaxCiphertextBytes` and `CiphertextBytesPerFeeQuantum` are both read from
-/// metadata. `fee::largest_separating_pad` is where the 61 comes from. A
-/// runtime whose cap this pad no longer fits under is refused, since the
-/// extrinsic would fail to decode. A runtime whose divisor merged the two
-/// buckets is a warning and the spend goes ahead: that is a property of the
-/// chain, a settler pads to the cap whatever this wallet does, and shrinking
-/// this pad alone would publish this wallet's own ciphertext length.
-///
-/// Zcash's 512-byte memo field is the precedent for padding at all. The size
-/// differs because this ciphertext's fixed part is larger and because the
-/// chain prices payload bytes.
-pub const MEMO_BYTES: usize = 61;
+/// The padding rule, which lives in `qnero-notes` beside the encryption it
+/// pads for. `qnero-prover-wasm` encrypts its own outputs in a browser and
+/// cannot link this crate, so a second copy here would be a pad that drifts,
+/// and a drifted pad is a ciphertext length that says which wallet wrote it.
+pub use qnero_notes::memo::{pad_memo, unpad_memo, CIPHERTEXT_FIXED_BYTES, MEMO_BYTES};
 
 /// The narrowest `balance` table prefix: `{:>10}  {:>12}  {:>7}  {:>7}  ` in
 /// `main.rs`, four right-aligned fields at their minimum widths and the two
@@ -160,35 +121,6 @@ pub fn budget_within(columns: usize, prefix_columns: usize) -> Option<usize> {
     (budget >= MIN_MEMO_COLUMNS).then_some(budget)
 }
 
-/// Pad a memo to [`MEMO_BYTES`] with trailing zeros.
-pub fn pad_memo(memo: &str) -> Result<Vec<u8>> {
-    let bytes = memo.as_bytes();
-    if bytes.len() > MEMO_BYTES {
-        bail!(
-            "the memo is {} bytes and this wallet pads every memo to {MEMO_BYTES}. A longer one \
-             would make this ciphertext a different length from every other note's, which is the \
-             leak the padding exists to close.",
-            bytes.len()
-        );
-    }
-    let mut padded = vec![0u8; MEMO_BYTES];
-    padded[..bytes.len()].copy_from_slice(bytes);
-    Ok(padded)
-}
-
-/// Strip the padding a received memo carries.
-///
-/// Trailing zero bytes, the way the padding writes them. A memo from a sender
-/// that does not pad passes through unchanged unless it ends in NUL, which a
-/// text memo does not.
-pub fn unpad_memo(bytes: &[u8]) -> &[u8] {
-    let end = bytes
-        .iter()
-        .rposition(|byte| *byte != 0)
-        .map_or(0, |last| last + 1);
-    &bytes[..end]
-}
-
 /// Render a memo for a terminal, inside `columns` display columns.
 ///
 /// A memo is remote input: anyone holding this wallet's address can send it a
@@ -273,36 +205,6 @@ mod tests {
     /// budget.
     fn render(memo: &str) -> String {
         render_memo_within(memo, DEFAULT_TERMINAL_COLUMNS - BALANCE_PREFIX_COLUMNS)
-    }
-
-    /// The property the padding exists for: every memo this wallet writes
-    /// produces a ciphertext of one length, so no observer reads a memo's size
-    /// off the chain and no spend's change note is the shorter of the pair.
-    #[test]
-    fn every_padded_memo_is_the_same_length() {
-        let lengths: Vec<usize> = ["", "x", "payment to B", &"m".repeat(MEMO_BYTES)]
-            .iter()
-            .map(|memo| pad_memo(memo).expect("it fits").len())
-            .collect();
-        assert!(lengths.iter().all(|len| *len == MEMO_BYTES), "{lengths:?}");
-    }
-
-    #[test]
-    fn padding_round_trips_through_unpadding() {
-        for memo in ["", "x", "payment to B", "a memo with spaces and 1234"] {
-            let padded = pad_memo(memo).expect("it fits");
-            assert_eq!(unpad_memo(&padded), memo.as_bytes(), "{memo}");
-        }
-        // Nothing but zeros is an empty memo, and an unpadded memo from
-        // another wallet passes through.
-        assert_eq!(unpad_memo(&[0u8; MEMO_BYTES]), b"");
-        assert_eq!(unpad_memo(b"unpadded"), b"unpadded");
-    }
-
-    #[test]
-    fn a_memo_longer_than_the_pad_is_refused() {
-        let error = pad_memo(&"m".repeat(MEMO_BYTES + 1)).expect_err("it does not fit");
-        assert!(error.to_string().contains("pads every memo"));
     }
 
     /// The regression: a memo is remote input and was printed byte for byte,

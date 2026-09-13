@@ -111,6 +111,37 @@ impl WalletProver {
         })
     }
 
+    /// Build from artifact bytes, with no filesystem.
+    ///
+    /// The bytes half of [`Self::from_artifact_dir`], and the only one a
+    /// browser can use: `std::fs` compiles for `wasm32-unknown-unknown` and
+    /// fails at runtime, so a wasm caller that reached for the directory
+    /// constructor would learn about it after the fetch rather than at the
+    /// call. `leaf_verifier_bytes` is `leaf_verifier.bin` and
+    /// `padding_leaf_proof_bytes` is `padding_leaf_proof.bin`; both are pinned
+    /// to a canonical rebuild before either reaches the circuit, so a poisoned
+    /// copy is caught here.
+    pub fn from_artifact_bytes(
+        leaf_verifier_bytes: &[u8],
+        padding_leaf_proof_bytes: &[u8],
+        num_leaves: usize,
+    ) -> Result<Self> {
+        let batch = QneroPrivateBatchProver::new_from_artifact_bytes(
+            leaf_verifier_bytes,
+            padding_leaf_proof_bytes,
+            num_leaves,
+        )
+        .context("failed to build a private-batch prover from the artifact bytes")?;
+        let circuit = QneroSpendCircuit::new(qnero_leaf_circuit_config())?;
+        let leaf_targets = circuit.targets();
+        let leaf_data = circuit.build();
+        Ok(Self {
+            leaf_targets,
+            leaf_data,
+            batch,
+        })
+    }
+
     /// Leaf slots per batch.
     pub fn num_leaves(&self) -> usize {
         self.batch.num_leaves()

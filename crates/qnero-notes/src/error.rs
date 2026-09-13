@@ -14,4 +14,10 @@ pub enum NotesError {
     NotOurs,
     #[error("decrypted note does not match the on-chain commitment")]
     CommitmentMismatch,
+    #[error(
+        "the memo is {len} bytes and Qnero pads every memo to {max}. A longer one would make \
+         this ciphertext a different length from every other note's, which is the leak the \
+         padding exists to close."
+    )]
+    MemoTooLong { len: usize, max: usize },
 }

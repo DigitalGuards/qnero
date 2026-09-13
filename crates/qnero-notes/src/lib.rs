@@ -32,6 +32,7 @@ pub mod address;
 pub mod encrypt;
 pub mod error;
 pub mod keys;
+pub mod memo;
 
 /// The primitives that carry no lattice dependency, re-exported so a wallet
 /// keeps one import. `qnero-circuit`, `qnero-aggregator` and
@@ -46,6 +47,7 @@ pub use encrypt::{
 };
 pub use error::NotesError;
 pub use keys::{FullViewingKey, IncomingViewingKey, SpendingKey};
+pub use memo::{pad_memo, unpad_memo, CIPHERTEXT_FIXED_BYTES, MEMO_BYTES};
 pub use qnero_note_core::{
     coinbase_r, coinbase_rho, commitment_from_inner, derive_ak, derive_pk, dummy_nullifier,
     entry_rho, note_inner, nullifier, output_rho, DerivedKeys, Digest, Felt, MinerKey, Note,

@@ -1,0 +1,22 @@
+# Flags for the browser prover (`crates/qnero-prover-wasm`). They apply only
+# when the target is named, so every native build is untouched.
+#
+# `getrandom_backend="wasm_js"` picks the `crypto.getRandomValues` backend for
+# both getrandom majors in the graph (0.3 through rand 0.9, 0.4 through
+# qp-plonky2's rand 0.10). Both read this one cfg name, and both also need
+# their own `wasm_js` feature, which `qnero-prover-wasm` declares directly.
+# `crypto.getRandomValues` exists only in a secure context, so the page has to
+# be served over https:// or http://localhost; `qnero_prover_wasm::entropy_self_check`
+# is the startup probe that turns that into an error at load time instead of a
+# failure tens of seconds into a private batch.
+#
+# The stack: rustc's wasm32 default is 1 MiB, carved out of linear memory.
+# Plonky2 recurses through FFT, Merkle-tree construction and recursive-verifier
+# construction, and a wasm stack overflow is a trap shaped like memory
+# corruption rather than a clean abort. 8 MiB is what the M8 measurements ran
+# on.
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "--cfg", "getrandom_backend=\"wasm_js\"",
+    "-C", "link-arg=-zstack-size=8388608",
+]

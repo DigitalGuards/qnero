@@ -10,6 +10,7 @@ members = [
     "crates/qnero-aggregator",
     "crates/qnero-circuit-builder",
     "crates/qnero-wallet",
+    "crates/qnero-prover-wasm",
 ]
 # The chain fork is its own workspace with its own toolchain and lock file, and
 # it lives inside this directory only because it is a git subtree. Excluding it
@@ -32,6 +33,7 @@ qnero-verifier = { path = "crates/qnero-verifier" }
 qnero-aggregator = { path = "crates/qnero-aggregator" }
 qnero-circuit-builder = { path = "crates/qnero-circuit-builder" }
 qnero-wallet = { path = "crates/qnero-wallet" }
+qnero-prover-wasm = { path = "crates/qnero-prover-wasm" }
 # no_std, and its `std` feature is empty, so nothing here asks for it: the
 # runtime links this crate through `qnero-circuit` on wasm.
 qp-poseidon-core = { version = "3.1.0", default-features = false }

@@ -1,0 +1,59 @@
+[package]
+name = "qnero-prover-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The browser surface of a Qnero wallet: key derivation, note decryption and one private-batch proof, compiled to wasm32-unknown-unknown"
+
+[lib]
+# `cdylib` is the wasm artifact; `rlib` is what the native gates and this
+# crate's own tests build.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+qnero-prover = { workspace = true }
+qnero-notes = { workspace = true }
+qnero-circuit = { workspace = true }
+qnero-note-core = { workspace = true }
+qp-plonky2 = { workspace = true }
+anyhow = { workspace = true, features = ["std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+wasm-bindgen = "0.2"
+
+# Two getrandom majors, two direct dependencies, one cfg. Cargo features are
+# per crate *version* and additive, so naming one does nothing for the other
+# and nothing upstream can turn either on:
+#
+#   0.3 arrives through rand 0.9, which `qnero-aggregator` uses to draw the
+#       padding nullifier preimages and the slot shuffle, and which
+#       `qnero-pqcrypto`'s `std` feature turns on for OS randomness.
+#   0.4 arrives through rand 0.10, which qp-plonky2 uses for `F::rand()` inside
+#       `RandomValueGenerator`. That is where every zero-knowledge blinding
+#       value comes from, and it is drawn at PROVING time, so a missing backend
+#       is not a startup failure: it lands tens of seconds into the first
+#       private batch.
+#
+# Both also need `--cfg getrandom_backend="wasm_js"`, which `.cargo/config.toml`
+# sets for this target. The feature and the cfg are each necessary and neither
+# is sufficient: without them the build stops at getrandom's own
+# `compile_error!` naming the version it reached first.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+# The runtime's own verifier, so the browser's proof is checked by the code a
+# chain would check it with. The `leaf` feature stays off: a runtime cannot name
+# a leaf verifier and neither should this test.
+qnero-verifier = { workspace = true }
+
+[features]
+default = []
+# Deliberately absent: anything that turns on `parallel` anywhere below this
+# crate. rayon-core spawns `std::thread`, which on wasm32-unknown-unknown
+# without the atomics target feature fails at runtime, and rayon needs a
+# SharedArrayBuffer-backed pool to be worth anything at all.
+# `tests/no_threads.rs` asserts the dependency tree stays rayon-free.
