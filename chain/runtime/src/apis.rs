@@ -130,14 +130,6 @@ impl_runtime_apis! {
 	}
 
 	impl sp_consensus_qpow::QPoWApi<Block> for Runtime {
-		fn verify_nonce_on_import_block(block_hash: [u8; 32], nonce: [u8; 64]) -> bool {
-			pallet_qpow::Pallet::<Self>::verify_nonce_on_import_block(block_hash, nonce)
-		}
-
-		fn verify_nonce_local_mining(block_hash: [u8; 32], nonce: [u8; 64]) -> bool {
-			pallet_qpow::Pallet::<Self>::verify_nonce_local_mining(block_hash, nonce)
-		}
-
 		fn get_max_reorg_depth() -> u32 {
 			pallet_qpow::Pallet::<Self>::get_max_reorg_depth()
 		}
@@ -163,8 +155,12 @@ impl_runtime_apis! {
 			pallet_qpow::Pallet::<Self>::get_max_difficulty()
 		}
 
-		fn verify_and_get_achieved_difficulty(block_hash: [u8; 32], nonce: [u8; 64]) -> (bool, U512) {
-			pallet_qpow::Pallet::<Self>::verify_and_get_achieved_difficulty(block_hash, nonce)
+		fn get_seed_epoch_blocks() -> u32 {
+			pallet_qpow::Pallet::<Self>::get_seed_epoch_blocks()
+		}
+
+		fn get_seed_epoch_lag() -> u32 {
+			pallet_qpow::Pallet::<Self>::get_seed_epoch_lag()
 		}
 	}
 

@@ -1,108 +1,7 @@
 use crate::{mock::*, Config, CurrentDifficulty};
 use frame_support::{pallet_prelude::TypedGet, traits::Hooks};
 use primitive_types::U512;
-use qpow_math::{get_nonce_hash, is_valid_nonce};
 use sp_runtime::BuildStorage;
-
-#[test]
-fn test_submit_valid_proof() {
-	new_test_ext().execute_with(|| {
-		// Set up test data
-		let block_hash = [1u8; 32];
-		let nonce = [2u8; 64];
-
-		// Test basic hash generation
-		let hash_result = get_nonce_hash(block_hash, nonce);
-		assert_ne!(hash_result, U512::zero());
-
-		// Test with easy difficulty
-		let easy_difficulty = U512::from(1u64);
-		let (is_valid, _) = is_valid_nonce(block_hash, nonce, easy_difficulty);
-		assert!(is_valid, "Should be valid with easy difficulty");
-	});
-}
-
-#[test]
-fn test_different_nonces_different_hashes() {
-	new_test_ext().execute_with(|| {
-		let block_hash = [1u8; 32];
-		let nonce1 = [2u8; 64];
-		let nonce2 = [3u8; 64];
-
-		let hash1 = get_nonce_hash(block_hash, nonce1);
-		let hash2 = get_nonce_hash(block_hash, nonce2);
-
-		assert_ne!(hash1, hash2);
-		assert_ne!(hash1, U512::zero());
-		assert_ne!(hash2, U512::zero());
-	});
-}
-
-#[test]
-fn test_same_inputs_same_hash() {
-	new_test_ext().execute_with(|| {
-		let block_hash = [5u8; 32];
-		let nonce = [7u8; 64];
-
-		let hash1 = get_nonce_hash(block_hash, nonce);
-		let hash2 = get_nonce_hash(block_hash, nonce);
-
-		assert_eq!(hash1, hash2);
-	});
-}
-
-#[test]
-fn test_difficulty_validation() {
-	new_test_ext().execute_with(|| {
-		let block_hash = [1u8; 32];
-		let nonce = [1u8; 64];
-
-		// Very easy difficulty - should pass
-		let easy_difficulty = U512::from(1u64);
-		let (is_valid_easy, hash) = is_valid_nonce(block_hash, nonce, easy_difficulty);
-		assert!(is_valid_easy);
-		assert_ne!(hash, U512::zero());
-
-		// Very hard difficulty - should fail
-		let hard_difficulty = U512::MAX;
-		let (is_valid_hard, _) = is_valid_nonce(block_hash, nonce, hard_difficulty);
-		assert!(!is_valid_hard);
-	});
-}
-
-#[test]
-fn test_poseidon_hash_squeeze_twice() {
-	new_test_ext().execute_with(|| {
-		let block_hash = [0x42u8; 32];
-		let nonce = [0x24u8; 64];
-
-		// Verify single Poseidon2 hash with double squeeze (512-bit output)
-		let mut input = [0u8; 96];
-		input[..32].copy_from_slice(&block_hash);
-		input[32..96].copy_from_slice(&nonce);
-
-		let hash = qp_poseidon_core::hash_squeeze_twice(&input);
-		let expected = U512::from_big_endian(&hash);
-
-		let actual = get_nonce_hash(block_hash, nonce);
-		assert_eq!(actual, expected);
-	});
-}
-
-#[test]
-fn test_pallet_verification() {
-	new_test_ext().execute_with(|| {
-		let block_hash = [1u8; 32];
-		let nonce = [2u8; 64];
-
-		// Test pallet's verification functions
-		let is_valid_import = QPow::verify_nonce_on_import_block(block_hash, nonce);
-		let is_valid_mining = QPow::verify_nonce_local_mining(block_hash, nonce);
-
-		// Both should return the same result
-		assert_eq!(is_valid_import, is_valid_mining);
-	});
-}
 
 #[test]
 fn test_difficulty_bounds() {
@@ -111,7 +10,7 @@ fn test_difficulty_bounds() {
 		let max_difficulty = QPow::get_max_difficulty();
 		let initial_difficulty = QPow::initial_difficulty();
 
-		assert_eq!(min_difficulty, U512::from(131_072u64));
+		assert_eq!(min_difficulty, U512::from(128u64));
 		assert!(max_difficulty > initial_difficulty);
 		assert!(initial_difficulty > min_difficulty);
 	});
@@ -194,115 +93,6 @@ fn test_difficulty_calculation() {
 		let max_difficulty = QPow::get_max_difficulty();
 		assert!(new_difficulty >= min_difficulty);
 		assert!(new_difficulty <= max_difficulty);
-	});
-}
-
-#[test]
-fn test_event_emission() {
-	new_test_ext().execute_with(|| {
-		let block_hash = [1u8; 32];
-		let nonce = [2u8; 64];
-
-		// Verify nonce on import block should emit event if valid
-		let is_valid = QPow::verify_nonce_on_import_block(block_hash, nonce);
-
-		if is_valid {
-			// Check that ProofSubmitted event was emitted
-			let events = System::events();
-			assert!(events.iter().any(|event| {
-				matches!(event.event, RuntimeEvent::QPow(crate::Event::ProofSubmitted { .. }))
-			}));
-		}
-	});
-}
-
-#[test]
-fn test_bitcoin_style_pow_properties() {
-	new_test_ext().execute_with(|| {
-		let block_hash = [0x12u8; 32];
-
-		// Test that hash distribution looks random-ish
-		let mut hashes = Vec::new();
-		for i in 0u64..10 {
-			let mut nonce = [0u8; 64];
-			nonce[0] = i as u8;
-			let hash = get_nonce_hash(block_hash, nonce);
-			hashes.push(hash);
-		}
-
-		// All hashes should be different
-		for i in 0..hashes.len() {
-			for j in i + 1..hashes.len() {
-				assert_ne!(hashes[i], hashes[j]);
-			}
-		}
-
-		// All hashes should be non-zero (except for zero nonce)
-		for hash in &hashes {
-			assert_ne!(*hash, U512::zero());
-		}
-	});
-}
-
-#[test]
-fn test_calculate_achieved_difficulty() {
-	new_test_ext().execute_with(|| {
-		let block_hash = [0x42u8; 32];
-		let nonce = [0x13u8; 64];
-
-		// Get the nonce hash
-		let nonce_hash = QPow::get_nonce_hash(block_hash, nonce);
-		assert_ne!(nonce_hash, U512::zero(), "Nonce hash should not be zero");
-
-		// Calculate achieved difficulty using the formula: U512::MAX / nonce_hash
-		let achieved_diff = U512::MAX / nonce_hash;
-
-		// Verify the formula makes sense
-		assert!(achieved_diff > U512::zero(), "Achieved difficulty should be positive");
-
-		// A lower nonce hash should result in higher achieved difficulty
-		// (more work done = smaller hash = higher difficulty)
-		let mut nonce2 = [0u8; 64];
-		let hash1 = QPow::get_nonce_hash(block_hash, nonce);
-		nonce2[0] = 1;
-		let hash2 = QPow::get_nonce_hash(block_hash, nonce2);
-
-		let diff1 = U512::MAX / hash1;
-		let diff2 = U512::MAX / hash2;
-
-		// If hash1 < hash2, then diff1 > diff2 (inverse relationship)
-		if hash1 < hash2 {
-			assert!(diff1 > diff2, "Lower hash should yield higher achieved difficulty");
-		} else if hash1 > hash2 {
-			assert!(diff1 < diff2, "Higher hash should yield lower achieved difficulty");
-		}
-		// If equal (extremely unlikely), difficulties would be equal too
-	});
-}
-
-#[test]
-fn test_verify_and_get_achieved_difficulty() {
-	new_test_ext().execute_with(|| {
-		let block_hash = [1u8; 32];
-		let nonce = [2u8; 64];
-
-		// Despite the legacy name, this returns the target difficulty (block work).
-		let (valid, block_work) = QPow::verify_and_get_achieved_difficulty(block_hash, nonce);
-
-		// Check that verify_nonce_on_import_block returns the same validity
-		let expected_valid = QPow::verify_nonce_on_import_block(block_hash, nonce);
-		assert_eq!(valid, expected_valid, "Validity should match verify_nonce_on_import_block");
-
-		if valid {
-			// Work is the target difficulty the block satisfied, NOT MAX / nonce_hash.
-			assert_eq!(
-				block_work,
-				QPow::get_difficulty(),
-				"Block work should equal the target difficulty"
-			);
-		} else {
-			assert_eq!(block_work, U512::zero(), "Invalid nonce should yield zero work");
-		}
 	});
 }
 
@@ -391,7 +181,7 @@ fn test_zero_observed_block_time() {
 #[test]
 fn test_min_difficulty_derived_from_clamp() {
 	new_test_ext().execute_with(|| {
-		assert_eq!(QPow::get_min_difficulty(), U512::from(131_072u64));
+		assert_eq!(QPow::get_min_difficulty(), U512::from(128u64));
 	});
 }
 
@@ -514,4 +304,69 @@ fn max_timestamp_drift_does_not_bias_difficulty_down() {
 			attacked
 		);
 	});
+}
+
+/// The seed schedule is chain state, so the consensus client can read it
+/// instead of carrying Monero's constants as a literal.
+#[test]
+fn the_seed_schedule_is_readable_from_the_runtime() {
+	new_test_ext().execute_with(|| {
+		assert_eq!(QPow::get_seed_epoch_blocks(), 2048);
+		assert_eq!(QPow::get_seed_epoch_lag(), 64);
+	});
+}
+
+/// The retarget reads block times and nothing else. Feeding it the same times
+/// twice gives the same answer, whatever hash produced those blocks, which is
+/// the property that let the RandomX swap keep this pallet.
+#[test]
+fn the_retarget_is_a_function_of_block_times_alone() {
+	let parent = U512::from(1_000_000u64);
+	let target = 1_000u64;
+	let fast = QPow::calculate_difficulty(parent, 100, target);
+	let on_time = QPow::calculate_difficulty(parent, target, target);
+	let slow = QPow::calculate_difficulty(parent, 10_000, target);
+
+	assert_eq!(fast, QPow::calculate_difficulty(parent, 100, target));
+	assert!(fast > on_time, "a fast block must raise difficulty");
+	assert!(slow < on_time, "a slow block must lower difficulty");
+}
+
+/// The floor moved for RandomX, and the `dev` preset starts there, so a value
+/// below it would stop a dev chain from building genesis at all.
+#[test]
+fn the_floor_is_reachable_by_one_light_mode_thread() {
+	new_test_ext().execute_with(|| {
+		let floor = QPow::get_min_difficulty();
+		assert_eq!(floor, U512::from(128u64));
+		// About four seconds at the ~33 H/s one light-mode thread manages,
+		// which is what makes a single-machine devnet produce blocks.
+		assert!(floor < U512::from(1_000u64));
+	});
+}
+
+/// A chain that reaches the floor must be able to leave it. Below 2048 the
+/// `parent / 2048` increment is zero by integer division, so without the floor
+/// on the increment itself a chain at the RandomX difficulty floor would sit
+/// there for ever however fast its blocks came.
+#[test]
+fn a_chain_at_the_floor_can_climb_out_of_it() {
+	new_test_ext().execute_with(|| {
+		let mut difficulty = QPow::get_min_difficulty();
+		for _ in 0..8 {
+			let next = QPow::calculate_difficulty(difficulty, 1, 1000);
+			assert!(next > difficulty, "{next} must exceed {difficulty}");
+			difficulty = next;
+		}
+		assert_eq!(difficulty, QPow::get_min_difficulty() + U512::from(8u64));
+	});
+}
+
+/// And the step is one only where the division would round to zero: above
+/// 2048 the retarget is exactly what it was before M7.
+#[test]
+fn the_increment_is_unchanged_above_the_rounding_boundary() {
+	let parent = U512::from(4_096_000u64);
+	let expected = parent + parent / U512::from(2048u64);
+	assert_eq!(QPow::calculate_difficulty(parent, 1, 1000), expected);
 }

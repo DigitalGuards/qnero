@@ -364,14 +364,40 @@ parameter_types! {
 	/// Target block time ms
 	pub const TargetBlockTime: u64 = TARGET_BLOCK_TIME_MS;
 	pub const TimestampBucketSize: u64 = 2 * TARGET_BLOCK_TIME_MS; // Nyquist frequency
-	/// Initial mining difficulty
-	pub const QPoWInitialDifficulty: U512 = U512([99_999_999_999, 0, 0, 0, 0, 0, 0, 0]);
+	/// Initial mining difficulty.
+	///
+	/// A RandomX number, sized for the hash rate a bootstrapping network of
+	/// CPUs actually has: 100 000 is about a minute of one modern core in full
+	/// mode against a 12 s target, and the retarget takes it from there. The
+	/// old value here was 10^11, which was calibrated for Poseidon over a
+	/// 512-bit space and would be days per block on RandomX. The `dev` preset
+	/// overrides this with the pallet's floor.
+	pub const QPoWInitialDifficulty: U512 = U512([100_000, 0, 0, 0, 0, 0, 0, 0]);
 }
 
 impl pallet_qpow::Config for Runtime {
 	type InitialDifficulty = QPoWInitialDifficulty;
 	type TargetBlockTime = TargetBlockTime;
 	type MaxReorgDepth = ConstU32<100>;
+	// Monero's own schedule, as constants rather than as literals in the
+	// client. Two things about these numbers are worth knowing before a
+	// launch, and both are a one-line change here because the client reads
+	// them from chain state.
+	//
+	// Monero's 2048 blocks at a 120 s target is 2.8 days between seed
+	// rotations. At this chain's 12 s target the same 2048 blocks is 6.8
+	// hours, and every rotation costs a full-mode rig a 2 GiB dataset rebuild.
+	// A launch that wants Monero's cadence rather than Monero's block count
+	// wants 16384 here, which is 2.3 days and still a power of two.
+	//
+	// The lag is 64 blocks and `MaxReorgDepth` is 100, so the block a seed
+	// comes from is inside the window a legal reorg can still move. That
+	// cannot split the chain, because the seed is resolved along each
+	// candidate's own ancestry rather than by canonical height, but a deep
+	// reorg across an epoch boundary does change the seed under work already
+	// started. A lag above the reorg depth, 128, removes even that.
+	type SeedEpochBlocks = ConstU32<2_048>;
+	type SeedEpochLag = ConstU32<64>;
 	type WeightInfo = pallet_qpow::weights::SubstrateWeight<Runtime>;
 }
 

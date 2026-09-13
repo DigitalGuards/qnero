@@ -78,6 +78,8 @@ impl pallet_qpow::Config for Test {
 	type InitialDifficulty = TestInitialDifficulty;
 	type TargetBlockTime = ConstU64<1000>;
 	type MaxReorgDepth = ConstU32<10>;
+	type SeedEpochBlocks = ConstU32<2048>;
+	type SeedEpochLag = ConstU32<64>;
 }
 
 // Build genesis storage according to the mock runtime

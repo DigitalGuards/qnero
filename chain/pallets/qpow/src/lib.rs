@@ -1,5 +1,25 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
+//! Mining difficulty: what it is now, and how it moves.
+//!
+//! This pallet is the chain's difficulty, and since M7 that is all it is. It
+//! used to verify the proof of work as well, when the hash was Poseidon and a
+//! wasm runtime could compute it. RandomX cannot run in a wasm runtime, so
+//! verification moved to the consensus client and what is left here is the part
+//! that never depended on the hash in the first place.
+//!
+//! The retarget is a pure function of the parent difficulty, the observed block
+//! time and the target block time, in Ethereum's Homestead shape. Nothing in it
+//! reads a nonce, a hash or an engine id, which is why the RandomX swap keeps
+//! it rather than forking it into a new pallet: a Monero-style LWMA would be
+//! another tuning of the same inputs. The storage,
+//! the genesis override and the `DifficultyAdjusted` event are unchanged, so
+//! the swap moved no storage item.
+//!
+//! The seed schedule is here for the same reason: it is two numbers the client
+//! reads out of chain state, so a chain can pick its own epoch length without a
+//! client release.
+
 extern crate alloc;
 
 pub use pallet::*;
@@ -26,10 +46,8 @@ pub mod pallet {
 		traits::{BuildGenesisConfig, Time},
 	};
 	use frame_system::pallet_prelude::BlockNumberFor;
-	use qpow_math::{get_nonce_hash, is_valid_nonce};
 	use sp_core::U512;
 
-	pub type NonceType = [u8; 64];
 	pub type Difficulty = U512;
 	pub type WorkValue = U512;
 	pub type Timestamp = u64;
@@ -61,6 +79,22 @@ pub mod pallet {
 
 		#[pallet::constant]
 		type MaxReorgDepth: Get<u32>;
+
+		/// Blocks per RandomX seed epoch.
+		///
+		/// The consensus client reads this rather than hard-coding Monero's
+		/// 2048, because Monero's epoch was chosen against a 120 s block time
+		/// and this chain's is 12 s. A power of two keeps the rule identical
+		/// to Monero's masked form.
+		#[pallet::constant]
+		type SeedEpochBlocks: Get<u32>;
+
+		/// Blocks between an epoch boundary and the block whose hash seeds it.
+		///
+		/// The lag is what gives every node the seed block well before the
+		/// first block that hashes under it.
+		#[pallet::constant]
+		type SeedEpochLag: Get<u32>;
 
 		type WeightInfo: WeightInfo;
 	}
@@ -101,11 +135,6 @@ pub mod pallet {
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
-		ProofSubmitted {
-			nonce: NonceType,
-			difficulty: U512,
-			hash_achieved: U512,
-		},
 		DifficultyAdjusted {
 			old_difficulty: Difficulty,
 			new_difficulty: Difficulty,
@@ -236,8 +265,17 @@ pub mod pallet {
 			log::debug!(target: "qpow", "Block time: {}ms, divisor: {}ms, time_factor: {}, adjustment: {}", 
 				block_time_ms, divisor_ms, time_factor, adjustment);
 
-			// Difficulty increment = parent_diff / 2048
-			let increment = parent_difficulty / U512::from(2048u64);
+			// Difficulty increment = parent_diff / 2048, and never zero.
+			//
+			// The floor on the increment is what M7 added, and it is the
+			// difference between a floor a chain can leave and one it cannot.
+			// Integer division makes the increment zero for any difficulty
+			// below 2048, so a chain that fell to the RandomX floor of 128
+			// would sit there for ever: fast blocks would compute an
+			// adjustment and add nothing. One is the smallest step that keeps
+			// the retarget monotonic at every difficulty, and it changes
+			// nothing above 2048, where the division already dominates.
+			let increment = (parent_difficulty / U512::from(2048u64)).max(U512::one());
 
 			// Calculate new difficulty
 			let new_difficulty = if adjustment >= 0 {
@@ -274,89 +312,6 @@ pub mod pallet {
 	}
 
 	impl<T: Config> Pallet<T> {
-		pub fn is_valid_nonce(
-			block_hash: [u8; 32],
-			nonce: NonceType,
-			difficulty: Difficulty,
-		) -> (bool, U512) {
-			is_valid_nonce(block_hash, nonce, difficulty)
-		}
-
-		pub fn get_nonce_hash(
-			block_hash: [u8; 32], // 256-bit block hash
-			nonce: NonceType,     // 512-bit nonce
-		) -> U512 {
-			get_nonce_hash(block_hash, nonce)
-		}
-
-		// Shared verification logic
-		fn verify_nonce_internal(block_hash: [u8; 32], nonce: NonceType) -> (bool, U512, U512) {
-			if nonce == [0u8; 64] {
-				log::warn!(
-					"verify_nonce should not be called with 0 nonce, but was for block_hash: {:?}",
-					block_hash
-				);
-				return (false, U512::zero(), U512::zero());
-			}
-			let difficulty = Self::get_difficulty();
-			let (valid, hash_achieved) = Self::is_valid_nonce(block_hash, nonce, difficulty);
-
-			log::debug!(
-				"verify_nonce_internal: block_hash: {:?}, nonce: {:?}, valid: {:?}, difficulty: {:?}, hash_achieved: {:?}",
-				hex::encode(block_hash),
-				nonce,
-				valid,
-				difficulty,
-				hash_achieved
-			);
-			(valid, difficulty, hash_achieved)
-		}
-
-		// Block verification with event emission
-		pub fn verify_nonce_on_import_block(block_hash: [u8; 32], nonce: NonceType) -> bool {
-			let (valid, difficulty, hash_achieved) = Self::verify_nonce_internal(block_hash, nonce);
-			if valid {
-				Self::deposit_event(Event::ProofSubmitted { nonce, difficulty, hash_achieved });
-			}
-
-			valid
-		}
-
-		pub fn verify_nonce_local_mining(block_hash: [u8; 32], nonce: NonceType) -> bool {
-			let (verify, _, _) = Self::verify_nonce_internal(block_hash, nonce);
-			verify
-		}
-
-		/// Verify the nonce and return the block's work used for chain selection.
-		///
-		/// IMPORTANT: despite the legacy name, this returns the *target* difficulty the
-		/// block had to satisfy (the network difficulty at this height), NOT the achieved
-		/// difficulty derived from the winning hash. Target-based work matches Bitcoin
-		/// (`2^256/(target+1)`) and Ethereum PoW (sum of the `difficulty` field): every
-		/// block at a given difficulty contributes an identical, deterministic amount of
-		/// work, so cumulative chain work tracks expended hash power instead of being
-		/// dominated by a single lucky hash.
-		///
-		/// The runtime API name is intentionally left unchanged so this can ship as an
-		/// on-chain-only upgrade: because the metric is determined by the value this
-		/// returns (the client merely accumulates `parent_work + value`), upgrading the
-		/// on-chain Wasm flips the whole network to target-based work at the `set_code`
-		/// block, with no coordinated node-binary upgrade and no resync. Renaming the API
-		/// would break that compatibility, so defer the rename to a later release once all
-		/// nodes run a binary that expects the new name.
-		///
-		/// Note: This is called via runtime API from the client side. Runtime API
-		/// calls execute in a temporary context where state changes are discarded,
-		/// so we don't emit events here.
-		pub fn verify_and_get_achieved_difficulty(
-			block_hash: [u8; 32],
-			nonce: NonceType,
-		) -> (bool, U512) {
-			let (valid, difficulty, _) = Self::verify_nonce_internal(block_hash, nonce);
-			let block_work = if valid { difficulty } else { U512::zero() };
-			(valid, block_work)
-		}
-
 		pub fn initial_difficulty() -> Difficulty {
 			T::InitialDifficulty::get()
 		}
@@ -373,8 +328,13 @@ pub mod pallet {
 		}
 
 		pub fn get_min_difficulty() -> Difficulty {
-			// Minimum difficulty floor - same as Ethereum's minimum (2^17 = 131072)
-			U512::from(131_072u64)
+			// The floor is sized for RandomX now. It used to be
+			// Ethereum's 2^17, which at the 500 to 2000 H/s a RandomX core
+			// manages would be 65 to 260 core-seconds per block against a 12 s
+			// target: a one-machine devnet would never produce a block. 128 is
+			// about four seconds on one light-mode thread, which is what the
+			// `dev` preset starts at.
+			U512::from(128u64)
 		}
 
 		pub fn get_max_difficulty() -> Difficulty {
@@ -391,6 +351,14 @@ pub mod pallet {
 
 		pub fn get_max_reorg_depth() -> u32 {
 			T::MaxReorgDepth::get()
+		}
+
+		pub fn get_seed_epoch_blocks() -> u32 {
+			T::SeedEpochBlocks::get()
+		}
+
+		pub fn get_seed_epoch_lag() -> u32 {
+			T::SeedEpochLag::get()
 		}
 	}
 }

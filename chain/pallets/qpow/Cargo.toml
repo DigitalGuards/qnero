@@ -25,7 +25,6 @@ hex.workspace = true
 log.workspace = true
 pallet-timestamp.workspace = true
 qp-poseidon-core.workspace = true
-qpow-math.workspace = true
 scale-info = { workspace = true, default-features = false, features = ["derive"] }
 sp-core.workspace = true
 sp-io.workspace = true
@@ -50,7 +49,6 @@ std = [
 	"log/std",
 	"pallet-timestamp/std",
 	"primitive-types/std",
-	"qpow-math/std",
 	"scale-info/std",
 	"sp-core/std",
 	"sp-io/std",
