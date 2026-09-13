@@ -153,6 +153,39 @@ async fn is_closed(miner: &mut FakeMiner, within: Duration) -> bool {
 	)
 }
 
+/// Whether the server closes this connection within `within`, while the peer
+/// keeps writing `line` every `every` and reads whatever comes back.
+async fn closes_while_sending(
+	miner: &mut FakeMiner,
+	line: &str,
+	every: Duration,
+	within: Duration,
+) -> bool {
+	tokio::time::timeout(within, async {
+		loop {
+			if miner.writer.write_all(line.as_bytes()).await.is_err() {
+				return;
+			}
+			let drain = async {
+				let mut reply = String::new();
+				loop {
+					match miner.reader.read_line(&mut reply).await {
+						Ok(0) | Err(_) => return,
+						Ok(_) => reply.clear(),
+					}
+				}
+			};
+			// Replies are read and thrown away; the end of the stream is the
+			// answer this is waiting for, and a quiet window means write again.
+			if tokio::time::timeout(every, drain).await.is_ok() {
+				return;
+			}
+		}
+	})
+	.await
+	.is_ok()
+}
+
 /// Take the job apart the way a miner does, find a nonce that clears the
 /// target the job carried, and return it with the hash.
 fn mine_from_job(engine: &Arc<RandomxEngine>, job: &Value) -> (u32, String) {
@@ -584,6 +617,55 @@ async fn a_connection_that_never_logs_in_gives_its_slot_back() {
 	tokio::time::sleep(Duration::from_millis(200)).await;
 	let mut next = FakeMiner::connect(server.local_addr()).await;
 	assert_eq!(next.login("qnero-worker").await["result"]["status"], "OK");
+}
+
+/// A peer that talks and never logs in must not keep its slot either.
+///
+/// The pre-login window is the connection's whole life. Measured from the last
+/// line instead it is no bound at all, because the line that refreshes it need
+/// not be a login or even a request: a blank line is a complete line and stamps
+/// the activity clock before it is discarded, and a `keepalived` is answered
+/// before any login. One byte a window then holds a slot for the life of the
+/// process, and at the production bounds four addresses hold all 64 while every
+/// real rig is answered `Too many connections`. The fully silent peer above
+/// does not cover this, because it never refreshes anything.
+#[tokio::test]
+async fn a_peer_that_talks_without_logging_in_gives_its_slot_back() {
+	// A newline, and a request that earns a reply so the write clock moves too.
+	for line in ["\n", &(json!({"id": 1, "method": "keepalived", "params": {}}).to_string() + "\n")]
+	{
+		let (server, _engine) = server_with_limits(
+			8,
+			// The authenticated deadline at its two-hour ceiling, so nothing but
+			// the pre-login window can close this.
+			u64::MAX,
+			Limits {
+				max_connections: 1,
+				max_connections_per_ip: 1,
+				login_timeout: Duration::from_millis(400),
+				..Limits::default()
+			},
+		)
+		.await;
+
+		let mut squatter = FakeMiner::connect(server.local_addr()).await;
+		assert!(
+			// Half a window apart, so the last inbound line is never more than
+			// half the window old and the old rule could never fire.
+			closes_while_sending(
+				&mut squatter,
+				line,
+				Duration::from_millis(200),
+				Duration::from_secs(5),
+			)
+			.await,
+			"a peer sending {line:?} every half window held its slot without logging in",
+		);
+
+		// And the slot it was holding is free for a rig that will log in.
+		let mut next = FakeMiner::connect(server.local_addr()).await;
+		assert_eq!(next.login("qnero-worker").await["result"]["status"], "OK");
+	}
 }
 
 /// A session that logs in and then never says anything again must not live on

@@ -122,11 +122,13 @@ const WRITE_QUEUE_DEPTH: usize = 32;
 /// connection never ends and the slot it holds never comes back.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a connection may go without logging in.
+/// How long a connection has to log in, measured from the moment it opened.
 ///
 /// The share-scaled deadline below is a rig's allowance, and a peer earns it by
 /// logging in. Until then the connection is one line away from useful and is
-/// holding one of the endpoint's slots, so it gets a short window.
+/// holding one of the endpoint's slots, so it gets a short window. This one is
+/// a lifetime and no inbound line refreshes it, because a peer that has nothing
+/// to say to the endpoint can say it as often as it likes.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Connections one address may hold at once, by default. The global cap alone
@@ -163,8 +165,8 @@ pub(crate) const REFUSED_MESSAGE: &str = "Too many connections";
 ///
 /// Eviction is driven by the template rolling, and a chain whose template has
 /// stalled does not roll one, so the set would otherwise grow at the
-/// share-check rate for as long as the stall lasts. Clearing at the ceiling
-/// costs at most one re-credited duplicate.
+/// share-check rate for as long as the stall lasts. What clearing at the
+/// ceiling costs is written out at `insert_seen`.
 const MAX_SEEN_SHARES: usize = 100_000;
 
 /// Floor and ceiling on how long a connection may stay silent.
@@ -267,7 +269,7 @@ pub struct StratumConfig {
 /// measured in minutes.
 #[derive(Clone, Copy, Debug)]
 struct Limits {
-	/// How long a connection may go without logging in.
+	/// How long a connection has to log in, counted from when it opened.
 	login_timeout: Duration,
 	/// How long one write to a miner may take.
 	write_timeout: Duration,
@@ -772,13 +774,28 @@ impl StratumServer {
 		let mut line: Vec<u8> = Vec::new();
 		let mut last_read = Instant::now();
 		let result = loop {
-			// A rig earns the long share-scaled window by logging in. Until then
-			// the connection is one line away from useful and is holding a slot,
-			// so it gets the short one.
-			let deadline = if session_id.is_some() {
-				authenticated_deadline
+			// A rig earns the long share-scaled window by logging in, and that
+			// window is an activity deadline: an inbound line or a job push
+			// refreshes it, which is what a rig that is hashing and has found
+			// nothing needs.
+			//
+			// Until login the connection is one line away from useful and is
+			// holding one of the endpoint's slots, so it gets a short window, and
+			// that one runs from `opened`, over the connection's whole life.
+			// Measured from the last line it would be no bound at
+			// all. A blank line is a complete line, so it stamps the activity clock
+			// at the top of this loop before it is discarded below, and a
+			// `keepalived` is answered before any login. One byte a window would
+			// then earn a peer that never intends to log in the slot it holds for
+			// the life of the process, and four addresses at the per-address cap
+			// would take the whole endpoint away from the operator's own rigs.
+			let login_left = if session_id.is_some() {
+				None
 			} else {
-				self.limits.login_timeout
+				let Some(left) = self.limits.login_timeout.checked_sub(opened.elapsed()) else {
+					break Err("did not log in".to_string());
+				};
+				Some(left)
 			};
 			// A ceiling on inbound silence, and the node's own writes do not
 			// refresh it. The share-scaled deadline below counts a job push as
@@ -795,7 +812,9 @@ impl StratumServer {
 			let since_write = opened
 				.elapsed()
 				.saturating_sub(Duration::from_millis(last_write.load(Ordering::Relaxed)));
-			let Some(remaining) = deadline.checked_sub(last_read.elapsed().min(since_write)) else {
+			let Some(remaining) =
+				authenticated_deadline.checked_sub(last_read.elapsed().min(since_write))
+			else {
 				break Err("idle timeout".to_string());
 			};
 			// Whichever runs out first. The ceiling has to be part of the wait:
@@ -803,6 +822,10 @@ impl StratumServer {
 			// deadline hours away, so a check made only on re-entry would leave
 			// the loop inside one read for all of it.
 			let remaining = remaining.min(silence_left);
+			// And the login window, for the same reason the ceiling is folded in
+			// here: checked only on re-entry, a bound that no inbound line ever
+			// takes the loop past would never be checked again.
+			let remaining = login_left.map_or(remaining, |left| remaining.min(left));
 
 			let read = tokio::select! {
 				biased;
@@ -1202,8 +1225,22 @@ impl Drop for IpSlot {
 ///
 /// The ceiling is what keeps the set finite when the template does not roll:
 /// eviction is driven by `broadcast_job`, and a stalled chain broadcasts
-/// nothing. Clearing costs at most one re-credited duplicate, which is cheaper
-/// than a set that grows for as long as the stall lasts.
+/// nothing.
+///
+/// Reaching it clears the whole set, and that re-opens every share recorded
+/// against a job that is still live, so a nonce already credited can be sent
+/// again, hashed again and counted again. Every submitted nonce counts toward
+/// the ceiling whether or not it was valid, and the set is shared by every
+/// session, so a full endpoint spending its ordinary refill reaches 100 000
+/// inside a minute and the dedup stops saving hashing for as long as the load
+/// lasts. `accepted` and `block_candidates` in the operator's line can
+/// over-report by the duplicates that buys.
+///
+/// Both costs are bounded by the submit budget and by the hashing semaphore,
+/// and neither is a consensus question: a duplicate seal cannot produce a
+/// second block, because `MiningHandle::submit` verifies and consumes the
+/// build under one lock. A per-job map would not remove the clear, because the
+/// case the ceiling exists for is a chain whose one live job never rolls.
 fn insert_seen(
 	seen: &mut HashSet<(String, u64, u32)>,
 	share: (String, u64, u32),

@@ -302,9 +302,13 @@ mod tests {
 	fn it_computes_the_librandomx_known_answers() {
 		let engine = RandomxEngine::light(2);
 		for (key, input, expected) in KNOWN_ANSWERS {
-			// The seeds here are the literal test keys, zero-padded to the 32
-			// bytes a block hash occupies, because the cache key is the seed
-			// and the seed is 32 bytes on this chain.
+			// The cache key here is the raw librandomx test key, because that is
+			// what the published vectors are defined over. A RandomX key is
+			// variable length, so padding one of these to 32 bytes builds a
+			// different cache and moves every answer below. The 32-byte seed a
+			// block hash occupies, which is the only thing the node ever keys a
+			// cache with, is what `the_engine_passes_the_seed_to_randomx_unchanged`
+			// covers.
 			let cache = RandomXCache::new(engine.flags(), key).expect("cache");
 			let vm = RandomXVM::new(engine.flags(), Some(cache), None).expect("vm");
 			let hash = vm.calculate_hash(input).expect("hash");

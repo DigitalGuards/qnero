@@ -359,9 +359,9 @@ Fixed costs measured alongside:
 
 4.3 s against a 12 s target is the retarget climbing: at 32.9 H/s a difficulty
 of 128 is about four seconds, so the chain runs fast and the difficulty rises
-one step per block. The step is one rather than `difficulty / 2048` because
-integer division rounds that to zero below 2048, and M7 floored the increment
-at one so a chain that reaches the difficulty floor can leave it again.
+one step per block. The step is one because integer division rounds
+`difficulty / 2048` to zero below 2048, and M7 floored the increment at one so
+a chain that reaches the difficulty floor can leave it again.
 
 With xmrig attached the same chain produced blocks as fast as the node could
 build templates, which is what a 3.5 kH/s rig against a difficulty of 175

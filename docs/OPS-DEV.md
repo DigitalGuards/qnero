@@ -497,8 +497,12 @@ anything an unauthenticated peer can reach:
   the refusal is logged at `warn`, rate limited to one a minute with the count
   of what it suppressed. A cap that refuses in silence is a rig retrying every
   five seconds forever with neither end saying why;
-- 30 seconds to log in. The long share-scaled deadline below is a rig's
-  allowance and a peer earns it by logging in;
+- 30 seconds to log in, counted from the moment the connection opened. The long
+  share-scaled deadline below is a rig's allowance and a peer earns it by
+  logging in. Nothing a peer sends before it logs in extends the 30 seconds: a
+  blank line and a `keepalived` are both answered before any login, so a
+  deadline measured from the last line would have been one newline a window
+  away from no deadline at all;
 - two hours of inbound silence, whatever the node writes. The share-scaled
   deadline counts a job push as proof of life, which is right for a rig that is
   hashing and has found nothing, and on its own it is also a session that never
@@ -597,9 +601,12 @@ one-line change in `runtime/src/configs/mod.rs`:
 Ethereum's 2^17 and is now 128. At the 33 H/s one light-mode thread manages,
 the old floor was 66 core-minutes per block against a 12 s target: a
 single-machine devnet would never produce one. The `dev` preset starts at the
-floor, and the Homestead retarget's increment is `difficulty / 2048`, which is
-zero below 2048, so a dev chain stays at 128 instead of drifting. Live presets
-start at `QPoWInitialDifficulty`, now 100 000.
+floor, and the Homestead retarget's increment is `max(difficulty / 2048, 1)`.
+Integer division rounds `difficulty / 2048` to zero anywhere below 2048, which
+left a chain at the floor unable to leave it, so M7 floored the increment at
+one: a dev chain now climbs one step per block for as long as blocks come in
+under the target. `docs/BENCH.md` measures it, 128 at block 1 and 189 at block
+66. Live presets start at `QPoWInitialDifficulty`, now 100 000.
 
 **What did not move.** The header shape (one 32-byte `PreRuntime` item plus a
 64-byte `Seal`, filling the 110-byte digest window exactly), the author label
@@ -4532,3 +4539,114 @@ cargo fmt --all -- --check
 All green. The consensus crate is at 58 tests and the node crate at 92, 26 of
 them stratum protocol tests driven by a fake miner that speaks xmrig's
 messages, with the node built once for the run above.
+
+## The M7 third review fix pass, 2026-09-13
+
+Five findings against the second fix pass: two mediums, which are the same
+defect reported twice, and three lows. The medium is the stratum endpoint for
+the fourth time, and it is the bound the second pass thought it had already
+set: a connection slot an unauthenticated peer keeps for the life of the
+process.
+
+### What changed
+
+**The pre-login deadline is the connection's age.** `LOGIN_TIMEOUT` was
+subtracted from the time since the last line in either direction, and every
+completed inbound line stamps that clock at the top of the read loop. A blank
+line is a completed line: `read_one_line` returns `Line::Complete`, the clock
+is stamped, and only then is the line discarded as blank. So one `\n` bought a
+peer a fresh 30 seconds, and it also refreshed the 7200-second silence ceiling
+the second pass added, which left no bound that could fire. Nothing else ends
+a connection before login, because `keepalived` is answered without a session
+and a `submit` before login replies `Unauthenticated` and keeps serving. Four
+source addresses, or one IPv6 /64, took all 64 slots for about two bytes per
+30 seconds per socket, and every real rig was answered `Too many connections`
+until the node restarted. On the documented rig-only deployment,
+`--mining-threads 0` with a stratum port, that is a node that stops authoring.
+
+The window now runs from `opened`, the instant the connection was accepted,
+and it is folded into the read's own timeout the way the silence ceiling is,
+so a read already in progress ends on it. The share-scaled deadline
+a rig earns by logging in is unchanged and is still an activity deadline,
+which is what a rig that is hashing and has found nothing needs. A peer that
+does not log in inside 30 seconds is closed with `did not log in`.
+
+`a_peer_that_talks_without_logging_in_gives_its_slot_back` is the regression
+test, and it runs the case twice: once with a bare newline and once with a
+`keepalived`, which is answered and therefore moves the write clock too. Both
+are written every half window. Against the old rule both hold the slot for the
+whole five seconds the test waits, and the rig behind them is refused; against
+the new one both are closed and the rig logs in. The existing
+`a_connection_that_never_logs_in_gives_its_slot_back` does not cover this,
+because a peer that sends nothing at all refreshes nothing.
+
+**Three low findings, all documentation of behaviour that had moved.**
+
+- `docs/OPS-DEV.md` still said the retarget increment is `difficulty / 2048`
+  and therefore zero below 2048, so a dev chain stays at 128. M7 floored the
+  increment at one, `docs/BENCH.md` measures the consequence, 128 at block 1
+  and 189 at block 66, and the two docs contradicted each other inside one
+  milestone. The mining section now states `max(difficulty / 2048, 1)` and
+  points at the measured row.
+- The comment in the librandomx known-answer test said the seeds are the test
+  keys zero-padded to 32 bytes, while the code passes the raw key, which is
+  what the published vectors are defined over. A RandomX key is variable
+  length, so a maintainer acting on the comment would pad the key, build a
+  different cache and fail all four vectors. The comment now says what the
+  code does and names `the_engine_passes_the_seed_to_randomx_unchanged` as the
+  test that covers the 32-byte seed the node actually uses.
+- `insert_seen` clears the whole duplicate set at its ceiling, and the comment
+  claimed that costs at most one re-credited duplicate. It re-opens every
+  entry, including shares already credited against a job that is still live,
+  and every submitted nonce counts toward the ceiling whether or not it was
+  valid, so a full endpoint spending its ordinary refill reaches 100 000 in
+  under a minute. The comment now says that, and says what it costs: hashing
+  the dedup exists to save, and `accepted` and `block_candidates` that can
+  over-report by the duplicates it buys. No consensus impact:
+  `MiningHandle::submit` verifies and consumes the build under one lock, so a
+  duplicate seal cannot produce a second block. Keying the set per job was
+  considered and left alone, because the case the ceiling exists for is a
+  chain whose one live job never rolls, and a per-job map still needs a
+  ceiling there.
+
+### The run
+
+The node was rebuilt once for the stratum change, then `--dev --tmp
+--stratum-port 3348 --mining-threads 1` against xmrig 6.21.3 at
+`nice -n 19 --threads=2` for a little over two minutes:
+
+```
+⛏️ Miner 127.0.0.1:47930 logged in as "qnero-rig" ("XMRig/6.21.3 (Linux x86_64) …"), extra nonce 0x342e7bac
+⛏️ Stratum so far: 508 shares accepted, 0 rejected, 508 at the block difficulty, 215 sealed, 293 too late
+```
+
+One login, no reconnects, 0 rejected, 215 blocks sealed from the rig, and the
+chain reached #235 at difficulty 361 from a genesis of 128, which is the
+floored increment climbing. Both ends were stopped by pidfile and port 3348
+was closed afterwards.
+
+### Gates
+
+```
+# the chain workspace
+SKIP_WASM_BUILD=1 RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 \
+  -p sc-consensus-randomx -p pallet-qpow -p qnero-runtime -p qnero-node --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 2 -p qnero-node -p sc-consensus-randomx --all-targets
+cargo +nightly fmt --all -- --check
+
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+cargo fmt --all -- --check
+```
+
+All green. The consensus crate is at 58 tests and the node crate at 93, 27 of
+them stratum protocol tests driven by a fake miner that speaks xmrig's
+messages. `-j 2` throughout on this workstation, in place of the `-j 4` the
+earlier passes used on the chain workspace.
+
+A note on `cargo fmt` here: the chain workspace's `.rustfmt.toml` sets options
+that only nightly rustfmt honours, so `cargo +nightly fmt` is the gate. Stable
+`rustfmt` on a file in that workspace rewrites match arms and binary operators
+that nightly leaves alone, and it follows `mod` declarations into files it was
+not handed.
