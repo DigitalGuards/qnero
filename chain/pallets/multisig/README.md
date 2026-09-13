@@ -1,6 +1,6 @@
 # Multisig Pallet
 
-A multisignature wallet pallet for the Quantus blockchain with an economic security model.
+A multisignature wallet pallet for the Qnero blockchain with an economic security model.
 
 ## Overview
 

@@ -22,7 +22,7 @@ The mental model carries over almost intact.
 
 Two habits do not carry over. There is no unlock time field: an anchor expires after `BlockHashWindow`, 256 blocks, and that is the only waiting rule.
 
-Tail emission is undesigned. The Quantus schedule inherited from upstream runs against `MAX_SUPPLY`, so the question Monero answered with a tail is open here, listed in the mapping as absent.
+Tail emission is undesigned. The emission schedule inherited from the upstream chain runs against `MAX_SUPPLY`, so the question Monero answered with a tail is open here, listed in the mapping as absent.
 
 ## Why the cryptography was replaced
 
@@ -30,7 +30,7 @@ Monero's privacy is Ed25519 in four places: CLSAG ring signatures with key image
 
 The design fixes four priorities in that order: private by default, every spend a proof; proof of work, with no stake and no validators; post-quantum from genesis; audited parts only, standardized primitives and firm-audited circuits, those audited parts being upstream's.
 
-The base is the Quantus Network stack (MIT): ML-DSA-87 accounts, post-quantum Noise (ML-KEM) p2p, a 4-ary Poseidon commitment tree, a nullifier set. Field Goldilocks, hash Poseidon2 at the Quantus parameters (Eiger reviewed), proofs Plonky2 (FRI) at a conjectured 100 bits. `crates/` holds the Qnero workspace, from `qnero-pqcrypto` to `qnero-wallet`; `qnero-verifier` builds for `wasm32v1-none`, so the runtime links no prover stack. `chain/` is the forked Quantus chain, a git subtree at `f1176ce` (v1.0.1) with its own workspace and lock file, where `pallets/shielded` settles.
+The base is an upstream post-quantum Substrate stack (MIT, credited below): ML-DSA-87 accounts, post-quantum Noise (ML-KEM) p2p, a 4-ary Poseidon commitment tree, a nullifier set. Field Goldilocks, hash Poseidon2 at parameters an audit firm has reviewed, proofs Plonky2 (FRI) at a conjectured 100 bits. `crates/` holds the Qnero workspace, from `qnero-pqcrypto` to `qnero-wallet`; `qnero-verifier` builds for `wasm32v1-none`, so the runtime links no prover stack. `chain/` is the forked upstream chain, a git subtree at `f1176ce` with its own workspace and lock file, where `pallets/shielded` settles.
 
 ## How a transfer works
 
@@ -126,12 +126,11 @@ M7 is done: the proof of work is RandomX, so a Monero rig mines Qnero through th
 
 ## Credits and licence
 
-Qnero is MIT licensed (`LICENSE` at the repository root, DigitalGuards). `chain/LICENSE` is the MIT License, "Copyright 2025 Quantus Network", and `crates/qnero-pqcrypto/LICENSE.hegemon` carries the vendored text.
+Qnero is MIT licensed (`LICENSE` at the repository root, DigitalGuards). The upstream copyright notices are kept where the licence requires them: `chain/LICENSE` for the chain fork and `crates/qnero-pqcrypto/LICENSE.hegemon` for the vendored crypto crate.
 
-- **Quantus Network** (MIT), chain: a subtree of Quantus-Network/chain at `f1176ce` (v1.0.1). `pallet-zk-tree`'s Poseidon tree, `UsedNullifiers` and ML-DSA-87 accounts come as is; `pallet-wormhole`'s verify flow is forked as `pallet-shielded`.
-- **Quantus Network** (MIT), circuits: parts of `qnero-circuit` and `qnero-aggregator` derive from qp-zk-circuits at 4.4.0, and three more crates follow its Wormhole equivalents in shape. All five carry a `NOTICE` and `CHANGES.md`; the layouts, padding rule and forwarding contract are Qnero's own.
+- **Upstream chain and circuits** (Quantus Network, MIT): `chain/` is a subtree of the upstream Substrate chain at `f1176ce`; its Poseidon tree, nullifier set and ML-DSA-87 accounts come as is, and its mixer pallet's verify flow is forked as `pallet-shielded`. Parts of `qnero-circuit` and `qnero-aggregator` derive from the upstream `qp-zk-circuits` at 4.4.0, and three more crates follow its equivalents in shape. All five carry a `NOTICE` and `CHANGES.md`; the layouts, padding rule and forwarding contract are Qnero's own.
 - **Hegemon** (Pauli-Group/Hegemon, MIT): `qnero-pqcrypto` vendors its `crypto` crate at `b819911`, carrying its own `NOTICE` and `CHANGES.md`.
-- **Plonky2** (Polygon lineage), through `qp-plonky2` and `qp-plonky2-verifier` at `=1.5.5`, with `qp-poseidon-core` 3.1.0 off circuit, tied to the in-circuit hash by `circuit_parity`. `quantus-cli` 2.2.2 was read while the wallet was written; no code was copied.
+- **Plonky2** (Polygon lineage), through `qp-plonky2` and `qp-plonky2-verifier` at `=1.5.5`, with `qp-poseidon-core` 3.1.0 off circuit, tied to the in-circuit hash by `circuit_parity`. The upstream CLI was read while the wallet was written; no code was copied.
 
 Design: `docs/DESIGN.md`. Circuit: `docs/CIRCUIT.md`.
 

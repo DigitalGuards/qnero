@@ -1,4 +1,4 @@
-# Quantus - Dilithium Crypto
+# Dilithium Crypto
 
 A Rust implementation of Dilithium post-quantum cryptographic signatures for Substrate-based blockchains.
 

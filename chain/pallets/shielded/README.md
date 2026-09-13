@@ -12,7 +12,7 @@ contract this implements, and section 4 is the leaf rule.
 
 ## Attribution
 
-Forked from `pallet-wormhole` in Quantus-Network/chain (MIT-0), which is where
+Forked from `pallet-wormhole` in the upstream chain (MIT-0), which is where
 the shape of the verification pipeline comes from: the proof-size gate and the
 canonical-encoding round trip ahead of any parse, the split between a cheap
 `validate_unsigned` and a `pre_dispatch` that runs the ZK verify, the fixed
