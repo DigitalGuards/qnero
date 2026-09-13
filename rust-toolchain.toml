@@ -2,4 +2,7 @@
 channel = "1.93.0"
 components = ["clippy", "rustfmt"]
 profile = "minimal"
-targets = ["wasm32v1-none"]
+# `wasm32v1-none` is the runtime's target; `wasm32-unknown-unknown` is the
+# browser prover's (`crates/qnero-prover-wasm`). Provisioning both means a fresh
+# clone can run every gate without a `rustup target add`.
+targets = ["wasm32v1-none", "wasm32-unknown-unknown"]

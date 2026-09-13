@@ -1251,6 +1251,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "qnero-circuit",
+ "qnero-circuit-builder",
  "qnero-note-core",
  "qnero-notes",
  "qnero-prover",

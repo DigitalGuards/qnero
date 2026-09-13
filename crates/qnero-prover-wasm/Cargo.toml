@@ -49,6 +49,12 @@ getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] 
 # chain would check it with. The `leaf` feature stays off: a runtime cannot name
 # a leaf verifier and neither should this test.
 qnero-verifier = { workspace = true }
+# The definition of the chain's leaf-slot count, so `CHAIN_NUM_LEAVES` is held
+# to it by a test rather than by a literal that a later `N` would silently
+# leave behind. A dev-dependency never enters the cdylib and never appears in
+# `cargo tree -e normal`, so this links no `std::fs` staging tool into the
+# browser and leaves the rayon guard untouched.
+qnero-circuit-builder = { workspace = true }
 
 [features]
 default = []
@@ -56,4 +62,4 @@ default = []
 # crate. rayon-core spawns `std::thread`, which on wasm32-unknown-unknown
 # without the atomics target feature fails at runtime, and rayon needs a
 # SharedArrayBuffer-backed pool to be worth anything at all.
-# `tests/no_threads.rs` asserts the dependency tree stays rayon-free.
+# `tests/no_parallel.rs` asserts the dependency tree stays rayon-free.

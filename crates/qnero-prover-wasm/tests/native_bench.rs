@@ -10,7 +10,7 @@
 //! ```
 //!
 //! Ignored by default: a six-slot private batch is tens of seconds single
-//! threaded, three times over, and that does not belong in a gate. `parallel`
+//! threaded, nine times over, and that does not belong in a gate. `parallel`
 //! is off everywhere in this crate's tree, so `RAYON_NUM_THREADS` changes
 //! nothing here and is set only to say so.
 
@@ -20,7 +20,15 @@ use qnero_prover_wasm::prove::{
 };
 use qnero_prover_wasm::request::TransferRequest;
 
-const RUNS: usize = 3;
+/// Nine, because of the leaf. The FRI challenge carries 16 grinding bits and
+/// the search for them is a geometric random variable, so a leaf prove at this
+/// degree is dominated by how lucky the grind was; `docs/BENCH.md` says to
+/// compare means over the same sample count for exactly this circuit. Three
+/// samples put the leaf anywhere in a 2x spread, which is enough to invent a
+/// wasm/native ratio that does not exist. The private batch is steady to
+/// within a percent and pays nine runs of about ten seconds each for the
+/// leaf's sake.
+const RUNS: usize = 9;
 
 fn request(tag: u8) -> TransferRequest {
     let json = synthetic_transfer_request(
@@ -34,14 +42,24 @@ fn request(tag: u8) -> TransferRequest {
 
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a duration"));
-    values[values.len() / 2]
+    let middle = values.len() / 2;
+    if values.len() % 2 == 1 {
+        values[middle]
+    } else {
+        (values[middle - 1] + values[middle]) / 2.0
+    }
+}
+
+fn mean(values: &[f64]) -> f64 {
+    values.iter().sum::<f64>() / values.len() as f64
 }
 
 fn line(label: &str, values: &[f64]) {
     let min = values.iter().copied().fold(f64::INFINITY, f64::min);
     let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     println!(
-        "{label}: median {:.1} ms, min {:.1} ms, max {:.1} ms, runs {:?}",
+        "{label}: mean {:.1} ms, median {:.1} ms, min {:.1} ms, max {:.1} ms, runs {:?}",
+        mean(values),
         median(values.to_vec()),
         min,
         max,
@@ -52,7 +70,7 @@ fn line(label: &str, values: &[f64]) {
     );
 }
 
-/// Leaf and private batch at the chain's `N = 6`, three runs, single threaded.
+/// Leaf and private batch at the chain's `N = 6`, nine runs, single threaded.
 #[test]
 #[ignore = "tens of seconds per run; this is the M8 measurement"]
 fn native_single_thread_at_the_chain_slot_count() {

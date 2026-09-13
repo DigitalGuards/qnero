@@ -70,9 +70,13 @@ fn the_recipient_decrypts_the_output_this_submission_published() {
 
 /// A request that names a different `N` from the chain's produces a proof the
 /// runtime's embedded verifier cannot read, and it says so only after the full
-/// proving cost. The constant is copied into this crate, so something has to
-/// hold it to the builder's.
+/// proving cost. The constant is copied into this crate, so the copy is held
+/// to the builder's definition rather than to a literal that a later `N` would
+/// leave behind.
 #[test]
-fn the_chain_slot_count_is_six() {
-    assert_eq!(qnero_prover_wasm::CHAIN_NUM_LEAVES, 6);
+fn the_chain_slot_count_is_the_builders() {
+    assert_eq!(
+        qnero_prover_wasm::CHAIN_NUM_LEAVES,
+        qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS
+    );
 }

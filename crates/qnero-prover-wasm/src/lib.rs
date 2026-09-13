@@ -15,7 +15,7 @@
 //!   .proveTransfer(request)            one leaf, one private batch, one verify
 //!   .verifyProof(bytes)
 //! proveZkLeaf(request)                 the delegated-batcher shape, measured
-//! linearMemoryBytes() / peakLinearMemoryBytes()
+//! linearMemoryBytes() / peakLinearMemoryBytes() / lastCallMemoryGrowthBytes()
 //! ```
 //!
 //! # Threading
@@ -110,10 +110,16 @@ pub fn peak_linear_memory_bytes() -> f64 {
     memory::peak_bytes() as f64
 }
 
-/// The peak the last proving call reached, in bytes.
-#[wasm_bindgen(js_name = lastCallPeakMemoryBytes)]
-pub fn last_call_peak_memory_bytes() -> f64 {
-    memory::last_call_peak_bytes() as f64
+/// How much linear memory the last proving call added to what it found.
+///
+/// There is no per-call peak to report: the mark is module-wide and linear
+/// memory never shrinks, so a second call reads the first call's memory back.
+/// This is the growth, which is a lower bound on what the same call needs in a
+/// fresh worker. [`peak_linear_memory_bytes`] is the figure that sizes the
+/// worker itself.
+#[wasm_bindgen(js_name = lastCallMemoryGrowthBytes)]
+pub fn last_call_memory_growth_bytes() -> f64 {
+    memory::last_call_growth_bytes() as f64
 }
 
 /// The public half of a key tree, as JSON. See [`scan::derive_account_json`].

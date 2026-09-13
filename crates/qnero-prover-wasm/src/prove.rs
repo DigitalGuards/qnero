@@ -27,13 +27,15 @@ use crate::request::{SubmissionPublicInputs, TransferRequest};
 
 /// The chain's leaf slots per private batch.
 ///
-/// `qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS` is the definition, and
-/// that crate is a `std::fs` staging tool this module must not link, so the
-/// number is copied here with a test (`the_chain_default_is_six_slots`) that
-/// pins the public-input length it implies. A set built at another `N`
-/// produces proofs whose public-input length the runtime's embedded verifier
-/// cannot read, and the rejection arrives only after the full proving cost has
-/// been paid.
+/// `qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS` is the definition, and that
+/// crate is a `std::fs` staging tool this module must not link, so the number
+/// is copied here and `the_chain_default_is_the_builders_default` holds the
+/// copy to the definition. That test reaches the builder through a
+/// dev-dependency, which never enters the cdylib and never appears in
+/// `cargo tree -e normal`, so the copy is checked without linking the tool. A
+/// set built at another `N` produces proofs whose public-input length the
+/// runtime's embedded verifier cannot read, and the rejection arrives only
+/// after the full proving cost has been paid.
 pub const CHAIN_NUM_LEAVES: usize = 6;
 
 /// Timings and memory for one call, in the shape the harness prints.
@@ -52,7 +54,11 @@ pub struct SubmissionReport {
     pub ciphertext_bytes: [usize; 2],
     pub public_inputs: SubmissionPublicInputs,
     pub phases: Vec<PhaseReport>,
-    pub peak_linear_memory_bytes: usize,
+    /// The module's high-water mark once this call finished. It counts every
+    /// circuit already resident, so it sizes a worker rather than this call.
+    pub peak_linear_memory_bytes_since_init: usize,
+    /// What this call grew linear memory by, over what it found on entry.
+    pub linear_memory_growth_bytes: usize,
 }
 
 /// What building the circuits cost, and the dimensions they came out at.
@@ -150,6 +156,9 @@ pub struct Submission {
 /// a local error; the pool refuses a bad settlement without saying which public
 /// input was wrong.
 pub fn prove_transfer(prover: &WalletProver, request: &TransferRequest) -> Result<Submission> {
+    // The memory this call found. What it grows from here is the only part of
+    // the high-water mark this call is responsible for.
+    let entry = MemorySpan::start();
     let mut prepared = request.prepare()?;
 
     let [first, second] = prepared.encrypt_outputs()?;
@@ -194,13 +203,15 @@ pub fn prove_transfer(prover: &WalletProver, request: &TransferRequest) -> Resul
     });
 
     let proof = batch.to_bytes();
+    let call = memory::record_call(entry);
     let report = SubmissionReport {
         num_leaves: prover.num_leaves(),
         proof_bytes: proof.len(),
         ciphertext_bytes: [ciphertexts[0].len(), ciphertexts[1].len()],
         public_inputs: prepared.public_inputs()?,
         phases,
-        peak_linear_memory_bytes: memory::record_call_peak(),
+        peak_linear_memory_bytes_since_init: call.peak_bytes_since_init,
+        linear_memory_growth_bytes: call.growth_bytes,
     };
 
     Ok(Submission {
@@ -221,18 +232,8 @@ pub fn verify(prover: &WalletProver, proof_bytes: &[u8]) -> Result<f64> {
     Ok(millis)
 }
 
-/// Build a zero-knowledge leaf circuit and prove one transfer with it.
-///
-/// Not the production path: the production leaf is non-ZK on purpose, because
-/// it is aggregated by the wallet that made it and privacy is applied one layer
-/// up. This measures the other shape, where a phone proves a blinded leaf and
-/// hands it to somebody else's batcher. `docs/DESIGN.md` section 8 carries what
-/// that costs in privacy.
-///
-/// It builds its own circuit per call, which makes it a measurement entry
-/// point and keeps it off any payment path. The proof does not leave this
-/// function: a ZK leaf is safe to hand out, and handing one out is a decision
-/// for the milestone that builds the delegated batcher to make deliberately.
+/// What one zero-knowledge leaf cost: build and prove time, the size it came
+/// out at, and the degree blinding pushed it to.
 #[derive(Debug, Serialize)]
 pub struct ZkLeafReport {
     pub build_millis: f64,
@@ -245,13 +246,31 @@ pub struct ZkLeafReport {
     /// this number is the proving cost.
     pub degree_bits: usize,
     pub phases: Vec<PhaseReport>,
-    pub peak_linear_memory_bytes: usize,
+    /// The module's high-water mark once this call finished, which in a warm
+    /// worker includes the private-batch circuit this call never touches.
+    /// Sizing a delegated leaf-only prover takes a run where nothing else was
+    /// built: `www/run.mjs --zk-only`.
+    pub peak_linear_memory_bytes_since_init: usize,
+    /// What this call grew linear memory by, over what it found on entry.
+    pub linear_memory_growth_bytes: usize,
 }
 
-/// See [`ZkLeafReport`].
+/// Build a zero-knowledge leaf circuit and prove one transfer with it.
+///
+/// Not the production path: the production leaf is non-ZK on purpose, because
+/// it is aggregated by the wallet that made it and privacy is applied one layer
+/// up. This measures the other shape, where a phone proves a blinded leaf and
+/// hands it to somebody else's batcher. `docs/DESIGN.md` section 8 carries what
+/// that costs in privacy.
+///
+/// It builds its own circuit per call, which makes it a measurement entry
+/// point and keeps it off any payment path. The proof does not leave this
+/// function: a ZK leaf is safe to hand out, and handing one out is a decision
+/// for the milestone that builds the delegated batcher to make deliberately.
 pub fn prove_zk_leaf(request: &TransferRequest) -> Result<ZkLeafReport> {
     use qnero_circuit::config::qnero_leaf_zk_circuit_config;
 
+    let entry = MemorySpan::start();
     let mut prepared = request.prepare()?;
     let outputs = prepared.encrypt_outputs()?;
     let digest = ct_digest(&[&outputs[0].ciphertext, &outputs[1].ciphertext]);
@@ -282,6 +301,7 @@ pub fn prove_zk_leaf(request: &TransferRequest) -> Result<ZkLeafReport> {
         memory: MemorySpan::end(before),
     });
 
+    let call = memory::record_call(entry);
     Ok(ZkLeafReport {
         build_millis,
         prove_millis,
@@ -289,7 +309,8 @@ pub fn prove_zk_leaf(request: &TransferRequest) -> Result<ZkLeafReport> {
         zero_knowledge,
         degree_bits,
         phases,
-        peak_linear_memory_bytes: memory::record_call_peak(),
+        peak_linear_memory_bytes_since_init: call.peak_bytes_since_init,
+        linear_memory_growth_bytes: call.growth_bytes,
     })
 }
 
@@ -298,10 +319,27 @@ mod tests {
     use super::*;
     use qnero_circuit::batch_layout::private_batch_pi_len;
 
-    /// The chain's `N` is 6, and what a wrong `N` costs is a full proving run
-    /// before the runtime says no. `5 + 21 * 6 = 131`.
+    /// The copy is held to the definition, so moving the chain's `N` moves
+    /// this crate's with it. Asserting the literal 6 here would have let the
+    /// browser prover keep building six-slot batches a seven-slot runtime
+    /// cannot read, with every gate green and the rejection arriving only
+    /// after the full proving cost.
+    ///
+    /// `qnero-circuit-builder` is a dev-dependency: it never enters the
+    /// cdylib, and `cargo tree -e normal` for the wasm target does not list it.
     #[test]
-    fn the_chain_default_is_six_slots() {
+    fn the_chain_default_is_the_builders_default() {
+        assert_eq!(
+            CHAIN_NUM_LEAVES,
+            qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS
+        );
+    }
+
+    /// What a wrong `N` costs is a full proving run before the runtime says
+    /// no, so the public-input length the current `N` implies is pinned too.
+    /// `5 + 21 * 6 = 131`.
+    #[test]
+    fn the_private_batch_public_inputs_are_one_three_one() {
         assert_eq!(CHAIN_NUM_LEAVES, 6);
         assert_eq!(private_batch_pi_len(CHAIN_NUM_LEAVES), 131);
     }
