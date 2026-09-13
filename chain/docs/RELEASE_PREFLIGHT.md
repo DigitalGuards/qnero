@@ -1,6 +1,14 @@
 # Chain release preflight
 
-Run this **before** tagging or publishing a `quantus-node` / runtime release.
+> Upstream's release process, carried in with the subtree and kept because the
+> gates in it are the right gates. Two things in it are not Qnero's: the
+> networks (`heisenberg`, `planck`, every `quantus.cat` endpoint) belong to
+> `Quantus-Network/chain`, and so does the `quantus-cli` / `quantus exercise`
+> tool. Qnero publishes no releases yet. Every command that runs against this
+> tree names `qnero-node` and `wbuild/qnero-runtime`, which is what this tree
+> builds.
+
+Run this **before** tagging or publishing a `qnero-node` / runtime release.
 CI green is not enough. The last ship-blocker we missed was a binary that
 could not sync a live chain — a fresh node would have caught it immediately.
 
@@ -18,7 +26,7 @@ Related:
 
 | # | Gate | Required | Passes when |
 |---|---|---|---|
-| 1 | Build the binary you will ship | yes | `./target/release/quantus-node --version` is the candidate |
+| 1 | Build the binary you will ship | yes | `./target/release/qnero-node --version` is the candidate |
 | 2 | Fresh node full-syncs a live chain | **yes** | Idle at tip, no import/panic errors |
 | 3 | `quantus exercise` on a local `--dev` node | **yes** | All default phases pass |
 | 4 | Warp sync (if this release touches sync / checkpoints) | if relevant | Reaches tip in minutes |
@@ -34,12 +42,12 @@ From the commit you intend to tag:
 
 ```sh
 cd /path/to/chain
-cargo build --release -p quantus-node
-./target/release/quantus-node --version
+cargo build --release -p qnero-node
+./target/release/qnero-node --version
 ```
 
 Use **this** binary for every step below. Do not test with an older
-`QUANTUS_NODE_BIN` or a leftover `binary_node_version/` copy.
+`QNERO_NODE_BIN` or a leftover `binary_node_version/` copy.
 
 ---
 
@@ -52,23 +60,23 @@ Full sync is the one that would have caught the last incident. Run it
 against every network this binary is meant to join.
 
 ```sh
-CANDIDATE=./target/release/quantus-node
+CANDIDATE=./target/release/qnero-node
 STAMP=$(date +%Y%m%d_%H%M%S)
 
 # Heisenberg
-rm -rf /tmp/quantus-preflight-heisenberg
+rm -rf /tmp/qnero-preflight-heisenberg
 "$CANDIDATE" \
   --chain heisenberg \
   --sync full \
-  --base-path /tmp/quantus-preflight-heisenberg \
+  --base-path /tmp/qnero-preflight-heisenberg \
   --name "preflight-heisenberg-$STAMP"
 
 # Planck (second terminal / after Heisenberg is clearly progressing)
-rm -rf /tmp/quantus-preflight-planck
+rm -rf /tmp/qnero-preflight-planck
 "$CANDIDATE" \
   --chain planck \
   --sync full \
-  --base-path /tmp/quantus-preflight-planck \
+  --base-path /tmp/qnero-preflight-planck \
   --name "preflight-planck-$STAMP"
 ```
 
@@ -91,19 +99,19 @@ Let it finish. "It started downloading" is not a pass.
 - Reaches a height and cannot continue.
 - Finalized / best diverge from public RPC and do not recover.
 
-Throw the `--base-path` away after the run (`rm -rf /tmp/quantus-preflight-*`).
+Throw the `--base-path` away after the run (`rm -rf /tmp/qnero-preflight-*`).
 
 Optional local helper (same idea, more logging): `../sync-heisenberg.sh`
-from the workspace, pointed at this candidate via `QUANTUS_NODE_BIN`.
+from the workspace, pointed at this candidate via `QNERO_NODE_BIN`.
 
 ### Warp sync (extra, when sync/checkpoint code changed)
 
 ```sh
-rm -rf /tmp/quantus-preflight-heisenberg-warp
+rm -rf /tmp/qnero-preflight-heisenberg-warp
 "$CANDIDATE" \
   --chain heisenberg \
   --sync warp \
-  --base-path /tmp/quantus-preflight-heisenberg-warp \
+  --base-path /tmp/qnero-preflight-heisenberg-warp \
   --name "preflight-warp-$STAMP"
 ```
 
@@ -120,8 +128,8 @@ phase can run (including governance).
 **Terminal 1 — fresh dev node**
 
 ```sh
-rm -rf /tmp/quantus-preflight-dev
-./target/release/quantus-node --dev --base-path /tmp/quantus-preflight-dev
+rm -rf /tmp/qnero-preflight-dev
+./target/release/qnero-node --dev --base-path /tmp/qnero-preflight-dev
 ```
 
 Wait until it is producing blocks (`ws://127.0.0.1:9944`).
@@ -164,7 +172,7 @@ If `spec_version` / storage / migrations changed:
 ```sh
 cargo build --release --features try-runtime
 try-runtime \
-  --runtime target/release/wbuild/quantus-runtime/quantus_runtime.wasm \
+  --runtime target/release/wbuild/qnero-runtime/qnero_runtime.wasm \
   on-runtime-upgrade --disable-spec-version-check --blocktime 10000 \
   live --uri wss://a1-heisenberg.quantus.cat
 ```

@@ -2,6 +2,13 @@
 
 # Quantus Network Node Installation Guide
 
+> Upstream's guide, carried in with the subtree. The commands in it build and
+> run **this** tree, so they name `qnero-node`, `key qnero` and
+> `wbuild/qnero-runtime`, which is what a `cargo build --release` here
+> produces. The network names, the release links and the credit to Quantus
+> Network are upstream's and stay. The commands of record for Qnero are the
+> repository `README.md` and `docs/OPS-DEV.md` one directory up.
+
 This guide will help you install and run a Quantus Network node for mining.
 
 **🚀 Quick Start Mining**: See our [Mining Guide](MINING.md) for a comprehensive setup tutorial with troubleshooting and optimization tips.
@@ -31,14 +38,14 @@ Use the following command to build the node:
 cargo build --release
 ```
 
-The compiled binary will be available at `./target/release/quantus-node`.
+The compiled binary will be available at `./target/release/qnero-node`.
 
 ## Key Management
 
 ### Generate a New Key
 
 ```sh
-./target/release/quantus-node key quantus
+./target/release/qnero-node key qnero
 ```
 
 This creates a new 24-word phrase, seed, and public and private keys.
@@ -46,20 +53,20 @@ This creates a new 24-word phrase, seed, and public and private keys.
 ### Restore Key from Seed Phrase
 
 ```sh
-./target/release/quantus-node key quantus --words
+./target/release/qnero-node key qnero --words
 ```
 
-You will be prompted for the phrase (input is not echoed). Non-interactively, pipe it in: `./target/release/quantus-node key quantus --words < mnemonic.txt`.
+You will be prompted for the phrase (input is not echoed). Non-interactively, pipe it in: `./target/release/qnero-node key qnero --words < mnemonic.txt`.
 
 Words should be a 24-word list separated by spaces, like "autumn bear...". The words must be from the BIP39 wordlist.
 
 ### Restore Key from Seed
 
 ```sh
-./target/release/quantus-node key quantus --seed
+./target/release/qnero-node key qnero --seed
 ```
 
-You will be prompted for the seed (input is not echoed). Non-interactively, pipe it in: `./target/release/quantus-node key quantus --seed < seed.txt`.
+You will be prompted for the seed (input is not echoed). Non-interactively, pipe it in: `./target/release/qnero-node key qnero --seed < seed.txt`.
 
 Seed must be a 128-character hexadecimal string (64 bytes).
 
@@ -76,19 +83,19 @@ For complete mining setup instructions, including wormhole address requirements 
 Start a single-node development chain (state is not persisted):
 
 ```sh
-./target/release/quantus-node --dev
+./target/release/qnero-node --dev
 ```
 
 To purge the development chain's state:
 
 ```sh
-./target/release/quantus-node purge-chain --dev
+./target/release/qnero-node purge-chain --dev
 ```
 
 To start with detailed logging:
 
 ```sh
-RUST_BACKTRACE=1 ./target/release/quantus-node -ldebug --dev
+RUST_BACKTRACE=1 ./target/release/qnero-node -ldebug --dev
 ```
 
 #### Development Chain Features
@@ -107,7 +114,7 @@ To persist chain state between runs, specify a base path:
 mkdir my-chain-state
 
 # Use that folder to store the chain state
-./target/release/quantus-node --dev --base-path ./my-chain-state/
+./target/release/qnero-node --dev --base-path ./my-chain-state/
 
 # Check the folder structure created inside the base path after running the chain
 ls ./my-chain-state
@@ -172,7 +179,7 @@ After you start the node locally, you can interact with it using the hosted vers
 After you build the project, you can use the following command to explore its parameters and subcommands:
 
 ```sh
-./target/release/quantus-node -h
+./target/release/qnero-node -h
 ```
 
 You can generate and view the [Rust Docs](https://doc.rust-lang.org/cargo/commands/cargo-doc.html) for this project with this command:
@@ -245,7 +252,7 @@ Compile the node with the `try-runtime` feature enabled to use the runtime wasm 
 ```sh
 cargo build --release --features try-runtime
 
-try-runtime --runtime target/release/wbuild/quantus-runtime/quantus_runtime.wasm on-runtime-upgrade --disable-spec-version-check --blocktime 10000 live --uri <WS_URL>
+try-runtime --runtime target/release/wbuild/qnero-runtime/qnero_runtime.wasm on-runtime-upgrade --disable-spec-version-check --blocktime 10000 live --uri <WS_URL>
 ```
 
 ## Resources

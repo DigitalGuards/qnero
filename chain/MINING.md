@@ -1,5 +1,19 @@
 # Quantus Network Mining Guide
 
+> Upstream's mining guide, carried in with the subtree and left in upstream's
+> terms on purpose: every `quantus-node` below is a **release binary from
+> [`Quantus-Network/chain`](https://github.com/Quantus-Network/chain/releases/latest)**
+> or an image from `ghcr.io/quantus-network`, and every network it names
+> (`planck`, `heisenberg`) is upstream's. None of that is Qnero's to rename.
+>
+> Qnero's binary is `qnero-node`, built from this tree (`cargo build --release`,
+> then `./target/release/qnero-node`), its key subcommand is `key qnero`, and
+> the only chain it runs is `--dev`. Qnero publishes no release binaries and no
+> images yet, and it runs no mining network of its own, so this guide has no
+> Qnero equivalent: the commands of record are the repository `README.md` and
+> `docs/OPS-DEV.md` one directory up. The two defaults that differ between the
+> binaries are called out where they appear below.
+
 Get started mining on the Quantus Network testnet in minutes.
 
 ## Table of Contents
@@ -362,7 +376,7 @@ service and must never be reachable from the open internet.
 | `--port` | P2P networking port | `30333` |
 | `--prometheus-port` | Metrics endpoint port | `9616` |
 | `--name` | Node display name | Auto-generated |
-| `--base-path` | Data directory | `~/.local/share/quantus-node` |
+| `--base-path` | Data directory | `~/.local/share/quantus-node` (`~/.local/share/qnero-node` for `qnero-node`: `sc_cli` derives the default from the executable's file name) |
 
 
 
@@ -378,6 +392,11 @@ tail -f ~/.local/share/quantus-node/chains/planck/network/quantus-node.log
 # Or run with verbose logging
 RUST_LOG=info quantus-node [options]
 ```
+
+For `qnero-node` the same two paths are
+`~/.local/share/qnero-node/chains/qnero-dev/network/qnero-node.log` and
+`RUST_LOG=info qnero-node [options]`: the base path follows the executable's
+file name, so the binary rename moved it.
 
 **Prometheus Metrics**
 Visit `http://localhost:9616/metrics` to view detailed node metrics.

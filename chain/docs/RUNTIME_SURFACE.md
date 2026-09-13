@@ -11,7 +11,7 @@ and its transaction extension, added `pallet-shielded` at index 24, and renamed
 the runtime. `docs/DESIGN.md` section 7 is the v1 policy this inventory is the
 surface of.
 
-- **Crate:** `quantus-runtime` (`runtime/`), version `1.0.0-gm`. The crate name is the fork's and has not been renamed; the chain identifies itself by the spec below.
+- **Crate:** `qnero-runtime` (`runtime/`), version `1.0.0-gm`. Renamed from `quantus-runtime` in `e3d3889`, along with the node package; the wasm it emits is `wbuild/qnero-runtime/qnero_runtime.wasm`. The chain identifies itself by the spec below.
 - **Spec:** `spec_name = qnero`, `impl_name = qnero-node`, `spec_version = 101`, `transaction_version = 7`, `authoring_version = 1`
 - **Build:** `no_std` WASM via `substrate-wasm-builder` (`runtime/build.rs`); native `std` build for the node/client
 - **Block time target:** 12s (`TARGET_BLOCK_TIME_MS = 12_000`)
@@ -188,7 +188,7 @@ what the `QpowAuthor` seam hashes a block author's digest item with.
 
 ### Index 21 - `ZkTree` (`pallet-zk-tree`, local fork)
 - `AssetId = u32`, `Balance = u128`. No dispatchable calls.
-- **Storage:** `Leaves` (raw `Hash256` note commitments since M4; the old typed `ZkLeaf` fold is gone, which is why a `quantus-runtime` state cannot be carried across), `Nodes`, `LeafCount`, `Depth`, `Root`.
+- **Storage:** `Leaves` (raw `Hash256` note commitments since M4; the old typed `ZkLeaf` fold is gone, which is why an upstream `quantus-runtime` state cannot be carried across), `Nodes`, `LeafCount`, `Depth`, `Root`.
 - `on_finalize` commits the merkle root into the header. Backs the `ZkTreeApi` runtime API. Under v1 every leaf is a note commitment and nothing else appends to it.
 
 ### Index 22 - `Vesting` (`pallet-vesting`, local)

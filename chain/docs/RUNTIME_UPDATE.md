@@ -115,7 +115,7 @@ every signing command (`runtime update`, `place-decision-deposit`, `vote`).
 ## Step 0 — Get the runtime wasm
 
 The canonical artifact is the compressed runtime from the release:
-`quantus-runtime-v<specVersion>.compact.compressed.wasm`, built by srtool in CI.
+`quantus-runtime-v<specVersion>.compact.compressed.wasm`, built by srtool in CI. That asset name is upstream's, from `Quantus-Network/chain` releases; Qnero publishes no releases yet, so the local build below is the path that works in this tree.
 
 **Normal path — download from the published GitHub release:**
 
@@ -146,9 +146,15 @@ echo "Using wasm: $WASM"
 
 ```bash
 git checkout <release-tag>
-cargo build --release -p quantus-runtime   # or: cargo build --release
-export WASM="$(pwd)/target/release/wbuild/quantus-runtime/quantus_runtime.compact.compressed.wasm"
+cargo build --release -p qnero-runtime   # or: cargo build --release
+export WASM="$(pwd)/target/release/wbuild/qnero-runtime/qnero_runtime.compact.compressed.wasm"
 ```
+
+> The package and the wbuild directory were `quantus-runtime` until `e3d3889`.
+> A machine that built before that commit still has the old directory under
+> `target/`, so the old export path resolves to a pre-rename blob and this
+> block would have handed a governance `set_code` a runtime nobody tagged.
+> Delete `target/release/wbuild/quantus-runtime` if you find one.
 
 ---
 

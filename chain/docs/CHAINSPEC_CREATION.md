@@ -76,7 +76,7 @@ build.
    ))?) as Box<dyn sc_service::ChainSpec>,
    ```
 
-4. **Record the genesis hash.** Run `quantus-node --chain <profile> --tmp` and
+4. **Record the genesis hash.** Run `qnero-node --chain <profile> --tmp` and
    note the genesis hash it prints on startup.
 
 5. **Verify the genesis runtime against the release** (against any running

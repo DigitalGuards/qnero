@@ -29,6 +29,11 @@ Renamed. A merge that brings the old name back is a regression:
 | the `--rewards-inner-hash` error hints | `qnero-node key qnero --scheme wormhole` | `node/src/command.rs` |
 | two `--help` strings naming Quantus | ML-DSA-87, and "upstream" | `client/cli/src/params/transaction_pool_params.rs` |
 | the startup banner's byline | `DigitalGuards <https://github.com/DigitalGuards/qnero>` | `SubstrateCli::author` in `node/src/command.rs` |
+| the bug-report address, `support.anonymous.an` | `https://github.com/DigitalGuards/qnero/issues` | `SubstrateCli::support_url` in `node/src/command.rs`: the last line of `--help`, and the address `sp_panic_handler` prints on every panic |
+| the `mainnet` preset's chain name `Quantus` and protocol id `quantus` | `Qnero` and `qnero` | `node/src/chain_spec.rs`. A spec file is the one artifact no runtime upgrade reaches |
+| the metadata-hash token symbol `UNIT` | `QNR` | `runtime/build.rs`. This is what a hardware or offline signer displays under `on-chain-release-build`, and it has to equal `qnero_properties()`'s symbol |
+| the upstream telemetry endpoint and bootnodes on `heisenberg`, `planck` and `mainnet` | removed | `node/src/chain_spec.rs`. All three build this tree's genesis, so upstream's peers refuse them and upstream's telemetry server was collecting a node that was never on that network. Both fields are outside genesis |
+| default base path `~/.local/share/quantus-node` | `~/.local/share/qnero-node` | nothing declares it: `sc_cli` derives it from the executable's file name (`client/cli/src/lib.rs`'s `executable_name`, `config.rs`'s `base_path_or_default`), so the binary rename moved it. See below |
 
 Three user-facing strings needed no edit of their own, and each is worth
 knowing about, because each looks like an omission until you check it:
@@ -39,13 +44,33 @@ knowing about, because each looks like an omission until you check it:
   both. `SubstrateCli::impl_name` has said `Qnero Node` since M6. The rest of
   `--help` comes from the flags of every crate `RunCmd` flattens, which is why
   two strings in `client/cli` had to move as well and why the guard runs the
-  binary instead of grepping `node/src`.
+  binary: a grep of `node/src` finds neither of them.
 - **The prometheus namespace.** The one metric this node registers is
   `qpow_metrics` (`node/src/prometheus.rs`), named after the consensus engine.
 - **The miner server's log lines.** Every one of them is `⛏️ Miner ...`
   (`node/src/miner_server.rs`). The ALPN beside them, `quantus-miner/2`, stays:
   it is a wire identifier negotiated with the external `quantus-miner` program,
   so changing it would refuse every miner that connects.
+
+One thing moved that no file names, and it has state behind it: **the default
+base path**. `sc_cli` derives it from the executable's file name, so a node
+started with no `--base-path` reads and writes `~/.local/share/qnero-node`
+where it used to read and write `~/.local/share/quantus-node`. Drop the new
+binary over the old one on a machine with a persistent local chain and it finds
+an empty database, resyncs from genesis, and generates a fresh
+`network/secret_ed25519`, which is a fresh peer id. The old directory sits
+untouched beside it. Either move it:
+
+```
+mv ~/.local/share/quantus-node ~/.local/share/qnero-node
+```
+
+or pass `--base-path` and name the directory yourself. `purge-chain` prints the
+path it is about to delete, which is the cheapest way to see which one a binary
+is using. Qnero has no live network and has published no binaries, so this is a
+developer-machine migration and nothing more. A fork that had operators would
+pin `SubstrateCli::executable_name()` and hold the directory still while the
+file name moves.
 
 Kept as upstream, deliberately:
 
@@ -58,21 +83,76 @@ Kept as upstream, deliberately:
   `QuantusKeyDetails`. The clap attribute `#[command(name = "qnero")]` is what
   renames the typed subcommand, so the identifier and the word an operator
   types are decoupled on purpose.
-- **`chain/LICENSE`, `chain/README.md`, `chain/MINING.md`, `chain/SECURITY.md`
-  and `chain/docs/`.** Upstream documents, and the attribution in them is the
-  licence condition.
-- **The release pipeline: `chain/.github/workflows/` and `chain/Dockerfile`.**
-  These build tags, release assets and images for Quantus-Network/chain, they
-  read the upstream repository's releases, and GitHub runs workflows only from
-  the repository root, so nothing here executes for this fork. They still say
-  `quantus-node`, and they are dead either way. `Dockerfile.local`, which
-  builds from this tree, is renamed.
-- **`scripts/install-quantus-node.sh`, `scripts/clean-quantus-node.sh`,
-  `scripts/genesis_generate_draft.sh` and `scripts/genesis_generate_spec.sh`.**
-  All four fetch upstream release binaries or upstream `quantus-runtime-v*.wasm`
-  release assets, and Qnero publishes no releases. The local-development
-  scripts beside them are renamed: `kill_chains.sh`, `run_local_nodes.sh`,
-  `start_testnet.sh`, `create_custom_chain_spec.sh`, `regenerate_weights.sh`.
+- **`chain/LICENSE` and `chain/SECURITY.md`.** Upstream documents, and the
+  attribution in them is the licence condition.
+
+  The licence condition is the copyright and the notice text. It is not the
+  build and run commands, and the first pass read it too widely: `chain/README.md`
+  told a reader who had just run `cargo build --release` in this tree that the
+  binary was at `./target/release/quantus-node` and to run `key quantus`, and
+  both of those are now hard errors. So the commands in `chain/README.md` and
+  `chain/docs/RELEASE_PREFLIGHT.md` name what this tree builds, the attribution
+  and the network names in them are untouched, and each carries a banner saying
+  which half is which. `chain/docs/RUNTIME_SURFACE.md`, `RUNTIME_UPDATE.md` and
+  `CHAINSPEC_CREATION.md` are Qnero-maintained (M6 edited all three) and say
+  `qnero-runtime` throughout. `chain/MINING.md` keeps upstream's names: every
+  binary in it is a release binary from `Quantus-Network/chain` or an image
+  from `ghcr.io/quantus-network`, and every network in it is upstream's, so a
+  rename would have produced a guide telling an operator to download one binary
+  and run another. It has a banner too, and the two defaults that differ
+  between the binaries (the base path, the log path) are called out where they
+  appear.
+- **The release pipeline: the four release workflows under
+  `chain/.github/workflows/` and `chain/Dockerfile`.** These build tags,
+  release assets and images for Quantus-Network/chain, they read the upstream
+  repository's releases, and GitHub runs workflows only from the repository
+  root, so nothing here executes for this fork. They still say `quantus-node`,
+  and they are dead either way.
+
+  `chain/.github/workflows/ci.yml` is the exception in that directory and is
+  renamed. It is the only workflow there that is not release-specific, it
+  builds and tests this workspace, and it would be the first one anybody lifts
+  to the repository root to get CI on this fork. It passed
+  `--features quantus-runtime/fast-governance` on two steps, which is a package
+  that no longer exists, so an adopter would have met "package `quantus-runtime`
+  does not exist" and read it as a broken workflow. There is no `.github/` at
+  the repository root, so nothing under `chain/.github/` runs today.
+
+  `Dockerfile.local`, which builds from this tree, is renamed, and so are the
+  runtime user and the data directory it prepares: `qnero` and `/var/lib/qnero`.
+  The image passes `--base-path /var/lib/qnero` explicitly, since the sc_cli
+  default is derived from the executable name under a `$HOME` the image's
+  system user does not have.
+- **`scripts/install-quantus-node.sh` and `scripts/clean-quantus-node.sh`.**
+  Both fetch upstream release binaries, install them under upstream's names and
+  remove them again, and Qnero publishes no releases, so there is nothing here
+  for them to name.
+
+  The first pass put `genesis_generate_draft.sh` and `genesis_generate_spec.sh`
+  in this bullet on the grounds that they fetch upstream release assets. That
+  is half true and it left both scripts broken: each downloads an upstream
+  `quantus-runtime-v*.wasm`, and each also runs
+  `cargo build --release --package quantus-node` **in this tree** and then
+  invokes the binary it just built. That build now exits with "package ID
+  specification `quantus-node` did not match any packages", and
+  `genesis_generate_spec.sh` reaches it only after `set -e` has already created
+  and checked out a new branch at an upstream tag. Both are renamed on the
+  build-and-invoke half; the downloaded asset name stays upstream's, with a
+  comment at each site saying so.
+
+  The local-development scripts are renamed: `kill_chains.sh`,
+  `run_local_nodes.sh`, `start_testnet.sh`, `create_custom_chain_spec.sh`,
+  `regenerate_weights.sh`. Three of them had a second defect the rename walked
+  past. `start_testnet.sh` ran the renamed binary against `--chain planck`, so
+  it started a working Qnero node wearing an upstream network identity, dialling
+  `quantus.cat` bootnodes and reporting to `quantus.cat` telemetry; it runs
+  `--chain dev` now. `create_custom_chain_spec.sh` passed `--chain local`, an id
+  `load_spec` has never had, which fell through to the file-path arm and died on
+  a missing file; it passes `--chain dev`. `kill_chains.sh` and
+  `run_local_nodes.sh` matched only the new name, so a `quantus-node` left
+  running from before the rename survived the kill and held 30333 and 9944
+  against the new binary; both match `q(nero|uantus)-node` for one release
+  cycle.
 - **Generated weight headers** (`pallets/*/src/weights.rs`), which record the
   benchmark command that produced them. `regenerate_weights.sh` rewrites those
   headers the next time weights are measured.
@@ -92,27 +172,63 @@ identities kept for reference:
 - `dev` and `qnero-dev` are Qnero's: name `Qnero DevNet`, protocol id
   `qnero-devnet`, token `QNR`. This is what `--dev` resolves to and the only
   preset the project runs.
-- `heisenberg`, `planck` and `mainnet` carry upstream's network names,
-  bootnodes and telemetry endpoints, all under `quantus.cat`. They build this
-  tree's runtime genesis, so the peers they dial would refuse them. They are
-  kept because deleting them means deleting the runtime's own preset list, and
-  that is a change to genesis code with nothing to do with a rename. Treat them
-  as reference until Qnero has a live network of its own, and then replace
-  them. `mainnet` is the one that still answers with the name `Quantus`.
+- `heisenberg`, `planck` and `mainnet` keep upstream's ids, because the id is
+  what selects the runtime preset that builds their genesis, and deleting a
+  preset is a change to genesis code with nothing to do with a rename. They are
+  reference presets until Qnero has a live network of its own.
+
+  Their node-side network identity is gone, and that half was a live defect
+  until this pass. All three carried `/dns/shard-telemetry.quantus.cat/...`, and
+  `heisenberg` and `planck` carried `quantus.cat` bootnodes, while building this
+  tree's genesis: an operator who started one dialled peers that refuse it on
+  genesis hash and published a node name, a client version and a block height to
+  a telemetry server run by somebody else, for a network the node was never on.
+  `start_testnet.sh` did exactly this. `mainnet` also answered with the chain
+  name `Quantus` and the protocol id `quantus`, which is what a wallet, an
+  explorer or an exchange reads out of a spec file, and no runtime upgrade
+  reaches a file somebody already holds. Both fields sit outside genesis, so
+  they were fixable without touching the preset list: the name and protocol id
+  are `Qnero` and `qnero`, and the telemetry and bootnode entries are removed
+  until Qnero runs peers and a telemetry server of its own.
 
 The token symbol is `QNR` on all four, from the one `qnero_properties()` map
-that `every_preset_names_the_token_qnr` pins.
+that `every_preset_names_the_token_qnr` pins. The symbol is written in a second
+place, `runtime/build.rs`, which hands it to `enable_metadata_hash`: that is the
+unit a hardware or offline signer displays when it decodes a call under the
+`on-chain-release-build` feature. It said `UNIT`, the Substrate template's
+placeholder, so a release build would have shown a signing device one unit while
+every spec file said another. It says `QNR`, and each site's comment names the
+other.
 
 ### The guard
 
 `node/tests/naming_guard.rs` is what holds this. It runs the binary Cargo just
-built and asserts that `--version` names `qnero-node`, that `--help` says
-`Qnero`, and that `build-spec --chain dev` answers with name `Qnero DevNet`, id
-`qnero-dev`, protocol id `qnero-devnet` and token symbol `QNR`, with no
-case-insensitive `quantus` in any of the three outside the genesis blob. It
-runs under `cargo test -p qnero-node --release`, and the chain-spec third of it
-skips itself when `SKIP_WASM_BUILD` is set, since without the wasm there is no
-spec to build.
+built and asserts that:
+
+- `--version` names `qnero-node`;
+- `--help` says `Qnero`;
+- every subcommand's own help says nothing of Quantus: `key`, `key qnero`, `build-spec`,
+  `check-block`, `export-blocks`, `export-state`, `import-blocks`, `purge-chain`, `revert`,
+  `chain-info`. `RunCmd`'s flags are flattened into the root help and a subcommand's doc comments
+  are not, which is where an upstream doc comment lands when a subtree merge restores one;
+- `build-spec --chain dev` answers with name `Qnero DevNet`, id `qnero-dev`, protocol id
+  `qnero-devnet` and token symbol `QNR`;
+- `build-spec` over **every** id `load_spec` accepts, the `_live_spec` aliases included, names the
+  token `QNR` and says nothing of Quantus outside the genesis blob.
+
+The last one is what the first pass missed. A dev-only guard is green while
+`--chain mainnet` hands out a spec named `Quantus`, and a preset the project
+never runs is still a preset the binary produces on request.
+
+`the_startup_banner_names_qnero_and_no_upstream_maintainer` in
+`node/src/command.rs` covers the banner, which appears under neither flag, and
+pins `support_url` as well: the placeholder `support.anonymous.an` names no
+project at all, so a guard looking for the word `quantus` cannot see it.
+
+The whole file runs under `cargo test -p qnero-node --release`, which is in the
+gate list below. The chain-spec assertions skip themselves when
+`SKIP_WASM_BUILD` is set, since without the wasm there is no spec to build, so
+run that line with the wasm.
 
 ### What `quantus` still means when you grep for it
 
@@ -194,8 +310,19 @@ dependency to `node`, `runtime` or any pallet.
 cd chain
 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p pallet-shielded -p pallet-mining-rewards --release
 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p qnero-runtime --release --test call_filter
+LIBCLANG_PATH=/usr/lib/llvm-18/lib RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 4 -p qnero-node --release
 nice -n 19 cargo clippy -j 4 -p pallet-shielded -p pallet-mining-rewards --all-targets
 ```
+
+The node line is the rename guard, and it is the one line here that must run
+**without** `SKIP_WASM_BUILD`: the chain-spec assertions build a preset spec and
+therefore need `WASM_BINARY`, and with the variable set they skip themselves and
+say so on stderr, which is most of the guard silently not running. It is in this
+list because the guard exists for the next subtree merge from
+Quantus-Network/chain, and a merge is exactly the moment somebody runs the
+documented gates and reads green. `chain/.github/workflows/ci.yml` does not run
+this or anything else: GitHub reads workflows only from the repository root and
+there is no `.github/` there.
 
 The runtime's call-filter test is named, and `cargo test -p qnero-runtime`
 without `--test call_filter` is not the gate: the `tests/mod.rs` target has not
@@ -3313,8 +3440,8 @@ and the contract for the next subtree merge. This entry is the run.
   sized for Quantus PQ signatures" and `--pool-type` said "to preserve prior
   Quantus node behavior". The first is a property of ML-DSA-87 and now says so;
   the second says upstream. They are the only two `quantus` strings in the whole
-  of `--help`, and they were found by running the built binary rather than by
-  grepping the node crate, which is why the guard runs the binary.
+  of `--help`, and running the built binary is what found them: a grep of the
+  node crate reaches neither, which is why the guard runs the binary.
 - **The startup banner's byline.** `SubstrateCli::author` answered
   `CARGO_PKG_AUTHORS`, which is the upstream workspace's attribution, so a Qnero
   node printed somebody else's maintainer and somebody else's contact address at
@@ -3336,14 +3463,23 @@ and the contract for the next subtree merge. This entry is the run.
 
 No consensus rule moved: no storage item, no hash layout, no public-input layout
 and no derivation. The runtime's on-chain identity was already `qnero` /
-`qnero-node` at `spec_version` 101 and is unchanged, so a node built before this
-pass and one built after answer the same version triple, which is correct,
-because they are the same runtime.
+`qnero-node` at `spec_version` 101 and is unchanged.
+
+`impl_version` did move, in the fix pass below, and the reason belongs here:
+renaming the crate changed the emitted wasm. The panic paths carry the crate
+name, so the pre-rename blob and the post-rename blob differ byte for byte while
+implementing the same specification, and at `impl_version` 1 both answered the
+same version triple. A `set_code` preflight, an srtool reproducible-build
+comparison and `try-runtime --disable-spec-version-check` all identify a runtime
+by that triple, so all three would have accepted either blob. `impl_version` is
+the field for a changed build of an unchanged specification, it sits outside the
+metadata hash (RFC-0078 covers `spec_name`, `spec_version`, the extrinsic
+version, the SS58 prefix, decimals and symbol), and it is 2.
 
 ### Verifying the guard against the defect it names
 
-The binary from the previous commit is still on disk, which makes a negative
-control free. Against it:
+The binary from the previous commit was still on disk at the time, which made a
+negative control free. Against it:
 
 ```
 $ ./chain/target/release/quantus-node --version
@@ -3360,10 +3496,17 @@ Usage: quantus-node [OPTIONS]
 
 So `the_version_string_names_qnero_and_not_quantus` and
 `the_help_text_names_qnero_and_not_quantus` both fail against the tree as it
-stood. The third assertion is a tripwire rather than a fix: the same binary
-already answered `build-spec --chain dev` with name `Qnero DevNet`, id
-`qnero-dev`, protocol id `qnero-devnet` and symbol `QNR`, because M6 fixed the
-spec. It is in the guard so a merge cannot quietly undo M6.
+stood. The third assertion is a tripwire, and it was green before this pass:
+the same binary already answered `build-spec --chain dev` with name
+`Qnero DevNet`, id `qnero-dev`, protocol id `qnero-devnet` and symbol `QNR`,
+because M6 fixed the spec. It is in the guard so a merge cannot quietly undo
+M6.
+
+That binary and the stale `target/release/wbuild/quantus-runtime` tree beside it
+are deleted now, and the fix pass below says why: a leftover `quantus-node` holds
+30333 and 9944 against the new binary, and a stale wbuild directory is a path a
+runbook resolves to a pre-rename wasm. The transcript above is what the negative
+control leaves behind.
 
 ### The run
 
@@ -3464,8 +3607,248 @@ earlier pass had touched.
 | `cargo test -j 4 -p qnero-node --release` after the fmt pass, node relink only | 1:04 |
 | the end-to-end, both tests, three proofs | 15.8 s |
 
-Four node links rather than one, and the reason is worth writing down: the two
-`--help` strings and the banner byline live outside the node crate's own text and
-outside anything a grep of `chain/node` finds. Running the built binary is what
-found them. A rename pass that greps the crate it is renaming and stops there
-ships a binary that still says the old name in the first line it prints.
+Four node links, and the reason is worth writing down: the two `--help`
+strings and the banner byline live outside the node crate's own text and outside
+anything a grep of `chain/node` finds. Running the built binary is what found
+them. A rename pass that greps the crate it is renaming and stops there ships a
+binary that still says the old name in the first line it prints.
+
+## The rename review fix pass, 2026-09-13
+
+The rename pass moved the package names and the strings a grep of `node/src`
+finds. The review found six more surfaces that answer an operator, and the
+pattern in all six is the same: each is a place where the name is written
+somewhere the rename never looked, so a grep of the crate being renamed reaches
+none of them.
+
+### What changed
+
+- **`support_url` was `support.anonymous.an`,** the Substrate node template's
+  default, which is the last line of `--help` and the address
+  `sp_panic_handler` prints on every panic. A node that crashed told its
+  operator to report it to a domain nobody owns. The byline two lines above it
+  moved in the rename pass for this exact reason, and this line was left
+  because it does not contain the word `quantus`. It is
+  `https://github.com/DigitalGuards/qnero/issues`, and
+  `the_startup_banner_names_qnero_and_no_upstream_maintainer` pins it, because
+  a guard that looks for `quantus` cannot see a placeholder that names no
+  project at all.
+- **`--chain mainnet` answered with the chain name `Quantus` and the protocol
+  id `quantus`,** on a preset that builds this tree's genesis. The guard built
+  only `--chain dev`, and `every_chain_id_this_node_accepts_is_a_qnero_chain`
+  asserts on the properties map that all four presets share, so neither saw it.
+  A spec file is the artifact no runtime upgrade reaches. Both fields are
+  outside genesis, so the runtime preset list the rename deliberately left
+  alone stays untouched: the name is `Qnero`, the protocol id is `qnero`.
+- **Three presets carried upstream's telemetry endpoint and bootnodes.**
+  `heisenberg`, `planck` and `mainnet` all pointed at
+  `shard-telemetry.quantus.cat`, and the first two dialled `quantus.cat`
+  bootnodes, while building this tree's genesis. An operator who started one
+  dialled peers that refuse it on genesis hash and published a node name, a
+  client version and a block height to a third party for a network the node was
+  never on. `scripts/start_testnet.sh` did exactly this: the rename gave it
+  `qnero-node` and left `--chain planck`. Both fields are outside genesis and
+  both are gone; the script runs `--chain dev`.
+- **`runtime/build.rs` committed the token symbol `UNIT`** into the metadata
+  hash, which is the unit a hardware or offline signer displays when it decodes
+  a call. Every chain spec says `QNR`. `enable_metadata_hash` is on only under
+  `on-chain-release-build`, so the drift was invisible in a development build
+  and would have shipped in a release one. Both sites now carry a comment
+  naming the other.
+- **`impl_version` stayed at 1 across the crate rename,** and the rename
+  changed the emitted wasm: the panic paths carry the crate name, so the
+  pre-rename blob (684,724 bytes compressed) and the post-rename blob (684,659)
+  implement the same specification and differed byte for byte while answering
+  the same version triple. A `set_code` preflight, an srtool reproducible-build
+  comparison and `try-runtime --disable-spec-version-check` all identify a
+  runtime by that triple and would have accepted either. `impl_version` is the
+  field for a changed build of an unchanged specification and sits outside the
+  metadata hash, so it is 2. The rule above `VERSION` in `runtime/src/lib.rs`
+  says when to move it.
+- **Six scripts, a workflow and the local Dockerfile.** Both genesis scripts
+  ran `cargo build --release --package quantus-node` in this tree and then
+  invoked the binary, so both aborted, and `genesis_generate_spec.sh` reaches
+  that line only after `set -e` has created and checked out a branch at an
+  upstream tag. `create_custom_chain_spec.sh` passed `--chain local`, an id
+  `load_spec` has never had, which falls through to the file-path arm and dies
+  on a missing file. `kill_chains.sh` and `run_local_nodes.sh` matched only the
+  new name, so a `quantus-node` left running from before the rename survived
+  the kill and held 30333 and 9944 against the new binary. `ci.yml` passed
+  `--features quantus-runtime/fast-governance` on two steps, and it is the one
+  workflow under `chain/.github` that anybody would lift to the repository root.
+  `Dockerfile.local` created a system user named `quantus` with its data under
+  `/var/lib/quantus`, and created it with no home directory, so a run without
+  `--base-path` fell back to a `$HOME` that does not exist.
+
+Two things the rename table did not say, and both are now in it:
+
+- **The default base path moved** from `~/.local/share/quantus-node` to
+  `~/.local/share/qnero-node`, because `sc_cli` derives it from the
+  executable's file name. Nothing declares it, so nothing in the diff showed
+  it, and it is the one consequence of the binary rename with state behind it.
+  The migration is one `mv`, and it is written out above.
+- **The guard was absent from the standing gate list,** which is the list
+  somebody runs after the subtree merge the guard exists to survive. It is in
+  the chain gate block now, with the note that it must run without
+  `SKIP_WASM_BUILD` or the chain-spec assertions skip themselves.
+
+The docs the rename classified as upstream were reclassified where the
+classification was wrong. The licence condition is the copyright and the notice
+text, and `chain/README.md` had build-and-run commands for **this** tree that
+were hard errors after the rename: `./target/release/quantus-node` after a
+`cargo build --release` that produces `qnero-node`, and `key quantus`, which
+`cli.rs` renamed to `key qnero` with no alias. Those and
+`chain/docs/RELEASE_PREFLIGHT.md`'s are renamed, the attribution and network
+names in both are untouched, and each file opens with a banner saying which
+half is which. `chain/docs/RUNTIME_SURFACE.md`, `RUNTIME_UPDATE.md` and
+`CHAINSPEC_CREATION.md` are Qnero-maintained and say `qnero-runtime`.
+`chain/MINING.md` keeps upstream's names, because every binary in it is a
+release binary from `Quantus-Network/chain` or an image from
+`ghcr.io/quantus-network` and every network in it is upstream's; a rename there
+would have produced a guide telling an operator to download one binary and run
+another. It has a banner, and the two defaults that differ between the binaries
+are called out where they appear.
+
+`RUNTIME_UPDATE.md`'s local-build block was the sharpest of these. It read
+`cargo build --release -p quantus-runtime` followed by an export of
+`wbuild/quantus-runtime/quantus_runtime.compact.compressed.wasm`. The build
+fails, the block has no `set -e`, and on any machine that built before the
+rename the export resolves to a real pre-rename blob, so the operator authorizes
+a governance `set_code` with a runtime nobody tagged. The stale
+`chain/target/release/wbuild/quantus-runtime` tree and the stale
+`chain/target/release/quantus-node` binary are deleted for the same reason, and
+because the leftover binary is what the kill scripts were missing.
+
+### Verifying the new guard against the defect it names
+
+`no_chain_spec_this_node_builds_says_quantus` is the assertion that was missing.
+With the mainnet builder's two fields put back to what they said before this
+pass, and the binary rebuilt:
+
+```
+$ cargo test -j 4 -p qnero-node --release --test naming_guard
+
+test no_chain_spec_this_node_builds_says_quantus ... FAILED
+
+the --chain mainnet spec outside its genesis still says Quantus:
+  "name": "Quantus",
+  "protocolId": "quantus",
+
+test result: FAILED. 4 passed; 1 failed
+```
+
+The other four passed throughout, which is the point: `--chain dev` was correct
+before this pass and stayed correct, and a guard that reads only the preset the
+project runs is green while the binary hands out a spec named Quantus on
+request. The fields were restored and the node rebuilt; all five pass.
+
+### The run
+
+`$SCRATCH` below is a temporary directory outside the repository.
+
+```
+$ qnero-wallet --file $SCRATCH/miner.seed keygen
+$ export QNERO_MINER_KEY=$(qnero-wallet --file $SCRATCH/miner.seed miner-address)
+$ nice -n 19 ./chain/target/release/qnero-node --dev --tmp   (backgrounded, pidfile)
+
+2026-09-13 10:20:43 Qnero Node
+2026-09-13 10:20:43 ✌️  version 1.0.1-814f60693da
+2026-09-13 10:20:43 ❤️  by DigitalGuards <https://github.com/DigitalGuards/qnero>, 2026-2026
+2026-09-13 10:20:43 📋 Chain specification: Qnero DevNet
+2026-09-13 10:20:43 👤 Role: AUTHORITY
+2026-09-13 10:20:43 💾 Database: RocksDb at /tmp/substrateXGFJ87/chains/qnero-dev/db/full
+2026-09-13 10:20:43 ⛏️ Coinbase notes are minted for miner key qnm1q9x8k3ne…520wr248
+
+RPC up within 8 s of start, height 16 after 14 s.
+```
+
+`grep -ci quantus` over the whole node log is 0.
+
+```
+$ curl ... state_getRuntimeVersion
+{"specName":"qnero","implName":"qnero-node","authoringVersion":1,
+ "specVersion":101,"implVersion":2,"transactionVersion":7}
+
+$ curl ... system_name         "Qnero Node"
+$ curl ... system_chain        "Qnero DevNet"
+$ curl ... system_chainType    "Development"
+$ curl ... system_properties   {"ss58Format":189,"tokenDecimals":12,"tokenSymbol":"QNR"}
+
+$ qnero-node --help | tail -1
+Support: https://github.com/DigitalGuards/qnero/issues
+```
+
+`implVersion` is 2 here and 1 in the rename pass's transcript above, which is
+the bump this pass made.
+
+Every preset, read back out of the built binary with `build-spec
+--disable-default-bootnode`:
+
+```
+chain        name          id           protocolId    symbol  bootNodes  telemetry  quantus hits
+dev          Qnero DevNet  qnero-dev    qnero-devnet  QNR     0          none       0
+heisenberg   Heisenberg    heisenberg   heisenberg    QNR     0          none       0
+planck       Planck        planck       planck        QNR     0          none       0
+mainnet      Qnero         mainnet      qnero         QNR     0          none       0
+```
+
+The wallet end-to-end against that node, both tests:
+
+```
+$ QNERO_DEV_NODE=http://127.0.0.1:9944 QNERO_MINER_SEED=$SCRATCH/miner.seed \
+    RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --release -p qnero-wallet \
+    --features parallel --test dev_node_e2e -- --nocapture
+
+sync: 20 leaves, 20 coinbase leaves, 20 of them this wallet's, 826 quanta
+shield of 1000 quanta included at block 21 (2.01s), leaf 20
+5 quanta to B at fee 8: included at block 24, change 29
+coinbase of block 24: 46 quanta against 41 to 43 elsewhere, author share 4
+system_dryRun of a transparent transfer: 0x0001030005000000
+300 quanta to B: proved in 3.06s, 150908 proof bytes, included at block 27
+100 quanta back to A: proved in 3.33s, included at block 34
+test result: ok. 2 passed; 0 failed; finished in 16.53s
+```
+
+Stopped by pidfile: `ss -ltn` does not list 9944, `curl` to it returns nothing,
+and the only `pgrep -f 'q(nero|uantus)-node'` match left is the shell running
+the `pgrep`.
+
+### Gates
+
+```
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+   38 suites, 327 passed, 0 failed
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+   no warnings
+cargo fmt --all -- --check
+   clean
+
+# the chain workspace
+RAYON_NUM_THREADS=4 SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 \
+  -p qnero-runtime -p pallet-shielded --release
+   74 + 42 + 9 + 60 passed, 0 failed, 2 ignored
+LIBCLANG_PATH=/usr/lib/llvm-18/lib RAYON_NUM_THREADS=4 nice -n 19 \
+  cargo test -j 4 -p qnero-node --release
+   69 unit + 5 naming_guard passed, 0 failed
+LIBCLANG_PATH=/usr/lib/llvm-18/lib SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 \
+  -p qnero-node -p qnero-runtime -p pallet-shielded -p sc-cli --all-targets
+   no warnings
+cargo +nightly-2026-08-30 fmt --all -- --check
+   clean
+```
+
+`sc-transaction-pool` took a one-line doc comment in this pass, so clippy was
+run over it too: its lib is clean, and its lib-test target fails the vendored
+`unwrap_used` and `expect_used` lints on 123 pre-existing sites that no pass
+here has touched. That crate is outside the documented clippy set for this
+reason.
+
+### Timings
+
+| Step | Wall |
+|---|---|
+| `cargo build -j 4 --release -p qnero-node` after the six code fixes, runtime wasm relinked | 1:05 |
+| `cargo test -j 4 -p qnero-node --release`, the widened guard | 4.9 s of test time |
+| the negative control: rebuild with the mainnet fields restored, guard, rebuild forward | 2 x 1:05 |
+| the end-to-end, both tests, three proofs | 16.5 s |
