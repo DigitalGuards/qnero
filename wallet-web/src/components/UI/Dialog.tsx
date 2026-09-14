@@ -14,6 +14,13 @@ import { Button } from './Button';
  * two questions that destroy something no other copy of exists, and it states
  * what is lost inside the dialog rather than in a toast that has already gone
  * by the time the button is pressed.
+ *
+ * Both of those dialogs get an explicit Cancel beside the destructive action,
+ * because the way out of a question like this cannot be a 14 px muted X in a
+ * corner. On the lock screen the path is two clicks from a mistyped
+ * passphrase to an unrecoverable wipe of the only copy of every note's
+ * randomness, so the second click has something to land on that is not the
+ * red one.
  */
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
@@ -49,7 +56,12 @@ export function DialogContent({
             <div className="mb-3 space-y-2 text-meta text-ink-2">{description}</div>
           </DialogPrimitive.Description>
         )}
-        {children}
+        <div className="flex flex-wrap gap-2">
+          <DialogPrimitive.Close asChild>
+            <Button data-testid="dialog-cancel">Cancel</Button>
+          </DialogPrimitive.Close>
+          {children}
+        </div>
         <DialogPrimitive.Close asChild>
           <Button
             variant="quiet"

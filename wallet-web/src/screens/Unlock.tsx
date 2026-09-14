@@ -64,9 +64,11 @@ export function Unlock({
         <div className="mt-4 flex gap-2">
           <Dialog>
             <DialogTrigger asChild>
-              <Button variant="destructive" disabled={busy}>
-                Remove
-              </Button>
+              {/* Neutral, so the lock screen has one filled button and it is
+                  Unlock. This one sits where a hand goes after a mistyped
+                  passphrase, and what it opens erases the only copy of every
+                  note's randomness. */}
+              <Button disabled={busy}>Remove</Button>
             </DialogTrigger>
             <DialogContent
               title="Remove this wallet?"
@@ -80,7 +82,7 @@ export function Unlock({
             >
               <Button
                 variant="destructive"
-                size="block"
+                className="flex-1"
                 data-testid="confirm-forget"
                 onClick={onForget}
               >

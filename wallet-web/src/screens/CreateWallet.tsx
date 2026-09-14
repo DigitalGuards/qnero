@@ -139,7 +139,7 @@ export function CreateWallet({
               if (wrong.length > 0) {
                 confirmForm.setError('root', {
                   message:
-                    `that is not right for ${wrong.length === 1 ? 'group' : 'groups'} ` +
+                    `That is not right for ${wrong.length === 1 ? 'group' : 'groups'} ` +
                     `${wrong.map((index) => index + 1).join(', ')}. You can look at the seed ` +
                     'again and start over.',
                 });

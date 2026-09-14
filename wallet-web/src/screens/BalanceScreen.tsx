@@ -257,7 +257,7 @@ export function BalanceScreen({
               </tbody>
             </Table>
           </TableScroll>
-          <p className="px-3 pt-2 text-meta text-muted">
+          <p className="px-4 pt-2 text-meta text-muted">
             Provisional. A reorg that orphans the settlement makes the same leaf acceptable, and the
             next sync drops the entry and holds the note.
           </p>
@@ -303,7 +303,7 @@ export function BalanceScreen({
             </Table>
           </TableScroll>
           {report.heldSpent > 0 && (
-            <p className="px-3 pt-2 text-meta text-muted">
+            <p className="px-4 pt-2 text-meta text-muted">
               {report.heldSpent} note{report.heldSpent === 1 ? '' : 's'} kept marked spent: their
               nullifiers are absent from this node&apos;s set, and this node has not yet reached the
               block that settled them. Clearing the flag on that reading would put a consumed note
@@ -311,7 +311,7 @@ export function BalanceScreen({
             </p>
           )}
           {report.forkedAt !== null && (
-            <p className="px-3 pt-2 text-meta text-muted">
+            <p className="px-4 pt-2 text-meta text-muted">
               This node is on a different branch above block {formatCount(report.forkedAt)}. The
               watermark was rewound to there and the leaves were walked again.
             </p>

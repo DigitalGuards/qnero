@@ -225,7 +225,7 @@ export function SettingsScreen({
             >
               <Button
                 variant="destructive"
-                size="block"
+                className="flex-1"
                 data-testid="confirm-forget"
                 onClick={onForget}
               >

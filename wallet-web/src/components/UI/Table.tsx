@@ -10,6 +10,10 @@ import { cn } from '../../utils/cn';
  * lifts its muted cells to the primary ink rather than inverting the ramp,
  * which keeps every cell above 4.5:1 in both themes instead of trading one
  * contrast problem for another.
+ *
+ * The cell inset is 16 px, which is `Panel`'s own and `Empty`'s. Inside a
+ * flush panel the three have to agree, or the left edge of a list moves by
+ * four pixels the moment the list stops being empty.
  */
 export function TableScroll({ children }: { children: ReactNode }): ReactNode {
   return <div className="w-full overflow-x-auto">{children}</div>;
@@ -25,7 +29,7 @@ export function Table({
   return (
     <table
       data-testid={testId}
-      className="w-full border-collapse text-meta [&_td]:px-3 [&_td]:py-1.5 [&_th]:px-3 [&_th]:py-1.5
+      className="w-full border-collapse text-meta [&_td]:px-4 [&_td]:py-1.5 [&_th]:px-4 [&_th]:py-1.5
         [&_tbody_tr:hover_td]:text-ink [&_tbody_tr:hover]:bg-hover
         [&_th]:text-left [&_th]:text-label [&_th]:uppercase [&_th]:tracking-label [&_th]:text-muted
         [&_tbody_tr]:border-t [&_tbody_tr]:border-edge"
