@@ -726,7 +726,7 @@ panic and the runner writes no fixed-name file for a stale run to occupy.
   round-trip test. A wallet scanning thousands of ciphertexts per sync is a
   different budget and nothing here bounds it.
 
-# M10: the browser wallet, threaded and single threaded (2026-09-14)
+# M10: Qloak, threaded and single threaded (2026-09-14)
 
 M8 measured one browser prover on one thread and left three things unmeasured
 by name: threads, `wasm-opt`, and what a payment costs end to end rather than
