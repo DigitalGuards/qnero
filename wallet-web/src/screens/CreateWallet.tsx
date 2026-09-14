@@ -103,13 +103,36 @@ export function CreateWallet({
             in this wallet scans one: the restore screen takes pasted hex. A
             scannable backup belongs with a camera import path, behind the
             same explicit reveal the miner key uses. */}
-        <p
-          className="mm-secret elev-inset my-3 rounded-field border border-edge-strong bg-field
-            p-3 text-body leading-6 tracking-wide text-ink"
+        {/* Numbered where they are shown, because the confirmation asks for
+            them by ordinal. Unnumbered, the eight groups wrapped four and four
+            at phone width and four in a row at desktop width, and somebody who
+            wrote the key down as one 64-character string, or in a different
+            number of columns than their window happened to use, had to count
+            chunks in their own handwriting to answer "group 6 of 8" and could
+            be off by one. The refusal then named groups they had copied
+            correctly, and the way out redraws a fresh challenge set, so a
+            miscount could loop without ever learning the transcription was
+            fine. The grid is two columns at every width so the numbering a
+            reader copies is the numbering they are asked for. */}
+        <ol
+          className="elev-inset my-3 grid list-none grid-cols-2 gap-x-4 gap-y-1 rounded-field
+            border border-edge-strong bg-field p-3"
           data-testid="seed-hex"
         >
-          {groups.join(' ')}
-        </p>
+          {groups.map((group, index) => (
+            <li key={group} className="flex items-baseline gap-2">
+              <span className="w-4 shrink-0 text-right text-label text-muted" aria-hidden>
+                {index + 1}
+              </span>
+              <span
+                className="mm-secret text-body leading-6 tracking-wide text-ink"
+                data-testid={`seed-group-${index}`}
+              >
+                {group}
+              </span>
+            </li>
+          ))}
+        </ol>
         <div className="mt-4 flex gap-2">
           <Button onClick={onCancel}>Cancel</Button>
           <Button
@@ -133,8 +156,8 @@ export function CreateWallet({
       <Panel title="Confirm what you wrote">
         <Prose>
           <p>
-            Type these groups back, counting from the left. The seed is hidden now, and it will not
-            be shown again.
+            Type these groups back, by the numbers they were shown under. The seed is hidden now,
+            and it will not be shown again.
           </p>
         </Prose>
         <form

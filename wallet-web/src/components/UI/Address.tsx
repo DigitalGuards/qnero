@@ -31,28 +31,31 @@ export function Address({
   tone?: 'default' | 'secret';
 }): ReactNode {
   return (
-    <p
-      data-testid={testId}
+    // Two boxes, and the split is the fix. Capped and scrollable rather than
+    // 2600 characters tall, but a scroll container's bottom padding is
+    // scrollable area that content paints into rather than a band that clips
+    // it, so budgeting both paddings in one `max-height` cut the last visible
+    // line horizontally through the middle of its glyphs and read as a
+    // rendering fault rather than as a box that scrolls. The padding is on the
+    // outer box and the cap is on the inner one, where it is a whole number of
+    // 16 px line boxes and nothing else.
+    //
+    // The whole value stays in the box and `user-select: all` still takes all
+    // of it in one gesture, so nothing is hidden from a copy or from a reader.
+    <div
       className={cn(
-        // Capped and scrollable rather than 2600 characters tall. The whole
-        // value stays in the box and `user-select: all` still takes all of it
-        // in one gesture, so nothing is hidden from a copy or from a reader.
-        //
-        // The cap is a whole number of line boxes: ten 16 px lines plus the
-        // 8 px padding on each side plus the two borders. `max-h-44` is 176 px,
-        // which leaves 158 px of content box, which is 9.875 lines, so every
-        // long value ended on a row of glyphs sliced at 87.5% of its height
-        // and read as a rendering fault rather than as a box that scrolls.
-        'mm-secret elev-inset my-2 max-h-[calc(10*16px+16px+2px)] overflow-y-auto rounded-field',
-        'border p-2 text-meta leading-4',
-        tone === 'secret'
-          ? 'border-edge-strong bg-field text-ink'
-          : 'border-edge bg-field text-ink',
+        'elev-inset my-2 rounded-field border p-2',
+        tone === 'secret' ? 'border-edge-strong bg-field' : 'border-edge bg-field',
         className,
       )}
     >
-      {value}
-    </p>
+      <p
+        data-testid={testId}
+        className="mm-secret m-0 max-h-[calc(10*16px)] overflow-y-auto text-meta leading-4 text-ink"
+      >
+        {value}
+      </p>
+    </div>
   );
 }
 

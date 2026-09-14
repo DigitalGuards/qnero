@@ -149,6 +149,20 @@
     border-color: var(--accent);
   }
 
+  /*
+   * A field whose value was refused, marked on the control.
+   *
+   * After the focus rule, so it wins over it: the accent is the colour this
+   * palette gives the one action a screen is for, and an address field holding
+   * an invalid address was drawn in exactly that while the refusal sat
+   * underneath in red. MyMonero marks its own failed field on the box for the
+   * same reason.
+   */
+  .mm-input[aria-invalid='true'],
+  .mm-input[aria-invalid='true']:focus-visible {
+    border-color: var(--destructive);
+  }
+
   /* The uppercase field label, 10 px with half a pixel of tracking. */
   .mm-label {
     display: block;

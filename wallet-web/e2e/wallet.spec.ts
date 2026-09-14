@@ -153,9 +153,16 @@ test.afterAll(() => {
 /** Create a wallet through the wizard, including the written confirmation. */
 async function createWallet(page: Page): Promise<string> {
   await page.getByTestId('create-wallet').click();
-  const shown = await page.getByTestId('seed-hex').innerText();
-  const groups = shown.trim().split(/\s+/);
+  // Group by group, by the number each is shown under. The confirmation asks
+  // for them by ordinal, so the numbering is part of what the screen owes a
+  // reader and part of what this suite reads.
+  const shown = page.locator('[data-testid^="seed-group-"]');
+  await expect(shown.first()).toBeVisible();
+  const groups = await shown.allInnerTexts();
   expect(groups).toHaveLength(8);
+  for (const group of groups) {
+    expect(group.trim()).toMatch(/^[0-9a-f]{8}$/);
+  }
 
   await page.getByTestId('seed-written-down').click();
 
@@ -169,7 +176,7 @@ async function createWallet(page: Page): Promise<string> {
     const input = inputs.nth(index);
     const id = await input.getAttribute('data-testid');
     const group = Number((id ?? '').replace('confirm-group-', ''));
-    await input.fill(groups[group] ?? '');
+    await input.fill((groups[group] ?? '').trim());
   }
   await page.getByTestId('confirm-seed').click();
 

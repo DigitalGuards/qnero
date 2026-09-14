@@ -125,8 +125,16 @@ export function BalanceScreen({
         <p className="mt-1 text-meta text-muted">
           <span data-testid="balance-unspent">{formatCount(balances.unspent)}</span> quanta unspent
         </p>
+        {/* The track count follows the content. Fixed at two columns, the
+            common case of one visible figure rendered a half-width row and put
+            the number in the middle of the panel with the right half empty,
+            which is the screen a wallet lands on the moment its first payment
+            arrives. */}
         {showStats && (
-          <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 border-t border-edge pt-3 text-meta">
+          <dl
+            className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-x-4 gap-y-1
+              border-t border-edge pt-3 text-meta"
+          >
             {showReachable && (
               <Stat
                 term="reachable in one payment"
