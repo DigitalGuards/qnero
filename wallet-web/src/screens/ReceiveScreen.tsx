@@ -50,6 +50,12 @@ export function ReceiveScreen({
           <CopyButton value={address} label="Copy address" testId="copy-address" />
         </div>
         <Qr value={address} uppercase caption="the same address, uppercase inside the code" />
+        <Notice className="mt-3">
+          Moving transparent value into the pool is a command-line step. A shield is signed with
+          ML-DSA-87 and this browser&apos;s prover exports no signing at all, so this wallet is
+          funded by a payment from another wallet, by `qnero-wallet shield` followed by a send, or
+          by a node configured with the miner key below.
+        </Notice>
       </Panel>
 
       <Panel title="Miner key">
