@@ -28,6 +28,7 @@ import {
   CIPHERTEXT_SUBSTITUTION_HINT,
   HEADER_WALK_LIMIT,
   runSync,
+  WARNED_LEAVES_PER_PASS,
   type ScannedNote,
   type SyncChain,
   type SyncCrypto,
@@ -872,6 +873,138 @@ describe('a leaf whose kind the headers decide', () => {
     expect(
       again.report.warnings.some((entry) => entry.includes('at none of the leaves it appended')),
     ).toBe(true);
+  });
+
+  /**
+   * How many leaves a pass writes one sentence about is a node's choice, so
+   * the sentences are capped and the rest are counted.
+   *
+   * Both detector warnings are per leaf, and a node answers the leaves: it can
+   * put a commitment this wallet's payload does not open beside every
+   * ciphertext it serves. Uncapped that is one string per leaf on
+   * `report.warnings` and one `Notice` per leaf on the balance screen, out of
+   * an answer nothing has checked. Past `WARNED_LEAVES_PER_PASS` the pass
+   * counts instead and closes each kind with one sentence carrying the count,
+   * so the list is bounded at eighteen entries whatever a node answers.
+   *
+   * `crates/qnero-wallet/tests/leaf_typing.rs` drives the same two overflows
+   * against the command-line wallet.
+   */
+  it('caps the per-leaf detector warnings and counts the rest', async () => {
+    const OVERFLOW = 2;
+    const EACH = WARNED_LEAVES_PER_PASS + OVERFLOW;
+    /** A second note of this wallet's, whose commitment the block never holds. */
+    const ELSEWHERE: ScannedNote = {
+      value: 5n,
+      rho: '11'.repeat(32),
+      r: '12'.repeat(32),
+      commitment: '13'.repeat(32),
+      nullifier: '14'.repeat(32),
+      memo: '',
+    };
+    const OTHER_CT = new Uint8Array([7, 7, 7]);
+
+    // Leaves 0..EACH-1 carry this wallet's payment ciphertext beside a
+    // stranger's commitment, and the block holds the payment's own commitment
+    // at its coinbase position, so each of them is a move the pass recovers.
+    // The next EACH carry a ciphertext of this wallet's whose commitment the
+    // block holds nowhere, so each of those is skipped.
+    const rows: Leaf[] = [];
+    for (let leaf = 0; leaf < EACH; leaf += 1) {
+      rows.push({
+        commitment: `${leaf.toString(16).padStart(2, '0')}a0`.repeat(16),
+        block: 8,
+        ciphertext: CT,
+        coinbaseQuanta: null,
+      });
+    }
+    for (let leaf = 0; leaf < EACH; leaf += 1) {
+      rows.push({
+        commitment: `${leaf.toString(16).padStart(2, '0')}b0`.repeat(16),
+        block: 8,
+        ciphertext: OTHER_CT,
+        coinbaseQuanta: null,
+      });
+    }
+    rows.push({ commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseQuanta: 7n });
+    const shape = shapeOf(9, rows);
+    const crypto: SyncCrypto = {
+      ...cryptoParts(shape),
+      decryptBatch: (items) =>
+        Promise.resolve(
+          items.map((item) => {
+            if (item.ciphertext[0] === CT[0]) {
+              return openedAs(MINE, item.commitment);
+            }
+            return item.ciphertext[0] === OTHER_CT[0] ? openedAs(ELSEWHERE, item.commitment) : null;
+          }),
+        ),
+      coinbaseBatch: (items) => Promise.resolve(items.map(() => null)),
+      entryRhoMatches: () => Promise.resolve(false),
+    };
+
+    const result = await runSync(
+      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
+      chainOf(shape, rows),
+      crypto,
+    );
+
+    // The payment still arrives, at the index inside the block that holds the
+    // commitment it opens. A cap on the sentences changes no decision.
+    expect(result.report.received).toBe(1);
+    expect(result.notes).toHaveLength(1);
+    expect(result.notes[0]?.note.leafIndex).toBe(EACH * 2);
+
+    const moved = result.report.warnings.filter((entry) =>
+      entry.includes('commitment answered beside it'),
+    );
+    const skipped = result.report.warnings.filter((entry) =>
+      entry.includes('at none of the leaves it appended'),
+    );
+    expect(moved).toHaveLength(WARNED_LEAVES_PER_PASS);
+    expect(skipped).toHaveLength(WARNED_LEAVES_PER_PASS);
+    // The ones written out are the first of each kind, named by their leaf.
+    expect(moved[0]).toContain('leaf 0');
+    expect(skipped[0]).toContain(`leaf ${EACH}`);
+
+    // And each kind closes with one sentence carrying what the cap held back.
+    const movedMore = result.report.warnings.filter(
+      (entry) => entry.startsWith(`and ${OVERFLOW} more leaves`) && entry.includes('each recorded'),
+    );
+    const skippedMore = result.report.warnings.filter(
+      (entry) => entry.startsWith(`and ${OVERFLOW} more leaves`) && entry.includes('each skipped'),
+    );
+    expect(movedMore).toHaveLength(1);
+    expect(skippedMore).toHaveLength(1);
+    expect(movedMore[0]).toContain('second node');
+    expect(skippedMore[0]).toContain('second node');
+
+    // Eighteen, whatever a node answers: two kinds of eight plus one closing
+    // sentence each, and nothing else fired on this pass.
+    expect(result.report.warnings).toHaveLength(WARNED_LEAVES_PER_PASS * 2 + 2);
+  });
+
+  /** At the cap exactly, there is nothing left over to count. */
+  it('writes no overflow sentence when the cap is not passed', async () => {
+    const rows: Leaf[] = [];
+    for (let leaf = 0; leaf < WARNED_LEAVES_PER_PASS; leaf += 1) {
+      rows.push({
+        commitment: `${leaf.toString(16).padStart(2, '0')}a0`.repeat(16),
+        block: 8,
+        ciphertext: CT,
+        coinbaseQuanta: null,
+      });
+    }
+    rows.push({ commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseQuanta: 7n });
+    const shape = shapeOf(9, rows);
+
+    const result = await runSync(
+      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
+      chainOf(shape, rows),
+      opener(shape),
+    );
+    expect(result.report.warnings).toHaveLength(WARNED_LEAVES_PER_PASS);
+    expect(result.report.warnings.some((entry) => entry.startsWith('and '))).toBe(false);
   });
 
   /** A value that does not rebuild this wallet's own coinbase commitment. */

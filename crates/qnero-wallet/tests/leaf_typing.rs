@@ -40,7 +40,7 @@ use qnero_wallet::keys::create_seed;
 use qnero_wallet::memo::pad_memo;
 use qnero_wallet::rpc::RpcClient;
 use qnero_wallet::scale::{identity_map_key, storage_prefix};
-use qnero_wallet::wallet::{SyncOptions, Wallet};
+use qnero_wallet::wallet::{SyncOptions, Wallet, WARNED_LEAVES_PER_PASS};
 use std::collections::BTreeSet;
 
 use support::{encode_u64, test_metadata, FakeNode, NodeState};
@@ -1543,6 +1543,173 @@ fn a_moved_leaf_whose_ciphertext_stayed_is_recorded_where_the_block_holds_it() {
         "the index the chain actually holds it at"
     );
     assert_eq!(wallet.store.unspent_total(), 1_000);
+}
+
+/// How many leaves a pass writes one sentence about is a node's choice, so the
+/// sentences are capped and the rest are counted.
+///
+/// Both detector warnings are per leaf, and a node answers the leaves: it can
+/// put a commitment this wallet's payload does not open beside every
+/// ciphertext it serves. Uncapped that is one `String` per leaf on
+/// `SyncReport::warnings` and one printed line per leaf, out of an answer
+/// nothing has checked. Past `WARNED_LEAVES_PER_PASS` the pass counts instead
+/// and closes each kind with one sentence carrying the count, so the list is
+/// bounded at eighteen entries whatever a node answers.
+///
+/// `wallet-web/tests/leaf-typing.test.ts` drives the same two overflows
+/// against the browser wallet.
+#[test]
+fn the_per_leaf_warnings_are_capped_and_the_rest_are_counted() {
+    let (_seed, mut wallet) = fresh("warning-cap");
+    let address = wallet.address();
+    let mine = note_for(address.pk, 1_000, "capped-payment");
+    let mine_ct = ct_for(&address, &mine, 7);
+    // A second note of this wallet's, whose commitment the block never holds.
+    let elsewhere = note_for(address.pk, 5, "capped-elsewhere");
+    let elsewhere_ct = ct_for(&address, &elsewhere, 8);
+
+    let overflow: u64 = 2;
+    let each = WARNED_LEAVES_PER_PASS + overflow;
+    let coinbase_index = each * 2;
+
+    let mut state = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    // The first `each` leaves carry this wallet's payment ciphertext beside a
+    // stranger's commitment, and the block holds the payment's own commitment
+    // at its coinbase position, so each of them is a move the pass recovers.
+    for leaf in 0..each {
+        let stranger = Digest::hash_bytes(&[b"moved", &leaf.to_le_bytes()]);
+        put_leaf(&mut state, leaf, 8, stranger, &mine_ct);
+    }
+    // The next `each` carry a ciphertext of this wallet's whose commitment the
+    // block holds nowhere, so each of those is skipped.
+    for leaf in 0..each {
+        let stranger = Digest::hash_bytes(&[b"unplaceable", &leaf.to_le_bytes()]);
+        put_leaf(&mut state, each + leaf, 8, stranger, &elsewhere_ct);
+    }
+    put_coinbase(&mut state, coinbase_index, 8, mine.commitment(), 42);
+    state.put_storage(
+        &storage_prefix("ZkTree", "LeafCount"),
+        &encode_u64(coinbase_index + 1),
+    );
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("a capped pass still finishes");
+
+    // The payment still arrives, at the index inside the block that holds the
+    // commitment it opens. A cap on the sentences changes no decision.
+    assert_eq!(report.received, 1, "the payment arrives");
+    assert_eq!(
+        wallet
+            .store
+            .notes
+            .first()
+            .expect("the note is stored")
+            .leaf_index,
+        coinbase_index
+    );
+
+    let moved: Vec<&String> = report
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("commitment answered beside it"))
+        .collect();
+    let skipped: Vec<&String> = report
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("at none of the leaves it appended"))
+        .collect();
+    assert_eq!(moved.len() as u64, WARNED_LEAVES_PER_PASS, "{moved:?}");
+    assert_eq!(skipped.len() as u64, WARNED_LEAVES_PER_PASS, "{skipped:?}");
+    // The ones written out are the first of each kind, named by their leaf.
+    assert!(moved[0].contains("leaf 0"), "{}", moved[0]);
+    assert!(
+        skipped[0].contains(&format!("leaf {each}")),
+        "{}",
+        skipped[0]
+    );
+
+    // And each kind closes with one sentence carrying what the cap held back.
+    let moved_more: Vec<&String> = report
+        .warnings
+        .iter()
+        .filter(|warning| {
+            warning.starts_with(&format!("and {overflow} more leaves"))
+                && warning.contains("each recorded")
+        })
+        .collect();
+    let skipped_more: Vec<&String> = report
+        .warnings
+        .iter()
+        .filter(|warning| {
+            warning.starts_with(&format!("and {overflow} more leaves"))
+                && warning.contains("each skipped")
+        })
+        .collect();
+    assert_eq!(moved_more.len(), 1, "{:?}", report.warnings);
+    assert_eq!(skipped_more.len(), 1, "{:?}", report.warnings);
+    assert!(moved_more[0].contains("second node"), "{}", moved_more[0]);
+    assert!(
+        skipped_more[0].contains("second node"),
+        "{}",
+        skipped_more[0]
+    );
+
+    // Eighteen, whatever a node answers: two kinds of eight plus one closing
+    // sentence each, and nothing else fired on this pass.
+    assert_eq!(
+        report.warnings.len() as u64,
+        WARNED_LEAVES_PER_PASS * 2 + 2,
+        "{:?}",
+        report.warnings
+    );
+}
+
+/// At the cap exactly, there is nothing left over to count.
+#[test]
+fn a_pass_at_the_warning_cap_writes_no_overflow_sentence() {
+    let (_seed, mut wallet) = fresh("warning-cap-exact");
+    let address = wallet.address();
+    let mine = note_for(address.pk, 1_000, "at-the-cap");
+    let mine_ct = ct_for(&address, &mine, 7);
+
+    let mut state = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    for leaf in 0..WARNED_LEAVES_PER_PASS {
+        let stranger = Digest::hash_bytes(&[b"moved", &leaf.to_le_bytes()]);
+        put_leaf(&mut state, leaf, 8, stranger, &mine_ct);
+    }
+    put_coinbase(&mut state, WARNED_LEAVES_PER_PASS, 8, mine.commitment(), 42);
+    state.put_storage(
+        &storage_prefix("ZkTree", "LeafCount"),
+        &encode_u64(WARNED_LEAVES_PER_PASS + 1),
+    );
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("a pass at the cap finishes");
+    assert_eq!(
+        report.warnings.len() as u64,
+        WARNED_LEAVES_PER_PASS,
+        "{:?}",
+        report.warnings
+    );
+    assert!(
+        !report.warnings.iter().any(|w| w.starts_with("and ")),
+        "{:?}",
+        report.warnings
+    );
 }
 
 /// The same swap with this wallet's ciphertext gone: nothing opens, and the

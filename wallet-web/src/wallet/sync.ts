@@ -352,6 +352,10 @@ export interface SyncReport {
    * origin walk, abandoned pending rows, a coinbase rebuilt under a foreign
    * label. Each of those is rare and each says something happened, which is
    * what keeps the list worth reading.
+   *
+   * The scan's two detector entries are per leaf and a node decides how many
+   * leaves produce one, so both are capped at `WARNED_LEAVES_PER_PASS`
+   * sentences and the rest of each is one closing sentence carrying the count.
    */
   warnings: string[];
   /**
@@ -742,28 +746,105 @@ export async function authenticateLeaves(
 }
 
 /**
- * Where the block a leaf belongs to holds a commitment, if it holds it.
+ * How many per-leaf detector warnings one pass writes out in full.
  *
- * The search is over the leaves this pass already folded and compared against
- * each block's own `zkTreeRoot`, so a hit is a commitment the block
- * demonstrably appended. It is over one block's range because that is the set
- * the root pins: a commitment elsewhere in the chain is a claim this pass has
- * not checked against the header that would settle it. Linear over that range,
- * and it runs only on a mismatch, which an honest chain never produces.
+ * The detector in the scan writes one sentence per leaf whose ciphertext this
+ * wallet's key opens beside a commitment that note does not open, and how many
+ * of those a pass meets is a node's choice: it can answer a mismatching
+ * commitment at every leaf it serves. Uncapped that is one sentence per leaf
+ * held in memory and one `Notice` per leaf on the balance screen, out of an
+ * answer nobody has checked. Past the cap the pass counts instead and says how
+ * many, so the two summaries bound the list at eighteen entries whatever a
+ * node answers.
  *
- * `crates/qnero-wallet/src/wallet.rs`'s `index_in_block` is the same rule.
+ * Eight, because the list is read by a person: it is enough entries to see the
+ * pattern, and the count after them is what says the size.
+ * `crates/qnero-wallet/src/wallet.rs` holds the same bound as
+ * `WARNED_LEAVES_PER_PASS`.
  */
-function indexInBlock(typing: LeafTyping, block: number, commitment: string): number | null {
-  for (const [index, at] of typing.blockOf) {
-    if (at !== block) {
-      continue;
-    }
-    const held = bytesToHex(typing.commitments.subarray(index * 32, index * 32 + 32)).slice(2);
-    if (held === commitment) {
-      return index;
+export const WARNED_LEAVES_PER_PASS = 8;
+
+/** "leaf" or "leaves", for a count that is written into a sentence. */
+function leavesWord(count: number): string {
+  return count === 1 ? 'leaf' : 'leaves';
+}
+
+/**
+ * One leaf whose opened note the same block holds at another index.
+ *
+ * The payment arrives, at the index inside the block that holds the commitment
+ * the note opens, and the sentence carries both indices because the one this
+ * node answered at is the thing a second node would disagree about.
+ * `crates/qnero-wallet/src/wallet.rs`'s `moved_leaf_warning` writes the same
+ * sentence.
+ */
+function movedLeafWarning(leaf: number, blockNumber: number | null, index: number): string {
+  return (
+    `leaf ${leaf} carries a ciphertext this wallet's own key opens, and the ` +
+    'commitment answered beside it is one that note does not open. Block ' +
+    `${String(blockNumber)} holds the opened note's commitment at leaf ${index}, inside ` +
+    "the range this pass folded against that block's own header, so the note is " +
+    `recorded at leaf ${index} and the payment arrives. A ciphertext that opens under ` +
+    "this wallet's key is this wallet's note, so the pair was moved. Which index " +
+    'inside a block holds which commitment is bound by nothing on chain: sync against ' +
+    'a second node before spending it.'
+  );
+}
+
+/**
+ * One leaf whose opened note its own block holds nowhere.
+ *
+ * Skipped and said out loud, because a sender who encrypts a payload opening a
+ * commitment it never published produces the identical reading and nothing
+ * local tells the two apart. `crates/qnero-wallet/src/wallet.rs`'s
+ * `unplaceable_leaf_warning` writes the same sentence.
+ */
+function unplaceableLeafWarning(leaf: number, blockNumber: number | null): string {
+  return (
+    `leaf ${leaf} carries a ciphertext this wallet's own key opens, and block ` +
+    `${String(blockNumber)} holds the commitment it opens at none of the leaves it ` +
+    'appended. The leaf is skipped and the pass continues, because a sender who ' +
+    'encrypts a payload opening a commitment it never published produces the same ' +
+    'reading and nothing here tells the two apart. If a payment is missing, sync ' +
+    'against a second node.'
+  );
+}
+
+/** The key a commitment is held under: its block, then the commitment. */
+function heldKey(block: number, commitment: string): string {
+  return `${String(block)}:${commitment}`;
+}
+
+/**
+ * Where each block of this pass holds each commitment, keyed by both.
+ *
+ * The map is over the leaves this pass already folded and compared against
+ * each block's own `zkTreeRoot`, so a hit is a commitment the block
+ * demonstrably appended. The block is half the key because that is the set the
+ * root pins: a commitment elsewhere in the chain is a claim this pass has not
+ * checked against the header that would settle it.
+ *
+ * Built once per pass and only when a leaf mismatches, because the lookup used
+ * to be a walk of the whole authenticated range per moved leaf, on the main
+ * thread, and how many moved leaves a pass meets is a node's choice. One walk
+ * answers every mismatch in the pass instead. The first leaf wins a repeated
+ * commitment, which is the leaf the walk used to return.
+ *
+ * `crates/qnero-wallet/src/wallet.rs`'s `index_chunk` is the same rule, per
+ * chunk of its own walk.
+ */
+function indexByCommitment(typing: LeafTyping): Map<string, number> {
+  const held = new Map<string, number>();
+  for (const [index, block] of typing.blockOf) {
+    const commitment = bytesToHex(
+      typing.commitments.subarray(index * 32, index * 32 + 32),
+    ).slice(2);
+    const key = heldKey(block, commitment);
+    if (!held.has(key)) {
+      held.set(key, index);
     }
   }
-  return null;
+  return held;
 }
 
 /** The hash at a chunk's top, refused by name when this node has no block there. */
@@ -1113,6 +1194,14 @@ export async function runSync(
     const WINDOW = BATCH;
     const total = shape.leafCount - watermark;
     let ciphertextsTried = 0;
+    // Where this pass holds which commitment, built by the first mismatch and
+    // by nothing else. An honest chain produces none, so the ordinary pass
+    // never builds it. See `indexByCommitment`.
+    let heldAtIndex: Map<string, number> | null = null;
+    // The two detector counts of this pass, which are what the per-leaf
+    // warnings are capped against. See `WARNED_LEAVES_PER_PASS`.
+    let movedLeaves = 0;
+    let unplaceableLeaves = 0;
     for (let windowFrom = watermark; windowFrom < shape.leafCount; windowFrom += WINDOW) {
       const windowTo = Math.min(windowFrom + WINDOW, shape.leafCount);
       const records = await chain.leaves(windowFrom, windowTo, head.hash, shape.leafCount);
@@ -1355,7 +1444,11 @@ export async function runSync(
           // already folded and compared against the `zkTreeRoot` its header
           // carries, so a commitment found inside it is one the block appended.
           const opened = normaliseHash(received.commitment);
-          const at = blockNumber === null ? null : indexInBlock(typing, blockNumber, opened);
+          let at: number | null = null;
+          if (blockNumber !== null) {
+            heldAtIndex ??= indexByCommitment(typing);
+            at = heldAtIndex.get(heldKey(blockNumber, opened)) ?? null;
+          }
           if (at === null) {
             // Skipped and said out loud, and a warning deliberately. One other
             // thing produces this reading and nothing local tells it apart: a
@@ -1367,26 +1460,16 @@ export async function runSync(
             // of one transaction. Refusing the pass here would hand that sender
             // a permanent sync denial: the leaf is read again on every later
             // pass and on a rescan as well.
-            warnings.push(
-              `leaf ${record.index} carries a ciphertext this wallet's own key opens, and block ` +
-                `${String(blockNumber)} holds the commitment it opens at none of the leaves it ` +
-                'appended. The leaf is skipped and the pass continues, because a sender who ' +
-                'encrypts a payload opening a commitment it never published produces the same ' +
-                'reading and nothing here tells the two apart. If a payment is missing, sync ' +
-                'against a second node.',
-            );
+            unplaceableLeaves += 1;
+            if (unplaceableLeaves <= WARNED_LEAVES_PER_PASS) {
+              warnings.push(unplaceableLeafWarning(record.index, blockNumber));
+            }
             continue;
           }
-          warnings.push(
-            `leaf ${record.index} carries a ciphertext this wallet's own key opens, and the ` +
-              'commitment answered beside it is one that note does not open. Block ' +
-              `${String(blockNumber)} holds the opened note's commitment at leaf ${at}, inside ` +
-              "the range this pass folded against that block's own header, so the note is " +
-              `recorded at leaf ${at} and the payment arrives. A ciphertext that opens under ` +
-              "this wallet's key is this wallet's note, so the pair was moved. Which index " +
-              'inside a block holds which commitment is bound by nothing on chain: sync against ' +
-              'a second node before spending it.',
-          );
+          movedLeaves += 1;
+          if (movedLeaves <= WARNED_LEAVES_PER_PASS) {
+            warnings.push(movedLeafWarning(record.index, blockNumber, at));
+          }
           leafIndex = at;
           heldAt = opened;
         }
@@ -1483,6 +1566,29 @@ export async function runSync(
         rejected.delete(commitment);
         report.rejectedCleared += 1;
       }
+    }
+
+    // What the cap held back, carried as a count. The sentence per leaf stops
+    // at the cap and this says how many more there were, so a node that
+    // mismatches at every leaf costs one closing sentence for the whole pass,
+    // and the balance screen renders a list a person can read. See
+    // `WARNED_LEAVES_PER_PASS`.
+    const movedMore = movedLeaves - WARNED_LEAVES_PER_PASS;
+    if (movedMore > 0) {
+      warnings.push(
+        `and ${movedMore} more ${leavesWord(movedMore)} in this pass carried a ciphertext this ` +
+          "wallet's own key opens beside a commitment that note does not open, each recorded " +
+          'at the index inside its own block that holds the commitment it opens. Sync against ' +
+          'a second node before spending them.',
+      );
+    }
+    const unplaceableMore = unplaceableLeaves - WARNED_LEAVES_PER_PASS;
+    if (unplaceableMore > 0) {
+      warnings.push(
+        `and ${unplaceableMore} more ${leavesWord(unplaceableMore)} in this pass carried a ` +
+          "ciphertext this wallet's own key opens whose commitment their own block holds " +
+          'nowhere, each skipped. If a payment is missing, sync against a second node.',
+      );
     }
   }
 

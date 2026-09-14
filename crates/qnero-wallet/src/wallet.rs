@@ -1,6 +1,6 @@
 //! The wallet's operations: scan, shield, spend.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -9,8 +9,8 @@ use qnero_circuit::chain::ct_digest;
 use qnero_circuit::merkle::{MerklePath, TreeFrontier};
 use qnero_circuit::witness::{InputNote, OutputNote, SpendWitness};
 use qnero_notes::{
-    decrypt_note, encrypt_note, entry_rho, try_receive, try_receive_coinbase, Address, Digest,
-    MinerKey, Note, NoteCiphertext, NotesError, ReceivedNote,
+    decrypt_note, encrypt_note, entry_rho, try_receive_coinbase, Address, Digest, MinerKey, Note,
+    NoteCiphertext, ReceivedNote,
 };
 use qnero_notes::{IncomingViewingKey, SpendingKey};
 use qnero_prover::WalletProver;
@@ -131,6 +131,64 @@ pub const ENTRY_WALK_LIMIT: u64 = 100_000;
 /// the per-block cost and this size. `wallet-web` holds the same bound in
 /// `src/wallet/sync.ts`.
 pub const HEADER_WALK_LIMIT: u32 = 1024;
+
+/// How many per-leaf detector warnings one pass writes out in full.
+///
+/// The detector in the scan writes one sentence per leaf whose ciphertext this
+/// wallet's key opens beside a commitment that note does not open, and how
+/// many of those a pass meets is a node's choice: it can answer a mismatching
+/// commitment at every leaf it serves. Uncapped that is one sentence per leaf
+/// held in memory and printed, out of an answer nobody has checked. Past the
+/// cap the pass counts instead and says how many, so the two summaries below
+/// bound the list at eighteen entries whatever a node answers.
+///
+/// Eight, because the list is read by a person: it is enough entries to see
+/// the pattern, and the count after them is what says the size. `wallet-web`
+/// holds the same bound in `src/wallet/sync.ts`.
+pub const WARNED_LEAVES_PER_PASS: u64 = 8;
+
+/// "leaf" or "leaves", for a count that is written into a sentence.
+fn leaves_word(count: u64) -> &'static str {
+    if count == 1 {
+        "leaf"
+    } else {
+        "leaves"
+    }
+}
+
+/// One leaf whose opened note the same block holds at another index.
+///
+/// The payment arrives, at the index inside the block that holds the
+/// commitment the note opens, and the sentence carries both indices because
+/// the one this node answered at is the thing a second node would disagree
+/// about. `wallet-web/src/wallet/sync.ts` writes the same sentence.
+fn moved_leaf_warning(leaf: u64, block_number: u32, index: u64) -> String {
+    format!(
+        "leaf {leaf} carries a ciphertext this wallet's own key opens, and the commitment \
+         answered beside it is one that note does not open. Block {block_number} holds the \
+         opened note's commitment at leaf {index}, inside the range this pass folded against \
+         that block's own header, so the note is recorded at leaf {index} and the payment \
+         arrives. A ciphertext that opens under this wallet's key is this wallet's note, so the \
+         pair was moved. Which index inside a block holds which commitment is bound by nothing \
+         on chain: sync against a second node before spending it."
+    )
+}
+
+/// One leaf whose opened note its own block holds nowhere.
+///
+/// Skipped and said out loud, because a sender who encrypts a payload opening
+/// a commitment it never published produces the identical reading and nothing
+/// local tells the two apart. `wallet-web/src/wallet/sync.ts` writes the same
+/// sentence.
+fn unplaceable_leaf_warning(leaf: u64, block_number: u32) -> String {
+    format!(
+        "leaf {leaf} carries a ciphertext this wallet's own key opens, and block {block_number} \
+         holds the commitment it opens at none of the leaves it appended. The leaf is skipped \
+         and the pass continues, because a sender who encrypts a payload opening a commitment it \
+         never published produces the same reading and nothing here tells the two apart. If a \
+         payment is missing, sync against a second node."
+    )
+}
 
 pub struct Wallet {
     pub seed_path: PathBuf,
@@ -491,6 +549,10 @@ impl Wallet {
         let mut cursor_leaf = start;
         let mut trusted_block = anchor_block;
         let mut trusted_hash = anchor_hash;
+        // The two detector counts of this pass, which are what the per-leaf
+        // warnings are capped against. See [`WARNED_LEAVES_PER_PASS`].
+        let mut moved_leaves: u64 = 0;
+        let mut unplaceable_leaves: u64 = 0;
         loop {
             let top = trusted_block
                 .saturating_add(HEADER_WALK_LIMIT)
@@ -574,6 +636,11 @@ impl Wallet {
                 }
                 let typed = type_chunk(fold, &blocks, &records, &miner)?;
                 cursor_leaf += typed.len() as u64;
+                // Where this chunk holds which commitment, built by the first
+                // mismatch in it and by nothing else. An honest chain produces
+                // none, so the ordinary pass never builds it. See
+                // [`index_chunk`].
+                let mut by_commitment: Option<HashMap<(u32, Digest), u64>> = None;
                 for (record, leaf) in records.iter().zip(typed.iter()) {
                     report.leaves_scanned += 1;
                     let commitment = leaf.commitment;
@@ -661,22 +728,20 @@ impl Wallet {
                         // against the `zkTreeRoot` its header carries, so a
                         // commitment found inside it is one the block appended.
                         OpenedLeaf::Elsewhere(received) => {
-                            match index_in_block(&typed, block_number, &received.commitment) {
+                            let found = by_commitment
+                                .get_or_insert_with(|| index_chunk(&typed))
+                                .get(&(block_number, received.commitment))
+                                .copied();
+                            match found {
                                 Some(index) => {
-                                    report.warnings.push(format!(
-                                        "leaf {} carries a ciphertext this wallet's own key \
-                                         opens, and the commitment answered beside it is one \
-                                         that note does not open. Block {block_number} holds the \
-                                         opened note's commitment at leaf {index}, inside the \
-                                         range this pass folded against that block's own header, \
-                                         so the note is recorded at leaf {index} and the payment \
-                                         arrives. A ciphertext that opens under this wallet's \
-                                         key is this wallet's note, so the pair was moved. Which \
-                                         index inside a block holds which commitment is bound by \
-                                         nothing on chain: sync against a second node before \
-                                         spending it.",
-                                        record.index
-                                    ));
+                                    moved_leaves += 1;
+                                    if moved_leaves <= WARNED_LEAVES_PER_PASS {
+                                        report.warnings.push(moved_leaf_warning(
+                                            record.index,
+                                            block_number,
+                                            index,
+                                        ));
+                                    }
                                     leaf_index = index;
                                     let commitment = received.commitment;
                                     (received, commitment)
@@ -696,17 +761,13 @@ impl Wallet {
                                 // sync denial: the leaf is read again on every
                                 // later pass and on a rescan as well.
                                 None => {
-                                    report.warnings.push(format!(
-                                        "leaf {} carries a ciphertext this wallet's own key \
-                                         opens, and block {block_number} holds the commitment it \
-                                         opens at none of the leaves it appended. The leaf is \
-                                         skipped and the pass continues, because a sender who \
-                                         encrypts a payload opening a commitment it never \
-                                         published produces the same reading and nothing here \
-                                         tells the two apart. If a payment is missing, sync \
-                                         against a second node.",
-                                        record.index
-                                    ));
+                                    unplaceable_leaves += 1;
+                                    if unplaceable_leaves <= WARNED_LEAVES_PER_PASS {
+                                        report.warnings.push(unplaceable_leaf_warning(
+                                            record.index,
+                                            block_number,
+                                        ));
+                                    }
                                     continue;
                                 }
                             }
@@ -824,6 +885,32 @@ impl Wallet {
             trusted_hash = top_hash;
             if top == head.number {
                 break;
+            }
+        }
+
+        // What the cap held back, carried as a count. The sentence per leaf
+        // stops at the cap and this says how many more there were, so a node
+        // that mismatches at every leaf costs one closing sentence for the
+        // whole pass. See [`WARNED_LEAVES_PER_PASS`].
+        if let Some(more) = moved_leaves.checked_sub(WARNED_LEAVES_PER_PASS) {
+            if more > 0 {
+                report.warnings.push(format!(
+                    "and {more} more {} in this pass carried a ciphertext this wallet's own key \
+                     opens beside a commitment that note does not open, each recorded at the \
+                     index inside its own block that holds the commitment it opens. Sync against \
+                     a second node before spending them.",
+                    leaves_word(more)
+                ));
+            }
+        }
+        if let Some(more) = unplaceable_leaves.checked_sub(WARNED_LEAVES_PER_PASS) {
+            if more > 0 {
+                report.warnings.push(format!(
+                    "and {more} more {} in this pass carried a ciphertext this wallet's own key \
+                     opens whose commitment their own block holds nowhere, each skipped. If a \
+                     payment is missing, sync against a second node.",
+                    leaves_word(more)
+                ));
             }
         }
 
@@ -1973,43 +2060,54 @@ enum OpenedLeaf {
 /// One leaf opened by the ordinary transfer rule: a shield or a settled
 /// output, whose value comes out of the payload and off the chain nowhere.
 ///
-/// [`NotesError::CommitmentMismatch`] is carried out of here as
-/// [`OpenedLeaf::Elsewhere`] and the caller acts on it. It used to be folded
-/// into "somebody else's", which is the same reading as a stranger's
-/// ciphertext and reaches the same silent skip, and it is the one reading a
-/// wallet can tell apart on its own: a stranger's bytes do not open at all,
-/// while these did.
+/// A payload that opens beside a commitment it does not open is carried out
+/// of here as [`OpenedLeaf::Elsewhere`] and the caller acts on it. It used to
+/// be folded into "somebody else's", which is the same reading as a
+/// stranger's ciphertext and reaches the same silent skip, and it is the one
+/// reading a wallet can tell apart on its own: a stranger's bytes do not open
+/// at all, while these did.
 fn try_transfer(ivk: &IncomingViewingKey, ciphertext: &[u8], commitment: &Digest) -> OpenedLeaf {
     let Ok(parsed) = NoteCiphertext::from_bytes(ciphertext) else {
         return OpenedLeaf::NotOurs;
     };
-    match try_receive(ivk, &parsed, commitment) {
-        Ok(received) => OpenedLeaf::Here(received),
-        // The second decryption is the price of keeping `try_receive` the one
-        // rule that compares a note against the commitment beside it. It runs
-        // only on a mismatch, which an honest chain never produces.
-        Err(NotesError::CommitmentMismatch) => match decrypt_note(ivk, &parsed) {
-            Ok(received) => OpenedLeaf::Elsewhere(received),
-            // Unreachable: `try_receive` reaches the comparison only past a
-            // decryption that already succeeded.
-            Err(_) => OpenedLeaf::NotOurs,
-        },
+    // One decapsulation per leaf, and the comparison after it.
+    //
+    // `try_receive` is `decrypt_note` plus this comparison, so calling it and
+    // then decrypting again on a mismatch ran the ML-KEM decapsulation and the
+    // AEAD open twice for the same bytes. How many mismatches a pass meets is
+    // a node's choice: it can answer a commitment the payload does not open at
+    // every leaf it serves, and each one used to cost a second decapsulation.
+    // The note the first open produced is the note either arm needs, so it is
+    // kept and the commitment decides which arm it goes down.
+    match decrypt_note(ivk, &parsed) {
+        Ok(received) if received.commitment == *commitment => OpenedLeaf::Here(received),
+        Ok(received) => OpenedLeaf::Elsewhere(received),
         Err(_) => OpenedLeaf::NotOurs,
     }
 }
 
-/// Where the block this leaf belongs to holds a commitment, if it holds it.
+/// Where each block of this chunk holds each commitment, keyed by both.
 ///
-/// The search is over the leaves this chunk already folded into the tree and
-/// compared against that block's own `zkTreeRoot`, so a hit is a commitment
-/// the block demonstrably appended. It is over one block's range because that
-/// is the set the root pins: a commitment elsewhere in the chain is a claim
-/// this pass has not checked against the header that would settle it.
-fn index_in_block(typed: &[TypedLeaf], block_number: u32, commitment: &Digest) -> Option<u64> {
-    typed
-        .iter()
-        .find(|leaf| leaf.block_number == block_number && leaf.commitment == *commitment)
-        .map(|leaf| leaf.index)
+/// The map is over the leaves this chunk already folded into the tree and
+/// compared against each block's own `zkTreeRoot`, so a hit is a commitment
+/// the block demonstrably appended. The block number is half the key because
+/// a block's root pins that block's leaf set and nothing else: a commitment
+/// elsewhere in the chain is a claim this pass has not checked against the
+/// header that would settle it.
+///
+/// Built once per chunk and only when a leaf in it mismatches, because the
+/// lookup used to be a walk of the whole chunk per moved leaf and how many
+/// moved leaves a pass meets is a node's choice. One walk answers every
+/// mismatch in the chunk instead. The first leaf wins a repeated commitment,
+/// which is the leaf the walk used to return.
+fn index_chunk(typed: &[TypedLeaf]) -> HashMap<(u32, Digest), u64> {
+    let mut by_commitment = HashMap::with_capacity(typed.len());
+    for leaf in typed {
+        by_commitment
+            .entry((leaf.block_number, leaf.commitment))
+            .or_insert(leaf.index);
+    }
+    by_commitment
 }
 
 /// Whether a note's `rho` is the one the entry rule produces for the block its
@@ -2204,6 +2302,10 @@ pub struct SyncReport {
     /// open, either relocated to the index inside the same block that holds
     /// the opened note's commitment, or skipped because that block holds it
     /// nowhere. `wallet-web` carries the same list as `report.warnings`.
+    ///
+    /// Both of those are per leaf and a node decides how many leaves produce
+    /// one, so both are capped at [`WARNED_LEAVES_PER_PASS`] sentences and the
+    /// rest of each is one closing sentence carrying the count.
     pub warnings: Vec<String>,
     /// The node gate this sync bypassed, as the refusal it would have been.
     ///
