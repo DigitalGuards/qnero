@@ -324,6 +324,28 @@ test.describe('the browser wallet against a dev chain', () => {
 
     expect(await headHeight()).toBeGreaterThan(0);
 
+    // The prover switch, which is the only control that gives back the 918 MiB
+    // this page holds and the one control with no test on it. Its test id was
+    // passed as `data-testid` to a component that destructured a fixed prop
+    // list and spread nothing, so the hook the settings screen advertised did
+    // not reach the DOM at all and JSX could not catch it: a hyphenated
+    // attribute name is not type checked.
+    await page.getByTestId('tab-settings').click();
+    const proverSwitch = page.getByTestId('prover-resident');
+    await expect(proverSwitch).toHaveAttribute('data-state', 'checked');
+    await proverSwitch.click();
+    await expect(proverSwitch).toHaveAttribute('data-state', 'unchecked');
+    // Nothing syncs while it is stopped, which is what the panel beside it
+    // says. The button used to stay live and pay for every node gate and the
+    // whole settled nullifier set before dying at the first worker call.
+    await page.getByTestId('tab-balance').click();
+    await expect(page.getByTestId('do-sync')).toBeDisabled();
+    await page.getByTestId('tab-settings').click();
+    await proverSwitch.click();
+    await expect(proverSwitch).toHaveAttribute('data-state', 'checked', { timeout: 180_000 });
+    await page.getByTestId('tab-balance').click();
+    await expect(page.getByTestId('do-sync')).toBeEnabled({ timeout: 60_000 });
+
     // What the node was asked, over a whole session: a connection, two syncs,
     // a payment and a confirmation.
     const rpc = await page.evaluate(

@@ -179,12 +179,16 @@ export async function spend(
   if (refusal !== null) {
     throw new Error(`${refusal}. Nothing has been built.`);
   }
-  // The recipient, checked here rather than inside the prover. A Qnero address
-  // is about 2,600 characters, so a truncated paste is the ordinary mistake,
-  // and the module decodes it at the end: after the circuit build, the anchor
-  // read and a rebuild of every leaf on the chain. The send form refuses the
-  // same thing as it is typed, from this same function.
-  if (!(await prover.addressIsValid(request.to.trim()))) {
+  // The recipient, checked before anything is built. A Qnero address is about
+  // 2,600 characters, so a truncated paste is the ordinary mistake, and the
+  // module decodes it at the end of the proving call: after the circuit build,
+  // the anchor read and a rebuild of every leaf on the chain. The send form
+  // refuses the same thing as it is typed, through the same check.
+  //
+  // Trimmed once, and the trimmed value is what is paid, so the address that
+  // passed the checksum is the address the proof commits to.
+  const recipient = request.to.trim();
+  if (!(await prover.addressIsValid(recipient))) {
     throw new Error(
       'that is not a valid Qnero address: its bech32m checksum does not hold, which is what a ' +
         'truncated or edited paste looks like. Nothing has been built.',
@@ -338,7 +342,7 @@ export async function spend(
   // outputs publicly into "counterparty" and "sender's change".
   const draw = crypto.getRandomValues(new Uint8Array(1))[0] ?? 0;
   const paymentSlot: 1 | 2 = draw % 2 === 0 ? 1 : 2;
-  const payment = { address: request.to, value: request.amount.toString(), memo: request.memo };
+  const payment = { address: recipient, value: request.amount.toString(), memo: request.memo };
   const changeOutput = {
     address: request.changeAddress,
     value: change.toString(),
@@ -441,7 +445,7 @@ export async function spend(
 
   report({ stage: 'done' });
   return {
-    to: request.to,
+    to: recipient,
     amount: request.amount,
     fee,
     change,

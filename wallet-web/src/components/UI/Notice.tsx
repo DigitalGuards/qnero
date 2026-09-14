@@ -44,11 +44,11 @@ export function Notice({
       data-sensitive={sensitive ? 'may name a note' : undefined}
       className={cn(
         'flex gap-2 rounded-panel border p-2 text-meta',
+        // `bg-notice-bg` is `transparent` in both themes. The token is kept so
+        // the role still has one place to change; the fill is what was dropped.
         tone === 'error'
           ? 'border-destructive/45 bg-destructive/8 text-destructive'
           : 'border-notice-edge bg-notice-bg text-notice',
-        // `bg-notice-bg` is `transparent` in both themes: the token is kept so
-        // the role has one place to change, and the fill is what was dropped.
         className,
       )}
     >

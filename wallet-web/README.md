@@ -249,9 +249,21 @@ itself, so the allowlist also covers what `@polkadot/api` asks on its own.
 
 The Playwright suite starts a `--dev --tmp` node at one mining thread, has the
 command-line wallet shield and then pay the address the browser wallet creates,
-proves a payment in the browser against that chain, and has the command-line
-wallet read the payment back. The node is stopped by pidfile and the port is
-confirmed closed.
+proves a payment in the browser against that chain, has the command-line wallet
+read the payment back, and stops and restarts the prover from the settings
+screen to check that nothing syncs while it is stopped. The node is stopped by
+pidfile and the port is confirmed closed.
+
+`QNERO_DEVNET_PORT` moves that chain off 9944, which is the port every
+Substrate node defaults to and therefore the one most likely to be taken:
+
+```
+QNERO_DEVNET_PORT=9955 nice -n 19 npm run e2e
+QNERO_DEVNET_PORT=9955 QNERO_PROVER=single nice -n 19 npm run e2e
+```
+
+The node, the command-line wallet and the browser all follow it, so there is
+nothing else to change.
 
 ## Design
 

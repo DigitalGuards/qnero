@@ -850,6 +850,38 @@ read the M8 phone floor of 2x to 4x on top of the band's upper half rather
 than its lower one: a payment on a phone is minutes, which is what the M8
 finding said and what the threaded module has not changed.
 
+## After the review fixes (2026-09-14)
+
+The same suite again on the same workstation, against the code the review
+fixes landed, on a dev chain the suite now puts on a port of its own:
+
+| run | `proveTransfer` | Send to settled | peak |
+|---|---|---|---|
+| threaded | 13.3 s | 21.6 s | 918.1 MiB |
+| threaded | 11.9 s | 25.6 s | 917.7 MiB |
+| threaded | 11.6 s | 23.6 s | 917.9 MiB |
+| single threaded | 36.0 s | 55.4 s | 910.2 MiB |
+
+**The module facts reproduce for a fourth sitting.** Peak lands inside half a
+MiB of every figure above it and the proof is 150,908 bytes again.
+
+**The clock came back to the fast end of the band.** These three threaded runs
+sit at 11.6 to 13.3 s where the previous sitting read 23.2 and 27.2 s, with the
+same modules and the same suite, and the single-threaded row is 36.0 s against
+that sitting's 67.0 s. That is the point the previous section made: the seconds
+are the machine's on the day, which is why the wallet now quotes the last
+payment it actually measured on the machine it is running on.
+
+**The ratio holds a third time.** 36.0 s against a 12.3 s threaded mean is
+2.93x, between the 3.36x of the M10 table and the 2.66x of the sitting after
+it. Four threads buy about three.
+
+**The scan reads in windows now and none of these figures moved.** A chain
+twenty blocks deep fits in one window either way. What changed is what is
+resident during a sync of a chain that does not: a leaf record carries that
+leaf's 1,792-byte ciphertext, and the range used to be materialised whole
+before anything was decrypted.
+
 ## `wasm-opt -O`, both modules
 
 Measured by running `wasm-bindgen` into a scratch directory and optimising a
@@ -882,14 +914,19 @@ binaryen should still produce a working module.
   arithmetic comfortable at the fast end of the band and leave it open at the
   slow end.
 - **What sets the clock on a given day.** The same suite, the same modules and
-  the same box spread by about 1.8x between two sittings. Nothing here
-  separates sustained-load clock throttling from contention with other work,
-  so the figure the send screen quotes is one machine's good day.
+  the same box spread by about 1.8x between sittings. Nothing here separates
+  sustained-load clock throttling from contention with other work. The send
+  screen no longer quotes a figure from this file: after the first payment it
+  quotes what the machine it is running on actually took, and the published
+  figure is the first payment's estimate alone.
 - **Scanning at chain scale.** The wallet's sync reads every leaf and tries
   every ciphertext, and this suite's chain is tens of blocks deep. Nothing here
-  bounds a sync against a chain with a million leaves, and the batching
-  constants (64 leaves per query, 1000 keys per page) are the CLI's rather than
-  a measured optimum.
+  bounds the *time* of a sync against a chain with a million leaves, and the
+  batching constants (64 leaves per query, 1000 keys per page) are the CLI's
+  rather than a measured optimum. What is bounded is the memory: the scan reads
+  one 64-leaf window, folds it in and drops it, so a first sync holds one
+  window plus the notes the wallet keeps rather than every ciphertext on the
+  chain at once.
 - **The module over a real network.** Everything above is loopback.
 - **A long-lived tab.** The per-payment growth above is closed, and the figure
   after three payments in one worker is measured. What is not measured is a
