@@ -782,9 +782,10 @@ build (about 4.5 s threaded), the anchor read and its header check, a local
 rebuild of the whole commitment tree, the submission, and the wait for a block.
 A dev chain at a 12 s target block time contributes most of the remainder, and
 it is the one part a faster prover cannot shorten. It is also the noisiest
-figure here: repeat runs of the threaded row landed at 19.6 s and 24.6 s with
-the proving time moving by half a second, because where the settlement falls
-inside a block interval is luck.
+figure here: repeat runs of the threaded row landed at 19.6 s and 24.6 s,
+because where the settlement falls inside a block interval is luck. The
+proving time moves too, by more than this paragraph first claimed. See the
+re-measurement below.
 
 ## What a second payment costs, and why it used to cost a gigabyte
 
@@ -816,6 +817,39 @@ threaded, 39.7 s and 910.2 MiB single threaded, which is the same peak within
 this suite's noise. Terminating the worker is the only thing that gives the
 memory back and the settings screen offers it by name.
 
+## The same suite, re-run, and what the clock is worth
+
+Three further runs of the same suite on the same workstation on 2026-09-14,
+after the fixes above, with other sessions using the box:
+
+| run | `proveTransfer` | Send to settled | peak |
+|---|---|---|---|
+| threaded | 27.2 s | 71.5 s | 917.8 MiB |
+| threaded | 23.2 s | 37.5 s | 917.8 MiB |
+| single threaded | 67.0 s | 104.0 s | 910.2 MiB |
+
+Two things reproduce exactly and one does not, and the split is the useful
+part of this table.
+
+**The module facts reproduce.** Peak linear memory lands within a fifth of a
+MiB of the M10 table (917.8 against 917.6 threaded, 910.2 against 910.2
+single), and the proof is 150,908 bytes in every run ever measured. Those are
+properties of the circuits and the module, so they travel.
+
+**The ratio survives.** 67.0 s against a 25.2 s threaded mean is 2.66x, where
+the table measured 3.36x. Four threads buy most of what they bought before,
+and the gap between the two figures is contention falling on the two runs
+differently.
+
+**The seconds are the machine's, on the day.** Both rows came out about 1.8x
+slower than the table, which measured the same modules through the same suite.
+A laptop part under sustained load and a workstation with other work on it are
+the whole difference. Read the absolute figures as a band of roughly 11 s to
+27 s threaded and 38 s to 67 s single threaded on this class of machine, and
+read the M8 phone floor of 2x to 4x on top of the band's upper half rather
+than its lower one: a payment on a phone is minutes, which is what the M8
+finding said and what the threaded module has not changed.
+
 ## `wasm-opt -O`, both modules
 
 Measured by running `wasm-bindgen` into a scratch directory and optimising a
@@ -842,9 +876,15 @@ binaryen should still produce a working module.
 
 ## What M10 leaves unmeasured
 
-- **A phone.** Still the 2 to 4 factor with no device under it. Threads make
-  the arithmetic comfortable rather than closing it: 11.2 s at 4x is 45 s, and
-  a phone with four usable cores is the assumption inside that.
+- **A phone.** Still the 2 to 4 factor with no device under it, and now over a
+  band rather than a point: 11.2 s at 4x is 45 s and 27.2 s at 4x is close to
+  two minutes, with four usable cores assumed inside both. Threads make the
+  arithmetic comfortable at the fast end of the band and leave it open at the
+  slow end.
+- **What sets the clock on a given day.** The same suite, the same modules and
+  the same box spread by about 1.8x between two sittings. Nothing here
+  separates sustained-load clock throttling from contention with other work,
+  so the figure the send screen quotes is one machine's good day.
 - **Scanning at chain scale.** The wallet's sync reads every leaf and tries
   every ciphertext, and this suite's chain is tens of blocks deep. Nothing here
   bounds a sync against a chain with a million leaves, and the batching
