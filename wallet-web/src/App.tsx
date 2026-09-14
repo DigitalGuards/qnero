@@ -859,8 +859,14 @@ export function App(): ReactNode {
         }
       >
         <header className="mb-4 flex items-center justify-between gap-3">
+          {/* The wordmark, in MyMonero's header type: the name in the body
+              size at semibold, the descriptor beside it at label size in
+              caps. "Qloak, a Qnero wallet" is the full form, and it is set
+              where a subtitle has room: the tab title, the readme and the
+              docs. Here the second span stays one word, because the chain
+              status and the theme control share this row at phone width. */}
           <div className="flex items-baseline gap-2">
-            <span className="text-body font-semibold tracking-label text-ink">Qnero</span>
+            <span className="text-body font-semibold tracking-label text-ink">Qloak</span>
             <span className="text-label uppercase tracking-label text-muted">wallet</span>
           </div>
           <div className="flex items-center gap-2">

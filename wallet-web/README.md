@@ -1,10 +1,15 @@
-# The Qnero browser wallet (M10)
+# Qloak, a Qnero wallet (M10)
 
-A wallet that runs in a page. It creates a spending key here, encrypts it here,
-scans the chain here, proves a payment here in a background worker, and
-contacts nothing but the node you configure. There is no server component and
-there is no account: the only thing between this page and a chain is one
-WebSocket to a node.
+Qloak is a wallet that runs in a page. It creates a spending key here,
+encrypts it here, scans the chain here, proves a payment here in a background
+worker, and contacts nothing but the node you configure. There is no server
+component and there is no account: the only thing between this page and a
+chain is one WebSocket to a node.
+
+The directory is `wallet-web/`, the built page is `dist/`, and the name on the
+page is Qloak. `qnero-wallet` is the command-line wallet in
+`crates/qnero-wallet`, and the two are named apart on purpose: this readme
+says "Qloak" for the page and "the command-line wallet" for the binary.
 
 ```
 cd wallet-web

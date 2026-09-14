@@ -1,9 +1,9 @@
 {
-  "name": "qnero-wallet-web",
+  "name": "qloak",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Browser wallet for a Qnero chain: keys in the page, proofs in a worker, no server",
+  "description": "Qloak, a Qnero wallet: keys in the page, proofs in a worker, no server",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
