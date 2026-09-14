@@ -79,9 +79,9 @@ const EMPTY_BALANCES: Balances = {
  * One session per tab, created when this module loads.
  *
  * Not a ref. The worker, the database handle and the chain connection are one
- * per tab by their nature, not per mount, and a ref read during render is a
- * value React cannot see change. What the component holds instead is state
- * mirroring the parts of it a screen depends on.
+ * per tab by their nature, and a ref would make them one per mount; a ref read
+ * during render is also a value React cannot see change. What the component
+ * holds is state mirroring the parts of it a screen depends on.
  */
 const session = new Session();
 

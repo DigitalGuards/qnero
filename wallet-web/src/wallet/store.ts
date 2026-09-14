@@ -9,8 +9,11 @@
  * What it does not replace is durability against the browser. IndexedDB is
  * evictable, and this store is the only copy of every note's `r`: a note whose
  * `r` is gone is value settled on chain that nothing can ever spend.
- * [`requestPersistence`] asks for the origin to be exempt, and the wallet
- * offers an encrypted export because the answer may be no.
+ * [`requestPersistence`] asks for the origin to be exempt and the settings
+ * screen reports the answer, which may be no. There is no encrypted export
+ * yet, so the answer to an eviction today is the seed: every note's plaintext
+ * is on the chain inside its ciphertext, and what a fresh store loses is the
+ * spent history, which comes back as the refusals a rescan records.
  *
  * # Ordering rules that are not about storage
  *

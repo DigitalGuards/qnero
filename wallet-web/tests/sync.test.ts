@@ -343,8 +343,8 @@ describe('spent status, derived afresh in both directions', () => {
       fakeCrypto(leaves),
     );
     expect(result.notes[0]?.note.spent).toBe(true);
-    // The head this pass was pinned to, not the block that settled it: the map
-    // carries no height.
+    // The head this pass was pinned to. The map carries no height, so the
+    // block that settled it is unknown to the wallet.
     expect(result.notes[0]?.note.spentSeenAtBlock).toBe(5);
     expect(result.report.newlySpent).toBe(1);
   });

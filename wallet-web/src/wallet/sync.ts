@@ -605,8 +605,8 @@ export async function runSync(
     const isSettled = settled.has(normaliseHash(entry.secret.nullifier));
     if (isSettled && !entry.note.spent) {
       entry.note.spent = true;
-      // The head this pass was pinned to, not the block that settled it: the
-      // map carries no height.
+      // The head this pass was pinned to. `UsedNullifiers` carries no height,
+      // so the block that settled it is unknown here.
       entry.note.spentSeenAtBlock = head.number;
       report.newlySpent += 1;
       continue;

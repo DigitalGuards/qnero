@@ -52,7 +52,8 @@ testnet and nothing about a chain is compiled in.
   length that verifier cannot read, and the refusal arrives after the whole
   proving cost.
 - `expectedProveSeconds` is what this build tells somebody to expect while a
-  payment proves. It is a measurement from `docs/BENCH.md`, not a promise.
+  payment proves. It comes from the measurement in `docs/BENCH.md`, and a slower
+  machine takes longer.
 
 `?prover=single` in the URL pins the single-threaded module on an origin that
 could run the threaded one. It is how both rows in `docs/BENCH.md` are measured

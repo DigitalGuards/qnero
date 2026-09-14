@@ -781,7 +781,10 @@ that matters for a phone: M8's peak stands.
 build (about 4.5 s threaded), the anchor read and its header check, a local
 rebuild of the whole commitment tree, the submission, and the wait for a block.
 A dev chain at a 12 s target block time contributes most of the remainder, and
-it is the one part a faster prover cannot shorten.
+it is the one part a faster prover cannot shorten. It is also the noisiest
+figure here: repeat runs of the threaded row landed at 19.6 s and 24.6 s with
+the proving time moving by half a second, because where the settlement falls
+inside a block interval is luck.
 
 ## `wasm-opt -O`, both modules
 

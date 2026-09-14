@@ -48,8 +48,8 @@ export interface StoredNote {
   origin: NoteOrigin;
   spent: boolean;
   /**
-   * The head the sync that set `spent` was pinned to, **not** the block that
-   * settled it: `UsedNullifiers` carries no height. It is what makes clearing
+   * The head the sync that set `spent` was pinned to. `UsedNullifiers` carries
+   * no height, so the block that settled it is unknown to the wallet. It is what makes clearing
    * the flag safe, because an absent nullifier below this height is an
    * orphaned settlement and above it is a node that has not got there yet.
    */
