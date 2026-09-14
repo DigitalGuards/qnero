@@ -350,7 +350,13 @@ export function App(): ReactNode {
       setError(null);
       try {
         const db = await current.openDatabase();
-        const account = await current.prover.deriveAccount(seedHex);
+        // One crossing. The seed goes to the worker as a transferred buffer,
+        // the page's copy is detached by the transfer, and the answer carries
+        // the address the store binds its records to. It used to cross twice:
+        // a `deriveAccount` request carrying the seed as a plain string, which
+        // structured clone copies into the worker's heap where neither side
+        // can erase it, for an address this call already returns.
+        const account = await current.prover.unlock(hexToBytes(seedHex));
         const saltHex = bytesToHex(newSalt());
         const key = await deriveKey(passphrase, saltHex);
         const store = await createStore(db, {
@@ -362,15 +368,17 @@ export function App(): ReactNode {
         });
         current.store = store;
         current.account = account;
-        // The seed goes to the worker as a transferred buffer and the page's
-        // copy is detached by the transfer.
-        await current.prover.unlock(hexToBytes(seedHex));
         setAddress(account.address);
         setStoreUnlocked(true);
         await refresh();
         // The route follows the phase: see `redirectFor`.
         setPhase({ kind: 'open' });
       } catch (createError) {
+        // Nothing stays unlocked, here as at the unlock screen: a store that
+        // failed to be written is a seed the worker is holding for a wallet
+        // that does not exist.
+        await current.lock().catch(() => undefined);
+        setStoreUnlocked(false);
         setError((createError as Error).message);
       } finally {
         setBusy(false);

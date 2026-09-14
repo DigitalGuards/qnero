@@ -87,6 +87,54 @@ export const nodeSeamFence = [
   },
 ];
 
+/**
+ * The worker fence.
+ *
+ * `src/worker/protocol.ts` states the split the whole privacy argument rests
+ * on: the worker holds the seed and never opens a socket, the page opens every
+ * socket and holds no secret, so the side that could leak a secret into a
+ * request has no way to make one. Only the page's half of that was checked.
+ * `tests/privacy.test.ts` records the page's transport seam, the transport
+ * fence above keys on `api.*`, and the end-to-end recorder patches
+ * `WebSocket.prototype.send` through `addInitScript`, which Playwright
+ * evaluates in page frames: a worker has its own realm with an unpatched
+ * `WebSocket`, `fetch` and `XMLHttpRequest`. One line inside `src/worker/`
+ * where the plaintext seed hex is in scope passed the lint, every unit test
+ * and every end-to-end run with its allowlist assertion green.
+ *
+ * The worker's one legitimate network use is the same-origin `import(url)`
+ * that loads the wasm module, which is a dynamic import rather than any of
+ * these names, so the fence leaves it alone.
+ */
+const WORKER_NETWORK_MESSAGE =
+  'The worker holds the seed and opens no socket. That split is what makes "the node learns ' +
+  'nothing" checkable, and nothing outside it can see a request made from here.';
+
+export const workerNetworkFence = [
+  {
+    // `new WebSocket(...)`, and the same for the other transports.
+    selector:
+      "NewExpression[callee.name=/^(WebSocket|XMLHttpRequest|EventSource|BroadcastChannel)$/]",
+    message: WORKER_NETWORK_MESSAGE,
+  },
+  {
+    // The name anywhere at all, so a `typeof` probe or an alias is caught too.
+    // None of them has a legitimate use in this directory.
+    selector: "Identifier[name=/^(WebSocket|XMLHttpRequest|EventSource|sendBeacon)$/]",
+    message: WORKER_NETWORK_MESSAGE,
+  },
+  {
+    // `fetch(...)` bare.
+    selector: "CallExpression[callee.name='fetch']",
+    message: WORKER_NETWORK_MESSAGE,
+  },
+  {
+    // `self.fetch`, `globalThis.fetch`, and any other object's.
+    selector: "MemberExpression[property.name='fetch']",
+    message: WORKER_NETWORK_MESSAGE,
+  },
+];
+
 export default tseslint.config(
   // `public/wasm` is the generated wasm-bindgen glue, staged by
   // `scripts/stage-wasm.sh`. It is a build output that happens to be
@@ -124,6 +172,19 @@ export default tseslint.config(
     files: ['src/**/*.ts', 'src/**/*.tsx'],
     ignores: ['src/chain/api.ts'],
     rules: { 'no-restricted-syntax': ['error', ...merkleProofFence, ...nodeSeamFence] },
+  },
+  {
+    // The side that holds the seed. Last, because a later block replaces the
+    // rule rather than adding to it, so this one carries all three fences.
+    files: ['src/worker/**'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...merkleProofFence,
+        ...nodeSeamFence,
+        ...workerNetworkFence,
+      ],
+    },
   },
   { files: ['**/*.js'], ...tseslint.configs.disableTypeChecked },
 );

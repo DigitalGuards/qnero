@@ -145,10 +145,6 @@ export class ProverClient {
     return this.call<ProverLimits>({ kind: 'limits' });
   }
 
-  deriveAccount(seedHex: string): Promise<ProverAccount> {
-    return this.call<ProverAccount>({ kind: 'deriveAccount', seedHex });
-  }
-
   /** No seed. The worker has held one since the unlock: see `protocol.ts`. */
   minerKey(): Promise<string> {
     return this.call<string>({ kind: 'minerKey' });

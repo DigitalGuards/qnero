@@ -37,7 +37,6 @@ const LIMITS = {
   chain_num_leaves: 6,
 };
 
-const SEED = '7f'.repeat(32);
 const ADDRESS = 'qn1stub';
 /** What the chain published for the coinbase leaf under test. */
 const CHAIN_VALUE = 5000n;
@@ -156,8 +155,12 @@ describe('the circuits', () => {
 describe('an account derivation', () => {
   it('hands the page the address and nothing else', async () => {
     const { core } = await started();
-    const answer = (await core.handle({ kind: 'deriveAccount', seedHex: SEED }, () => undefined))
-      .value;
+    // Through the unlock, which is the only request that carries a seed and
+    // the only one that answers with an account. The create path used to send
+    // a second request carrying the seed as a plain string, for this address.
+    const answer = (
+      await core.handle({ kind: 'unlock', seed: new Uint8Array(32) }, () => undefined)
+    ).value;
     expect(answer).toEqual({ address: ADDRESS });
     // The module answers with the coinbase viewing key beside the address.
     // Whatever a page later serialises, it cannot serialise that.

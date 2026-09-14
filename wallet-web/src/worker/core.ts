@@ -182,10 +182,6 @@ export class ProverCore {
         return { value: this.limits };
       }
 
-      case 'deriveAccount': {
-        return { value: accountOf(this.requireWasm().deriveAccount(request.seedHex)) };
-      }
-
       case 'minerKey': {
         // From the seed this worker already holds. The request carries none:
         // a page that had to read the vault back out to ask this question

