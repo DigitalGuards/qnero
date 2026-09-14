@@ -1,6 +1,8 @@
 # `crypto/`: Post-Quantum Primitive Crate
 
-This crate (`synthetic-crypto`) hosts ML-DSA/SLH-DSA signatures, ML-KEM encryption, and hash/commitment utilities described in `DESIGN.md §1` and the `docs/API_REFERENCE.md` entry. It is consumed by `consensus`, `wallet`, and the benchmarking binaries.
+This crate (`qnero-pqcrypto`) hosts SLH-DSA signatures, ML-KEM encryption, and hash/commitment utilities described in `DESIGN.md §1` and the `docs/API_REFERENCE.md` entry. It is consumed by `consensus`, `wallet`, and the benchmarking binaries.
+
+Transparent spend authorization lives in `chain/`. Qnero signs a transparent extrinsic with ML-DSA-87 through `qp-dilithium-crypto`, and `chain/runtime/src/extrinsic.rs` is the consensus rule that admits exactly that scheme. The level-3 ML-DSA module this crate carried was unused by anything in the workspace and was dropped with that rule; see `CHANGES.md`.
 
 ## Quickstart
 

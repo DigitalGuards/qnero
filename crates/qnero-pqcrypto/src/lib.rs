@@ -5,7 +5,6 @@ extern crate alloc;
 pub mod deterministic;
 pub mod error;
 pub mod hashes;
-pub mod ml_dsa;
 pub mod ml_kem;
 pub mod note_encryption;
 pub mod slh_dsa;

@@ -3,7 +3,6 @@ use qnero_pqcrypto::hashes::{
     blake3_256, commit_note, commit_note_with, derive_nullifier, derive_prf_key, poseidon_hash,
     sha256, sha3_256, CommitmentHash, FieldElement,
 };
-use qnero_pqcrypto::ml_dsa::{MlDsaSecretKey, ML_DSA_PUBLIC_KEY_LEN, ML_DSA_SIGNATURE_LEN};
 use qnero_pqcrypto::ml_kem::{
     MlKemKeyPair, ML_KEM_CIPHERTEXT_LEN, ML_KEM_PUBLIC_KEY_LEN, ML_KEM_SHARED_SECRET_LEN,
 };
@@ -15,9 +14,6 @@ use std::path::Path;
 
 #[derive(Deserialize)]
 struct CryptoVectors {
-    ml_dsa_pk: String,
-    ml_dsa_sk: String,
-    ml_dsa_sig: String,
     slh_dsa_pk: String,
     slh_dsa_sk: String,
     slh_dsa_sig: String,
@@ -38,29 +34,6 @@ fn load_vectors() -> CryptoVectors {
     let path = Path::new("tests/vectors.json");
     let contents = fs::read_to_string(path).expect("vectors.json readable");
     serde_json::from_str(&contents).expect("valid json vectors")
-}
-
-#[test]
-fn ml_dsa_deterministic_vectors() {
-    let vectors = load_vectors();
-    let seed = b"synthetic-ml-dsa-seed";
-    let message = b"synthetic message for ml-dsa";
-    let sk = MlDsaSecretKey::generate_deterministic(seed);
-    let pk = sk.verify_key();
-    let signature = sk.sign(message);
-    pk.verify(message, &signature)
-        .expect("signature must verify");
-
-    assert_eq!(pk.to_bytes().len(), ML_DSA_PUBLIC_KEY_LEN);
-    assert_eq!(signature.as_bytes().len(), ML_DSA_SIGNATURE_LEN);
-
-    let pk_hex = encode(pk.to_bytes());
-    let sig_hex = encode(signature.as_bytes());
-    let sk_hex = encode(sk.to_bytes());
-
-    assert_eq!(pk_hex, vectors.ml_dsa_pk);
-    assert_eq!(sig_hex, vectors.ml_dsa_sig);
-    assert_eq!(sk_hex, vectors.ml_dsa_sk);
 }
 
 #[test]
