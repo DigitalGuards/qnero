@@ -2,7 +2,7 @@
 
 Monero's principles, rebuilt without elliptic curves: every transfer shielded, sender, recipient and amount hidden, no transparent option for users, and no elliptic curve anywhere in the transaction path. Emission is proof of work, with no stake, no validators, no foundation keys in consensus.
 
-**Pre-alpha, devnet only, and no part of Qnero itself has been audited.** The repository is two days of commits, 2026-09-11 and 2026-09-12. What runs today is a local `--dev --tmp` chain and a CLI wallet, exercised end to end on one workstation. No public testnet, no seed node, no hosted explorer, no GUI. Key storage is dev grade. The wallet docs say it plainly: use this on a dev chain and nowhere else. The design draft estimates 10 to 12 weeks to a private testnet.
+**Pre-alpha, devnet only, and no part of Qnero itself has been audited.** The first commit is dated 2026-09-11. What runs today is a local `--dev --tmp` chain and a CLI wallet, exercised end to end on one workstation. No public testnet, no seed node, no hosted explorer, no GUI. Key storage is dev grade. The wallet docs say it plainly: use this on a dev chain and nowhere else. The design draft estimates 10 to 12 weeks to a private testnet.
 
 ## For Monero users
 
@@ -16,7 +16,7 @@ The mental model carries over almost intact.
 
 **RingCT and Bulletproofs+ fold into one proof.** A note commits as `cm = H(CM, H(NOTE, pk, rho, r), v)`, balance is proved in circuit, and each output range-checks to 62 bits inside the spend proof.
 
-**A coinbase still pays the miner in a note.** One note per block, minted from a required inherent, its value and its block public, the recipient hidden. Every unit minted after genesis is a note, and the pool is where it lives, which is what fungibility rests on: `shield` is the only door in, v0 has no exit, and `BaseCallFilter` blocks transparent transfers. Two bypasses are open, for Root and the scheduler.
+**A coinbase still pays the miner in a note.** One note per block, minted from a required inherent, its value and its block public, the recipient hidden. Every unit minted after genesis is a note, and the pool is where it lives, which is what fungibility rests on: `shield` is the only door in, v0 has no exit, and `BaseCallFilter` blocks transparent transfers. One bypass is open, for Root.
 
 **Rigs mine it.** Qnero's proof of work is RandomX, stock `rx/0`, behind the same `FindAuthor` seam QPoW ran behind, so a Monero rig mines Qnero with a config change. The node serves the stratum dialect xmrig speaks to a Monero pool.
 
@@ -54,6 +54,28 @@ One workstation, 20 cores, WSL2. `docs/BENCH.md` is the log.
 - Verify is flat in what a proof wraps: 2.2 ms for a leaf, 4.2 ms for a private batch, 6.04 ms for the public-batch check, all native. A private batch verifies in 14.1 ms of browser wasm against 3.7 ms for the same call natively, 3.8x, and the module's very first verify costs 20.5 ms because V8 has yet to tier that code up. Neither is `WASM_VERIFY_FACTOR = 5`, which governs the runtime's own wasmtime executor and stays unmeasured.
 - In a browser, single threaded: a payment is 33.6 s of wasm and 910.4 MiB of peak linear memory, on top of 12.1 s of circuit build once per worker. Natively on one thread the same batch is 9.82 s, so wasm costs about 3.3x. There is no phone in these figures: a desktop core under headless Chromium is the proxy, and the stated 2-to-4 factor is a floor, because its low end is a peak single-core score ratio that leaves out both throttling and mobile browser engines. A phone therefore lands at 67 to 134 s per payment or worse. The memory fits a 6 GB device and the single-threaded clock misses the 60 s target, so threads are the measured gap.
 - An address `qn1...` is 2571 characters, mostly its 1568-byte ML-KEM-1024 key. Amounts are pool quanta of 10^10 planck, 0.01 QNR; a `send` defaults to a fee of 8 quanta and takes 6.47 to 7.81 s, and emission at genesis supply is 41 quanta a block.
+
+## How it compares
+
+Five projects, set against each other on the points that decide whether a payment is private and whether it stays private once a quantum computer exists. Qnero is the youngest by a wide margin and the only one here with no public testnet and no audit of its own code, so read its column as a design running on a devnet. Monero and Bitcoin hold the longest track records, years of mainnet under adversarial pressure, and QRL's legacy chain has run since 2018.
+
+| | Qnero | Quantus | QRL | Monero | Bitcoin |
+|---|---|---|---|---|---|
+| Status (2026-09) | Pre-testnet, devnet only, first commit 2026-09-11 | Mainnet since 2026-09-09 | Legacy mainnet since 2018; QRL 2.0 on testnet | Mainnet since April 2014 | Mainnet since January 2009 |
+| Consensus | RandomX proof of work, stock `rx/0`, no stake | QPoW, Poseidon2 nonce grinding, no stake | Legacy RandomX proof of work; QRL 2.0 proof of stake | RandomX proof of work since 2019 | SHA-256d proof of work, ASIC dominated |
+| Spend authorization | ML-DSA-87 and ML-DSA-65 transparent; shielded spends proved in circuit | ML-DSA-87 and ML-DSA-65, no curve fallback | XMSS on legacy, ML-DSA-87 on QRL 2.0 | CLSAG ring signatures over Ed25519, ring size 16 | ECDSA and Schnorr on secp256k1 |
+| Privacy by default | Mandatory for user transfers; Root exempt; shields, coinbase values and fees public | Optional; transfers transparent; rewards paid to wormhole addresses | Absent, fully transparent ledger | Mandatory for user payments, no opt-out; coinbase amounts and fees public | Absent, fully transparent ledger |
+| What hides sender, receiver, amount | Poseidon2 Merkle membership, ML-KEM ciphertexts, in-circuit commitments | Wormhole hides the burn-to-exit link; amounts and addresses public | Nothing on chain | Ring signatures, stealth addresses, RingCT with Bulletproofs+ | Nothing; pseudonymous addresses |
+| What a quantum computer breaks | No curves in the path; residual exposure is lattice, ML-KEM, Poseidon2 (Grover-halved), FRI | No curves in the path; residual exposure is lattice, Poseidon2 (Grover-halved), FRI | No curves in the path; history was always public | Unspent outputs stealable; past rings resolved, amounts readable, recipients matched to known addresses | Every exposed key at once, Taproot included; the rest in the confirmation race |
+| Block time | 12 seconds | 12 seconds | 60 seconds legacy; 60-second slots on QRL 2.0 testnet | 120 seconds | 10 minutes |
+| Supply and emission | 21M QNR cap, upstream decay schedule; genesis allocation and tail undecided | 21M QTC cap, geometric decay, 27% genesis vesting | 105M cap on legacy, flat reward since QIP-016; no published QRL 2.0 schedule | No cap; perpetual tail of 0.6 XMR per block | 21M cap; halvings to zero, then fees |
+| Smart contracts | None; one fixed circuit | None | None on legacy; QRVM and Hyperion on QRL 2.0 | None; a fixed set of transaction types | Bitcoin Script and Tapscript, no loops |
+| Audits | None of its own code; upstream Poseidon and chain reviewed; its RandomX engine unreviewed | Eiger: chain, Poseidon, earlier PoW; Neodyme: ML-DSA; Immunefi contest Aug 2026 | Red4Sec and X41 D-Sec 2018, Halborn; QRL 2.0 audits partial | Bulletproofs 2018, RandomX 2019, CLSAG 2020, Bulletproofs+ 2021 | Quarkslab 2025 on P2P, mempool and validation; open review since 2009 |
+| Licence | MIT, Rust, forked post-quantum Substrate chain | MIT family, Rust, Substrate | MIT on legacy Python, GPL-3.0 on QRL 2.0 | 3-clause BSD, C++ | MIT, C++ |
+
+The rows leave out everything that takes years to acquire. Monero has carried real value under sustained attack since 2014, Bitcoin since 2009 and QRL's legacy chain since 2018, which is evidence of a kind no design document supplies. Decentralization, the count of independent implementations and node operators, exchange liquidity, wallet and hardware support, and the accumulated reading of the same consensus code by thousands of people all sit outside this table. Qnero has none of it yet, and a column of favourable properties is worth less than a decade of people trying to break the thing. The cells compress, too: `docs/CIRCUIT.md` section 10.7 lists everything a Qnero block publishes, down to the arguments of a refused transparent transfer, and the Quantus proof-of-work audit covered the earlier RSA-shortcut puzzle, since replaced by Poseidon2 grinding.
+
+Checked 2026-09-14. Qnero's column comes from this repository: `README.md`, `docs/DESIGN.md` and the runtime constants under `chain/`. The other columns come from each project's own source tree, documentation and audit material: [quantus.com](https://quantus.com) and the Eiger reports in the Quantus chain repository, [theqrl.org](https://theqrl.org) and its audit summaries, [getmonero.org](https://getmonero.org) with the Kudelski, X41 D-Sec, Quarkslab, Trail of Bits, JP Aumasson and Antony Vennard, and ZenGo X reports, and [bitcoin.org](https://bitcoin.org), the `bitcoin/bitcoin` tree, BIPs 340 to 342 and the 2025 Quarkslab review.
 
 ## Running it
 
