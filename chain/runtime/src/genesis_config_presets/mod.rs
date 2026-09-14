@@ -703,11 +703,13 @@ pub fn get_preset(id: &PresetId) -> Option<Vec<u8>> {
 ///
 /// Provenance is therefore a procedure, standing in for an assertion nothing
 /// here can make. Every address passed here must be an ML-DSA-87 account: mint
-/// one with `qnero-node key qnero`, which builds an ML-DSA-87 pair and has no
-/// other mode. The node refuses `key generate --scheme dilithium65` for the
-/// same reason (`node/src/command.rs`), and `docs/DESIGN.md` section 7.3
-/// carries the pre-mainnet check that every literal has been confirmed before
-/// genesis.
+/// one with `qnero-node key qnero` at its default `--scheme standard`, which
+/// builds an ML-DSA-87 pair. Its other scheme, `wormhole`, derives an
+/// unspendable wormhole address from a mnemonic and mints no signing key, so a
+/// wormhole address is never a preset account. The node refuses
+/// `key generate --scheme dilithium65` for the same reason
+/// (`node/src/command.rs`), and `docs/DESIGN.md` section 7.3 carries the
+/// pre-mainnet check that every literal has been confirmed before genesis.
 fn account_from_ss58(ss58: &str) -> AccountId {
 	AccountId::from_ss58check_with_version(ss58)
 		.expect("Failed to decode SS58 address")
