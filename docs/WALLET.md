@@ -1522,11 +1522,13 @@ Two of the default tests run the wallet against a scriptable JSON-RPC node in
   `wallet-web/tests/leaf-typing.test.ts`, so neither wallet can drift on how it
   reads a header's digest logs.
 
-## The browser wallet (M10)
+## Qloak, a Qnero wallet (M10)
 
-`wallet-web/` is the same wallet in a page, and it holds to the rules above
-rather than relaxing them for the browser. Its own reference is
+`wallet-web/` is **Qloak**, the same wallet in a page, and it holds to the
+rules above rather than relaxing them for the browser. Its own reference is
 `wallet-web/README.md`; what follows is what differs from this CLI and why.
+Below this heading "Qloak" and "the browser wallet" name the same thing, and
+`qnero-wallet` stays the name of the binary this document is otherwise about.
 
 **The rules that are identical.** A sync never names a nullifier: the settled
 set is paged whole through `state_getKeysPaged` and every spent decision is

@@ -107,9 +107,9 @@ export RAYON_NUM_THREADS=4
 
 RPC is the Substrate default, port 9944. A `send` picks two notes largest-first, rebuilds Merkle paths locally and proves the batch itself. `docs/OPS-DEV.md` carries the build preconditions and the end-to-end transcripts; `docs/WALLET.md` is the wallet's reference.
 
-`wallet-web/` is the same wallet in a browser: `cd wallet-web && nice -n 19 npm ci && ./scripts/stage-wasm.sh --threaded && nice -n 19 npm run dev` serves it at `http://127.0.0.1:5173` against the node above. Keys are created and used in the page, sealed under a passphrase in the browser's own storage, and a payment is proved in a background worker; entering the pool stays a command-line step, because a shield is signed with ML-DSA-87 and the browser prover exports no signing. `wallet-web/README.md` covers the build, the runtime JSON that points it at a chain, and what a browser-hosted wallet can and cannot promise.
+**Qloak**, a Qnero wallet, is the same wallet in a browser: `cd wallet-web && nice -n 19 npm ci && ./scripts/stage-wasm.sh --threaded && nice -n 19 npm run dev` serves it at `http://127.0.0.1:5173` against the node above. Keys are created and used in the page, sealed under a passphrase in the browser's own storage, and a payment is proved in a background worker; entering the pool stays a command-line step, because a shield is signed with ML-DSA-87 and the browser prover exports no signing. `wallet-web/README.md` covers the build, the runtime JSON that points it at a chain, and what a browser-hosted wallet can and cannot promise.
 
-`explorer/` is a static web explorer for the same chain: `cd explorer && nice -n 19 npm ci && nice -n 19 npm run dev` serves it at `http://127.0.0.1:5173` against the node above, and `explorer/README.md` covers the build, the one runtime JSON that points it at a chain, and what it deliberately declines to show.
+**silQ Road**, the Qnero explorer, is a static web explorer for the same chain: `cd explorer && nice -n 19 npm ci && nice -n 19 npm run dev` serves it at `http://127.0.0.1:5173` against the node above, and `explorer/README.md` covers the build, the one runtime JSON that points it at a chain, and what it deliberately declines to show.
 
 ### Point a rig at it
 
@@ -141,7 +141,7 @@ another machine needs `0.0.0.0` and a firewall rule you chose.
 
 ## Status, audits and caveats
 
-M1 through M9 are done, through the wallet CLI, v1 mandatory privacy, RandomX proof of work, a measured browser prover and a static explorer. The audits are upstream's: Eiger on the Wormhole circuits (2026-03-20), a Substrate audit of the chain (2026-05-13), a proof-of-work and Poseidon review. **No external audit of the Qnero delta exists.** That delta is the leaf circuit's note fragments, the public-input layouts at all three layers, the aggregator rules, and `pallet-shielded`. The design claims a reviewer can read it in a day, and Plonky2's 100-bit security here is a conjecture.
+M1 through M10 are done, through the wallet CLI, v1 mandatory privacy, RandomX proof of work, a measured browser prover, the silQ Road explorer and the Qloak browser wallet. The audits are upstream's: Eiger on the Wormhole circuits (2026-03-20), a Substrate audit of the chain (2026-05-13), a proof-of-work and Poseidon review. **No external audit of the Qnero delta exists.** That delta is the leaf circuit's note fragments, the public-input layouts at all three layers, the aggregator rules, and `pallet-shielded`. The design claims a reviewer can read it in a day, and Plonky2's 100-bit security here is a conjecture.
 
 - Key storage is dev grade: 32 bytes of hex in a `0600` file, no passphrase or encryption, beside a note store holding every `rho` and `r` in clear text.
 - Weights are unbenchmarked, and admission work is unpaid per gossiped blob: a settlement walk and a verify each, with no rate limit.
