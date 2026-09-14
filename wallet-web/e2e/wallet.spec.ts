@@ -129,8 +129,13 @@ const ALLOWED_RPC = new Set([
  * metadata through it, and it is also the shape the Merkle-proof fence exists
  * for: `state_call` with `ZkTreeApi_get_merkle_proof` is one leaf named to the
  * node. So the method is allowed and the function it carries is not.
+ *
+ * `QPoWApi_get_target_block_time` is on it as well, and it is safe for the
+ * reason the fenced call is not: it takes no argument. It asks the chain what
+ * its block interval is, once at connect, and the question is the same whoever
+ * asks it.
  */
-const ALLOWED_RUNTIME_CALLS = /^(Metadata_|Core_)/;
+const ALLOWED_RUNTIME_CALLS = /^(Metadata_|Core_|QPoWApi_get_target_block_time$)/;
 
 /** `formatDuration`'s two forms: "980 ms" and "11.3 s". */
 function millisFrom(reading: string): number {
