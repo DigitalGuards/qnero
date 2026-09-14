@@ -479,11 +479,11 @@ index. The type stays; the chain refuses one of its arms.
 **It cannot be a transaction extension.** By the time an extension runs, the
 extrinsic's `check` has already verified and dropped the signature and handed
 the extension an `AccountId32`, and both variants hash to an `AccountId32` of
-the same shape. A Dilithium65 account is byte-indistinguishable from a
-Dilithium87 one in state, in an address and in `origin`, so there is nothing
-left for an extension to look at. The refusal therefore lives in `Checkable`,
-one layer below every extension, which also means it costs no change to the
-signed extrinsic encoding: `transaction_version` stays where it is.
+the same shape, so there is nothing left for an extension to look at: a
+Dilithium65 account is byte-indistinguishable from a Dilithium87 one in state,
+in an address and in `origin`. The refusal therefore lives in `Checkable`, one
+layer below every extension, which also means it costs no change to the signed
+extrinsic encoding: `transaction_version` stays where it is.
 
 **It covers every signed call, including `shield`.** The seam is the extrinsic,
 so nothing is enumerated per call. Section 7.2's call filter is a different
@@ -500,12 +500,23 @@ key at all, the block-author label is a Poseidon digest, and `qnero-node key
 qnero --scheme standard` builds an ML-DSA-87 pair. One gap is worth naming: the
 Planck and mainnet accounts are SS58 literals, and both variants hash into the
 same 32-byte account, so a literal carries no variant for a test to assert on.
-The entry rule is what covers those.
+
+**Pre-mainnet check for the SS58 literals.** The gap above has a permanent
+consequence, so what covers it is a procedure. A level-3 account among those
+literals could never sign: its vesting claim, its treasury approval and its
+faucet drip would each answer `BadSigner` at the entry, and whatever genesis
+vested to it would be stranded for good. Before mainnet genesis, confirm that
+every beneficiary key in `genesis_config_presets/mainnet_vesting.rs` (the ten
+treasurers, the ten tech collective members, and the account of every `VESTING`
+row) and every literal in `genesis_config_presets/mod.rs` was minted with
+`qnero-node key qnero`, which builds an ML-DSA-87 pair and has no other mode.
+`account_from_ss58` carries the same instruction beside the code.
 
 Two consequences worth writing down. The vendored `sc-cli` fork still offers
-`key generate --scheme dilithium65` and the keystore will still hold what it
-mints: that is upstream CLI surface, left alone, and this rule is what makes
-the material inert. And the rule breaks consensus. Before it, an ML-DSA-65
+`--scheme dilithium65` on its key commands, and that tree stays as upstream
+wrote it so the next subtree merge is clean; Qnero's own dispatch refuses the
+flag before `sc-cli` sees it (`node/src/command.rs`), so the CLI and the entry
+now say the same thing. And the rule breaks consensus. Before it, an ML-DSA-65
 extrinsic passed every check and entered the block, refused only later at
 dispatch by the call filter, so a block already carrying one fails to
 re-execute under the rule. Qnero is devnet-only, so a devnet carrying

@@ -341,8 +341,9 @@ mod tests {
 	// entry, one layer up, in `runtime/src/extrinsic.rs`. The guard for that
 	// rule is `transactions/signature_scheme.rs`; these tests are about the
 	// primitive underneath it, which no longer decides admission on its own.
+	// Both names say so, because a test name is what a CI log shows.
 	#[test]
-	fn test_dilithium65_extrinsic() {
+	fn dilithium65_still_verifies_at_the_primitive_layer() {
 		setup();
 
 		let pair = Dilithium65Pair::from_seed_slice(&[0u8; 32]).expect("Failed to create pair");
@@ -390,7 +391,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_dilithium65_extrinsic_fail_signature() {
+	fn dilithium65_primitive_verify_rejects_a_wrong_signature() {
 		setup();
 
 		let pair = Dilithium65Pair::from_seed_slice(&[0u8; 32]).expect("Failed to create pair");
