@@ -1,10 +1,14 @@
-# Qnero explorer
+# silQ Road, the Qnero explorer
 
-A block explorer for a Qnero chain. One static directory, one WebSocket to a
-node, no server-side indexer and no third party: every number on every page is
-read live from the node the page is configured with, and the only other requests
-are to the host serving the page, for `config.json` at startup and for the
-page's own assets.
+silQ Road is a block explorer for a Qnero chain. One static directory, one
+WebSocket to a node, no server-side indexer and no third party: every number on
+every page is read live from the node the page is configured with, and the only
+other requests are to the host serving the page, for `config.json` at startup
+and for the page's own assets.
+
+The directory is `explorer/`, the built site is `dist/`, and the name on the
+page is silQ Road, spelled that way everywhere: lowercase `s`, capital `Q`, a
+space, capital `R`.
 
 It is built for a chain where value is private by default, so it is as careful
 about what it declines to show as about what it shows. The "What this chain
@@ -27,7 +31,7 @@ and a pasted link survives a refresh.
 
 ## Run it
 
-The explorer needs a node to read. For a local one, from the repository root:
+silQ Road needs a node to read. For a local one, from the repository root:
 
 ```
 ./target/release/qnero-wallet keygen

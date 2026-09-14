@@ -513,7 +513,7 @@ test('every page is reachable from the keyboard and readable at 400 px', async (
   await page.keyboard.press('Tab');
   await expect(page.locator(':focus')).toContainText('theme:');
   await page.keyboard.press('Tab');
-  await expect(page.locator(':focus')).toContainText('Qnero');
+  await expect(page.locator(':focus')).toContainText('silQ Road');
   for (const name of ['Chain', 'Blocks', 'Search', 'Reveals']) {
     await page.keyboard.press('Tab');
     await expect(page.locator(':focus')).toHaveText(name);

@@ -1,9 +1,9 @@
 {
-  "name": "qnero-explorer",
+  "name": "silq-road",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Static block explorer for a Qnero chain",
+  "description": "silQ Road, the Qnero explorer: one static directory, one WebSocket to a node",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

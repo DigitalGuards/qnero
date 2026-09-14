@@ -60,8 +60,14 @@ export function Layout({ current, children }: { current: Route['name']; children
       <StatusStrip />
       <div className="frame">
         <nav className="rail" aria-label="Sections">
+          {/* The wordmark, in the rail's own type: the name at the UI size
+              in the mono face, the chain it is pointed at under it at label
+              size. "silQ Road, the Qnero explorer" is the full form and it is
+              set where a subtitle has room: the tab title, the readme and the
+              docs. Under the name here is the chain, which is the thing a
+              reader of a page needs to know first. */}
           <a className="rail__brand" href={href({ name: 'home' })}>
-            Qnero
+            silQ Road
             <span className="rail__chain">{bundle?.config.chainName ?? 'explorer'}</span>
           </a>
           <div className="rail__nav">
