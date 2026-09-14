@@ -120,14 +120,27 @@ export async function waitForInclusion(
   context: ChainContext,
   encoded: string,
   nullifiers: readonly string[],
-  options: { timeoutMs: number; pollMs?: number; onBlock?: (height: number) => void },
+  options: {
+    timeoutMs: number;
+    /**
+     * The anchor's height. The scan starts at the block after it, because the
+     * node can author the block carrying this settlement and another one
+     * before the first head read returns, and a settlement below the first
+     * observed head would then never be looked at: the wallet would report a
+     * timeout, leave its inputs unlatched and send the operator to prove
+     * again, over a settlement that landed.
+     */
+    fromBlock: number;
+    pollMs?: number;
+    onBlock?: (height: number) => void;
+  },
 ): Promise<Inclusion | null> {
   const deadline = Date.now() + options.timeoutMs;
   const pollMs = options.pollMs ?? 2000;
-  let checked = -1;
+  let checked = options.fromBlock;
   while (Date.now() < deadline) {
     const head = await fetchHead(context);
-    for (let height = checked < 0 ? head.number : checked + 1; height <= head.number; height += 1) {
+    for (let height = checked + 1; height <= head.number; height += 1) {
       const hash = await context.send<string | null>('chain_getBlockHash', [height]);
       if (hash === null) {
         continue;

@@ -449,4 +449,56 @@ describe('a reorg that takes a leaf away', () => {
     expect(result.notes[0]?.note.leafIndex).toBe(1);
     expect(result.report.vanished).toBe(1);
   });
+
+  it('leaves a spent note spent rather than marking it off chain', async () => {
+    // Both the settlement and the creating leaf were orphaned. The note is
+    // still spent (its nullifier is still in the settled set) and the re-walked
+    // range does not carry it back. `off chain` is the heading for value the
+    // chain may still honour, and this note's value is already gone, so the
+    // command-line wallet's `mark_off_chain` refuses a spent note outright.
+    const leaves: FakeLeaf[] = [{ index: 0, commitment: 'cd'.repeat(32), blockNumber: 1, note: null }];
+    const result = await runSync(
+      {
+        meta: meta({ nextLeaf: 2, lastSyncedBlock: 20 }),
+        held: [
+          held(mine, { leafIndex: 1, blockNumber: 18, spent: true, spentSeenAtBlock: 19 }),
+        ],
+        rejected: [],
+        checkpoints: [{ blockNumber: 20, blockHash: 'ff'.repeat(32), nextLeaf: 2 }],
+        pending: [],
+      },
+      fakeChain({ head: 25, leaves, leafCount: 1, settled: new Set([mine.nullifier]) }),
+      fakeCrypto(leaves),
+    );
+    expect(result.notes[0]?.note.spent).toBe(true);
+    expect(result.notes[0]?.note.onChain).toBe(true);
+    expect(result.report.vanished).toBe(0);
+  });
+});
+
+describe('the checkpoints a pass writes', () => {
+  it('replaces the one at this head rather than spending a slot on it', async () => {
+    // Two syncs inside one block interval. Appending a second entry at the
+    // same height costs a slot: the trim drops the oldest real checkpoint to
+    // make room, and the store collapses the pair afterwards because it is
+    // keyed on the height. Sixteen slots would become fifteen for good, and
+    // the fork walk could rewind that much less far.
+    const leaves: FakeLeaf[] = [{ index: 0, commitment: 'cd'.repeat(32), blockNumber: 1, note: null }];
+    const existing = [
+      { blockNumber: 4, blockHash: hashAtHeight(4), nextLeaf: 1 },
+      { blockNumber: 9, blockHash: hashAtHeight(9), nextLeaf: 1 },
+    ];
+    const result = await runSync(
+      {
+        meta: meta({ nextLeaf: 1, lastSyncedBlock: 9 }),
+        held: [],
+        rejected: [],
+        checkpoints: existing,
+        pending: [],
+      },
+      fakeChain({ head: 9, leaves, leafCount: 1 }),
+      fakeCrypto(leaves),
+    );
+    expect(result.checkpoints.map((entry) => entry.blockNumber)).toEqual([4, 9]);
+  });
 });

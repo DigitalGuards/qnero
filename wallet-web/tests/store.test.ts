@@ -257,6 +257,107 @@ describe('one sync commits as one transaction', () => {
   });
 });
 
+describe('latching a spend', () => {
+  it('marks every member of a conflict set, because they share one nullifier', async () => {
+    const store = await makeStore(db);
+    // A sender who repeats a `(rho, r)` pair leaves this wallet two notes with
+    // one nullifier between them. At most one can settle; spending the larger
+    // one and latching only that commitment leaves the smaller the sole holder
+    // of a nullifier the chain has settled, and the next selection offers it.
+    const larger: StoredNote = {
+      ...NOTE,
+      commitment: 'aa'.repeat(32),
+      leafIndex: 4,
+      value: '1000',
+      secret: await store.sealNoteSecret('aa'.repeat(32), SECRET),
+    };
+    const smaller: StoredNote = {
+      ...NOTE,
+      commitment: 'bb'.repeat(32),
+      leafIndex: 7,
+      value: '400',
+      secret: await store.sealNoteSecret('bb'.repeat(32), SECRET),
+    };
+    const other: StoredNote = {
+      ...NOTE,
+      commitment: 'cc'.repeat(32),
+      leafIndex: 9,
+      value: '250',
+      secret: await store.sealNoteSecret('cc'.repeat(32), { ...SECRET, nullifier: '44'.repeat(32) }),
+    };
+    await store.commitSync({
+      meta: await store.meta(),
+      notes: [larger, smaller, other],
+      removedNotes: [],
+      rejected: [],
+      removedRejected: [],
+      checkpoints: [],
+      clearedPending: [],
+    });
+
+    await store.markSpentByNullifier([SECRET.nullifier], 31);
+
+    const after = new Map((await store.notes()).map((note) => [note.commitment, note]));
+    expect(after.get(larger.commitment)?.spent).toBe(true);
+    expect(after.get(smaller.commitment)?.spent).toBe(true);
+    expect(after.get(larger.commitment)?.spentSeenAtBlock).toBe(31);
+    // A nullifier this settlement did not publish is untouched.
+    expect(after.get(other.commitment)?.spent).toBe(false);
+  });
+
+  it('takes a nullifier however it was written', async () => {
+    const store = await makeStore(db);
+    const only: StoredNote = {
+      ...NOTE,
+      secret: await store.sealNoteSecret(NOTE.commitment, SECRET),
+    };
+    await store.commitSync({
+      meta: await store.meta(),
+      notes: [only],
+      removedNotes: [],
+      rejected: [],
+      removedRejected: [],
+      checkpoints: [],
+      clearedPending: [],
+    });
+    await store.markSpentByNullifier([`0x${SECRET.nullifier.toUpperCase()}`], 12);
+    expect((await store.notes())[0]?.spent).toBe(true);
+  });
+});
+
+describe('writing a note off', () => {
+  async function withNote(overrides: Partial<StoredNote>): Promise<WalletStore> {
+    const store = await makeStore(db);
+    await store.commitSync({
+      meta: await store.meta(),
+      notes: [{ ...NOTE, ...overrides, secret: await store.sealNoteSecret(NOTE.commitment, SECRET) }],
+      removedNotes: [],
+      rejected: [],
+      removedRejected: [],
+      checkpoints: [],
+      clearedPending: [],
+    });
+    return store;
+  }
+
+  it('marks a held note the chain does not carry', async () => {
+    const store = await withNote({});
+    expect(await store.markOffChain(NOTE.commitment)).toBe(true);
+    expect((await store.notes())[0]?.onChain).toBe(false);
+  });
+
+  it('refuses a spent note, whose value is already gone', async () => {
+    const store = await withNote({ spent: true, spentSeenAtBlock: 9 });
+    expect(await store.markOffChain(NOTE.commitment)).toBe(false);
+    expect((await store.notes())[0]?.onChain).toBe(true);
+  });
+
+  it('says nothing happened for a note it does not hold', async () => {
+    const store = await withNote({});
+    expect(await store.markOffChain('ff'.repeat(32))).toBe(false);
+  });
+});
+
 describe('the version gate', () => {
   it('refuses a store written by a newer build, by name', () => {
     expect(() => {

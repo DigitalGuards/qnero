@@ -160,15 +160,41 @@ export function App(): ReactNode {
 
     // One member per nullifier, on chain and unspent: the same rule selection
     // uses, so the balance and what a spend can reach never disagree.
+    //
+    // While the wallet is locked no secret opens, so `nullifierOf` falls back
+    // to the commitment and a conflict set stops collapsing. These totals are
+    // not rendered in that state: a locked wallet has exactly one screen, the
+    // unlock one, and `redirectFor` sends every other route to it. They are
+    // computed on the boot path so an unlock has nothing to wait for.
     const nullifierOf = (note: StoredNote): string => {
       const row = rows.find((entry) => entry.note.commitment === note.commitment);
       return row?.secret?.nullifier ?? note.commitment;
     };
     const candidates = spendable(stored, nullifierOf);
     const unspent = candidates.reduce((sum, note) => sum + BigInt(note.value), 0n);
-    const offChain = stored
-      .filter((note) => !note.onChain && !note.spent)
-      .reduce((sum, note) => sum + BigInt(note.value), 0n);
+    // The off-chain heading collapses too, and by the same rule the table
+    // under it uses. Two members of one conflict set are two rows and one
+    // amount: at most one of them can ever settle, so summing both would print
+    // a heading that overstates its own table.
+    const offChainBest = new Map<string, StoredNote>();
+    for (const note of stored) {
+      if (note.onChain || note.spent) {
+        continue;
+      }
+      const key = nullifierOf(note);
+      const best = offChainBest.get(key);
+      if (
+        best === undefined ||
+        BigInt(note.value) > BigInt(best.value) ||
+        (BigInt(note.value) === BigInt(best.value) && note.leafIndex < best.leafIndex)
+      ) {
+        offChainBest.set(key, note);
+      }
+    }
+    const offChain = [...offChainBest.values()].reduce(
+      (sum, note) => sum + BigInt(note.value),
+      0n,
+    );
     const pendingTotal = pending.reduce((sum, note) => sum + BigInt(note.value), 0n);
 
     setNotes(rows);
@@ -469,6 +495,16 @@ export function App(): ReactNode {
       const limits = current.limits;
       if (store === null || context === null || limits === null) {
         setSpendError('this wallet is not connected, or the prover has not loaded');
+        return;
+      }
+      if (context.storageDrift.length > 0) {
+        // The same gate the sync runs, hoisted above everything a payment
+        // pays for. Without it a drifted runtime is met after the circuit
+        // build, the anchor read and a whole tree rebuild.
+        setSpendError(
+          'this runtime declares storage differently from what this build assumes, so spending ' +
+            'against it is refused. Nothing has been built and nothing has been submitted.',
+        );
         return;
       }
       setSpendRunning(true);

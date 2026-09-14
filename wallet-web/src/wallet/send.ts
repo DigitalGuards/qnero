@@ -220,11 +220,17 @@ export async function spend(
       const recordedBelow =
         held.note.blockNumber !== null && held.note.blockNumber < anchor.block_number;
       if (recordedBelow) {
+        // Written off here rather than left for a sync to notice. The sync's
+        // orphan marking runs only when a checkpoint walk rewound, and a
+        // rescan never runs it at all, so "sync so it is marked off chain"
+        // would be advice that does not always hold and selection would pick
+        // the same phantom on every retry.
+        await store.markOffChain(held.note.commitment);
         throw new Error(
           `note ${held.note.commitment} is recorded at leaf ${held.note.leafIndex}, which is ` +
             `past the end of a ${shape.leafCount}-leaf tree the anchor confirms, and it was ` +
             `recorded at block ${held.note.blockNumber}, below the anchor. This chain does not ` +
-            'carry it: sync so it is marked off chain, then send again.',
+            'carry it, so it is marked off chain. Send again: the next selection will not offer it.',
         );
       }
       throw new Error(
@@ -338,6 +344,9 @@ export async function spend(
       // chain needs and what a person will wait before being told the answer
       // is to prove again.
       timeoutMs: 120_000,
+      // These bytes did not exist before the anchor, so no block at or below
+      // it can carry them and none after it is skipped.
+      fromBlock: anchor.block_number,
       onBlock: (height) => {
         report({ stage: 'confirm', detail: `block ${height}` });
       },
@@ -345,10 +354,12 @@ export async function spend(
   );
 
   if (inclusion !== null && inclusion.settled) {
-    // Latch the flag now. A send that happens before the next sync would
-    // otherwise select the same input twice.
-    await store.markSpent(
-      chosen.map((held) => held.note.commitment),
+    // Latch the flag now, on the nullifiers rather than on the commitments. A
+    // send that happens before the next sync would otherwise select the other
+    // member of a conflict set, which carries the nullifier the chain has just
+    // settled. See `WalletStore.markSpentByNullifier`.
+    await store.markSpentByNullifier(
+      chosen.map((held) => held.secret.nullifier),
       inclusion.blockNumber,
     );
   }

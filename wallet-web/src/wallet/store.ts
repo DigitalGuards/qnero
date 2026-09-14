@@ -80,6 +80,11 @@ function request<T>(source: IDBRequest): Promise<T> {
   });
 }
 
+/** Hashes compare as lower-case hex without a prefix, wherever they came from. */
+function normaliseHash(hash: string): string {
+  return hash.toLowerCase().replace(/^0x/, '');
+}
+
 function transactionDone(transaction: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     transaction.oncomplete = (): void => {
@@ -340,22 +345,81 @@ export class WalletStore {
   }
 
   /**
-   * Latch a spent flag at submit time.
+   * Latch a spent flag at submit time, keyed on the nullifier.
    *
    * Once both nullifiers are confirmed settled at the inclusion block, the
    * notes they came from are spent whatever the next sync reads, so a send
    * that happens before the next sync cannot select the same input twice.
+   *
+   * On the nullifier rather than on the commitment, because a nullifier can
+   * belong to more than one held note. A sender who repeats a `(rho, r)` pair
+   * gives this wallet two notes sharing one nullifier, of which at most one
+   * can ever settle. Latching only the member that was spent leaves the other
+   * unspent and on chain, so it is the sole holder of that nullifier and the
+   * next selection offers it: a whole proof paid for a nullifier the chain has
+   * already settled. `WalletStore::mark_spent` in the command-line wallet
+   * walks every note whose nullifier matches for the same reason.
+   *
+   * The secrets are opened outside the write, because an IndexedDB transaction
+   * closes when its microtask queue drains and WebCrypto is slower than that.
    */
-  async markSpent(commitments: readonly string[], atBlock: number): Promise<void> {
-    const transaction = this.db.transaction(STORE_NOTES, 'readwrite');
-    const notes = transaction.objectStore(STORE_NOTES);
-    for (const commitment of commitments) {
-      const existing = await request<StoredNote | undefined>(notes.get(commitment));
-      if (existing !== undefined) {
-        notes.put({ ...existing, spent: true, spentSeenAtBlock: atBlock });
+  async markSpentByNullifier(nullifiers: readonly string[], atBlock: number): Promise<void> {
+    const wanted = new Set(nullifiers.map(normaliseHash));
+    const held = await this.notes();
+    const hits: StoredNote[] = [];
+    for (const note of held) {
+      if (note.spent) {
+        continue;
+      }
+      let secret: NoteSecret;
+      try {
+        secret = await this.openNoteSecret(note);
+      } catch {
+        // A record this key cannot open. It keeps its flags: a note whose
+        // secrets are unreadable is one nothing can select anyway.
+        continue;
+      }
+      if (wanted.has(normaliseHash(secret.nullifier))) {
+        hits.push(note);
       }
     }
+    if (hits.length === 0) {
+      return;
+    }
+    const transaction = this.db.transaction(STORE_NOTES, 'readwrite');
+    const notes = transaction.objectStore(STORE_NOTES);
+    for (const note of hits) {
+      notes.put({ ...note, spent: true, spentSeenAtBlock: atBlock });
+    }
     await transactionDone(transaction);
+  }
+
+  /**
+   * Write a note off as one the chain does not carry.
+   *
+   * The spend path's answer to a selected note sitting past the end of a tree
+   * whose root the anchor confirms, recorded at a block strictly below that
+   * anchor. Reporting that and writing nothing leaves selection picking the
+   * same phantom on every retry, because selection is largest first and the
+   * phantom does not move. `Wallet::send` wraps its own preparation in
+   * `write_off_missing_note` for exactly this.
+   *
+   * The gate is `mark_off_chain`'s: a spent note is never marked off chain,
+   * because its value is already gone and `off chain` is the heading for value
+   * the chain may still honour.
+   */
+  async markOffChain(commitment: string): Promise<boolean> {
+    const read = this.db.transaction(STORE_NOTES, 'readonly');
+    const existing = await request<StoredNote | undefined>(
+      read.objectStore(STORE_NOTES).get(commitment),
+    );
+    if (existing === undefined || existing.spent || !existing.onChain) {
+      return false;
+    }
+    const transaction = this.db.transaction(STORE_NOTES, 'readwrite');
+    transaction.objectStore(STORE_NOTES).put({ ...existing, onChain: false });
+    await transactionDone(transaction);
+    return true;
   }
 
   /** Erase the whole wallet, seed included. */

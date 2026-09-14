@@ -299,8 +299,11 @@ async function originOf(
     return 'transfer';
   }
   // A shield predicts `(head + 1, EntryCount)`, so the entry index of one that
-  // settled is below the counter read at the head. The walk is bounded: a
-  // handful of entries per block at most, and the counter only grows.
+  // settled is below the counter read at the head. The walk is bounded to the
+  // newest entries rather than run over the whole counter, which the
+  // command-line wallet does: a wallet restoring from a seed on a chain with
+  // more shields than this window labels the ones below it `transfer`. The
+  // label moves no value, and the column is not authoritative after a restore.
   const window = 64n;
   const from = entryCount > window ? entryCount - window : 0n;
   for (let index = from; index < entryCount; index += 1n) {
@@ -680,10 +683,16 @@ export async function runSync(
   // ahead of everything this wallet has read. A rescan may have bypassed that
   // proof, and against a node that is behind every leaf it has not reached
   // looks exactly like a leaf that is gone.
+  // Never over a spent note either, which is `mark_off_chain`'s own gate. A
+  // reorg that orphans both a note's settlement and its creating leaf leaves
+  // it spent and not met again, and writing `onChain: false` on it would
+  // render it under the `off chain` heading, which is where value the chain
+  // may still honour goes, and count it in `vanished`, which would tell the
+  // operator it lost a note whose value was already gone.
   if (rewound && reconciles) {
     for (const entry of notes.values()) {
       if (entry.note.leafIndex >= watermark && !seenAgain.has(entry.note.commitment)) {
-        if (entry.note.onChain) {
+        if (entry.note.onChain && !entry.note.spent) {
           entry.note.onChain = false;
           report.vanished += 1;
         }
@@ -697,11 +706,19 @@ export async function runSync(
     );
   }
 
-  const nextCheckpoints = [...checkpoints, {
-    blockNumber: head.number,
-    blockHash: normaliseHash(head.hash),
-    nextLeaf: shape.leafCount,
-  }].slice(-MAX_CHECKPOINTS);
+  // Every checkpoint at or above this head goes first. Syncing twice inside
+  // one block interval otherwise appends a second entry at the same height,
+  // the trim drops the oldest real checkpoint to make room, and the store
+  // collapses the pair afterwards because it is keyed on the height: sixteen
+  // slots become fifteen, permanently, and the fork walk can rewind less far.
+  const nextCheckpoints = [
+    ...checkpoints.filter((checkpoint) => checkpoint.blockNumber < head.number),
+    {
+      blockNumber: head.number,
+      blockHash: normaliseHash(head.hash),
+      nextLeaf: shape.leafCount,
+    },
+  ].slice(-MAX_CHECKPOINTS);
 
   report.recordedGenesis = input.meta.genesisHash === null;
 
