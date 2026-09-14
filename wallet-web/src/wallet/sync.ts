@@ -439,184 +439,208 @@ export async function runSync(
 
   if (shape.leafCount > watermark) {
     const entryCount = await chain.entryCount(head.hash);
-    const records = await chain.leaves(watermark, shape.leafCount, head.hash, (done) => {
-      progress('scan', `${done} of ${shape.leafCount - watermark} leaves`);
-    });
 
     // Decryption goes over the boundary in batches, so a scan is one round
     // trip per batch rather than one per leaf.
     const BATCH = 64;
-    const candidates = records.filter(
-      (record) =>
-        record.commitment !== null &&
-        record.ciphertext !== null &&
-        // A coinbase leaf is rebuilt by the batch below, under the chain's own
-        // value. Sending it through the transfer rule as well would open it
-        // against the payload's value, which for a coinbase is zero.
-        record.coinbaseQuanta === null,
-    );
-    const decrypted = new Map<number, ScannedNote | null>();
-    for (let start = 0; start < candidates.length; start += BATCH) {
-      const slice = candidates.slice(start, start + BATCH);
-      const answers = await crypto.decryptBatch(
-        slice.map((record) => ({
-          index: record.index,
-          ciphertext: record.ciphertext as Uint8Array,
-          // Normalised, because the module parses this as hex and `0x` is not
-          // hex. A prefixed commitment makes `try_receive` refuse every
-          // ciphertext on the chain, and the refusal is indistinguishable
-          // from "none of these are yours": a wallet that reads its own
-          // payments as nobody's, with no error anywhere.
-          commitment: normaliseHash(record.commitment as string),
-        })),
-      );
-      slice.forEach((record, offset) => {
-        decrypted.set(record.index, answers[offset] ?? null);
-      });
-      progress('scan', `${Math.min(start + BATCH, candidates.length)} of ${candidates.length} ciphertexts`);
-    }
+    /**
+     * The scan reads one window of leaves, folds it in and drops it.
+     *
+     * The whole range used to be materialised first, and a `LeafRecord`
+     * carries the leaf's ciphertext: 1,792 bytes each, one per leaf on the
+     * chain, in the page, beside the worker's 918 MiB. The pallet mints a
+     * coinbase leaf per block at a twelve-second target, so a chain that has
+     * been running a year is gigabytes of ciphertext held at once for a first
+     * sync, and a tab reclaimed under that pressure dies with no catchable
+     * error and makes no progress, because nothing is committed until the pass
+     * ends. Reading in windows bounds what is resident to one window plus the
+     * notes this wallet actually holds.
+     *
+     * The window is the read batch, so the request stream is unchanged: the
+     * same contiguous range, the same four keys per leaf, 64 leaves a query.
+     * What the node is asked is what `tests/privacy.test.ts` asserts on.
+     */
+    const WINDOW = BATCH;
+    const total = shape.leafCount - watermark;
+    let ciphertextsTried = 0;
+    for (let windowFrom = watermark; windowFrom < shape.leafCount; windowFrom += WINDOW) {
+      const windowTo = Math.min(windowFrom + WINDOW, shape.leafCount);
+      const records = await chain.leaves(windowFrom, windowTo, head.hash);
+      progress('scan', `${windowTo - watermark} of ${total} leaves`);
 
-    // The coinbase leaves, in the same shape and for the same reason.
-    const coinbases = records.filter(
-      (record) =>
-        record.commitment !== null && record.coinbaseQuanta !== null && record.blockNumber !== null,
-    );
-    const minted = new Map<number, ScannedNote | null>();
-    for (let start = 0; start < coinbases.length; start += BATCH) {
-      const slice = coinbases.slice(start, start + BATCH);
-      const answers = await crypto.coinbaseBatch(
-        slice.map((record) => ({
-          index: record.index,
-          blockNumber: record.blockNumber as number,
-          value: record.coinbaseQuanta as bigint,
-          genesisHash: genesis,
-          // Normalised: the module parses this as hex and `0x` is not hex.
-          commitment: normaliseHash(record.commitment as string),
-          ciphertext: record.ciphertext,
-        })),
+      const candidates = records.filter(
+        (record) =>
+          record.commitment !== null &&
+          record.ciphertext !== null &&
+          // A coinbase leaf is rebuilt by the batch below, under the chain's own
+          // value. Sending it through the transfer rule as well would open it
+          // against the payload's value, which for a coinbase is zero.
+          record.coinbaseQuanta === null,
       );
-      slice.forEach((record, offset) => {
-        minted.set(record.index, answers[offset] ?? null);
-      });
-      progress('scan', `${Math.min(start + BATCH, coinbases.length)} of ${coinbases.length} coinbase leaves`);
-    }
-
-    for (const record of records) {
-      report.leavesScanned += 1;
-      if (record.commitment === null) {
-        // A gap in the leaf map, which the tree never leaves: a node
-        // answering about a block it does not have.
-        continue;
+      const decrypted = new Map<number, ScannedNote | null>();
+      for (let start = 0; start < candidates.length; start += BATCH) {
+        const slice = candidates.slice(start, start + BATCH);
+        const answers = await crypto.decryptBatch(
+          slice.map((record) => ({
+            index: record.index,
+            ciphertext: record.ciphertext as Uint8Array,
+            // Normalised, because the module parses this as hex and `0x` is not
+            // hex. A prefixed commitment makes `try_receive` refuse every
+            // ciphertext on the chain, and the refusal is indistinguishable
+            // from "none of these are yours": a wallet that reads its own
+            // payments as nobody's, with no error anywhere.
+            commitment: normaliseHash(record.commitment as string),
+          })),
+        );
+        slice.forEach((record, offset) => {
+          decrypted.set(record.index, answers[offset] ?? null);
+        });
+        ciphertextsTried += slice.length;
+        progress('scan', `${ciphertextsTried} ciphertexts tried`);
       }
-      const commitment = normaliseHash(record.commitment);
 
-      let received: ScannedNote | null = null;
-      let isCoinbase = false;
-      if (record.coinbaseQuanta !== null) {
-        // A block's coinbase note. Its value is public, because the chain
-        // hashed it into a commitment over an `inner` it cannot open, and the
-        // rest is rebuilt from this wallet's own miner key, or from a payload
-        // under the chain's published value when somebody else minted it. The
-        // commitment check decides in both cases, and in both cases the value
-        // inside any payload is ignored: a coinbase's amount is the chain's
-        // own arithmetic. The rule is the module's; see `worker/core.ts`.
-        //
-        // Not this wallet's coinbase, or a corrupt miner key, is a `null`. The
-        // gap between `coinbaseLeaves` and `coinbaseReceived` is the only
-        // signal of the second one.
-        isCoinbase = true;
-        report.coinbaseLeaves += 1;
-        if (record.blockNumber === null) {
+      // The coinbase leaves, in the same shape and for the same reason.
+      const coinbases = records.filter(
+        (record) =>
+          record.commitment !== null && record.coinbaseQuanta !== null && record.blockNumber !== null,
+      );
+      const minted = new Map<number, ScannedNote | null>();
+      for (let start = 0; start < coinbases.length; start += BATCH) {
+        const slice = coinbases.slice(start, start + BATCH);
+        const answers = await crypto.coinbaseBatch(
+          slice.map((record) => ({
+            index: record.index,
+            blockNumber: record.blockNumber as number,
+            value: record.coinbaseQuanta as bigint,
+            genesisHash: genesis,
+            // Normalised: the module parses this as hex and `0x` is not hex.
+            commitment: normaliseHash(record.commitment as string),
+            ciphertext: record.ciphertext,
+          })),
+        );
+        slice.forEach((record, offset) => {
+          minted.set(record.index, answers[offset] ?? null);
+        });
+        progress('scan', `${Math.min(start + BATCH, coinbases.length)} of ${coinbases.length} coinbase leaves in this window`);
+      }
+
+      for (const record of records) {
+        report.leavesScanned += 1;
+        if (record.commitment === null) {
+          // A gap in the leaf map, which the tree never leaves: a node
+          // answering about a block it does not have.
           continue;
         }
-        received = minted.get(record.index) ?? null;
-      } else {
-        // A leaf with neither ciphertext nor coinbase value is skipped: a
-        // pre-v1 wormhole transfer or a transparent reward leaf, and nothing
-        // appends either any more.
-        received = decrypted.get(record.index) ?? null;
-      }
-      if (received === null) {
-        continue;
-      }
+        const commitment = normaliseHash(record.commitment);
 
-      const existing = notes.get(commitment);
-      if (existing !== undefined) {
+        let received: ScannedNote | null = null;
+        let isCoinbase = false;
+        if (record.coinbaseQuanta !== null) {
+          // A block's coinbase note. Its value is public, because the chain
+          // hashed it into a commitment over an `inner` it cannot open, and the
+          // rest is rebuilt from this wallet's own miner key, or from a payload
+          // under the chain's published value when somebody else minted it. The
+          // commitment check decides in both cases, and in both cases the value
+          // inside any payload is ignored: a coinbase's amount is the chain's
+          // own arithmetic. The rule is the module's; see `worker/core.ts`.
+          //
+          // Not this wallet's coinbase, or a corrupt miner key, is a `null`. The
+          // gap between `coinbaseLeaves` and `coinbaseReceived` is the only
+          // signal of the second one.
+          isCoinbase = true;
+          report.coinbaseLeaves += 1;
+          if (record.blockNumber === null) {
+            continue;
+          }
+          received = minted.get(record.index) ?? null;
+        } else {
+          // A leaf with neither ciphertext nor coinbase value is skipped: a
+          // pre-v1 wormhole transfer or a transparent reward leaf, and nothing
+          // appends either any more.
+          received = decrypted.get(record.index) ?? null;
+        }
+        if (received === null) {
+          continue;
+        }
+
+        const existing = notes.get(commitment);
+        if (existing !== undefined) {
+          if (rewound && reconciles) {
+            seenAgain.add(commitment);
+          }
+          // Unconditional, the rescan included: a commitment the chain carries
+          // at another index is a note whose stored index is stale, and leaving
+          // it stale is what makes a note unspendable. This only ever adds,
+          // because it moves a note to where the chain has it.
+          if (
+            existing.note.leafIndex !== record.index ||
+            existing.note.blockNumber !== record.blockNumber ||
+            !existing.note.onChain
+          ) {
+            existing.note.leafIndex = record.index;
+            existing.note.blockNumber = record.blockNumber;
+            existing.note.onChain = true;
+            report.relocated += 1;
+          }
+          continue;
+        }
+
+        const nullifier = normaliseHash(received.nullifier);
+        if (settled.has(nullifier)) {
+          // The one refusal left, and it is provisional: a reorg that orphans
+          // the settlement makes the same leaf acceptable on the next pass.
+          //
+          // A note this wallet already holds never reaches here: the branch
+          // above returns first, so a wallet's own spent notes are relocated
+          // rather than refused.
+          if (!rejected.has(commitment)) {
+            report.rejected += 1;
+          }
+          rejected.set(commitment, {
+            commitment,
+            leafIndex: record.index,
+            value: received.value.toString(),
+            reason: 'its nullifier is already settled on chain',
+          });
+          continue;
+        }
+
+        const origin: NoteOrigin = isCoinbase
+          ? 'coinbase'
+          : await originOf(crypto, record.blockNumber, received.rho, entryCount);
+
+        report.received += 1;
+        report.receivedValue += received.value;
+        if (isCoinbase) {
+          report.coinbaseReceived += 1;
+        }
         if (rewound && reconciles) {
+          // A note first recorded by this scan is on chain by construction.
           seenAgain.add(commitment);
         }
-        // Unconditional, the rescan included: a commitment the chain carries
-        // at another index is a note whose stored index is stale, and leaving
-        // it stale is what makes a note unspendable. This only ever adds,
-        // because it moves a note to where the chain has it.
-        if (
-          existing.note.leafIndex !== record.index ||
-          existing.note.blockNumber !== record.blockNumber ||
-          !existing.note.onChain
-        ) {
-          existing.note.leafIndex = record.index;
-          existing.note.blockNumber = record.blockNumber;
-          existing.note.onChain = true;
-          report.relocated += 1;
-        }
-        continue;
-      }
-
-      const nullifier = normaliseHash(received.nullifier);
-      if (settled.has(nullifier)) {
-        // The one refusal left, and it is provisional: a reorg that orphans
-        // the settlement makes the same leaf acceptable on the next pass.
-        //
-        // A note this wallet already holds never reaches here: the branch
-        // above returns first, so a wallet's own spent notes are relocated
-        // rather than refused.
-        if (!rejected.has(commitment)) {
-          report.rejected += 1;
-        }
-        rejected.set(commitment, {
-          commitment,
-          leafIndex: record.index,
-          value: received.value.toString(),
-          reason: 'its nullifier is already settled on chain',
+        notes.set(commitment, {
+          note: {
+            commitment,
+            leafIndex: record.index,
+            blockNumber: record.blockNumber,
+            value: received.value.toString(),
+            origin,
+            spent: false,
+            spentSeenAtBlock: null,
+            onChain: true,
+            // Sealed by the caller, which holds the key.
+            secret: { v: 1, iv: '', ct: '' },
+          },
+          secret: {
+            rho: received.rho,
+            r: received.r,
+            nullifier,
+            memo: received.memo,
+          },
         });
-        continue;
-      }
-
-      const origin: NoteOrigin = isCoinbase
-        ? 'coinbase'
-        : await originOf(crypto, record.blockNumber, received.rho, entryCount);
-
-      report.received += 1;
-      report.receivedValue += received.value;
-      if (isCoinbase) {
-        report.coinbaseReceived += 1;
-      }
-      if (rewound && reconciles) {
-        // A note first recorded by this scan is on chain by construction.
-        seenAgain.add(commitment);
-      }
-      notes.set(commitment, {
-        note: {
-          commitment,
-          leafIndex: record.index,
-          blockNumber: record.blockNumber,
-          value: received.value.toString(),
-          origin,
-          spent: false,
-          spentSeenAtBlock: null,
-          onChain: true,
-          // Sealed by the caller, which holds the key.
-          secret: { v: 1, iv: '', ct: '' },
-        },
-        secret: {
-          rho: received.rho,
-          r: received.r,
-          nullifier,
-          memo: received.memo,
-        },
-      });
-      if (input.pending.includes(commitment)) {
-        clearedPending.push(commitment);
+        if (input.pending.includes(commitment)) {
+          clearedPending.push(commitment);
+        }
       }
     }
 

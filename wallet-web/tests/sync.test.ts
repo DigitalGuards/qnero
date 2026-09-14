@@ -233,6 +233,53 @@ describe('the gates a sync passes before it writes', () => {
   });
 });
 
+describe('a scan over more leaves than one window', () => {
+  it('reads the range in contiguous windows and misses nothing between them', async () => {
+    // The range used to be materialised whole before anything was decrypted,
+    // and a `LeafRecord` carries the leaf's ciphertext: 1,792 bytes per leaf
+    // on the chain, in the page, beside the worker's 918 MiB. It is read in
+    // windows now, which is a change to what is resident and has to be no
+    // change at all to what is found or to what the node is asked.
+    const first = note(100n, 'a1');
+    const middle = note(200n, 'b2');
+    const last = note(300n, 'c3');
+    const leaves: FakeLeaf[] = [
+      { index: 0, commitment: first.commitment, blockNumber: 1, note: first },
+      { index: 70, commitment: middle.commitment, blockNumber: 2, note: middle },
+      { index: 129, commitment: last.commitment, blockNumber: 3, note: last },
+    ];
+    const chain = fakeChain({ head: 5, leaves, leafCount: 130 });
+    const windows: [number, number][] = [];
+    const watched: SyncChain = {
+      ...chain,
+      leaves: (from, to, at, onProgress) => {
+        windows.push([from, to]);
+        return chain.leaves(from, to, at, onProgress);
+      },
+    };
+
+    const result = await runSync(
+      { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+      watched,
+      fakeCrypto(leaves),
+    );
+
+    expect(result.report.received).toBe(3);
+    expect(result.report.leavesScanned).toBe(3);
+    expect(result.notes.map((entry) => entry.note.leafIndex).sort((a, b) => a - b)).toEqual([
+      0, 70, 129,
+    ]);
+    // Contiguous, ascending, and covering the whole range: the same question
+    // the whole-range read asked, in the same order.
+    expect(windows).toEqual([
+      [0, 64],
+      [64, 128],
+      [128, 130],
+    ]);
+    expect(result.meta.nextLeaf).toBe(130);
+  });
+});
+
 describe('the hex a scan hands the prover', () => {
   it('carries no 0x prefix, which the module would refuse as not-hex', async () => {
     // The chain answers with `0x`-prefixed hex and the module parses hex. A

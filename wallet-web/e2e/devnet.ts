@@ -33,7 +33,16 @@ const WORK = join(APP_DIR, '.devnet');
 const NODE_BIN = join(REPO, 'chain', 'target', 'release', 'qnero-node');
 const WALLET_BIN = join(REPO, 'target', 'release', 'qnero-wallet');
 
-export const RPC_PORT = 9944;
+/**
+ * The port the dev chain answers on.
+ *
+ * Overridable, because 9944 is the port every Substrate node defaults to and
+ * this workstation runs other ones: a suite that can only run when nothing
+ * else holds that port is a suite that cannot be run on demand. The node, the
+ * command-line wallet and the browser are all pointed at whatever this says,
+ * so there is one place to change it and no second copy to disagree.
+ */
+export const RPC_PORT = Number(process.env['QNERO_DEVNET_PORT'] ?? '9944');
 export const RPC_HTTP = `http://127.0.0.1:${RPC_PORT}`;
 export const RPC_WS = `ws://127.0.0.1:${RPC_PORT}`;
 
@@ -73,9 +82,15 @@ function requireBinaries(): void {
   }
 }
 
-/** One command-line wallet invocation, niced, inside the work directory. */
+/**
+ * One command-line wallet invocation, niced, inside the work directory.
+ *
+ * `--node` is passed on every call rather than left to the default, so the
+ * command-line wallet and the browser are talking to the same chain even when
+ * that chain is not on the port a node defaults to.
+ */
 export function wallet(args: string[], env: Record<string, string> = {}): string {
-  const result = spawnSync('nice', ['-n', '19', WALLET_BIN, ...args], {
+  const result = spawnSync('nice', ['-n', '19', WALLET_BIN, '--node', RPC_HTTP, ...args], {
     cwd: WORK,
     encoding: 'utf8',
     env: { ...process.env, ...env },
@@ -195,15 +210,29 @@ export async function startDevnet(): Promise<DevnetFacts> {
   const minerKey = matchAddress(wallet(['--file', 'sender.seed', 'miner-address']), 'qnm1');
 
   writeFileSync(LOG_PATH, '');
-  const child = spawn('nice', ['-n', '19', NODE_BIN, '--dev', '--tmp', '--mining-threads', '1'], {
-    cwd: WORK,
-    // The environment variable rather than the command line: every process
-    // listing on a machine can read a command line, and the miner key carries
-    // the coinbase viewing key.
-    env: { ...process.env, QNERO_MINER_KEY: minerKey },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-  });
+  const child = spawn(
+    'nice',
+    [
+      '-n',
+      '19',
+      NODE_BIN,
+      '--dev',
+      '--tmp',
+      '--mining-threads',
+      '1',
+      '--rpc-port',
+      String(RPC_PORT),
+    ],
+    {
+      cwd: WORK,
+      // The environment variable rather than the command line: every process
+      // listing on a machine can read a command line, and the miner key
+      // carries the coinbase viewing key.
+      env: { ...process.env, QNERO_MINER_KEY: minerKey },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    },
+  );
   child.stdout.on('data', (chunk: Buffer) => {
     writeFileSync(LOG_PATH, chunk, { flag: 'a' });
   });

@@ -207,6 +207,19 @@ test.describe('the browser wallet against a dev chain', () => {
     const problems: string[] = [];
     page.on('pageerror', (error) => problems.push(`page error: ${error.message}`));
     await page.addInitScript(RECORD_RPC);
+    // The endpoint this suite's node is actually on, seeded the way the
+    // settings screen would write it. `public/config.json` carries the
+    // default, and the default port is the one every Substrate node wants, so
+    // the suite states its own rather than assuming nothing else on this
+    // machine wanted 9944.
+    await page.addInitScript((endpoint: string) => {
+      try {
+        localStorage.setItem('qnero-wallet-endpoint', endpoint);
+      } catch {
+        // Site data blocked. The page then falls back to `config.json`, which
+        // is right whenever the node is on the default port.
+      }
+    }, facts.rpc);
 
     await page.goto(MODE === 'single' ? '/?prover=single' : '/');
     await expect(page.getByTestId('create-wallet')).toBeVisible({ timeout: 60_000 });
