@@ -54,6 +54,73 @@ const MODE: 'threaded' | 'single' = process.env['QNERO_PROVER'] === 'single' ? '
 
 const measurements: Measurement[] = [];
 
+/**
+ * Every JSON-RPC method this page sends, recorded off the wire.
+ *
+ * `tests/privacy.test.ts` records the sync and the spend at the transport
+ * seam, which is where the rules live. This records the socket itself, so it
+ * also covers the part no unit test reaches: what `@polkadot/api` asks on its
+ * own during a connection, and what a head subscription costs. The property is
+ * the same one and it is the whole of "the node learns nothing": a name it is
+ * never given.
+ */
+const RECORD_RPC = `
+  (() => {
+    const sent = [];
+    globalThis.__qneroRpc = sent;
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      try {
+        const frame = JSON.parse(String(data));
+        for (const call of Array.isArray(frame) ? frame : [frame]) {
+          if (typeof call.method === 'string') {
+            sent.push({ method: call.method, params: JSON.stringify(call.params ?? []) });
+          }
+        }
+      } catch {
+        // Not a JSON-RPC frame. Nothing this wallet sends looks like that, and
+        // a recorder that threw here would break the page it is watching.
+      }
+      return send.call(this, data);
+    };
+  })();
+`;
+
+/**
+ * What a wallet may ask a node.
+ *
+ * The first group is polkadot-js describing the chain it has just connected
+ * to, which every client of this runtime sends and none of which names
+ * anything. The second is this wallet's own reads, batched and pinned.
+ * `state_getStorage` is deliberately absent: every storage read here is a
+ * range or a batch at one block hash, and a point lookup is the shape that
+ * carries a name.
+ */
+const ALLOWED_RPC = new Set([
+  'rpc_methods',
+  'system_chain',
+  'system_chainType',
+  'system_name',
+  'system_properties',
+  'system_version',
+  'system_health',
+  'state_getMetadata',
+  'state_getRuntimeVersion',
+  'state_subscribeRuntimeVersion',
+  'state_unsubscribeRuntimeVersion',
+  'chain_getFinalizedHead',
+  'chain_subscribeNewHead',
+  'chain_subscribeNewHeads',
+  'chain_unsubscribeNewHead',
+  'chain_unsubscribeNewHeads',
+  'chain_getBlockHash',
+  'chain_getHeader',
+  'chain_getBlock',
+  'state_queryStorageAt',
+  'state_getKeysPaged',
+  'author_submitExtrinsic',
+]);
+
 /** `formatDuration`'s two forms: "980 ms" and "11.3 s". */
 function millisFrom(reading: string): number {
   const value = Number(reading.replace(/[^0-9.]/g, ''));
@@ -128,6 +195,7 @@ test.describe('the browser wallet against a dev chain', () => {
     const facts = readFacts();
     const problems: string[] = [];
     page.on('pageerror', (error) => problems.push(`page error: ${error.message}`));
+    await page.addInitScript(RECORD_RPC);
 
     await page.goto(MODE === 'single' ? '/?prover=single' : '/');
     await expect(page.getByTestId('create-wallet')).toBeVisible({ timeout: 60_000 });
@@ -220,6 +288,22 @@ test.describe('the browser wallet against a dev chain', () => {
     await expect(page.getByTestId('notes-table')).toContainText('spent');
 
     expect(await headHeight()).toBeGreaterThan(0);
+
+    // What the node was asked, over a whole session: a connection, two syncs,
+    // a payment and a confirmation.
+    const rpc = await page.evaluate(
+      () => (globalThis as unknown as { __qneroRpc: { method: string; params: string }[] }).__qneroRpc,
+    );
+    expect(rpc.length).toBeGreaterThan(10);
+    const methods = [...new Set(rpc.map((call) => call.method))].sort();
+    console.log(`rpc methods (${MODE}):`, methods.join(', '));
+    for (const method of methods) {
+      expect(ALLOWED_RPC.has(method), `${method} is not a method this wallet may call`).toBe(true);
+    }
+    // The one call that is only ever asked about a leaf the caller is
+    // spending, under any of its spellings.
+    expect(JSON.stringify(rpc)).not.toMatch(/merkle/i);
+
     expect(problems).toEqual([]);
   });
 });
