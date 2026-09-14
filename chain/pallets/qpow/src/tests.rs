@@ -99,7 +99,7 @@ fn test_difficulty_calculation() {
 #[test]
 fn test_difficulty_recovers_after_sleep() {
 	new_test_ext().execute_with(|| {
-		let target = <Test as Config>::TargetBlockTime::get();
+		let target = QPow::target_block_time();
 
 		for i in 1u64..=10 {
 			run_block(i, i * target);
@@ -134,9 +134,13 @@ fn test_difficulty_recovers_after_sleep() {
 #[should_panic(expected = "Genesis initial difficulty must be within")]
 fn test_genesis_rejects_out_of_range_difficulty() {
 	let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
-	crate::GenesisConfig::<Test> { initial_difficulty: U512::zero(), _phantom: Default::default() }
-		.assimilate_storage(&mut t)
-		.unwrap();
+	crate::GenesisConfig::<Test> {
+		initial_difficulty: U512::zero(),
+		target_block_time: <Test as Config>::TargetBlockTime::get(),
+		_phantom: Default::default(),
+	}
+	.assimilate_storage(&mut t)
+	.unwrap();
 }
 
 /// V12 audit fix (181438): the retarget floors the author-controlled block time,
@@ -158,7 +162,7 @@ fn test_retarget_floors_small_block_time() {
 
 		// production-scale target: floor stays below the divisor, so fast blocks
 		// still increase difficulty.
-		let fast = QPow::calculate_difficulty(difficulty, 100, 12_000);
+		let fast = QPow::calculate_difficulty(difficulty, 100, PUBLIC_TARGET);
 		assert!(
 			fast > difficulty,
 			"fast blocks must still increase difficulty at production target"
@@ -229,7 +233,7 @@ fn test_difficulty_below_min_clips_up() {
 fn test_adjust_difficulty_with_zero_storage_uses_initial_difficulty() {
 	new_test_ext().execute_with(|| {
 		let initial_difficulty = <Test as Config>::InitialDifficulty::get();
-		let target_time = <Test as Config>::TargetBlockTime::get();
+		let target_time = QPow::target_block_time();
 
 		// Clear the CurrentDifficulty storage to simulate unset state.
 		// This could happen if genesis wasn't properly initialized or storage was corrupted.
@@ -277,33 +281,129 @@ fn test_adjust_difficulty_with_zero_storage_uses_initial_difficulty() {
 	});
 }
 
-/// A max-legal future timestamp (15s slack after a 12s wait → 27s delta) plus
-/// the honest catch-up blocks `create_inherent` is forced to produce must not
-/// leave a permanent deficit versus the same wall-clock of honest 12s blocks.
+/// A max-legal future timestamp plus the honest catch-up blocks
+/// `create_inherent` is forced to produce must not leave a permanent deficit
+/// versus the same wall clock of honest blocks at the target.
+///
+/// The drift allowance is an absolute number of seconds and the retarget's
+/// buckets scale with the target, so moving the public target from 12 s to
+/// 120 s made this strictly safer: a 15 s inflate used to push a 12 s wait into
+/// the next 10 s bucket and cost a single -1, and at a 100 s divisor it does not
+/// leave the neutral band at all. Both targets are checked, because the dev
+/// chain still runs at 12 s.
 #[test]
 fn max_timestamp_drift_does_not_bias_difficulty_down() {
 	new_test_ext().execute_with(|| {
-		const TARGET: u64 = 12_000;
 		let start = U512::from(4_000_000u64);
-		let run = |mut d: U512, deltas: &[u64]| {
+		let run = |target: u64, mut d: U512, deltas: &[u64]| {
 			for &t in deltas {
-				d = QPow::calculate_difficulty(d, t, TARGET);
+				d = QPow::calculate_difficulty(d, t, target);
 			}
 			d
 		};
 
-		let honest = run(start, &[12_000, 12_000, 12_000]);
-		// 12s wait + 15s future, then last+100ms, then wall clock catches up.
-		let attacked = run(start, &[27_000, 100, 8_900]);
-
+		// Dev target: 12s wait + 15s future, then last+100ms, then the wall
+		// clock catches up.
+		let honest = run(DEV_TARGET, start, &[12_000, 12_000, 12_000]);
+		let attacked = run(DEV_TARGET, start, &[27_000, 100, 8_900]);
 		assert_eq!(honest, start, "honest 12s blocks leave difficulty unchanged");
 		assert!(
 			attacked >= honest,
-			"max-drift cycle must not book a deficit: honest {}, attacked {}",
-			honest,
-			attacked
+			"max-drift cycle must not book a deficit at the dev target: honest {honest}, attacked {attacked}"
+		);
+
+		// Public target: the same 15s inflate after a 120s wait.
+		let honest = run(PUBLIC_TARGET, start, &[120_000, 120_000, 120_000]);
+		let attacked = run(PUBLIC_TARGET, start, &[135_000, 100, 104_900]);
+		assert_eq!(honest, start, "honest 120s blocks leave difficulty unchanged");
+		assert!(
+			attacked >= honest,
+			"max-drift cycle must not book a deficit at the public target: honest {honest}, attacked {attacked}"
 		);
 	});
+}
+
+/// The public chain's target and the `dev` preset's, as the retarget sees them.
+const PUBLIC_TARGET: u64 = 120_000;
+const DEV_TARGET: u64 = 12_000;
+
+/// A chain that starts at the difficulty floor has to climb to a live
+/// difficulty on the retarget alone, and at a 120 s target every step costs ten
+/// times the wall clock it cost at 12 s. This pins how long that takes.
+///
+/// The model is one rig of a fixed hash rate: difficulty is expected hashes per
+/// block, so the observed block time is `difficulty / hash_rate`, and the
+/// retarget is fed that. What it converges to is the bottom of its own neutral
+/// band. The Homestead band is one to two divisors wide, so at a 120 s target
+/// (100 s divisor) a climbing chain settles at 100 s blocks and stops there,
+/// which is inside the band by construction and is the honest answer to "does
+/// it converge".
+#[test]
+fn a_chain_at_the_floor_converges_to_the_target_band() {
+	new_test_ext().execute_with(|| {
+		/// A small testnet rig: about two modern cores in full mode.
+		const HASH_RATE: u64 = 3_500;
+		/// Measured: 13_628 blocks, which at 120 s is 18.9 days.
+		const MAX_BLOCKS: u32 = 14_000;
+
+		let mut difficulty = QPow::get_min_difficulty();
+		let mut blocks = 0u32;
+		let mut block_time_ms = 0u64;
+		while blocks < MAX_BLOCKS {
+			// Observed block time for this difficulty at a fixed hash rate.
+			block_time_ms = (difficulty.low_u64().saturating_mul(1_000) / HASH_RATE).max(1);
+			let next = QPow::calculate_difficulty(difficulty, block_time_ms, PUBLIC_TARGET);
+			blocks += 1;
+			if next == difficulty {
+				break;
+			}
+			difficulty = next;
+		}
+
+		assert!(
+			(13_000..MAX_BLOCKS).contains(&blocks),
+			"climb from the floor took {blocks} blocks, expected about 13_628"
+		);
+		assert!(
+			(PUBLIC_TARGET * 10 / 12..PUBLIC_TARGET * 20 / 12).contains(&block_time_ms),
+			"settled block time {block_time_ms}ms is outside the retarget's neutral band"
+		);
+		// The band's lower edge is `hash_rate * divisor`, and the climb stops on
+		// the first step that lands inside it.
+		assert!(difficulty >= U512::from(HASH_RATE * (PUBLIC_TARGET * 10 / 12) / 1_000));
+	});
+}
+
+/// The target is chain state, so one binary serves a 120 s public chain and a
+/// 12 s dev chain. The accessor falls back to the runtime constant when storage
+/// is unset, which is what an already-running chain reads.
+#[test]
+fn the_target_block_time_comes_from_genesis_storage() {
+	new_test_ext().execute_with(|| {
+		assert_eq!(QPow::target_block_time(), <Test as Config>::TargetBlockTime::get());
+		crate::TargetBlockTimeMs::<Test>::put(PUBLIC_TARGET);
+		assert_eq!(QPow::target_block_time(), PUBLIC_TARGET);
+		crate::TargetBlockTimeMs::<Test>::kill();
+		assert_eq!(
+			QPow::target_block_time(),
+			<Test as Config>::TargetBlockTime::get(),
+			"an unset target must fall back to the runtime constant"
+		);
+	});
+}
+
+/// A zero target would divide by zero in the retarget, so genesis refuses it.
+#[test]
+#[should_panic(expected = "Genesis target block time must be non-zero")]
+fn test_genesis_rejects_zero_target_block_time() {
+	let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
+	crate::GenesisConfig::<Test> {
+		initial_difficulty: <Test as Config>::InitialDifficulty::get(),
+		target_block_time: 0,
+		_phantom: Default::default(),
+	}
+	.assimilate_storage(&mut t)
+	.unwrap();
 }
 
 /// The seed schedule is chain state, so the consensus client can read it

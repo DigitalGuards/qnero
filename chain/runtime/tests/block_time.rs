@@ -1,0 +1,101 @@
+//! The target block time, and everything the runtime derives from it.
+//!
+//! The public chain targets 120 000 ms, Monero's interval. `docs/DESIGN.md`
+//! carries the decision and the rationale; what this file carries is every
+//! number that moved with it, so a future edit to `TARGET_BLOCK_TIME_MS` cannot
+//! silently change what a governance period, a reversal window or a quota
+//! window means.
+//!
+//! Two kinds of constant live here and they are audited differently:
+//!
+//! - Derived durations keep their meaning and change their block count. `DAYS` is one day at any
+//!   target.
+//! - Block counts keep their count and change their meaning. 256 blocks of shielded anchor validity
+//!   is 8.5 hours at 120 s where it was 51 minutes at 12 s, and that was the point of leaving it
+//!   alone.
+
+use frame_support::traits::Get;
+use qnero_runtime::{
+	configs::{
+		ChainTargetBlockTime, DefaultDelay, HighSecurityTxWindowBlocks, MaxExpiryDuration,
+		MinDelayPeriodBlocks, ShieldedBlockHashWindow, TargetBlockTime, TimestampBucketSize,
+		UndecidingTimeout,
+	},
+	DAYS, HOURS, MINUTES, TARGET_BLOCK_TIME_MS,
+};
+use qp_scheduler::BlockNumberOrTimestamp;
+
+/// Monero's interval, and the runtime's public default.
+#[test]
+fn the_public_target_is_two_minutes() {
+	assert_eq!(TARGET_BLOCK_TIME_MS, 120_000);
+	assert_eq!(TargetBlockTime::get(), TARGET_BLOCK_TIME_MS);
+}
+
+/// Each unit is derived from milliseconds on its own. Chaining `HOURS` off
+/// `MINUTES` would make both zero at a target longer than a minute, and every
+/// governance period denominated in them would collapse to the next block with
+/// nothing to say so.
+#[test]
+fn the_time_units_are_derived_from_milliseconds() {
+	assert_eq!(MINUTES, 1, "one block, the shortest period a block count can express: 2 minutes");
+	assert_eq!(HOURS, 30, "3_600_000 / 120_000, still exactly one hour");
+	assert_eq!(DAYS, 720, "86_400_000 / 120_000, still exactly one day");
+	assert_ne!(HOURS, MINUTES * 60, "chaining would make this two hours");
+	assert_eq!(DAYS, HOURS * 24);
+}
+
+/// Every constant whose block count is a duration. The count changes, the
+/// duration does not.
+#[test]
+fn duration_denominated_constants_keep_their_durations() {
+	assert_eq!(UndecidingTimeout::get(), 45 * DAYS);
+	assert_eq!(UndecidingTimeout::get(), 32_400, "still 45 days");
+	assert_eq!(
+		DefaultDelay::get(),
+		BlockNumberOrTimestamp::BlockNumber(DAYS),
+		"the default reversible delay is still 24 hours"
+	);
+	assert_eq!(HighSecurityTxWindowBlocks::get(), DAYS);
+	assert_eq!(HighSecurityTxWindowBlocks::get(), 720, "the 16-tx quota window is still 24 hours");
+	assert_eq!(MaxExpiryDuration::get(), 14 * DAYS);
+	assert_eq!(
+		MaxExpiryDuration::get(),
+		10_080,
+		"a multisig proposal still expires after two weeks; the old bare 100_800 would have \
+		 made it 140 days"
+	);
+}
+
+/// Every constant whose block count is a count. The duration changes, and this
+/// is where the new duration is written down.
+#[test]
+fn count_denominated_constants_keep_their_counts() {
+	assert_eq!(
+		ShieldedBlockHashWindow::get(),
+		256,
+		"256 blocks of anchor validity: 8.5 hours at 120 s, which suits a phone prover"
+	);
+	assert_eq!(
+		MinDelayPeriodBlocks::get(),
+		2,
+		"two confirmations is the guarantee; at 120 s that is 4 minutes of wall clock"
+	);
+}
+
+/// The scheduler's timestamp granularity follows the chain's configured target
+/// rather than the runtime constant, so a 12 s dev chain keeps 24 s buckets.
+/// With no genesis storage written it falls back to the constant, which is the
+/// path benchmarks, mocks and any pre-104 chain take.
+#[test]
+fn the_timestamp_bucket_follows_the_chain_target() {
+	sp_io::TestExternalities::default().execute_with(|| {
+		assert_eq!(ChainTargetBlockTime::get(), TARGET_BLOCK_TIME_MS);
+		assert_eq!(TimestampBucketSize::get(), 2 * TARGET_BLOCK_TIME_MS);
+		assert_eq!(TimestampBucketSize::get(), 240_000, "4 minutes, up from 24 s at a 12 s target");
+
+		pallet_qpow::TargetBlockTimeMs::<qnero_runtime::Runtime>::put(12_000u64);
+		assert_eq!(ChainTargetBlockTime::get(), 12_000);
+		assert_eq!(TimestampBucketSize::get(), 24_000, "a dev chain keeps its 24 s buckets");
+	});
+}

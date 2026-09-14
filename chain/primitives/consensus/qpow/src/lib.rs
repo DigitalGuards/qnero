@@ -35,6 +35,14 @@ sp_api::decl_runtime_apis! {
 		/// Get the current mining difficulty
 		fn get_difficulty() -> U512;
 
+		/// The chain's target block time, in milliseconds.
+		///
+		/// Chain state since spec 104, so one binary serves a 120 s public
+		/// chain and a 12 s dev chain. Anything that quotes a wait to a user,
+		/// estimates a hash rate from an observed interval or counts blocks per
+		/// day reads it from here instead of carrying a constant.
+		fn get_target_block_time() -> u64;
+
 		/// Get last block timestamp
 		fn get_last_block_time() -> u64;
 

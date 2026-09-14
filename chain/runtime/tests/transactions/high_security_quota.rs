@@ -1,6 +1,12 @@
 //! High-security accounts may include at most 16 signed extrinsics in a
 //! rolling 24h window (`DAYS` blocks). The 17th is rejected even if it is a
 //! whitelisted no-op.
+//!
+//! `DAYS` is derived from the target block time, so the window is a day at any
+//! target: 720 blocks at the public 120 s one. The assertion below guards the
+//! derivation, because a `DAYS` that collapsed to zero or one would make the
+//! "one block short of a day" and "a full day" checks indistinguishable and
+//! this test would pass on nothing.
 
 use super::high_security_tip::{bogus_cancel, empty_batch_all, funded_ext, pair, signed_call};
 use frame_support::pallet_prelude::{InvalidTransaction, TransactionValidityError};
@@ -9,6 +15,8 @@ use qnero_runtime::{
 };
 use sp_core::Pair;
 use sp_runtime::traits::IdentifyAccount;
+
+const _: () = assert!(DAYS > 1);
 
 #[test]
 fn high_security_account_is_capped_at_sixteen_signed_extrinsics_per_rolling_day() {

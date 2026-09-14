@@ -33,7 +33,10 @@ parameter_types! {
 	pub const BlockHashCount: u64 = 250;
 	pub const SS58Prefix: u8 = 189;
 	pub const MaxSupply: u128 = 21_000_000 * UNIT;
-	pub const EmissionDivisor: u128 = 50_000_000;
+	/// Matches the runtime: `remaining / 5_000_000` a block at a 120 s target,
+	/// which is the 12 s schedule's `1/50_000_000` rescaled so the supply
+	/// against wall clock is unchanged.
+	pub const EmissionDivisor: u128 = 5_000_000;
 	/// `static` so individual tests can raise it (e.g. to make a treasury mint
 	/// fail below the ED) via `ExistentialDeposit::set`.
 	pub static ExistentialDeposit: Balance = 1;

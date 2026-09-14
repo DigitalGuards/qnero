@@ -55,6 +55,11 @@ pub mod pallet {
 
 	/// Lower bound (ms) on the author-controlled block time fed into the difficulty
 	/// retarget. Flooring can only lower the adjustment, so it can never stall the chain.
+	///
+	/// It binds only below a 600 ms target, where the Homestead divisor drops to
+	/// 500 ms. At the public 120 s target the divisor is 100 s and at the 12 s
+	/// dev target it is 10 s, so this floor is a no-op on both and moving the
+	/// target does not ask for a different value here.
 	const MIN_RETARGET_BLOCK_TIME_MS: u64 = 500;
 
 	#[pallet::pallet]
@@ -69,6 +74,23 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type CurrentDifficulty<T: Config> = StorageValue<_, Difficulty, ValueQuery>;
 
+	/// The target block time this chain was launched with, in milliseconds.
+	///
+	/// Written once, at genesis, from the chain spec. There is no setter and no
+	/// extrinsic that can move it, which is what makes it safe for the
+	/// scheduler to derive its timestamp bucket from: a target that changed
+	/// under a running chain would strand every task already queued at an old
+	/// bucket boundary.
+	///
+	/// [`Config::TargetBlockTime`] stays the runtime's public default and the
+	/// value in metadata. This storage item is what lets one binary serve a
+	/// 120 s public chain and a 12 s dev chain, and it is why
+	/// [`Pallet::target_block_time`] falls back to the constant when storage
+	/// reads zero: a chain that started before this item existed has no value
+	/// here and must keep the behaviour it launched with.
+	#[pallet::storage]
+	pub type TargetBlockTimeMs<T: Config> = StorageValue<_, BlockDuration, ValueQuery>;
+
 	#[pallet::config]
 	pub trait Config: frame_system::Config + pallet_timestamp::Config {
 		#[pallet::constant]
@@ -82,10 +104,11 @@ pub mod pallet {
 
 		/// Blocks per RandomX seed epoch.
 		///
-		/// The consensus client reads this rather than hard-coding Monero's
-		/// 2048, because Monero's epoch was chosen against a 120 s block time
-		/// and this chain's is 12 s. A power of two keeps the rule identical
-		/// to Monero's masked form.
+		/// The consensus client reads this from chain state instead of
+		/// hard-coding Monero's 2048, so a launch can change it without a
+		/// client release. A power of two keeps the rule identical to Monero's
+		/// masked form. At this chain's 120 s target, 2048 blocks is 2.84 days
+		/// between seed rotations, the same wall clock Monero has.
 		#[pallet::constant]
 		type SeedEpochBlocks: Get<u32>;
 
@@ -102,13 +125,21 @@ pub mod pallet {
 	#[pallet::genesis_config]
 	pub struct GenesisConfig<T: Config> {
 		pub initial_difficulty: Difficulty,
+		/// Target block time in milliseconds for this chain, defaulting to
+		/// [`Config::TargetBlockTime`]. The `dev` preset lowers it so the test
+		/// suites keep their cadence under a binary built for a 120 s chain.
+		pub target_block_time: BlockDuration,
 		#[serde(skip)]
 		pub _phantom: PhantomData<T>,
 	}
 
 	impl<T: Config> Default for GenesisConfig<T> {
 		fn default() -> Self {
-			Self { initial_difficulty: T::InitialDifficulty::get(), _phantom: PhantomData }
+			Self {
+				initial_difficulty: T::InitialDifficulty::get(),
+				target_block_time: T::TargetBlockTime::get(),
+				_phantom: PhantomData,
+			}
 		}
 	}
 
@@ -127,8 +158,14 @@ pub mod pallet {
 			// This allows chain-spec overrides of initial difficulty.
 			<CurrentDifficulty<T>>::put(self.initial_difficulty);
 
-			log::info!(target: "qpow", "Genesis: Set initial difficulty to {:x}",
-				self.initial_difficulty.low_u64());
+			// A zero target would divide by zero in the retarget and make every
+			// timestamp bucket degenerate, so refuse it at genesis rather than
+			// fall back silently to the constant.
+			assert!(self.target_block_time > 0, "Genesis target block time must be non-zero");
+			<TargetBlockTimeMs<T>>::put(self.target_block_time);
+
+			log::info!(target: "qpow", "Genesis: Set initial difficulty to {:x}, target block time to {}ms",
+				self.initial_difficulty.low_u64(), self.target_block_time);
 		}
 	}
 
@@ -199,12 +236,12 @@ pub mod pallet {
 
 				duration
 			} else {
-				T::TargetBlockTime::get()
+				Self::target_block_time()
 			};
 
 			<LastBlockTime<T>>::put(now);
 
-			let target_time = T::TargetBlockTime::get();
+			let target_time = Self::target_block_time();
 			let new_difficulty =
 				Self::calculate_difficulty(current_difficulty, block_time, target_time);
 
@@ -238,12 +275,14 @@ pub mod pallet {
 		/// diff = parent_diff + (parent_diff / 2048) * max(1 - block_time / divisor, -99)
 		///
 		/// Homestead used 10s buckets (`Δt // 10`) with Geth's 15s future slack.
-		/// Scaling 10/12 keeps those buckets at a 12s target so a max-drift inflate
-		/// is a single -1 that forced +1 catch-up blocks repay (or overshoot).
-		/// Zones at a 12s target (10s divisor):
-		/// - < 10s: difficulty increases by 1/2048 (~0.05%)
-		/// - 10s to 20s: no change
-		/// - 20s to 30s: difficulty decreases by 1/2048
+		/// Scaling 10/12 keeps those buckets proportional to the target, so a
+		/// max-drift inflate is a single -1 that forced +1 catch-up blocks repay
+		/// (or overshoot). The shape is scale free: at any target the neutral
+		/// band is one to two divisors wide.
+		/// Zones at the public 120s target (100s divisor):
+		/// - < 100s: difficulty increases by 1/2048 (~0.05%)
+		/// - 100s to 200s: no change
+		/// - 200s to 300s: difficulty decreases by 1/2048
 		/// - etc, up to max decrease of 99/2048 (~4.8%)
 		pub fn calculate_difficulty(
 			parent_difficulty: U512,
@@ -257,7 +296,8 @@ pub mod pallet {
 			let block_time_ms = block_time_ms.max(MIN_RETARGET_BLOCK_TIME_MS);
 
 			// Homestead divisor was 10s on a ~12-15s target. Keep that ratio:
-			// divisor = target * 10 / 12.
+			// divisor = target * 10 / 12, which is 100s at the public 120s
+			// target and 10s on a 12s dev chain.
 			let divisor_ms = (target_time_ms * 10 / 12).max(1);
 			let time_factor = (block_time_ms / divisor_ms) as i64;
 			let adjustment = core::cmp::max(1i64 - time_factor, -99i64);
@@ -327,12 +367,27 @@ pub mod pallet {
 			stored
 		}
 
+		/// The target block time this chain runs at, in milliseconds.
+		///
+		/// Reads the genesis-configured storage value, falling back to
+		/// [`Config::TargetBlockTime`] when it is unset. Same shape as
+		/// [`Self::get_difficulty`], and for the same reason: a chain whose
+		/// storage predates the item keeps the constant it launched with, so
+		/// nothing here needs a migration.
+		pub fn target_block_time() -> BlockDuration {
+			let stored = <TargetBlockTimeMs<T>>::get();
+			if stored == 0 {
+				return T::TargetBlockTime::get();
+			}
+			stored
+		}
+
 		pub fn get_min_difficulty() -> Difficulty {
 			// The floor is sized for RandomX now. It used to be
 			// Ethereum's 2^17, which at the 500 to 2000 H/s a RandomX core
 			// manages would be 65 to 260 core-seconds per block against a 12 s
-			// target: a one-machine devnet would never produce a block. 128 is
-			// about four seconds on one light-mode thread, which is what the
+			// dev target: a one-machine devnet would never produce a block. 128
+			// is about four seconds on one light-mode thread, which is what the
 			// `dev` preset starts at.
 			U512::from(128u64)
 		}

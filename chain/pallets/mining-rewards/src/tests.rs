@@ -459,19 +459,22 @@ fn sub_quantum_credit_does_not_mint_a_note() {
 }
 
 #[test]
-#[ignore] // This test takes a very long time (~120M blocks simulation), run manually with --ignored
-fn test_emission_simulation_120m_blocks() {
+#[ignore] // This test takes a very long time (~13M blocks simulation), run manually with --ignored
+fn test_emission_simulation_13m_blocks() {
 	new_test_ext().execute_with(|| {
 		println!("=== Mining Rewards Emission Simulation ===");
 		println!("Max Supply: {:.0} tokens", MaxSupply::get() as f64 / UNIT as f64);
 		println!("Emission Divisor: {:?}", EmissionDivisor::get());
 		println!();
 
-		const MAX_BLOCKS: u64 = 130_000_000;
-		const REPORT_INTERVAL: u64 = 1_000_000;
+		/// Block counts at the public 120 s target: a tenth of what they were
+		/// at 12 s, so each one covers the same wall clock.
+		const TARGET_BLOCK_TIME_SECONDS: f64 = 120.0;
+		const MAX_BLOCKS: u64 = 13_000_000;
+		const REPORT_INTERVAL: u64 = 100_000;
 		const UNIT: u128 = 1_000_000_000_000;
-		const FOUR_YEARS_BLOCKS: u64 = 10_519_200;
-		const HALF_LIFE_BLOCKS: u64 = 34_657_359;
+		const FOUR_YEARS_BLOCKS: u64 = 1_051_920;
+		const HALF_LIFE_BLOCKS: u64 = 3_465_736;
 
 		let initial_supply = Balances::total_issuance();
 		let mut current_supply = initial_supply;
@@ -556,11 +559,11 @@ fn test_emission_simulation_120m_blocks() {
 		println!();
 		println!("Total Miner Rewards: {:.6} tokens", total_miner_rewards as f64 / UNIT as f64);
 
-		let total_seconds = block as f64 * 12.0;
+		let total_seconds = block as f64 * TARGET_BLOCK_TIME_SECONDS;
 		let days = total_seconds / (24.0 * 3600.0);
 		let years = days / 365.25;
 		println!();
-		println!("=== Time Estimates (12s blocks) ===");
+		println!("=== Time Estimates ({TARGET_BLOCK_TIME_SECONDS:.0}s blocks) ===");
 		println!("Total Time: {:.1} days ({:.1} years)", days, years);
 
 		let (supply_4y, miner_4y) =

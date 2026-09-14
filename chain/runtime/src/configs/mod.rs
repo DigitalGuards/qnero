@@ -74,12 +74,16 @@ use sp_core::U512;
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
 
 parameter_types! {
+	/// Retained block hashes. A block count, so at the public 120 s target it is
+	/// 5.7 days of history rather than the 13.7 hours it was at 12 s.
+	/// `ShieldedBlockHashWindow` (256 blocks, 8.5 hours) stays the tighter bound
+	/// on how long a shielded anchor is valid, which is what its comment claims.
 	pub const BlockHashCount: BlockNumber = 4096;
 	pub const Version: RuntimeVersion = VERSION;
 
 	/// Block weight limits for the runtime.
 	///
-	/// - `ref_time`: 6 seconds of compute (with 12 second block time, this leaves headroom)
+	/// - `ref_time`: 6 seconds of compute (with a 120 second block time, this leaves headroom)
 	/// - `proof_size`: Set to u64::MAX (uncapped) - this is intentional for a solo PoW chain
 	///   where stateless validation and PoV limits don't apply.
 	///
@@ -356,23 +360,70 @@ impl pallet_mining_rewards::Config for Runtime {
 	type FindAuthor = QpowAuthor;
 	type WeightInfo = pallet_mining_rewards::weights::SubstrateWeight<Runtime>;
 	type MaxSupply = ConstU128<{ MAX_SUPPLY }>;
-	type EmissionDivisor = ConstU128<50_000_000>;
+	// Emission is a schedule in time, and moving the target block time from 12 s
+	// to 120 s is what moved this. Each block pays out `remaining / divisor`, so
+	// the remaining supply decays geometrically at `k` a block. Ten times fewer
+	// blocks a day need ten blocks' worth of decay in one:
+	// `k_new = 1 - (1 - k_old)^10`, which for `k_old = 1/50_000_000` is
+	// 1.99999982e-7, a divisor of 5_000_000.45. Rounding to 5_000_000 gives
+	// `k = 2.0e-7`, 9.0e-8 relative above exact: the supply-versus-time curve
+	// runs that fraction ahead of the 12 s one, which is far below the pool
+	// quantization every payout already goes through. The curve decays toward
+	// `MaxSupply` and never arrives, so what happens at the tail is still open.
+	type EmissionDivisor = ConstU128<5_000_000>;
 	type Unit = MiningUnit;
 }
 
 parameter_types! {
-	/// Target block time ms
+	/// The runtime's public target block time, in milliseconds.
+	///
+	/// This is the default and the value in metadata. What a running chain
+	/// actually retargets against is `pallet_qpow::TargetBlockTimeMs`, written
+	/// once at genesis from the chain spec, and [`ChainTargetBlockTime`] is the
+	/// reader for it.
 	pub const TargetBlockTime: u64 = TARGET_BLOCK_TIME_MS;
-	pub const TimestampBucketSize: u64 = 2 * TARGET_BLOCK_TIME_MS; // Nyquist frequency
 	/// Initial mining difficulty.
 	///
 	/// A RandomX number, sized for the hash rate a bootstrapping network of
-	/// CPUs actually has: 100 000 is about a minute of one modern core in full
-	/// mode against a 12 s target, and the retarget takes it from there. The
-	/// old value here was 10^11, which was calibrated for Poseidon over a
-	/// 512-bit space and would be days per block on RandomX. The `dev` preset
-	/// overrides this with the pallet's floor.
-	pub const QPoWInitialDifficulty: U512 = U512([100_000, 0, 0, 0, 0, 0, 0, 0]);
+	/// CPUs actually has. Difficulty is expected hashes per block, so it scales
+	/// with the target: 100 000 was about a minute of one modern core in full
+	/// mode against the old 12 s target, and 1 000 000 is the same network
+	/// against a 120 s one. The retarget takes it from there. The old value
+	/// here was 10^11, which was calibrated for Poseidon over a 512-bit space
+	/// and would be days per block on RandomX. The `dev` preset overrides this
+	/// with the pallet's floor.
+	pub const QPoWInitialDifficulty: U512 = U512([1_000_000, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+/// The target block time this chain actually runs at, read from chain state.
+///
+/// One binary serves a 120 s public chain and a 12 s dev chain, so everything
+/// denominated in the target has to read the genesis-configured storage value
+/// instead of [`TargetBlockTime`]. The pallet accessor falls back to the
+/// constant when storage is unset, which covers benchmarks, mocks and any chain
+/// whose genesis predates the storage item.
+pub struct ChainTargetBlockTime;
+impl Get<u64> for ChainTargetBlockTime {
+	fn get() -> u64 {
+		pallet_qpow::Pallet::<Runtime>::target_block_time()
+	}
+}
+
+/// Scheduler timestamp granularity: two target block times, the Nyquist rate for
+/// a clock that only ticks once a block.
+///
+/// At the public 120 s target this is 4 minutes, up from 24 s at the old 12 s
+/// target. It follows the chain's configured target rather than the constant,
+/// which is why `pallet_qpow::TargetBlockTimeMs` has no setter: a bucket size
+/// that moved under a running chain would strand every task already queued at
+/// an old bucket boundary. As a `#[pallet::constant]` this now reports the
+/// chain's own value in metadata rather than the runtime default, which is the
+/// value a client wanting to round a delay needs.
+pub struct TimestampBucketSize;
+impl Get<u64> for TimestampBucketSize {
+	fn get() -> u64 {
+		2u64.saturating_mul(ChainTargetBlockTime::get())
+	}
 }
 
 impl pallet_qpow::Config for Runtime {
@@ -384,18 +435,20 @@ impl pallet_qpow::Config for Runtime {
 	// launch, and both are a one-line change here because the client reads
 	// them from chain state.
 	//
-	// Monero's 2048 blocks at a 120 s target is 2.8 days between seed
-	// rotations. At this chain's 12 s target the same 2048 blocks is 6.8
-	// hours, and every rotation costs a full-mode rig a 2 GiB dataset rebuild.
-	// A launch that wants Monero's cadence rather than Monero's block count
-	// wants 16384 here, which is 2.3 days and still a power of two.
+	// Monero's 2048 blocks at a 120 s target is 2.84 days between seed
+	// rotations, and this chain's target is now the same 120 s, so the block
+	// count and the wall clock both match Monero exactly. Every rotation costs
+	// a full-mode rig a 2 GiB dataset rebuild, and 2.84 days is how often
+	// Monero asks its miners to pay that.
 	//
 	// The lag is 64 blocks and `MaxReorgDepth` is 100, so the block a seed
 	// comes from is inside the window a legal reorg can still move. That
 	// cannot split the chain, because the seed is resolved along each
 	// candidate's own ancestry rather than by canonical height, but a deep
 	// reorg across an epoch boundary does change the seed under work already
-	// started. A lag above the reorg depth, 128, removes even that.
+	// started. A lag above the reorg depth, 128, removes even that. In wall
+	// clock the lag is 2.1 hours and the reorg window 3.3 hours at a 120 s
+	// target, so the relationship between them is unchanged.
 	type SeedEpochBlocks = ConstU32<2_048>;
 	type SeedEpochLag = ConstU32<64>;
 	type WeightInfo = pallet_qpow::weights::SubstrateWeight<Runtime>;
@@ -759,7 +812,12 @@ impl pallet_utility::Config for Runtime {
 
 parameter_types! {
 	pub const ReversibleTransfersPalletIdValue: PalletId = PalletId(*b"rtpallet");
+	/// 24 hours, as a block count: 720 blocks at the public 120 s target.
 	pub const DefaultDelay: BlockNumberOrTimestamp<BlockNumber, Moment> = BlockNumberOrTimestamp::BlockNumber(DAYS);
+	/// The shortest block-denominated reversal window, in blocks. Deliberately a
+	/// block count and not a duration: two blocks is two confirmations, which is
+	/// what the guarantee is about. At a 120 s target that is 4 minutes of wall
+	/// clock, up from 24 s.
 	pub const MinDelayPeriodBlocks: BlockNumber = 2;
 	pub const MaxPendingPerAccount: u32 = 16;
 	/// Maximum leaf calls in a high-security `batch_all`. Deliberately its own
@@ -769,6 +827,7 @@ parameter_types! {
 	pub const MaxHighSecurityBatchLen: u32 = 16;
 	/// Rolling 24h cap on signed extrinsics from a high-security account.
 	pub const MaxHighSecurityTxsPerWindow: u32 = 16;
+	/// The quota window, in blocks: 720 at the public 120 s target, still 24 hours.
 	pub const HighSecurityTxWindowBlocks: BlockNumber = DAYS;
 	/// Volume fee for reversed transactions from high-security accounts only (1% fee is burned)
 	pub const HighSecurityVolumeFee: Permill = Permill::from_percent(1);
@@ -805,7 +864,10 @@ impl pallet_reversible_transfers::Config for Runtime {
 	type BlockNumberProvider = System;
 	type DefaultDelay = DefaultDelay;
 	type MinDelayPeriodBlocks = MinDelayPeriodBlocks;
-	type MinDelayPeriodMoment = TargetBlockTime;
+	// One block interval is the shortest moment-denominated delay that can mean
+	// anything, so it follows the chain's configured target: 2 minutes on the
+	// public chain, 12 s on a dev chain.
+	type MinDelayPeriodMoment = ChainTargetBlockTime;
 	type PalletId = ReversibleTransfersPalletIdValue;
 	type Preimages = Preimage;
 	type WeightInfo = pallet_reversible_transfers::weights::SubstrateWeight<Runtime>;
@@ -918,7 +980,11 @@ parameter_types! {
 	pub const ProposalDeposit: Balance = scale_fee(10 * MILLI_UNIT); // 0.01 UNIT (locked until cleanup)
 	pub const ProposalFee: Balance = scale_fee(50 * MILLI_UNIT); // 0.05 UNIT (non-refundable)
 	pub const SignerStepFactorParam: Permill = Permill::from_percent(1);
-	pub const MaxExpiryDuration: BlockNumber = 100_800; // ~2 weeks at 12s blocks (14 days * 24h * 60m * 60s / 12s)
+	/// ~2 weeks, as a block count derived from [`DAYS`] so it stays two weeks
+	/// when the target block time moves. It was a bare `100_800` sized for 12 s
+	/// blocks; left alone at a 120 s target a multisig proposal would have lived
+	/// 140 days.
+	pub const MaxExpiryDuration: BlockNumber = 14 * DAYS;
 	// Maximum weight for inner calls executed via multisig: 1s of ref_time (a sixth
 	// of the 6s block budget, leaving room for multisig bookkeeping and other
 	// extrinsics) and 2.5 MiB of proof_size (uncharged today — the block's
@@ -1068,8 +1134,13 @@ impl pallet_zk_tree::Config for Runtime {
 }
 
 parameter_types! {
-	/// How far back a shielded settlement may anchor: 256 blocks, about 51
-	/// minutes at a 12 second target.
+	/// How far back a shielded settlement may anchor: 256 blocks, 8.5 hours at
+	/// the public 120 second target (it was about 51 minutes at 12 s).
+	///
+	/// A block count, deliberately kept at 256 when the target moved. What the
+	/// window has to cover is the time between a wallet reading an anchor and
+	/// its proof landing, and 8.5 hours suits a phone that starts a proof, locks
+	/// its screen and finishes later far better than 51 minutes did.
 	///
 	/// Two bounds meet here. A proof names the header of one block and the
 	/// chain resolves that hash from `frame_system::BlockHash`, which keeps

@@ -2,7 +2,7 @@ use crate as pallet_qpow;
 use frame_support::{
 	pallet_prelude::ConstU32,
 	parameter_types,
-	traits::{ConstU64, Everything},
+	traits::{ConstU64, Everything, Get},
 };
 use primitive_types::U512;
 use sp_core::H256;
@@ -89,6 +89,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 	// Add QPow genesis configuration
 	pallet_qpow::GenesisConfig::<Test> {
 		initial_difficulty: TestInitialDifficulty::get(),
+		target_block_time: <Test as pallet_qpow::Config>::TargetBlockTime::get(),
 		_phantom: Default::default(),
 	}
 	.assimilate_storage(&mut t)

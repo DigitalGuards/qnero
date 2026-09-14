@@ -21,7 +21,8 @@
 pub(crate) mod mainnet_vesting;
 
 use crate::{
-	AccountId, BalancesConfig, RuntimeGenesisConfig, EXISTENTIAL_DEPOSIT, MILLIS_PER_DAY, UNIT,
+	AccountId, BalancesConfig, RuntimeGenesisConfig, EXISTENTIAL_DEPOSIT, MILLIS_PER_DAY,
+	TARGET_BLOCK_TIME_MS, UNIT,
 };
 use alloc::{
 	string::{String, ToString},
@@ -222,7 +223,7 @@ fn genesis_template(
 	extra_balances: Vec<(AccountId, u128)>,
 	vesting_schedules: Vec<VestingScheduleTuple>,
 	anchor_vesting_to_first_timestamp: bool,
-	initial_difficulty: Option<U512>,
+	consensus: ConsensusGenesis,
 ) -> Value {
 	const ENDOWED_BALANCE_UNITS: u128 = 100_000;
 	let mut balances = endowed_accounts
@@ -254,10 +255,12 @@ fn genesis_template(
 
 	let config = RuntimeGenesisConfig {
 		balances: BalancesConfig { balances, dev_accounts: None },
-		q_po_w: match initial_difficulty {
-			Some(difficulty) =>
-				pallet_qpow::GenesisConfig { initial_difficulty: difficulty, ..Default::default() },
-			None => Default::default(),
+		q_po_w: pallet_qpow::GenesisConfig {
+			initial_difficulty: consensus
+				.initial_difficulty
+				.unwrap_or_else(pallet_qpow::Pallet::<crate::Runtime>::initial_difficulty),
+			target_block_time: consensus.target_block_time.unwrap_or(TARGET_BLOCK_TIME_MS),
+			..Default::default()
 		},
 		treasury_pallet: pallet_treasury::GenesisConfig::<crate::Runtime> {
 			treasury_account: Some(treasury.account),
@@ -353,6 +356,42 @@ fn dev_initial_difficulty() -> U512 {
 	pallet_qpow::Pallet::<crate::Runtime>::get_min_difficulty()
 }
 
+/// What a preset says about consensus at genesis.
+///
+/// `None` in either field means "the runtime's own default": the public chains
+/// take it, and the `dev` preset overrides both.
+pub struct ConsensusGenesis {
+	/// Starting mining difficulty, defaulting to `QPoWInitialDifficulty`.
+	pub initial_difficulty: Option<U512>,
+	/// Target block time in milliseconds, defaulting to [`TARGET_BLOCK_TIME_MS`].
+	pub target_block_time: Option<u64>,
+}
+
+impl ConsensusGenesis {
+	/// The public chains: mainnet-scale difficulty, 120 s blocks.
+	fn public() -> Self {
+		Self { initial_difficulty: None, target_block_time: None }
+	}
+
+	/// The `dev` preset: the difficulty floor and the fast block time.
+	fn dev() -> Self {
+		Self {
+			initial_difficulty: Some(dev_initial_difficulty()),
+			target_block_time: Some(DEV_TARGET_BLOCK_TIME_MS),
+		}
+	}
+}
+
+/// Target block time for the `dev` preset, in milliseconds.
+///
+/// The public chain targets 120 s. Every e2e suite and every local test drives a
+/// dev chain and would otherwise wait ten times as long for each block, so the
+/// `dev` preset writes this into `pallet_qpow::TargetBlockTimeMs` at genesis.
+/// One binary, two cadences, and no feature flag: the target is chain state.
+/// `the_dev_preset_keeps_the_fast_block_time` is the tripwire, so a future edit
+/// cannot slow the suites down without a failing test.
+pub const DEV_TARGET_BLOCK_TIME_MS: u64 = 12_000;
+
 /// Return the development genesis config.
 pub fn development_config_genesis() -> Value {
 	let endowed_accounts = dilithium_default_accounts();
@@ -400,7 +439,7 @@ pub fn development_config_genesis() -> Value {
 			vec![],
 			vesting_schedules,
 			false,
-			Some(dev_initial_difficulty()),
+			ConsensusGenesis::dev(),
 		);
 		// `genesis_template` adds a chain-spec-only field that `RuntimeGenesisConfig` cannot
 		// deserialize; strip it before deserializing, then restore it on the returned JSON so
@@ -432,7 +471,7 @@ pub fn development_config_genesis() -> Value {
 			vec![],
 			vesting_schedules,
 			false,
-			Some(dev_initial_difficulty()),
+			ConsensusGenesis::dev(),
 		)
 	}
 }
@@ -459,7 +498,7 @@ pub fn heisenberg_config_genesis() -> Value {
 		vec![],
 		vesting_schedules,
 		false,
-		None,
+		ConsensusGenesis::public(),
 	)
 }
 
@@ -640,13 +679,13 @@ pub fn planck_config_genesis() -> Value {
 		signer_fee_seed,
 		vec![],
 		false,
-		None,
+		ConsensusGenesis::public(),
 	)
 }
 
-/// Mainnet genesis: the 27% TGE mint from `mainnet_vesting` — its vesting table, the
-/// `SEED` endowments for the treasurers and the tech collective, and the treasury multisig
-/// derived from the treasurers. Refuses to build until `mainnet_vesting::FINALIZED`.
+/// Mainnet genesis: the 2% placeholder TGE mint from `mainnet_vesting` — its one vesting
+/// row, the `SEED` endowments for the treasurers and the tech collective, and the treasury
+/// multisig derived from the treasurers. Refuses to build until `mainnet_vesting::FINALIZED`.
 pub fn mainnet_config_genesis() -> Value {
 	let treasury_signers = mainnet_vesting::treasurers();
 	let tech_collective = mainnet_vesting::tech_collective();
@@ -670,7 +709,7 @@ pub fn mainnet_config_genesis() -> Value {
 		extra_balances,
 		vesting_schedules,
 		true,
-		None,
+		ConsensusGenesis::public(),
 	)
 }
 
@@ -874,6 +913,32 @@ mod tests {
 		}
 	}
 
+	/// The public chain targets 120 s and the `dev` preset overrides it to 12 s,
+	/// which is what keeps every e2e suite at its old cadence under a binary
+	/// built for the public chain. Without this assertion an edit that dropped
+	/// the override would make the suites ten times slower and nothing would
+	/// say so; without the other half, a preset that silently kept 12 s would
+	/// ship a public chain at the wrong cadence.
+	#[test]
+	fn the_dev_preset_keeps_the_fast_block_time() {
+		let target_of = |name: &str| {
+			let raw = get_preset(&PresetId::from(name)).expect("listed preset must resolve");
+			let (json, _) = prepare_genesis_build_input(raw).expect("well-formed");
+			let config: RuntimeGenesisConfig = serde_json::from_slice(&json).expect("deserializes");
+			config.q_po_w.target_block_time
+		};
+		assert_eq!(
+			target_of(sp_genesis_builder::DEV_RUNTIME_PRESET),
+			DEV_TARGET_BLOCK_TIME_MS,
+			"the dev preset must keep the fast block time the test suites are sized for"
+		);
+		assert_eq!(DEV_TARGET_BLOCK_TIME_MS, 12_000);
+		assert_eq!(crate::TARGET_BLOCK_TIME_MS, 120_000);
+		for preset in [HEISENBERG_RUNTIME_PRESET, PLANCK_RUNTIME_PRESET] {
+			assert_eq!(target_of(preset), crate::TARGET_BLOCK_TIME_MS);
+		}
+	}
+
 	/// Every planck a preset endows can still reach the pool under v1's call
 	/// filter.
 	///
@@ -978,22 +1043,18 @@ mod tests {
 		// endowment check above says nothing about it: the pot's amount covers
 		// the schedule table whoever it pays.
 		//
-		// `planck` vests to nobody. `mainnet`'s payees are its own grant table
-		// plus the treasury multisig, which is the circularity noted above:
-		// what it pins there is that `genesis_template` adds no schedule of its
-		// own.
+		// `planck` vests to nobody. `mainnet`'s payees are its own allocation
+		// table, which is the circularity noted above: what it pins there is
+		// that `genesis_template` adds no schedule of its own. The treasury
+		// multisig holds no schedule since the 2% placeholder replaced the
+		// inherited table.
 		let declared_vested = |id: &PresetId| -> Vec<AccountId> {
 			match id.as_ref() {
 				sp_genesis_builder::DEV_RUNTIME_PRESET | HEISENBERG_RUNTIME_PRESET =>
 					dilithium_default_accounts(),
 				PLANCK_RUNTIME_PRESET => Vec::new(),
 				MAINNET_RUNTIME_PRESET => {
-					let mut payees: Vec<AccountId> = mainnet_vesting::schedules()
-						.into_iter()
-						.map(|(who, ..)| who)
-						.collect();
-					payees.push(mainnet_vesting::treasury_account());
-					payees
+					mainnet_vesting::schedules().into_iter().map(|(who, ..)| who).collect()
 				},
 				other => panic!(
 					"preset {other:?} has no declared beneficiary table here; add one before 					 shipping it, or a schedule paying an account with no key ships unchecked"
@@ -1166,7 +1227,8 @@ mod tests {
 			assert_eq!(config.vesting.schedules.len(), mainnet_vesting::schedules().len());
 			assert_eq!(
 				config.vesting.schedules.iter().filter(|(who, ..)| *who == treasury).count(),
-				2
+				0,
+				"the treasury holds no vesting schedule under the 2% placeholder allocation"
 			);
 			assert!(config.vesting.anchor_to_first_timestamp);
 			let minted: u128 = config.balances.balances.iter().map(|(_, amount)| *amount).sum();

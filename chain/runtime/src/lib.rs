@@ -100,6 +100,13 @@ impl_opaque_keys! {
 // ML-DSA-87 and refuses ML-DSA-65. That rule changes which extrinsics are
 // valid, so it moves `spec_version`; it changes no byte of the signed extrinsic
 // encoding and no entry of the metadata, so `transaction_version` stays at 7.
+// 104 is the move to a 120 s target block time: the retarget, the emission
+// divisor, every block count derived from `DAYS` and the genesis allocation all
+// change with it, and `pallet-qpow` gained a genesis-configured
+// `TargetBlockTimeMs` so one binary can still serve a 12 s dev chain. That is a
+// consensus change and a metadata change (a new storage item, a new genesis
+// field, a new `QPoWApi` method), so `spec_version` moves; the signed extrinsic
+// encoding is untouched, so `transaction_version` stays at 7.
 // `the_runtime_identity_is_pinned` in `tests/call_filter.rs` is the tripwire.
 //
 // Bump `impl_version` when the emitted wasm changes under an unchanged
@@ -118,7 +125,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
 	spec_name: alloc::borrow::Cow::Borrowed("qnero"),
 	impl_name: alloc::borrow::Cow::Borrowed("qnero-node"),
 	authoring_version: 1,
-	spec_version: 103,
+	spec_version: 104,
 	impl_version: 2,
 	apis: apis::RUNTIME_API_VERSIONS,
 	transaction_version: 7,
@@ -126,12 +133,41 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
 };
 
 // Time is measured by number of blocks.
-pub const TARGET_BLOCK_TIME_MS: u64 = 12_000;
+//
+// 120 000 ms is Monero's interval, and the decision to adopt it is recorded in
+// `docs/DESIGN.md`. It is the runtime's public default; the `dev` preset writes
+// 12 000 into `pallet_qpow::TargetBlockTimeMs` at genesis so one binary serves
+// both a 120 s public chain and the fast chains the test suites drive.
+pub const TARGET_BLOCK_TIME_MS: u64 = 120_000;
 
-/// Derived time units expressed in number of blocks (e.g. 60s / 12s = 5 blocks per minute)
-pub const MINUTES: BlockNumber = (60_000u64 / TARGET_BLOCK_TIME_MS) as BlockNumber;
-pub const HOURS: BlockNumber = MINUTES * 60;
-pub const DAYS: BlockNumber = HOURS * 24;
+/// Derived time units expressed in number of blocks.
+///
+/// Each is derived from milliseconds rather than chained off the one above it.
+/// Chaining works only while a block is shorter than a minute: at a 120 s target
+/// `60_000 / TARGET_BLOCK_TIME_MS` is zero, and `MINUTES * 60` would then make
+/// `HOURS` and `DAYS` zero too, which silently zeroes every governance period
+/// denominated in them. Deriving each unit on its own keeps `HOURS` one hour
+/// (30 blocks) and `DAYS` one day (720 blocks).
+///
+/// `MINUTES` is floored at one block, so at a 120 s target it means two minutes:
+/// one block is the shortest wait a block-denominated period can express. Read
+/// every `n * MINUTES` below with that in mind.
+pub const MINUTES: BlockNumber = {
+	let per_minute = (60_000u64 / TARGET_BLOCK_TIME_MS) as BlockNumber;
+	if per_minute == 0 {
+		1
+	} else {
+		per_minute
+	}
+};
+pub const HOURS: BlockNumber = (3_600_000u64 / TARGET_BLOCK_TIME_MS) as BlockNumber;
+pub const DAYS: BlockNumber = (86_400_000u64 / TARGET_BLOCK_TIME_MS) as BlockNumber;
+
+// A target longer than an hour would zero `HOURS`, and one longer than a day
+// would zero `DAYS`. Either would turn a governance period into "the next
+// block" with nothing to say so.
+const _: () = assert!(MINUTES >= 1 && HOURS >= 1 && DAYS >= 1);
+const _: () = assert!(TARGET_BLOCK_TIME_MS > 0);
 
 // Unit = the base number of indivisible units for balances
 pub const UNIT: Balance = 1_000_000_000_000;

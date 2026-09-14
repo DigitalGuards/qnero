@@ -1,29 +1,35 @@
-//! Mainnet genesis allocation — the audit surface for the 27% TGE mint.
+//! Mainnet genesis allocation — the audit surface for the 2% placeholder mint.
 //!
 //! How to audit this file:
-//! 1. [`GENESIS_ALLOCATION`] is 27% of [`MAX_SUPPLY`] (5_670_000). Every coin of it is either a row
-//!    of [`VESTING`] or a [`SEED`] endowment: `sum(VESTING) + SEEDED_ACCOUNTS * SEED ==
+//! 1. [`GENESIS_ALLOCATION`] is 2% of [`MAX_SUPPLY`] (420 000 QNR). Every coin of it is either the
+//!    single [`VESTING`] row or a [`SEED`] endowment: `sum(VESTING) + SEEDED_ACCOUNTS * SEED ==
 //!    GENESIS_ALLOCATION` is asserted at compile time.
-//! 2. [`VESTING`] is the allocation spreadsheet, one row per schedule: `(account, amount, unlock
-//!    start day, unlock end day)`. Days count from TGE, the first non-zero block timestamp (the
-//!    genesis block's `Now` is 0 and is not TGE). Every row vests linearly with `cliff == start`,
-//!    so nothing unlocks as a lump. Spreadsheet grants lock for [`GRANT_UNLOCK_DELAY_DAYS`] (1
-//!    year) and then vest over [`GRANT_UNLOCK_PERIOD_DAYS`] (3 years) to [`GRANT_END_DAYS`]; the
-//!    intents grant ([`INTENTS_AMOUNT`]) vests from TGE over [`INTENTS_UNLOCK_PERIOD_DAYS`].
-//! 3. [`TREASURY`] rows resolve to the [`TREASURY_THRESHOLD`]-of-10 multisig of [`TREASURERS`]:
-//!    [`INITIAL_LIQUIDITY_AMOUNT`] (1% of max supply) vesting over [`INITIAL_LIQUIDITY_VEST_DAYS`],
-//!    and [`TREASURY_VESTING_AMOUNT`] — whatever of the 27% is left — on the grant clock.
-//! 4. Spreadsheet grants sum to [`TOTAL_GRANT_AMOUNT`].
-//! 5. Each of [`TREASURERS`] and [`TECH_COLLECTIVE`] (distinct sets) is endowed with [`SEED`] as
-//!    free balance so they can pay fees and deposits from block 1; a treasurer cannot claim a
-//!    schedule before the multisig can act. The vesting pot additionally receives its existential
-//!    deposit from `genesis_template`, the only issuance outside the 27%.
+//! 2. [`VESTING`] is one row, `(account, amount, unlock start day, unlock end day)`. Days count
+//!    from TGE, the first non-zero block timestamp (the genesis block's `Now` is 0 and is not TGE).
+//!    It vests linearly with `cliff == start`, so nothing unlocks as a lump: locked for
+//!    [`GRANT_UNLOCK_DELAY_DAYS`] (1 year), then vesting over [`GRANT_UNLOCK_PERIOD_DAYS`] (3
+//!    years) to [`GRANT_END_DAYS`].
+//! 3. That row pays [`PLACEHOLDER`], and [`PLACEHOLDER`] is a placeholder. It is one ML-DSA-87
+//!    address generated with `qnero-node key qnero`, standing in for whatever allocation this
+//!    project decides on. Replace it or delete the whole allocation before mainnet genesis; there
+//!    is no launch that should ship this address. `docs/DESIGN.md` section 7.3 carries the
+//!    pre-mainnet check.
+//! 4. Each of [`TREASURERS`] and [`TECH_COLLECTIVE`] (distinct sets) is endowed with [`SEED`] as
+//!    free balance so they can pay fees and deposits from block 1. They hold no vesting schedule.
+//!    The vesting pot additionally receives its existential deposit from `genesis_template`, the
+//!    only issuance outside the 2%.
+//! 5. The treasury multisig is derived from [`TREASURERS`] and holds no genesis balance at all.
 //! 6. Accounts are SS58 addresses only — no personal names.
 //! 7. Every address below must be an ML-DSA-87 account, minted with `qnero-node key qnero`. An SS58
 //!    literal carries no trace of its scheme, so nothing here can assert it; the entry refuses an
 //!    ML-DSA-65 signature, which would strand such an account and everything vested to it for good.
 //!    `super::account_from_ss58` states the procedure and `docs/DESIGN.md` section 7.3 the
 //!    pre-mainnet check.
+//!
+//! History: this table inherited a 27% allocation and 48 vesting rows from the upstream project
+//! this chain forked. Every one of those rows was removed on 2026-09-14. 27% of the supply minted
+//! to addresses this project has no relationship with is not an allocation it can defend, so the
+//! placeholder is 2% and the open question is whether it survives at all.
 //!
 //! Flip [`FINALIZED`] only after every `REPLACE_WITH_` placeholder is filled. Until then the
 //! `mainnet` preset refuses to build.
@@ -32,25 +38,15 @@ use super::{account_from_ss58, days_ms, Multisig, VestingScheduleTuple};
 use crate::{AccountId, MAX_SUPPLY, UNIT};
 use alloc::vec::Vec;
 
-/// 27% of [`MAX_SUPPLY`] minted at genesis.
-pub const GENESIS_ALLOCATION: u128 = 27 * MAX_SUPPLY / 100;
-/// 1% of [`MAX_SUPPLY`] to the treasury, vested linearly over [`INITIAL_LIQUIDITY_VEST_DAYS`] with
-/// no lockup.
-pub const INITIAL_LIQUIDITY_AMOUNT: u128 = MAX_SUPPLY / 100;
-/// Linear vest for the treasury liquidity, in days from TGE.
-pub const INITIAL_LIQUIDITY_VEST_DAYS: u64 = 16;
-/// Delay before unlock starts, in days from TGE. Shared by every spreadsheet grant except the
-/// intents grant, and by the company vesting.
+/// 2% of [`MAX_SUPPLY`] minted at genesis, as a placeholder. See the module docs: this number is a
+/// position to argue from, not a commitment, and zero is a live option.
+pub const GENESIS_ALLOCATION: u128 = 2 * MAX_SUPPLY / 100;
+/// Delay before unlock starts, in days from TGE.
 pub const GRANT_UNLOCK_DELAY_DAYS: u64 = 365;
 /// Linear unlock after the delay, in days.
 pub const GRANT_UNLOCK_PERIOD_DAYS: u64 = 3 * 365;
-/// Shared finish of every delayed schedule, in days from TGE.
+/// Finish of the delayed schedule, in days from TGE.
 pub const GRANT_END_DAYS: u64 = GRANT_UNLOCK_DELAY_DAYS + GRANT_UNLOCK_PERIOD_DAYS;
-/// Intents grant (ADDRESS_45): unlock starts at TGE, linear over [`INTENTS_UNLOCK_PERIOD_DAYS`].
-pub const INTENTS_AMOUNT: u128 = 42_000 * UNIT;
-pub const INTENTS_UNLOCK_PERIOD_DAYS: u64 = 365;
-/// Sum of the spreadsheet grants: every [`VESTING`] row that is not a [`TREASURY`] row.
-pub const TOTAL_GRANT_AMOUNT: u128 = 4_957_502 * UNIT;
 /// Free balance endowed to each treasurer and tech collective member at genesis.
 pub const SEED: u128 = 3 * UNIT;
 /// Number of [`SEED`] endowments: [`TREASURERS`] plus [`TECH_COLLECTIVE`].
@@ -58,10 +54,8 @@ pub const SEEDED_ACCOUNTS: u128 = (TREASURERS.len() + TECH_COLLECTIVE.len()) as 
 /// Approvals required on the treasury multisig.
 pub const TREASURY_THRESHOLD: u32 = 6;
 const TREASURY_NONCE: u64 = 0;
-/// Leftover of the 27% after grants, liquidity and seeds — vests to the treasury on the grant
-/// clock.
-pub const TREASURY_VESTING_AMOUNT: u128 =
-	GENESIS_ALLOCATION - TOTAL_GRANT_AMOUNT - INITIAL_LIQUIDITY_AMOUNT - SEEDED_ACCOUNTS * SEED;
+/// Whatever of the 2% the seed endowments do not take, vesting to [`PLACEHOLDER`].
+pub const PLACEHOLDER_AMOUNT: u128 = GENESIS_ALLOCATION - SEEDED_ACCOUNTS * SEED;
 
 /// Flip to `true` only when every placeholder below is a launch address.
 pub const FINALIZED: bool = true;
@@ -94,63 +88,20 @@ pub const TECH_COLLECTIVE: [&str; 10] = [
 	"qzoijuSKGJAgAbPChRc1LxxxjeZRpWGLBooHDUYzhPJ6ooTvw",
 ];
 
-/// Row account that resolves to the treasury multisig derived from [`TREASURERS`].
-pub const TREASURY: &str = "TREASURY";
+/// The one account the placeholder allocation vests to.
+///
+/// An ML-DSA-87 address from `qnero-node key qnero`, held by nobody who matters: it exists so the
+/// allocation machinery has something to point at while the allocation itself is undecided. A
+/// mainnet launch replaces this address or removes [`VESTING`] entirely.
+pub const PLACEHOLDER: &str = "qzmgtTEBgy7i7vBLRMq7qscR1h4mqHV8sdxx8Wyqo6vpEco6p";
 
 /// One schedule: `(account, amount, unlock start day, unlock end day)`; `cliff == start`.
 type Row = (&'static str, u128, u64, u64);
 
 #[rustfmt::skip]
 const VESTING: &[Row] = &[
-	//  account                                                               amount  start                    end
-	("qzo9ddk2km1qqAmXNiwo55vs5LNTU851mSQc8ufBwkQygHRBv",            840_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzq9inB2ja6jGuaBbWktKeBycHNA7eRDHVFnaxAVqDuEzhsdc",            840_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzjiozZCkaJnvm6h54aaNTCvcDPAbG2q2XLWTiB6pxW35UyEe",            525_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzoHvg4L13wUfCzXHEFFggxsXh2x2hbygBq2K79tcirCsfDN9",            262_500 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzmqKknQfjrvvXvBciPL2XppaDiJi7wg26GzRP266rVsmwwcN",             70_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzkDeyY438Pqodmq6pJHF1m8E9xwb2VSJ5wB7pUM2Q8mNg65P",            472_500 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzoBzAq4F4Cpf82Jj3yDTNrocqWDqnxB47VHuQH5KFEUB2yPj",             52_500 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzmpFp2GCj23rSuskbEM7u7sezbKAhEvvY52DaZ37vLjX8ukp",             26_250 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzox7xGgNk2MpkUsFMUpdHnbJbfiUu3nDskaFPLfs4ZZRDid2",             52_500 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzkbv3tDr1NBK2iey2z9NGNfyALnYcbvXJmuy8HTN67qsnRPP",             21_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qznoufvc6dhwie2TvuXWrWMCRbA925WTofereiTnZxGzjNTsP",              5_250 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzkbVzeUi5zYmMaewnnkpRMhBHV7y7pMo4SvTNRZCACMPaKWU",              2_100 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzogZBABSmhpUBWEaKw4fs78igH9PyHCJ1NxSpEjn2sgjjrFi",              5_250 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzkNXaZ6Up8nWQ1wn5m4LACnw6PwP2orNd79omAdbvhxYXJ6X",              5_250 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzjmD32vqMhwy4GU2ma8VANS4V4TtHcQo35Ynsa3xioMjRFye",             42_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzjkDjpWP8vvfNmebeH5AVonbVDFNKDggh9XT1KbTQPPrj6Fm",             21_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzouqJ4eyfxH3qH3MeyoaNhossKvqAQxs9YP6DK4Mo8J6FJ3H",             21_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzkiLP9tPxy4ECdy8MQKkpETEQzYzrLZ2DZMQazCEHfDuYtqX",              7_350 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzoRSP6Yj1YbTGa9mb5QaUb3yHcAdNhPdP2N7DCWD8TeAGoYU",              2_100 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzodzJGufu5U1XC1Xi39Q7cTbzJs3JK92Vc3xpLBPXXNFhy11",             21_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qznv4Xb41HMaS4AqzTVMvFHcPLtN4PtS2m468bkUu1mTWemTH",              5_250 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzmqPJuc5RMbk2RnZwm1TBg4bkqx87pBxS7UuQNgxb2vHnFU5",              5_250 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzpj8mzijcLbcvT16bUPKhYkRsSHWzuMqb1uqqvJpjizKvesu",            420_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzoh6MQtRojFVAjRbWKJa3FscHEfzMJ3ybZecsCSx3miVFVJA",            210_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qznRPT2raGy3spYuU3o8ViA6MLUu8NGSKyNJA6TfxFjF3miHd",            136_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzpZ9YQen3oRuFZzFJf3SWyCn9b2eXHmbJe6nCxFQSUSabNpg",             10_500 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzjhNC1Gcp1zHpJ43fEcqGEyTDKd2jipi9dhm3UjFNJFvUNEb",            105_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzk9eYREUbogTy9oKBrZAWP7ZcqtPJi2RPZoLfqHW2pS51qFS",             52_500 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzoHyF1vuKVv7icssc8BsHBgV2PqGyyyDY8i3usJpGe6GpweY",            210_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qznhY8p1pfFCSuNYvb45EfXaRgaWEbK54p1kcqrFzCiEoe77X",             10_500 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzmQ5JFmchP1K76LUQ5sAuFWWJzWSmMkuXfJSJF6td7oBKZyf",             21_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzk1GBELnXPLK45ZbWeYikfnjcWgPHZVSFJDR1fzsHLYXTQte",            105_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzoSXaPFb6hibxHkKeZeWGErsoYyeFE9dNzM6gTaAKd4urunc",            210_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzpZfwZBgtBKtGjWwTdE9tMBgfPT3wc7hRWnPVjV8z8KgGcHv",             63_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzo48Sn5vZu7BhT1ojyT6budi9pbF5rA1tiGUtKbrRFNfJJxf",              1_050 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzpNMj2jLhAauhf6FBNJEYUoYx9dpAPh51vPjuF3rKJ5SREDU",             10_500 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzn3iwmQ3dPaiJuQ9EqUiZXaty8AyuZrfFfPjUfU4dS1tCRy5",             21_000 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzpUkSoWSwXLmcZ7qnda6CNL9RDLM7gJAaw4XGVdvryqsFX1k",                830 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzodtvut7NErNcRMX8r2Z6X9x5ybXeq1yHBVTcbfRZUEoUGy6",              1_312 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzkHddrW8eR1NpNqx7XWBzAk2zMSQ8BCAWcJFgarBqw6QPSvq",              4_410 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzmHoVdpPzADYwkg7Kof1mQ7DeDC7swyACsKMBaPC21HLzCRs",              2_100 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzn4nPBrz9w2KoJTKZSbBu3Aaghw9aWk9hxBNUkyRm3VqtiwU",              2_100 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qznksEvwu1cy1Gqk75E8FecqKQpmEKJ5SgDaUz44mMSgJCSGZ",              2_100 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzmhuMENeJ44MNStX9jxu57JGsECUCP8S81438DpCqnAcmBk1",              1_050 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzoQxyk2HkyDMScbhSDYM5Fv9yNKDvkPMFvburmbMCagYiTqN",             10_500 * UNIT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
-	("qzjX3MScnFw6dxFjR32KAgrtF8S9YvpbioyNAGPZ3rCefFtvE",            INTENTS_AMOUNT,  0,                       INTENTS_UNLOCK_PERIOD_DAYS),
-	(TREASURY,                                             INITIAL_LIQUIDITY_AMOUNT,  0,                       INITIAL_LIQUIDITY_VEST_DAYS),
-	(TREASURY,                                              TREASURY_VESTING_AMOUNT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
+	//  account                                                                amount  start                    end
+	(PLACEHOLDER,                                                  PLACEHOLDER_AMOUNT,  GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS),
 ];
 
 const fn vesting_total() -> u128 {
@@ -163,20 +114,15 @@ const fn vesting_total() -> u128 {
 	sum
 }
 
-const _: () = assert!(GENESIS_ALLOCATION == 5_670_000 * UNIT);
-const _: () = assert!(INITIAL_LIQUIDITY_AMOUNT == 210_000 * UNIT);
-const _: () = assert!(TOTAL_GRANT_AMOUNT == 4_957_502 * UNIT);
+const _: () = assert!(GENESIS_ALLOCATION == 420_000 * UNIT);
 const _: () = assert!(SEEDED_ACCOUNTS * SEED == 60 * UNIT);
-const _: () = assert!(TREASURY_VESTING_AMOUNT == 502_438 * UNIT);
+const _: () = assert!(PLACEHOLDER_AMOUNT == 419_940 * UNIT);
 const _: () = assert!(GRANT_UNLOCK_PERIOD_DAYS == 3 * 365);
 const _: () = assert!(GRANT_END_DAYS == 4 * 365);
 const _: () = assert!(GRANT_UNLOCK_DELAY_DAYS < GRANT_END_DAYS);
-const _: () = assert!(INTENTS_UNLOCK_PERIOD_DAYS > 0 && INITIAL_LIQUIDITY_VEST_DAYS > 0);
-const _: () = assert!(VESTING.len() == 48);
+const _: () = assert!(VESTING.len() == 1);
 const _: () = assert!(VESTING.len() <= pallet_vesting::MAX_GENESIS_SCHEDULES as usize);
-const _: () = assert!(
-	vesting_total() == TOTAL_GRANT_AMOUNT + INITIAL_LIQUIDITY_AMOUNT + TREASURY_VESTING_AMOUNT
-);
+const _: () = assert!(vesting_total() == PLACEHOLDER_AMOUNT);
 const _: () = assert!(vesting_total() + SEEDED_ACCOUNTS * SEED == GENESIS_ALLOCATION);
 
 fn require_finalized() {
@@ -235,12 +181,11 @@ pub fn seed_balances() -> Vec<(AccountId, u128)> {
 
 /// [`VESTING`] in row order (ids from 0). Times are offsets from the first non-zero timestamp.
 pub fn schedules() -> Vec<VestingScheduleTuple> {
-	let treasury = treasury_account();
+	require_finalized();
 	VESTING
 		.iter()
 		.map(|(who, amount, start, end)| {
-			let who = if *who == TREASURY { treasury.clone() } else { account_from_ss58(who) };
-			(who, days_ms(*start), days_ms(*start), days_ms(*end), *amount)
+			(account_from_ss58(who), days_ms(*start), days_ms(*start), days_ms(*end), *amount)
 		})
 		.collect()
 }
@@ -250,57 +195,33 @@ mod tests {
 	use super::*;
 	use crate::configs::VestingPayoutQuantum;
 
-	fn grant_rows() -> Vec<&'static Row> {
-		VESTING.iter().filter(|(who, ..)| *who != TREASURY).collect()
-	}
-
 	#[test]
-	fn every_coin_of_the_27_percent_is_accounted_for() {
-		assert_eq!(GENESIS_ALLOCATION, 27 * MAX_SUPPLY / 100);
-		assert_eq!(GENESIS_ALLOCATION, 5_670_000 * UNIT);
+	fn every_coin_of_the_2_percent_is_accounted_for() {
+		assert_eq!(GENESIS_ALLOCATION, 2 * MAX_SUPPLY / 100);
+		assert_eq!(GENESIS_ALLOCATION, 420_000 * UNIT);
 		assert_eq!(SEED, 3 * UNIT);
 		assert_eq!(TREASURERS.len(), 10);
 		assert_eq!(TECH_COLLECTIVE.len(), 10);
-		assert_eq!(TREASURY_VESTING_AMOUNT, 502_438 * UNIT);
 		let vested: u128 = VESTING.iter().map(|(_, amount, _, _)| *amount).sum();
+		assert_eq!(vested, PLACEHOLDER_AMOUNT);
 		assert_eq!(vested + SEEDED_ACCOUNTS * SEED, GENESIS_ALLOCATION);
 	}
 
+	/// The whole allocation is one row to one address, and that is the point:
+	/// there is one thing to delete when the allocation question is settled.
 	#[test]
-	fn grants_match_the_allocation_sheet() {
-		let grants = grant_rows();
-		assert_eq!(grants.len(), 46);
-		assert_eq!(
-			grants.iter().map(|(_, amount, _, _)| *amount).sum::<u128>(),
-			TOTAL_GRANT_AMOUNT
-		);
-		let (intents, locked): (Vec<&&Row>, Vec<&&Row>) =
-			grants.iter().partition(|(_, _, start, _)| *start == 0);
-		assert_eq!(locked.len(), 45);
-		assert!(locked
-			.iter()
-			.all(|(_, _, start, end)| (*start, *end) == (GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS)));
-		assert_eq!(intents.len(), 1);
-		assert_eq!(
-			(intents[0].1, intents[0].2, intents[0].3),
-			(INTENTS_AMOUNT, 0, INTENTS_UNLOCK_PERIOD_DAYS)
-		);
+	fn the_allocation_is_one_placeholder_row() {
+		assert_eq!(VESTING.len(), 1);
+		let (who, amount, start, end) = VESTING[0];
+		assert_eq!(who, PLACEHOLDER);
+		assert_eq!(amount, PLACEHOLDER_AMOUNT);
+		assert_eq!((start, end), (GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS));
 		assert_eq!(GRANT_UNLOCK_DELAY_DAYS, 365);
 		assert_eq!(GRANT_UNLOCK_PERIOD_DAYS, 3 * 365);
-		assert_eq!(INTENTS_UNLOCK_PERIOD_DAYS, 365);
-	}
-
-	#[test]
-	fn treasury_gets_liquidity_and_the_company_remainder() {
-		let rows: Vec<_> = VESTING.iter().filter(|(who, ..)| *who == TREASURY).collect();
-		assert_eq!(rows.len(), 2);
-		assert_eq!(rows[0], &(TREASURY, INITIAL_LIQUIDITY_AMOUNT, 0, INITIAL_LIQUIDITY_VEST_DAYS));
-		assert_eq!(
-			rows[1],
-			&(TREASURY, TREASURY_VESTING_AMOUNT, GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS)
-		);
-		assert_eq!(INITIAL_LIQUIDITY_AMOUNT, MAX_SUPPLY / 100);
-		assert_eq!(INITIAL_LIQUIDITY_VEST_DAYS, 16);
+		let placeholder = account_from_ss58(PLACEHOLDER);
+		assert!(treasurers().iter().all(|who| *who != placeholder));
+		assert!(tech_collective().iter().all(|who| *who != placeholder));
+		assert_ne!(placeholder, treasury_account());
 	}
 
 	#[test]
@@ -310,7 +231,7 @@ mod tests {
 			assert!(*amount >= VestingPayoutQuantum::get(), "{who}");
 			assert_eq!(amount % VestingPayoutQuantum::get(), 0, "{who}");
 		}
-		let mut accounts: Vec<&str> = grant_rows().iter().map(|(who, ..)| *who).collect();
+		let mut accounts: Vec<&str> = VESTING.iter().map(|(who, ..)| *who).collect();
 		accounts.extend(TREASURERS);
 		accounts.extend(TECH_COLLECTIVE);
 		let total = accounts.len();
@@ -319,7 +240,7 @@ mod tests {
 		assert_eq!(
 			accounts.len(),
 			total,
-			"grant, treasurer and tech collective addresses must be distinct"
+			"allocation, treasurer and tech collective addresses must be distinct"
 		);
 	}
 
@@ -344,7 +265,7 @@ mod tests {
 			let treasury = treasury_account();
 			let rows = schedules();
 			assert_eq!(rows.len(), VESTING.len());
-			assert_eq!(rows.iter().filter(|(who, ..)| *who == treasury).count(), 2);
+			assert_eq!(rows.iter().filter(|(who, ..)| *who == treasury).count(), 0);
 			assert!(rows.iter().all(|(_, start, cliff, _, _)| start == cliff));
 			let seeds = seed_balances();
 			assert_eq!(seeds.len(), SEEDED_ACCOUNTS as usize);

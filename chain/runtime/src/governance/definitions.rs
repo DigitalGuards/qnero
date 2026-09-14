@@ -115,7 +115,8 @@ impl TechCollectiveTracksInfo {
 			decision_deposit: TECH_COLLECTIVE_DECISION_DEPOSIT,
 			// Advance-notice window before deciding starts. Raised from 4 min to give the
 			// collective (and observers) visibility of a pending Root proposal before voting can
-			// conclude.
+			// conclude. Two hours either way: `HOURS` is derived from the target
+			// block time, so it is 60 blocks at the public 120 s target.
 			prepare_period: 2 * HOURS,
 			decision_period: DAYS,
 			confirm_period: DAYS,
@@ -135,12 +136,16 @@ impl TechCollectiveTracksInfo {
 		let info = apply_test_timing(info);
 
 		// Emergency runtime-upgrade lane, modeled on Polkadot's Whitelisted Caller
-		// track (10-minute confirm + 10-minute enactment vs a full day each on the
-		// normal lane). Proposals dispatch with `CustomOrigin::FastUpgrade`, which is
-		// honored only by `system.authorize_upgrade` — never arbitrary Root — so the
-		// short windows cannot be leveraged for anything but publishing an upgrade
-		// hash (the wasm itself is applied permissionlessly and version-checked).
-		// The 80%/80% constant curves require 8-of-10 ayes from the genesis
+		// track (a short confirm + enactment against a full day each on the
+		// normal lane). `MINUTES` floors at one block, so at the public 120 s
+		// target `10 * MINUTES` is 10 blocks: 20 minutes rather than 10. One
+		// block is the shortest period a block-denominated track can express,
+		// and doubling these three windows on a chain whose blocks are ten times
+		// longer is the honest reading of "as short as the lane can be". Proposals dispatch with
+		// `CustomOrigin::FastUpgrade`, which is honored only by `system.authorize_upgrade` —
+		// never arbitrary Root — so the short windows cannot be leveraged for anything but
+		// publishing an upgrade hash (the wasm itself is applied permissionlessly and
+		// version-checked). The 80%/80% constant curves require 8-of-10 ayes from the genesis
 		// collective (support counts all members, so 8 ayes are needed regardless of
 		// nays; approval at exactly 8 ayes / 2 nays is 80% and still passes).
 		let fast_upgrade = pallet_referenda::TrackInfo {
