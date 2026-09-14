@@ -193,7 +193,7 @@ export type WorkerRequest =
   | { kind: 'memoFits'; memo: string }
   | { kind: 'decryptBatch'; items: DecryptItem[] }
   | { kind: 'coinbaseBatch'; items: CoinbaseItem[] }
-  | { kind: 'entryRho'; blockNumber: number; entryIndex: string }
+  | { kind: 'entryRhoMatches'; blockNumber: number; rho: string; entryCount: string }
   | { kind: 'noteDigests'; value: string; rho: string; r: string }
   | { kind: 'headerBlockHash'; anchor: Anchor }
   | { kind: 'treePath'; leafHashes: Uint8Array; depth: number; leafIndex: number }

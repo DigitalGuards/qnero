@@ -91,6 +91,7 @@ export function cryptoAdapter(prover: ProverClient): SyncCrypto {
             } satisfies ScannedNote),
       );
     },
-    entryRho: (blockNumber, entryIndex) => prover.entryRho(blockNumber, entryIndex),
+    entryRhoMatches: (blockNumber, rho, entryCount) =>
+      prover.entryRhoMatches(blockNumber, rho, entryCount),
   };
 }

@@ -105,7 +105,7 @@ function fakeCrypto(leaves: readonly FakeLeaf[]): SyncCrypto {
           return leaf?.note ?? null;
         }),
       ),
-    entryRho: () => Promise.resolve('00'.repeat(32)),
+    entryRhoMatches: () => Promise.resolve(false),
   };
 }
 

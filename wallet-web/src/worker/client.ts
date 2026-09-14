@@ -214,8 +214,22 @@ export class ProverClient {
     return this.call({ kind: 'coinbaseBatch', items });
   }
 
-  entryRho(blockNumber: number, entryIndex: bigint): Promise<string> {
-    return this.call({ kind: 'entryRho', blockNumber, entryIndex: entryIndex.toString() });
+  /**
+   * The shield walk, whole, in one crossing.
+   *
+   * `rho` is a secret and this is the side that holds secrets, so the
+   * comparison happens here rather than in the page. One crossing per received
+   * note instead of one per candidate entry index: the counter is chain wide,
+   * and a first sync on a busy chain was otherwise a walk of round trips per
+   * note for a label.
+   */
+  entryRhoMatches(blockNumber: number, rho: string, entryCount: bigint): Promise<boolean> {
+    return this.call({
+      kind: 'entryRhoMatches',
+      blockNumber,
+      rho,
+      entryCount: entryCount.toString(),
+    });
   }
 
   noteDigests(

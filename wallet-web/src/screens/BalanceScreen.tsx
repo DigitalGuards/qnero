@@ -167,7 +167,8 @@ export function BalanceScreen({
               <Stat
                 term="notes held"
                 explains="Every note in this store, spent and unspent, on chain and off. The table
-                  below is the same set."
+                  below collapses a conflict set to the one member a spend could use, so it can be
+                  shorter than this."
                 value={formatCount(balances.noteCount)}
               />
             )}

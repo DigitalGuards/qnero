@@ -95,6 +95,18 @@ function accountOf(json: string): ProverAccount {
   return { address: parsed.address };
 }
 
+/**
+ * One digest, in the one spelling.
+ *
+ * Both sides of the shield comparison come out of the same module, so they
+ * already agree. It is written down because the values crossing this boundary
+ * are hex strings and a comparison of hex strings is exactly where a `0x` or a
+ * capital letter turns a shield into a transfer with nothing to see.
+ */
+function normaliseDigest(hex: string): string {
+  return hex.replace(/^0x/i, '').toLowerCase();
+}
+
 /** The size of one call over the module's own resource timing, or zero. */
 function moduleBytes(): number {
   const entry = performance
@@ -269,8 +281,21 @@ export class ProverCore {
         return { value: out };
       }
 
-      case 'entryRho': {
-        return { value: this.requireWasm().entryRho(request.blockNumber, BigInt(request.entryIndex)) };
+      case 'entryRhoMatches': {
+        // The whole counter, the way `crates/qnero-wallet/src/wallet.rs` walks
+        // it. A shield predicts `(head + 1, EntryCount)`, so a settled one is
+        // somewhere below the counter read at the head, and a walk bounded to
+        // the newest entries mislabelled every older shield of a restored
+        // wallet.
+        const module = this.requireWasm();
+        const wanted = normaliseDigest(request.rho);
+        const entries = BigInt(request.entryCount);
+        for (let index = 0n; index < entries; index += 1n) {
+          if (normaliseDigest(module.entryRho(request.blockNumber, index)) === wanted) {
+            return { value: true };
+          }
+        }
+        return { value: false };
       }
 
       case 'noteDigests': {

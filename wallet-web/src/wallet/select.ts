@@ -16,7 +16,7 @@
  * because "consolidate first" is the only thing a person can do about it.
  */
 
-import type { StoredNote } from './model';
+import type { NoteRow, StoredNote } from './model';
 
 /** Input slots in the leaf circuit. */
 export const MAX_INPUTS = 2;
@@ -105,4 +105,47 @@ export function reachableTotal(candidates: readonly StoredNote[]): bigint {
     .sort((a, b) => (BigInt(b.value) > BigInt(a.value) ? 1 : -1))
     .slice(0, MAX_INPUTS)
     .reduce((sum, note) => sum + BigInt(note.value), 0n);
+}
+
+/**
+ * One row per nullifier, for a table a reader adds up.
+ *
+ * A sender chooses `rho` and `r`, so a repeated pair yields two notes sharing
+ * one nullifier of which at most one can ever settle. Both are held, because
+ * refusing the second on arrival decides by arrival order and the sender
+ * controls that. The balance headings count the set once, at the member a
+ * spend would use, and the table under them printed every member with its own
+ * amount: a reader adding the rows got a number the chain will never back.
+ *
+ * The surviving member is the one a spend would choose, which is the rule
+ * `spendable` uses and the rule `crates/qnero-wallet/src/store.rs` collapses
+ * on: a member a spend could use outranks one it could not, then the larger
+ * value, then the lower leaf index. The count of members stays on the row it
+ * survives as, so the conflict is still visible.
+ *
+ * A locked wallet opens no secret, so the key falls back to the commitment and
+ * nothing collapses. That is the same fallback the balance uses, and the two
+ * agree in that state as well.
+ */
+export function collapseRows(rows: readonly NoteRow[]): NoteRow[] {
+  const best = new Map<string, NoteRow>();
+  for (const row of rows) {
+    const key = row.secret?.nullifier ?? row.note.commitment;
+    const held = best.get(key);
+    if (held === undefined || outranksForDisplay(row.note, held.note)) {
+      // A `Map` keeps the position a key was first inserted at, so re-setting
+      // one keeps the table's order stable as the winner changes.
+      best.set(key, row);
+    }
+  }
+  return [...best.values()];
+}
+
+function outranksForDisplay(candidate: StoredNote, held: StoredNote): boolean {
+  const candidateUsable = candidate.onChain && !candidate.spent;
+  const heldUsable = held.onChain && !held.spent;
+  if (candidateUsable !== heldUsable) {
+    return candidateUsable;
+  }
+  return beats(candidate, held);
 }

@@ -19,8 +19,8 @@ import {
   slotFeeFloor,
   submissionFeeFloor,
 } from '../src/wallet/fee';
-import { MAX_INPUTS, reachableTotal, selectNotes, spendable } from '../src/wallet/select';
-import type { StoredNote } from '../src/wallet/model';
+import { collapseRows, MAX_INPUTS, reachableTotal, selectNotes, spendable } from '../src/wallet/select';
+import type { NoteRow, NoteSecret, StoredNote } from '../src/wallet/model';
 
 /** The M4 runtime's four constants. */
 function runtime(): ShieldedConstants {
@@ -212,5 +212,71 @@ describe('the spendable set', () => {
     ];
     const candidates = spendable(notes, (stored) => stored.commitment);
     expect(candidates.map((entry) => entry.value)).toEqual(['300']);
+  });
+});
+
+/**
+ * The table under the headings, collapsed by the same rule as the headings.
+ *
+ * The balance counts a conflict set once, at the member a spend would use, and
+ * the notes table printed every member with its own amount. A reader adding
+ * the rows got a number the chain will never back, under a heading that had
+ * already collapsed. `crates/qnero-wallet/src/store.rs` collapses its own rows
+ * for this exact complaint.
+ */
+describe('the notes table', () => {
+  function row(note: StoredNote, nullifier: string | null, members = 1): NoteRow {
+    const secret: NoteSecret | null =
+      nullifier === null ? null : { rho: '', r: '', nullifier, memo: '' };
+    return { note, secret, conflictMembers: members };
+  }
+
+  it('prints one row per nullifier, at the member a spend would use', () => {
+    const rows = collapseRows([
+      row(note(100, 0), 'shared', 2),
+      row(note(400, 1), 'shared', 2),
+      row(note(50, 2), 'own'),
+    ]);
+    expect(rows.map((entry) => entry.note.value)).toEqual(['400', '50']);
+    expect(rows[0]?.conflictMembers).toBe(2);
+  });
+
+  it('keeps the member a spend could use over a larger one it could not', () => {
+    // The balance's unspent heading counts only what a spend can reach, so a
+    // table whose surviving row was the spent member would print an amount
+    // that is in no heading at all.
+    const rows = collapseRows([
+      row(note(900, 0, { spent: true }), 'shared', 2),
+      row(note(100, 1), 'shared', 2),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.note.value).toBe('100');
+  });
+
+  it('breaks a tie on the lowest leaf index, as selection does', () => {
+    const rows = collapseRows([row(note(100, 3), 'shared', 2), row(note(100, 1), 'shared', 2)]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.note.leafIndex).toBe(1);
+  });
+
+  it('collapses nothing while the wallet is locked, because no nullifier opens', () => {
+    const rows = collapseRows([row(note(100, 0), null), row(note(400, 1), null)]);
+    expect(rows).toHaveLength(2);
+  });
+
+  it('sums to what the unspent heading says, which is the whole complaint', () => {
+    const rows = collapseRows([
+      row(note(100, 0), 'shared', 2),
+      row(note(400, 1), 'shared', 2),
+      row(note(50, 2), 'own'),
+    ]);
+    const table = rows
+      .filter((entry) => entry.note.onChain && !entry.note.spent)
+      .reduce((sum, entry) => sum + BigInt(entry.note.value), 0n);
+    const heading = spendable(
+      rows.map((entry) => entry.note),
+      (stored) => (stored.commitment === 'cm0' || stored.commitment === 'cm1' ? 'shared' : stored.commitment),
+    ).reduce((sum, stored) => sum + BigInt(stored.value), 0n);
+    expect(table).toBe(heading);
   });
 });

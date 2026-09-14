@@ -99,7 +99,8 @@ function stubModule(counts: Counts): WasmModule {
         commitment: 'not-this-wallets-coinbase',
         nullifier: 'nn'.repeat(32),
       }),
-    entryRho: () => '00'.repeat(32),
+    // `H(RHO_ENTRY, block, index)`, stubbed as something a test can predict.
+    entryRho: (block: number, index: bigint) => `entry-${block}-${index.toString()}`,
     headerBlockHash: () => '00'.repeat(32),
     treePath: () => '{}',
     treeRoot: () => '00'.repeat(32),
@@ -165,6 +166,43 @@ describe('an account derivation', () => {
     // The module answers with the coinbase viewing key beside the address.
     // Whatever a page later serialises, it cannot serialise that.
     expect(JSON.stringify(answer)).not.toContain('CVK-SECRET');
+  });
+});
+
+describe('the shield walk', () => {
+  it('walks the whole counter, so a restored wallet labels its older shields', async () => {
+    // It used to walk the newest 64 entries and ask the page once per index.
+    // A wallet restored from its seed on a chain with more shields than that
+    // labelled every one of its own older shields `transfer`, for good, since
+    // origin is written once at receipt. The command-line wallet walks the
+    // whole counter, and the label should say what that one says.
+    const { core } = await started();
+    const answer = await core.handle(
+      { kind: 'entryRhoMatches', blockNumber: 7, rho: 'entry-7-3', entryCount: '500' },
+      () => undefined,
+    );
+    expect(answer.value).toBe(true);
+  });
+
+  it('says no when no entry produces that rho, which is every ordinary payment', async () => {
+    const { core } = await started();
+    const answer = await core.handle(
+      { kind: 'entryRhoMatches', blockNumber: 7, rho: 'aa'.repeat(32), entryCount: '64' },
+      () => undefined,
+    );
+    expect(answer.value).toBe(false);
+  });
+
+  it('crosses the boundary once for a note rather than once for an entry', async () => {
+    // The walk is the module's, on the side that holds the secret it is
+    // comparing. One request answers it.
+    const { core } = await started();
+    const answer = await core.handle(
+      { kind: 'entryRhoMatches', blockNumber: 2, rho: '0xENTRY-2-9', entryCount: '10' },
+      () => undefined,
+    );
+    // And the comparison is on one spelling of a digest, not on two.
+    expect(answer.value).toBe(true);
   });
 });
 

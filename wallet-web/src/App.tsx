@@ -56,7 +56,7 @@ import {
 } from './wallet/crypto';
 import { createStore, WalletStore } from './wallet/store';
 import type { Balances, NoteRow, RejectedNote, StoreMeta, StoredNote } from './wallet/model';
-import { reachableTotal, spendable } from './wallet/select';
+import { collapseRows, reachableTotal, spendable } from './wallet/select';
 import { runSync, type SyncReport } from './wallet/sync';
 import {
   chainMismatchRefusal,
@@ -211,7 +211,12 @@ export function App(): ReactNode {
     );
     const pendingTotal = pending.reduce((sum, note) => sum + BigInt(note.value), 0n);
 
-    setNotes(rows);
+    // One row per nullifier, by the rule the headings above the table use. Two
+    // members of one conflict set are two notes and one amount: at most one of
+    // them can ever settle, so a table that printed both summed to a number
+    // the chain will never back, under a heading that had counted the set
+    // once.
+    setNotes(collapseRows(rows));
     setRejected(rejectedNotes);
     setBalances({
       unspent,

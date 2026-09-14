@@ -127,8 +127,17 @@ export interface SyncCrypto {
       ciphertext: Uint8Array | null;
     }[],
   ): Promise<(ScannedNote | null)[]>;
-  /** `rho = H(RHO_ENTRY, block, index)`, for telling a shield from a spend output. */
-  entryRho(blockNumber: number, entryIndex: bigint): Promise<string>;
+  /**
+   * Whether `rho` is one the shield rule produces for this block, over every
+   * entry index up to `entryCount`.
+   *
+   * The whole walk in one crossing, rather than one crossing per candidate
+   * index. `rho = H(RHO_ENTRY, block, index)` is the module's arithmetic and
+   * the comparison is the module's too, which is where the command-line wallet
+   * does it as well. A first sync receiving N notes on a chain with a large
+   * counter was otherwise N walks of round trips through a message port.
+   */
+  entryRhoMatches(blockNumber: number, rho: string, entryCount: bigint): Promise<boolean>;
 }
 
 export interface HeldNote {
@@ -307,9 +316,18 @@ export async function readNodeStance(
  * A `rho` that came from the shield counter, which is what tells a shield
  * apart from a spend's output.
  *
- * The counter is chain wide and read once per pass, so this walks candidate
- * entry indices rather than asking per note. Only ever a label: getting it
- * wrong misfiles a note's origin and moves no value.
+ * The counter is chain wide and read once per pass, and the whole of it is
+ * walked: a shield predicts `(head + 1, EntryCount)`, so the entry index of
+ * one that settled is somewhere below the counter read at the head. It used to
+ * walk the newest 64 entries only, which meant a wallet restored from its seed
+ * on a chain with more shields than that labelled every one of its own older
+ * shields `transfer`, permanently, because origin is written once at receipt
+ * and no later pass revisits it. `crates/qnero-wallet/src/wallet.rs` walks the
+ * whole counter and this now matches it.
+ *
+ * Only ever a label: getting it wrong misfiles a note's origin and moves no
+ * value, and nothing selects on it. The store's field should still say what
+ * the command-line wallet's says, because a later rule could key on it.
  */
 async function originOf(
   crypto: SyncCrypto,
@@ -320,20 +338,7 @@ async function originOf(
   if (blockNumber === null) {
     return 'transfer';
   }
-  // A shield predicts `(head + 1, EntryCount)`, so the entry index of one that
-  // settled is below the counter read at the head. The walk is bounded to the
-  // newest entries rather than run over the whole counter, which the
-  // command-line wallet does: a wallet restoring from a seed on a chain with
-  // more shields than this window labels the ones below it `transfer`. The
-  // label moves no value, and the column is not authoritative after a restore.
-  const window = 64n;
-  const from = entryCount > window ? entryCount - window : 0n;
-  for (let index = from; index < entryCount; index += 1n) {
-    if ((await crypto.entryRho(blockNumber, index)) === rho) {
-      return 'shield';
-    }
-  }
-  return 'transfer';
+  return (await crypto.entryRhoMatches(blockNumber, rho, entryCount)) ? 'shield' : 'transfer';
 }
 
 export async function runSync(
@@ -608,14 +613,18 @@ export async function runSync(
           // at another index is a note whose stored index is stale, and leaving
           // it stale is what makes a note unspendable. This only ever adds,
           // because it moves a note to where the chain has it.
+          // Back on chain unconditionally: this leaf is in the tree at this
+          // block hash, whatever a previous pass wrote. A move is what is
+          // counted, and only a move: a commitment met again at the same leaf
+          // and the same block is a note quietly put back, which is what the
+          // command-line wallet's `relocate_note` reports too.
+          existing.note.onChain = true;
           if (
             existing.note.leafIndex !== record.index ||
-            existing.note.blockNumber !== record.blockNumber ||
-            !existing.note.onChain
+            existing.note.blockNumber !== record.blockNumber
           ) {
             existing.note.leafIndex = record.index;
             existing.note.blockNumber = record.blockNumber;
-            existing.note.onChain = true;
             report.relocated += 1;
           }
           continue;
