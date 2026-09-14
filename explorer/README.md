@@ -2,8 +2,9 @@
 
 A block explorer for a Qnero chain. One static directory, one WebSocket to a
 node, no server-side indexer and no third party: every number on every page is
-read live from the node the page is configured with, and nothing else is
-contacted.
+read live from the node the page is configured with, and the only other requests
+are to the host serving the page, for `config.json` at startup and for the
+page's own assets.
 
 It is built for a chain where value is private by default, so it is as careful
 about what it declines to show as about what it shows. The "What this chain
@@ -176,20 +177,29 @@ is a bounded walk that says how far it looked.
 | Home | One header, four storage values, and one state decoration per recent block carrying that block's events and timestamp. Blocks are cached by hash, so a poll fetches only what is new. The three consensus constants are three runtime calls, made after the connection is published |
 | Block | One body and one state decoration |
 | Settlement from a block link | One body. From a bare hash, one body per block walked backwards, capped at `searchWindowBlocks` |
-| Search, nullifier | One point lookup on a constructed key, which names that nullifier to the node. The page prints that before it offers the button, and the lookup runs only on the button |
-| Search, commitment | `ZkTree::Leaves` newest first, 256 keys per request, capped |
+| Search, nullifier | One point lookup on a constructed key, which names that nullifier to the node. The page prints that before it offers the button, and the lookup runs once per click, pinned to the block the chain was at when it was asked, so an imported block never re-sends it |
+| Search, commitment | `ZkTree::Leaves` newest first, 256 keys per request, capped. A match is followed by a read of the window it came out of, so no request the scan makes names one leaf |
 | Nullifier count | `state_getKeysPaged` at 1000 keys a page, capped by `nullifierPageLimit`, and reported as a floor when it hits the cap. It is pinned to a baseline block that moves once per recent-list window, and the blocks after the baseline are counted from the settlement events the recent list already holds, so an imported block costs no new walk |
 
 Every one of these degrades rather than failing a page. A refused unsafe method
 or a missing runtime call empties the fields that needed it and leaves the rest
 readable; a block whose state the node no longer keeps still renders its header
-and its body, with the panels that read events saying why they are empty; and a
-walk that reaches the bottom of a pruned state window ends as a bounded miss
-that names the boundary.
+and its body, with the panels that read events saying that the state was not
+kept; and a walk that reaches the bottom of a pruned state window ends as a
+bounded miss that names the boundary. A node that never answers at all is a
+written failure after fifteen seconds naming the endpoint that did not answer
+and the file it is set in, so the commonest deployment mistake does not read as
+an indefinite "connecting".
 
-A negative is never inferred from a failure. "Not in the settled nullifier set"
-is rendered only when the node answered, and a refused or drifted read reads as
-"not answered" instead, because the absence is the answer someone acts on.
+A negative is never inferred from a failure, because the absence is the answer
+someone acts on. "Not in the settled nullifier set" is rendered only when the
+node answered, and a refused or drifted read reads as "not answered". A walk
+reports a pruned state window only when the node named one, so a dropped socket
+three blocks into a 512-block walk raises an error where it would otherwise have
+concluded "not published" about 509 blocks nobody read. A block whose state did
+not answer says so in every panel that needed it, down to the outcome column,
+and it is not cached, so a blip does not pin those rows for the life of the
+tab.
 
 ## Two decoder seams worth knowing about
 

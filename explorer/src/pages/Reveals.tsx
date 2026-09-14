@@ -48,16 +48,19 @@ export function Reveals(): ReactNode {
 
         <h3>Emission</h3>
         <p>
-          Every block mints one coinbase note and publishes its value, its leaf index and the
-          block it belongs to. Total emission is therefore auditable block by block. What the value
-          does not come with is a recipient: the note&rsquo;s inner hash is published in the clear
-          and only the holder of the matching coinbase viewing key can recognise it.
+          Every block after genesis mints one coinbase note and publishes its value, its leaf index
+          and the block it belongs to; a block that mints none leaves its share to the next one.
+          Total emission is therefore auditable block by block. What the value does not come with
+          is a recipient: the note&rsquo;s inner hash is published in the clear, and recognising it
+          takes the matching coinbase viewing key together with the miner&rsquo;s address.
         </p>
 
         <h3>Settlements</h3>
         <p>
-          Each accepted submission publishes how many circuit segments it carried, how many leaf
-          slots actually settled, and the fee those slots paid. Each settled slot publishes the two
+          Each accepted submission publishes how many of its circuit segments settled, how many
+          leaf slots settled with them, and the fee those slots paid. A segment the chain skipped,
+          for a nullifier another submission spent first or for an anchor it could no longer
+          resolve, is in neither count. Each settled slot publishes the two
           nullifiers it spent, the two commitments it appended, both leaf indices and both
           ciphertexts.
         </p>
@@ -123,8 +126,8 @@ export function Reveals(): ReactNode {
         <p>
           No event and no storage item names a block&rsquo;s author. The mining-rewards pallet omits
           it deliberately, and the header&rsquo;s label rotates every block, so the coinbase notes
-          one operator produced cannot be grouped into an income stream by anyone without that
-          operator&rsquo;s coinbase viewing key.
+          one operator produced cannot be grouped into an income stream by anyone lacking that
+          operator&rsquo;s coinbase viewing key and address.
         </p>
       </Panel>
 

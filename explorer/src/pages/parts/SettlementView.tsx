@@ -40,6 +40,7 @@ export function SettlementView({
         <Field
           label="Circuit segments"
           value={<span className="num">{formatCount(settlement.segments)}</span>}
+          note="segments that settled; one the chain skipped is not counted, so this is not the submission's shape"
         />
         <Field label="Fee" value={<span className="num">{formatQnr(settlement.feePlanck)}</span>} />
         <Field

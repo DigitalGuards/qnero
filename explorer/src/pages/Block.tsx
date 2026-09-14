@@ -244,7 +244,7 @@ export function Block({ id }: { id: string }): ReactNode {
               value={<span className="num">{formatQnr(block.coinbase.authorFeePlanck)}</span>}
             />
             <Field label="Inner hash" value={<Hash value={block.coinbase.inner} full />} wide
-              note="published in the clear and still opaque: only the holder of the matching coinbase viewing key can recognise it" />
+              note="published in the clear and still opaque: recognising it takes the matching coinbase viewing key together with the miner’s address" />
           </Fields>
         )}
       </Panel>
