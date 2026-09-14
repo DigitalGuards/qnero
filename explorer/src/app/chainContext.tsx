@@ -27,7 +27,14 @@ export interface Head {
 export interface ChainBundle {
   config: ExplorerConfig;
   context: ChainContext;
-  constants: ConsensusConstants;
+  /**
+   * Null until the three runtime calls answer, and null for good if they do
+   * not. They are read after the connection is published, so a node that
+   * refuses `state_call` or a runtime that renames a `QPoWApi` method costs
+   * the fields that need them and nothing else.
+   */
+  constants: ConsensusConstants | null;
+  constantsError: string | null;
   cache: BlockCache;
 }
 
@@ -66,13 +73,42 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
     const start = async (): Promise<void> => {
       const config = await loadConfig();
       const context = await connect(config.rpcEndpoint);
-      const constants = await fetchConsensusConstants(context);
       if (!stillLive()) {
         await context.api.disconnect();
         return;
       }
-      bundle = { config, context, constants, cache: new BlockCache() };
+      bundle = {
+        config,
+        context,
+        constants: null,
+        constantsError: null,
+        cache: new BlockCache(),
+      };
       setState((previous) => ({ ...previous, status: 'live', bundle, error: null }));
+
+      // The consensus constants are three runtime calls, and a page that needs
+      // none of them should not wait for them or die with them.
+      const settleConstants = (
+        constants: ConsensusConstants | null,
+        constantsError: string | null,
+      ): void => {
+        if (!stillLive()) {
+          return;
+        }
+        setState((previous) =>
+          previous.bundle === null
+            ? previous
+            : { ...previous, bundle: { ...previous.bundle, constants, constantsError } },
+        );
+      };
+      void fetchConsensusConstants(context).then(
+        (constants) => {
+          settleConstants(constants, null);
+        },
+        (error: unknown) => {
+          settleConstants(null, messageOf(error));
+        },
+      );
 
       context.api.on('disconnected', () => {
         setState((previous) => ({ ...previous, status: 'offline' }));

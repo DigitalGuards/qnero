@@ -5,7 +5,10 @@ import type { BlockSummary } from '../../chain/blocks';
 import { formatCount, formatQnr } from '../../lib/units';
 import { Hash } from '../../components/ui';
 
-function age(timestampMs: number): string {
+function age(timestampMs: number | null): ReactNode {
+  if (timestampMs === null || timestampMs === 0) {
+    return <span className="dim">unread</span>;
+  }
   const seconds = Math.max(0, Math.round((Date.now() - timestampMs) / 1000));
   if (seconds < 60) {
     return `${seconds}s ago`;
@@ -16,6 +19,17 @@ function age(timestampMs: number): string {
   return `${Math.round(seconds / 3600)}h ago`;
 }
 
+/**
+ * The block list.
+ *
+ * Every row links by hash and shows the height. A height names different
+ * blocks on different branches and this chain reorgs up to its reorg depth, so
+ * a link by height would quietly open a different block than the row the
+ * reader clicked.
+ *
+ * A row whose state the node no longer keeps shows dashes rather than zeros:
+ * an unread block and an empty block are not the same block.
+ */
 export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): ReactNode {
   return (
     <div className="table-wrap">
@@ -25,9 +39,13 @@ export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): R
             <th scope="col">Height</th>
             <th scope="col">Age</th>
             <th scope="col">Author label</th>
-            <th scope="col">Leaves</th>
+            <th className="col--wide" scope="col">
+              Leaves
+            </th>
             <th scope="col">Settlements</th>
-            <th scope="col">Entries</th>
+            <th className="col--wide" scope="col">
+              Entries
+            </th>
             <th scope="col">Coinbase</th>
           </tr>
         </thead>
@@ -35,7 +53,7 @@ export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): R
           {blocks.map((block) => (
             <tr key={block.hash}>
               <td className="num">
-                <a href={href({ name: 'block', id: String(block.header.number) })}>
+                <a href={href({ name: 'block', id: block.hash })}>
                   {formatCount(block.header.number)}
                 </a>
               </td>
@@ -47,16 +65,24 @@ export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): R
                   <Hash value={block.header.authorLabel} />
                 )}
               </td>
-              <td className="num">{formatCount(block.leavesAdded.length)}</td>
-              <td className="num">{formatCount(block.settlements.length)}</td>
-              <td className="num">{formatCount(block.entries.length)}</td>
-              <td className="num">
-                {block.coinbase === null ? (
-                  <span className="dim">none</span>
-                ) : (
-                  formatQnr(block.coinbase.valuePlanck)
-                )}
-              </td>
+              {block.stateError === null ? (
+                <>
+                  <td className="num col--wide">{formatCount(block.leavesAdded.length)}</td>
+                  <td className="num">{formatCount(block.settlements.length)}</td>
+                  <td className="num col--wide">{formatCount(block.entries.length)}</td>
+                  <td className="num">
+                    {block.coinbase === null ? (
+                      <span className="dim">none</span>
+                    ) : (
+                      formatQnr(block.coinbase.valuePlanck)
+                    )}
+                  </td>
+                </>
+              ) : (
+                <td className="dim" colSpan={4} title={block.stateError}>
+                  state not kept at this block
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

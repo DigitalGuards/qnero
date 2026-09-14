@@ -17,8 +17,16 @@ export function messageOf(error: unknown): string {
  * fast click through blocks can never leave an older block's answer on the
  * page, and a changed key reads as loading with no state written during
  * render.
+ *
+ * The read is handed a liveness check. Dropping a result is enough for a
+ * single round trip; a read that pages, like the nullifier count, has to be
+ * able to stop paging, or an abandoned walk keeps issuing requests nobody will
+ * ever look at. A read that does not care takes no argument.
  */
-export function useAsync<T>(key: string | null, run: (() => Promise<T>) | null): AsyncState<T> {
+export function useAsync<T>(
+  key: string | null,
+  run: ((live: () => boolean) => Promise<T>) | null,
+): AsyncState<T> {
   const [entry, setEntry] = useState<{ key: string; state: AsyncState<T> } | null>(null);
 
   useEffect(() => {
@@ -26,7 +34,7 @@ export function useAsync<T>(key: string | null, run: (() => Promise<T>) | null):
       return;
     }
     let live = true;
-    run().then(
+    run(() => live).then(
       (value) => {
         if (live) {
           setEntry({ key, state: { status: 'ready', value } });

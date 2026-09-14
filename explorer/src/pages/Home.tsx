@@ -27,18 +27,40 @@ export function Home(): ReactNode {
       ? null
       : () => fetchRecent(bundle.context, bundle.cache, headNumber, bundle.config.recentBlocks),
   );
-  const nullifiers = useAsync(
-    ready ? `nullifiers:${headHash}` : null,
-    bundle === null || headHash === null
+  // Walking the whole nullifier key space is twenty-five paged requests and the
+  // set only grows, so re-walking it on every imported block would stack a walk
+  // per block and throw away all but the last. The walk is pinned to a baseline
+  // block that moves once per recent-list window, and the blocks after it are
+  // counted from the SlotSettled events the recent list has already decoded.
+  // Resolving the baseline hash costs one call per head so a reorg cannot leave
+  // the count pinned to an orphan, while the walk itself is keyed by the hash
+  // and re-runs only when that block really changes.
+  const recentDepth = bundle?.config.recentBlocks ?? 0;
+  const baselineNumber =
+    headNumber === null || recentDepth <= 0 ? null : Math.floor(headNumber / recentDepth) * recentDepth;
+  const baselineHash = useAsync(
+    bundle === null || baselineNumber === null || headHash === null
       ? null
-      : () => countNullifiers(bundle.context, headHash, bundle.config.nullifierPageLimit),
+      : `baseline:${baselineNumber}:${headHash}`,
+    bundle === null || baselineNumber === null
+      ? null
+      : () => blockHashAt(bundle.context, baselineNumber),
+  );
+  const baselineAt = baselineHash.status === 'ready' ? baselineHash.value : null;
+  const counted = useAsync(
+    bundle === null || baselineAt === null ? null : `nullifiers:${baselineAt}`,
+    bundle === null || baselineAt === null
+      ? null
+      : (live) => countNullifiers(bundle.context, baselineAt, bundle.config.nullifierPageLimit, live),
   );
   const seedNumber =
-    bundle === null || headNumber === null
+    bundle === null || bundle.constants === null || headNumber === null
       ? null
       : seedHeight(headNumber, bundle.constants.seedEpochBlocks, bundle.constants.seedEpochLag);
   const seedHash = useAsync(
-    bundle === null || seedNumber === null ? null : `seed:${seedNumber}`,
+    bundle === null || seedNumber === null || headHash === null
+      ? null
+      : `seed:${seedNumber}:${headHash}`,
     bundle === null || seedNumber === null ? null : () => blockHashAt(bundle.context, seedNumber),
   );
 
@@ -59,16 +81,32 @@ export function Home(): ReactNode {
   const latest = recent.status === 'ready' ? recent.value[0] : undefined;
   const observedMs =
     blockTimeMs ?? (snapshot.status === 'ready' ? snapshot.value.lastBlockDurationMs : null);
-  const nextSeed = nextSeedHeight(
-    head.header.number,
-    bundle.constants.seedEpochBlocks,
-    bundle.constants.seedEpochLag,
-  );
-  const untilRotation = blocksToNextSeed(
-    head.header.number,
-    bundle.constants.seedEpochBlocks,
-    bundle.constants.seedEpochLag,
-  );
+  const constants = bundle.constants;
+  const nextSeed =
+    constants === null
+      ? null
+      : nextSeedHeight(head.header.number, constants.seedEpochBlocks, constants.seedEpochLag);
+  const untilRotation =
+    constants === null
+      ? null
+      : blocksToNextSeed(head.header.number, constants.seedEpochBlocks, constants.seedEpochLag);
+  const missingConstants =
+    bundle.constantsError === null
+      ? 'reading the consensus constants'
+      : `the runtime did not answer the consensus constants: ${bundle.constantsError}`;
+
+  // The settled set as of the baseline, plus the settlements since, which the
+  // recent list has already decoded. Two nullifiers per settled slot.
+  const sinceBaseline =
+    recent.status === 'ready' && baselineNumber !== null
+      ? recent.value
+          .filter((block) => block.header.number > baselineNumber)
+          .flatMap((block) => block.settlements)
+          .flatMap((settlement) => settlement.slots)
+          .flatMap((slot) => slot.nullifiers)
+      : [];
+  const nullifierCount =
+    counted.status === 'ready' ? counted.value.count + new Set(sinceBaseline).size : null;
 
   return (
     <>
@@ -95,9 +133,13 @@ export function Home(): ReactNode {
                 '-'
               )
             }
-            note={`proof of work with no finality gadget: the last ${formatCount(
-              bundle.constants.maxReorgDepth,
-            )} blocks are provisional`}
+            note={
+              constants === null
+                ? 'proof of work with no finality gadget: the blocks near the tip are provisional'
+                : `proof of work with no finality gadget: the last ${formatCount(
+                    constants.maxReorgDepth,
+                  )} blocks are provisional`
+            }
           />
           <Field
             label="Block time"
@@ -138,7 +180,9 @@ export function Home(): ReactNode {
             label="RandomX seed height"
             value={<span className="num">{seedNumber === null ? '-' : formatCount(seedNumber)}</span>}
             note={
-              seedHash.status === 'ready' && seedHash.value !== null ? (
+              seedNumber === null ? (
+                missingConstants
+              ) : seedHash.status === 'ready' && seedHash.value !== null ? (
                 <Hash value={seedHash.value} href={href({ name: 'block', id: seedHash.value })} />
               ) : (
                 'computed from the height; the chain holds no seed'
@@ -147,10 +191,14 @@ export function Home(): ReactNode {
           />
           <Field
             label="Next seed height"
-            value={<span className="num">{formatCount(nextSeed)}</span>}
-            note={`rotates in ${formatCount(untilRotation)} blocks, epoch ${formatCount(
-              bundle.constants.seedEpochBlocks,
-            )} lag ${formatCount(bundle.constants.seedEpochLag)}`}
+            value={<span className="num">{nextSeed === null ? '-' : formatCount(nextSeed)}</span>}
+            note={
+              constants === null || untilRotation === null
+                ? missingConstants
+                : `rotates in ${formatCount(untilRotation)} blocks, epoch ${formatCount(
+                    constants.seedEpochBlocks,
+                  )} lag ${formatCount(constants.seedEpochLag)}`
+            }
           />
         </Fields>
       </Panel>
@@ -176,15 +224,15 @@ export function Home(): ReactNode {
             label="Nullifiers settled"
             value={
               <span className="num">
-                {nullifiers.status === 'ready'
-                  ? `${formatCount(nullifiers.value.count)}${nullifiers.value.capped ? '+' : ''}`
-                  : nullifiers.status === 'error'
+                {nullifierCount === null
+                  ? counted.status === 'error'
                     ? '-'
-                    : 'counting'}
+                    : 'counting'
+                  : `${formatCount(nullifierCount)}${counted.status === 'ready' && counted.value.capped ? '+' : ''}`}
               </span>
             }
             note={
-              nullifiers.status === 'ready' && nullifiers.value.capped
+              counted.status === 'ready' && counted.value.capped
                 ? 'a floor: the set is unbounded and this count stops at its page budget'
                 : 'each settled slot spends two'
             }

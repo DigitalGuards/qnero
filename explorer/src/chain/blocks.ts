@@ -29,12 +29,15 @@ import {
 import { decodeExtrinsic, type ExtrinsicEnvelope } from '../lib/extrinsics';
 import { hexToBytes } from '../lib/hex';
 import { parseHeader, type BlockHeader } from '../lib/header';
-import { callName, normaliseEvents, storageAt, type ChainContext } from './api';
+import { callName, normaliseEvents, type ChainContext } from './api';
 
 export interface BlockSummary {
   hash: string;
   header: BlockHeader;
-  timestampMs: number;
+  /** Null when the node keeps no state at this block, which prunes the timestamp with it. */
+  timestampMs: number | null;
+  /** Why the state reads failed, when they did. The header and the body survive it. */
+  stateError: string | null;
   leavesAdded: number[];
   settlements: Settlement[];
   entries: ShieldEntry[];
@@ -66,27 +69,57 @@ export async function fetchHeader(context: ChainContext, hash: string): Promise<
   return parseHeader(await context.provider.send('chain_getHeader', [hash]));
 }
 
-export async function fetchEvents(context: ChainContext, hash: string): Promise<EventRecord[]> {
-  const query = await storageAt(context, hash, 'system', 'events');
-  const records = await query();
-  return normaliseEvents(records as unknown as Parameters<typeof normaliseEvents>[0]);
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-export async function fetchTimestamp(context: ChainContext, hash: string): Promise<number> {
-  const query = await storageAt(context, hash, 'timestamp', 'now');
-  return Number((await query()).toString());
+/** Everything one block's state holds, read behind a single decoration. */
+export interface BlockState {
+  events: EventRecord[];
+  timestampMs: number | null;
+  error: string | null;
 }
 
-export function summarise(
-  hash: string,
-  header: BlockHeader,
-  timestampMs: number,
-  events: EventRecord[],
-): BlockSummary {
+/**
+ * The events and the timestamp of one block, in one decoration and one round
+ * trip each.
+ *
+ * `api.at()` costs a header read and a runtime-version read on a registry
+ * miss, so taking it once and using it twice halves the cost of a block and
+ * cuts a twenty-row list by a third.
+ *
+ * Both reads need state, and a node keeps state for a bounded number of
+ * finalized blocks. Below that window they fail, and that is an ordinary
+ * answer rather than an error: the header and the body are still there, so a
+ * failure here empties the panels that read events and leaves the rest of the
+ * page standing.
+ */
+export async function fetchBlockState(context: ChainContext, hash: string): Promise<BlockState> {
+  try {
+    const at = await context.api.at(hash);
+    const events = at.query['system']?.['events'];
+    const now = at.query['timestamp']?.['now'];
+    if (events === undefined || now === undefined) {
+      throw new Error(`the runtime at ${hash} declares no System::Events or Timestamp::Now`);
+    }
+    const [records, timestamp] = await Promise.all([events(), now()]);
+    return {
+      events: normaliseEvents(records as unknown as Parameters<typeof normaliseEvents>[0]),
+      timestampMs: Number(timestamp.toString()),
+      error: null,
+    };
+  } catch (error: unknown) {
+    return { events: [], timestampMs: null, error: messageOf(error) };
+  }
+}
+
+export function summarise(hash: string, header: BlockHeader, state: BlockState): BlockSummary {
+  const events = state.events;
   return {
     hash,
     header,
-    timestampMs,
+    timestampMs: state.timestampMs,
+    stateError: state.error,
     leavesAdded: decodeLeafInsertions(events),
     settlements: decodeSettlements(events),
     entries: decodeShieldEntries(events),
@@ -98,12 +131,11 @@ export function summarise(
 }
 
 export async function fetchSummary(context: ChainContext, hash: string): Promise<BlockSummary> {
-  const [header, events, timestampMs] = await Promise.all([
+  const [header, state] = await Promise.all([
     fetchHeader(context, hash),
-    fetchEvents(context, hash),
-    fetchTimestamp(context, hash),
+    fetchBlockState(context, hash),
   ]);
-  return summarise(hash, header, timestampMs, events);
+  return summarise(hash, header, state);
 }
 
 interface RawBlock {
@@ -111,13 +143,12 @@ interface RawBlock {
 }
 
 export async function fetchDetail(context: ChainContext, hash: string): Promise<BlockDetail> {
-  const [raw, events, timestampMs] = await Promise.all([
+  const [raw, state] = await Promise.all([
     context.provider.send<RawBlock>('chain_getBlock', [hash]),
-    fetchEvents(context, hash),
-    fetchTimestamp(context, hash),
+    fetchBlockState(context, hash),
   ]);
   const header = parseHeader(raw.block.header);
-  const succeeded = successfulExtrinsics(events);
+  const succeeded = successfulExtrinsics(state.events);
   const extrinsics = raw.block.extrinsics.map((hex, index) => {
     const bytes = hexToBytes(hex);
     const envelope = decodeExtrinsic(bytes, index, context.layout);
@@ -133,7 +164,7 @@ export async function fetchDetail(context: ChainContext, hash: string): Promise<
       succeeded: succeeded.has(index),
     };
   });
-  return { ...summarise(hash, header, timestampMs, events), extrinsics };
+  return { ...summarise(hash, header, state), extrinsics };
 }
 
 /**
@@ -195,7 +226,7 @@ export async function fetchRecent(
 export function rollingBlockTimeMs(summaries: readonly BlockSummary[]): number | null {
   const times = summaries
     .map((summary) => summary.timestampMs)
-    .filter((value) => Number.isFinite(value) && value > 0)
+    .filter((value): value is number => value !== null && Number.isFinite(value) && value > 0)
     .sort((a, b) => a - b);
   const first = times.at(0);
   const last = times.at(-1);

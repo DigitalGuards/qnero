@@ -110,16 +110,24 @@ const NULLIFIER_PAGE = 1000;
  * `UsedNullifiers` is `Blake2_128Concat` and grows forever, so counting it
  * means paging its keys and gets slower every day. This is capped, says so
  * when it hits the cap, and never blocks the rest of a page.
+ *
+ * `stillWanted` stops the paging. A walk of twenty-five pages outlives a block
+ * on any link with latency, and without this every new head would stack
+ * another walk on top of the last one and throw all but the newest away.
  */
 export async function countNullifiers(
   context: ChainContext,
   at: string,
   pageLimit: number,
+  stillWanted?: () => boolean,
 ): Promise<NullifierCount> {
   const prefix = storage(context, 'shielded', 'usedNullifiers').keyPrefix();
   let count = 0;
   let cursor: string | null = null;
   for (let page = 0; page < pageLimit; page += 1) {
+    if (stillWanted?.() === false) {
+      return { count, capped: true };
+    }
     const params: unknown[] = [prefix, NULLIFIER_PAGE, cursor, at];
     const keys: string[] = await context.provider.send<string[]>('state_getKeysPaged', params);
     if (keys.length === 0) {
@@ -146,7 +154,12 @@ export async function countNullifiers(
  * Whether one nullifier is in the settled set.
  *
  * This is a point lookup on a constructed key, which names that nullifier to
- * whoever runs the node. The search page says so before it runs one.
+ * whoever runs the node. The search page prints that warning first and runs
+ * this only when a reader asks for it.
+ *
+ * A failure is never turned into a `false` here. "Not in the set" is a
+ * privacy-relevant claim and a refused or drifted read establishes nothing, so
+ * the rejection reaches the caller and the page shows a third state.
  */
 export async function nullifierSeen(
   context: ChainContext,

@@ -16,7 +16,7 @@ function isHash(id: string): boolean {
 }
 
 export function Block({ id }: { id: string }): ReactNode {
-  const { bundle } = useChain();
+  const { bundle, head } = useChain();
   const resolved = useAsync(
     bundle === null ? null : `resolve:${id}`,
     bundle === null
@@ -66,22 +66,46 @@ export function Block({ id }: { id: string }): ReactNode {
   const afterRetarget =
     block.difficulty?.newDifficulty ??
     (storedDifficulty.status === 'ready' ? storedDifficulty.value : null);
-  const seed = seedHeight(
-    block.header.number,
-    bundle.constants.seedEpochBlocks,
-    bundle.constants.seedEpochLag,
-  );
+  const constants = bundle.constants;
+  const seed =
+    constants === null
+      ? null
+      : seedHeight(block.header.number, constants.seedEpochBlocks, constants.seedEpochLag);
+  const isSettlement = (index: number): boolean =>
+    block.settlements.some((settlement) => settlement.extrinsicIndex === index);
 
   return (
     <>
       <header className="page__head">
         <h1>Block {formatCount(block.header.number)}</h1>
         <p className="page__lede">
-          {new Date(block.timestampMs).toISOString()} ·{' '}
-          <a href={href({ name: 'block', id: String(block.header.number - 1) })}>previous</a> ·{' '}
-          <a href={href({ name: 'block', id: String(block.header.number + 1) })}>next</a>
+          {block.timestampMs === null || block.timestampMs === 0
+            ? 'no timestamp: genesis carries none and a pruned block no longer answers for one'
+            : new Date(block.timestampMs).toISOString()}
+          {block.header.number === 0 ? null : (
+            <>
+              {' · '}
+              <a href={href({ name: 'block', id: block.header.parentHash })}>previous</a>
+            </>
+          )}
+          {head === null || block.header.number >= head.header.number ? null : (
+            <>
+              {' · '}
+              <a href={href({ name: 'block', id: String(block.header.number + 1) })}>next</a>
+            </>
+          )}
         </p>
       </header>
+
+      {block.stateError === null ? null : (
+        <Notice>
+          <p>
+            The node answered no state at this block, so the coinbase, the settlements, the entries
+            and the outcomes below are empty because they could not be read: {block.stateError}.
+            The header and the body are archived, and those are what this page still shows.
+          </p>
+        </Notice>
+      )}
 
       <Panel title="Header">
         <Fields>
@@ -124,8 +148,12 @@ export function Block({ id }: { id: string }): ReactNode {
           />
           <Field
             label="RandomX seed height"
-            value={<span className="num">{formatCount(seed)}</span>}
-            note="computed from the height; the chain holds no seed"
+            value={<span className="num">{seed === null ? '-' : formatCount(seed)}</span>}
+            note={
+              seed === null
+                ? 'the runtime did not answer the seed epoch constants'
+                : 'computed from the height; the chain holds no seed'
+            }
           />
           <Field
             label="Seal"
@@ -241,7 +269,7 @@ export function Block({ id }: { id: string }): ReactNode {
       </Panel>
 
       <RefusedCalls block={block} />
-      <OtherExtrinsics block={block} />
+      <OtherExtrinsics block={block} isSettlement={isSettlement} />
     </>
   );
 }
@@ -306,7 +334,21 @@ function summaryOf(extrinsic: ExtrinsicRow): string {
   return extrinsic.kind === 'bare' ? 'unsigned or inherent' : extrinsic.kind;
 }
 
-function OtherExtrinsics({ block }: { block: BlockDetail }): ReactNode {
+/**
+ * Every extrinsic in the block, summarised.
+ *
+ * Only a settlement links to the settlement page. A timestamp inherent or a
+ * coinbase opened there would be titled as a settlement and would carry the
+ * settlement's statement of what a spend publishes, over an extrinsic that
+ * spent nothing.
+ */
+function OtherExtrinsics({
+  block,
+  isSettlement,
+}: {
+  block: BlockDetail;
+  isSettlement: (index: number) => boolean;
+}): ReactNode {
   return (
     <Panel title={`Extrinsics (${formatCount(block.extrinsics.length)})`}>
       <div className="table-wrap">
@@ -329,9 +371,15 @@ function OtherExtrinsics({ block }: { block: BlockDetail }): ReactNode {
                 <td>{summaryOf(extrinsic)}</td>
                 <td className="num">{formatBytes(extrinsic.byteLength)}</td>
                 <td>
-                  <SettlementLink txHash={extrinsic.hash} blockHash={block.hash}>
-                    <span className="mono">{extrinsic.hash.slice(0, 10)}…</span>
-                  </SettlementLink>
+                  {isSettlement(extrinsic.index) ? (
+                    <SettlementLink txHash={extrinsic.hash} blockHash={block.hash}>
+                      <span className="mono">{extrinsic.hash.slice(0, 10)}…</span>
+                    </SettlementLink>
+                  ) : (
+                    <span className="mono" title={extrinsic.hash}>
+                      {extrinsic.hash.slice(0, 10)}…
+                    </span>
+                  )}
                 </td>
                 <td>{extrinsic.succeeded ? 'succeeded' : 'failed'}</td>
               </tr>

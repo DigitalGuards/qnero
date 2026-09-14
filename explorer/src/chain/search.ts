@@ -5,9 +5,15 @@
  * not key directly is a bounded walk backwards from the tip. Every walk here
  * takes a block budget, reports how far it looked, and says so in the answer
  * rather than pretending a miss is an absence.
+ *
+ * A walk also ends where the node stops answering. A node keeps state for a
+ * bounded number of finalized blocks and this chain finalizes its reorg depth
+ * behind the tip, so a default-pruned node holds only a few hundred blocks of
+ * state. Reaching the bottom of that is a boundary the answer names, not an
+ * error that takes the page down.
  */
 
-import { blockHashAt, fetchDetail, fetchEvents, type BlockDetail } from './blocks';
+import { blockHashAt, fetchBlockState, fetchDetail, type BlockDetail } from './blocks';
 import type { ChainContext } from './api';
 import { decodeSettlements } from '../lib/events';
 
@@ -30,7 +36,12 @@ export interface ScanResult<T> {
   scanned: number;
   /** True when the walk reached the genesis end of its window rather than the budget. */
   exhausted: boolean;
+  /** Why the walk stopped early, when the node stopped answering rather than the budget running out. */
+  stopped: string | null;
 }
+
+const PRUNED =
+  'the node answered nothing below this block, which is what a pruned state window looks like';
 
 export interface ExtrinsicLocation {
   blockHash: string;
@@ -61,20 +72,26 @@ export async function findExtrinsic(
     if (hash === null) {
       continue;
     }
-    const detail = await fetchDetail(context, hash);
+    let detail: BlockDetail;
+    try {
+      detail = await fetchDetail(context, hash);
+    } catch {
+      return { found: null, scanned, exhausted: true, stopped: PRUNED };
+    }
     const match = detail.extrinsics.find((extrinsic) => extrinsic.hash.toLowerCase() === target);
     if (match !== undefined) {
       return {
         found: { blockHash: hash, height, index: match.index, detail },
         scanned,
         exhausted: false,
+        stopped: null,
       };
     }
     if (height === 0) {
-      return { found: null, scanned, exhausted: true };
+      return { found: null, scanned, exhausted: true, stopped: null };
     }
   }
-  return { found: null, scanned, exhausted: false };
+  return { found: null, scanned, exhausted: false, stopped: null };
 }
 
 export interface NullifierLocation {
@@ -107,7 +124,11 @@ export async function findNullifierBlock(
     if (hash === null) {
       continue;
     }
-    const settlements = decodeSettlements(await fetchEvents(context, hash));
+    const state = await fetchBlockState(context, hash);
+    if (state.error !== null) {
+      return { found: null, scanned, exhausted: true, stopped: PRUNED };
+    }
+    const settlements = decodeSettlements(state.events);
     for (const settlement of settlements) {
       for (const slot of settlement.slots) {
         if (slot.nullifiers.some((value) => value.toLowerCase() === target)) {
@@ -115,15 +136,16 @@ export async function findNullifierBlock(
             found: { blockHash: hash, height, extrinsicIndex: settlement.extrinsicIndex },
             scanned,
             exhausted: false,
+            stopped: null,
           };
         }
       }
     }
     if (height === 0) {
-      return { found: null, scanned, exhausted: true };
+      return { found: null, scanned, exhausted: true, stopped: null };
     }
   }
-  return { found: null, scanned, exhausted: false };
+  return { found: null, scanned, exhausted: false, stopped: null };
 }
 
 /** Whether a 32-byte value is a block hash on this chain. */
