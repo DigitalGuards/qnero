@@ -5,8 +5,7 @@ import { href, navigate } from '../app/router';
 import { useAsync } from '../app/useAsync';
 import { fetchLeaf, findCommitment } from '../chain/leaves';
 import { blockForHash, classifyQuery, findExtrinsic, findNullifierBlock } from '../chain/search';
-import { fetchSnapshot } from '../chain/state';
-import { nullifierSeen } from '../chain/state';
+import { fetchSnapshot, nullifierSeen } from '../chain/state';
 import { formatCount } from '../lib/units';
 import { Empty, ErrorBox, Field, Fields, Loading, Notice, Panel } from '../components/ui';
 
@@ -58,7 +57,10 @@ export function Search({ query }: { query: string }): ReactNode {
       ) : kind === 'height' ? (
         <HeightResult height={Number(query)} />
       ) : (
-        <HashResult hash={query.toLowerCase()} />
+        // Keyed by the query, so asking about a second value starts from the
+        // warning again. Consent to name one nullifier to the node is not
+        // consent to name the next one.
+        <HashResult key={query.toLowerCase()} hash={query.toLowerCase()} />
       )}
     </>
   );
@@ -74,63 +76,138 @@ function HeightResult({ height }: { height: number }): ReactNode {
   );
 }
 
+/**
+ * What a 32-byte value can be, one question at a time.
+ *
+ * Only the block check runs on its own. It reads a header, which names nothing
+ * the chain does not already publish, and a block hash is public by
+ * construction. Everything below it is asked for, because a nullifier lookup
+ * names the value to whoever runs the node and the two scans walk the chain.
+ * The warning is on the page before any of them can run, which is the point of
+ * running none of them automatically.
+ *
+ * The whole subtree is keyed by the query, so every button is back to unasked
+ * when the query changes. Without that, one click would carry its permission
+ * to every value typed after it.
+ */
 function HashResult({ hash }: { hash: string }): ReactNode {
-  const { bundle, head } = useChain();
-  const cheap = useAsync(
-    bundle === null || head === null ? null : `direct:${hash}`,
-    bundle === null || head === null
-      ? null
-      : async () => {
-          const [height, seen] = await Promise.all([
-            blockForHash(bundle.context, hash),
-            nullifierSeen(bundle.context, hash, head.hash).catch(() => false),
-          ]);
-          return { height, seen };
-        },
+  const { bundle } = useChain();
+  const asBlock = useAsync(
+    bundle === null ? null : `block-for:${hash}`,
+    bundle === null ? null : () => blockForHash(bundle.context, hash),
   );
 
-  if (bundle === null || head === null || cheap.status === 'loading') {
+  if (bundle === null) {
     return <Loading what="the chain" />;
-  }
-  if (cheap.status === 'error') {
-    return <ErrorBox>{cheap.error}</ErrorBox>;
   }
 
   return (
     <>
+      <Notice>
+        <p>
+          A nullifier lookup builds a map key out of the 32 bytes above and asks the node for it,
+          so whoever runs the node learns that someone asked about that value. It runs only when
+          you ask for it below, and so do the two scans, which read public ranges and name nothing.
+        </p>
+      </Notice>
+
       <Panel title="Direct answers">
         <Fields>
           <Field
             label="A block on this chain"
             value={
-              cheap.value.height === null ? (
+              asBlock.status === 'loading' ? (
+                'reading'
+              ) : asBlock.status === 'error' ? (
+                'not answered'
+              ) : asBlock.value === null ? (
                 'not seen'
               ) : (
-                <a href={href({ name: 'block', id: hash })}>
-                  block {formatCount(cheap.value.height)}
-                </a>
+                <a href={href({ name: 'block', id: hash })}>block {formatCount(asBlock.value)}</a>
               )
             }
-          />
-          <Field
-            label="In the settled nullifier set"
-            value={cheap.value.seen ? 'seen' : 'not seen'}
-            note="presence proves some note was spent and says nothing about which"
+            note="one header read, which names nothing the chain does not already publish"
           />
         </Fields>
       </Panel>
 
-      <Notice>
-        <p>
-          A 32-byte query is sent to the node as a nullifier-set lookup, which names that value to
-          whoever runs it. The two searches below read public ranges and name nothing, and
-          they run only when asked because each walks the chain.
-        </p>
-      </Notice>
-
-      {cheap.value.seen ? <NullifierBlock hash={hash} /> : null}
+      <NullifierLookup hash={hash} />
       <CommitmentScan hash={hash} />
       <ExtrinsicScan hash={hash} />
+    </>
+  );
+}
+
+/**
+ * The point lookup, behind the disclosure.
+ *
+ * A failure is never rendered as "not seen". The negative is the answer a
+ * reader acts on, and a refused read, a dropped socket or a renamed storage
+ * item establishes nothing. Storage drift blocks the question outright,
+ * because a key built with the wrong hasher is simply absent and an absent key
+ * reads exactly like an empty set.
+ */
+function NullifierLookup({ hash }: { hash: string }): ReactNode {
+  const { bundle, head } = useChain();
+  const [run, setRun] = useState(false);
+  const result = useAsync(
+    !run || bundle === null || head === null ? null : `nullifier:${hash}:${head.hash}`,
+    !run || bundle === null || head === null
+      ? null
+      : () => nullifierSeen(bundle.context, hash, head.hash),
+  );
+  if (bundle === null) {
+    return null;
+  }
+  const drift = bundle.context.storageDrift;
+  const seen = result.status === 'ready' ? result.value : null;
+
+  return (
+    <>
+      <Panel title="The settled nullifier set">
+        {drift.length > 0 ? (
+          <ErrorBox>
+            The runtime declares its storage differently from what this build assumes, so a lookup
+            here would answer &ldquo;not seen&rdquo; for every value with no error anywhere:{' '}
+            {drift.join('; ')}.
+          </ErrorBox>
+        ) : !run ? (
+          <>
+            <p>
+              This asks the node for one key built from these 32 bytes, which names the value to
+              whoever runs it. Membership proves some note was spent and says nothing about which
+              note it was.
+            </p>
+            <button
+              className="button"
+              type="button"
+              onClick={() => {
+                setRun(true);
+              }}
+            >
+              Check the settled nullifier set
+            </button>
+          </>
+        ) : result.status === 'loading' ? (
+          <Loading what="the settled set" />
+        ) : (
+          <>
+            <Fields>
+              <Field
+                label="In the settled nullifier set"
+                value={result.status === 'error' ? 'not answered' : seen === true ? 'seen' : 'not seen'}
+                note={
+                  result.status === 'error'
+                    ? 'the node did not answer, so this is not an absence'
+                    : 'presence proves some note was spent and says nothing about which'
+                }
+              />
+            </Fields>
+            {result.status === 'error' ? <ErrorBox>{result.error}</ErrorBox> : null}
+          </>
+        )}
+      </Panel>
+      {seen === true ? <NullifierBlock hash={hash} /> : null}
     </>
   );
 }
@@ -163,9 +240,13 @@ function NullifierBlock({ hash }: { hash: string }): ReactNode {
             The settled set holds presence only. Finding the block means reading the settlement
             events of the last {formatCount(bundle.config.searchWindowBlocks)} blocks.
           </p>
-          <button className="button" type="button" onClick={() => {
+          <button
+            className="button"
+            type="button"
+            onClick={() => {
               setRun(true);
-            }}>
+            }}
+          >
             Read the last {formatCount(bundle.config.searchWindowBlocks)} blocks
           </button>
         </>
@@ -175,13 +256,14 @@ function NullifierBlock({ hash }: { hash: string }): ReactNode {
         <ErrorBox>{result.error}</ErrorBox>
       ) : result.value.found === null ? (
         <Empty>
-          Not published in the last {formatCount(result.value.scanned)} blocks. It is in the settled
-          set, so it was published earlier than this window reaches.
+          Not published in the last {formatCount(result.value.scanned)} blocks
+          {result.value.stopped === null ? '' : `, and ${result.value.stopped}`}. It is in the
+          settled set, so it was published earlier than this walk reached.
         </Empty>
       ) : (
         <p>
           Settled at{' '}
-          <a href={href({ name: 'block', id: String(result.value.found.height) })}>
+          <a href={href({ name: 'block', id: result.value.found.blockHash })}>
             block {formatCount(result.value.found.height)}
           </a>
           , extrinsic {result.value.found.extrinsicIndex ?? '-'}.
@@ -232,9 +314,13 @@ function CommitmentScan({ hash }: { hash: string }): ReactNode {
             The tree is keyed by leaf index, so finding a commitment means reading leaves newest
             first. This reads commitments only and says nothing about which one matters.
           </p>
-          <button className="button" type="button" onClick={() => {
+          <button
+            className="button"
+            type="button"
+            onClick={() => {
               setRun(true);
-            }}>
+            }}
+          >
             Scan the tree
           </button>
         </>
@@ -295,9 +381,13 @@ function ExtrinsicScan({ hash }: { hash: string }): ReactNode {
             Bodies are not indexed here, so this reads the last{' '}
             {formatCount(bundle.config.searchWindowBlocks)} blocks and hashes what it finds.
           </p>
-          <button className="button" type="button" onClick={() => {
+          <button
+            className="button"
+            type="button"
+            onClick={() => {
               setRun(true);
-            }}>
+            }}
+          >
             Scan recent blocks
           </button>
         </>
@@ -307,12 +397,13 @@ function ExtrinsicScan({ hash }: { hash: string }): ReactNode {
         <ErrorBox>{result.error}</ErrorBox>
       ) : result.value.found === null ? (
         <Empty>
-          Not in the last {formatCount(result.value.scanned)} blocks.
+          Not in the last {formatCount(result.value.scanned)} blocks
+          {result.value.stopped === null ? '' : `, and ${result.value.stopped}`}.
         </Empty>
       ) : (
         <p>
           Extrinsic {formatCount(result.value.found.index)} of{' '}
-          <a href={href({ name: 'block', id: String(result.value.found.height) })}>
+          <a href={href({ name: 'block', id: result.value.found.blockHash })}>
             block {formatCount(result.value.found.height)}
           </a>
           . <a href={href({ name: 'settlement', hash, at: result.value.found.blockHash })}>Open it</a>

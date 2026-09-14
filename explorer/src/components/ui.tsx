@@ -2,15 +2,26 @@ import type { ReactNode } from 'react';
 
 import { shortHash } from '../lib/hex';
 
+/**
+ * A panel.
+ *
+ * `prose` caps the panel itself at a reading measure. The measure belongs on
+ * the container: a `ch` cap on the paragraph resolves against the paragraph's
+ * own font size, so an 11px note inside a wide panel would stop at half the
+ * box and read as a broken grid. A panel holding a table or the field grid
+ * keeps the full width.
+ */
 export function Panel({
   title,
+  prose = false,
   children,
 }: {
   title?: string;
+  prose?: boolean;
   children: ReactNode;
 }): ReactNode {
   return (
-    <section className="panel" data-panel={title}>
+    <section className={prose ? 'panel panel--prose' : 'panel'} data-panel={title}>
       {title === undefined ? null : <h2 className="panel__title">{title}</h2>}
       {children}
     </section>

@@ -13,7 +13,12 @@ import { Notice, Panel } from '../components/ui';
  */
 export function Reveals(): ReactNode {
   const { bundle } = useChain();
-  const window = bundle?.context.api.consts['shielded']?.['blockHashWindow']?.toString() ?? '256';
+  // Read from the runtime or not stated at all. A default here would print a
+  // chain parameter this page never read, including on the first paint of
+  // every load, and the size of the window a settlement could have anchored in
+  // is not a number to guess at.
+  const constant = bundle?.context.api.consts['shielded']?.['blockHashWindow'];
+  const window = constant === undefined ? null : Number(constant.toString());
 
   return (
     <>
@@ -26,7 +31,7 @@ export function Reveals(): ReactNode {
         </p>
       </header>
 
-      <Panel title="What an observer learns from one block">
+      <Panel title="What an observer learns from one block" prose>
         <h3>The block itself</h3>
         <p>
           Its height and hash, its parent, the state and extrinsic roots, and the commitment tree
@@ -89,7 +94,7 @@ export function Reveals(): ReactNode {
         </p>
       </Panel>
 
-      <Panel title="What stays hidden">
+      <Panel title="What stays hidden" prose>
         <h3>Recipients</h3>
         <p>
           A note is a hash over a public key, a nonce and a randomiser, and the chain only ever
@@ -108,10 +113,10 @@ export function Reveals(): ReactNode {
 
         <h3>Which note a nullifier spends</h3>
         <p>
-          The settled set holds presence only, keyed by the nullifier. A nullifier is a Poseidon2
-          output with no published relation to any leaf index. Membership proves some note was
-          spent and says nothing about which. There is no on-chain join from a nullifier to a leaf,
-          and this site does not invent one.
+          The settled set holds presence only, keyed by the nullifier. Membership proves some note
+          was spent and says nothing about which, because nothing on chain joins a nullifier to the
+          leaf it spent. What a settlement does join it to is the two leaves that same spend
+          created, which is above and is the strongest linkage the system has.
         </p>
 
         <h3>The miner&rsquo;s wallet</h3>
@@ -138,7 +143,7 @@ export function Reveals(): ReactNode {
         </p>
       </Notice>
 
-      <Panel title="What this site does not ask the node">
+      <Panel title="What this site does not ask the node" prose>
         <p>
           It never calls the Merkle-proof endpoint. Every such call names one specific leaf to
           whoever runs the node, which is the correlation a wallet&rsquo;s local tree rebuild exists
@@ -146,13 +151,16 @@ export function Reveals(): ReactNode {
           leaf-interest log. It reads leaves and the root as public ranges.
         </p>
         <p>
-          A settlement may anchor at any canonical block in the {formatCount(Number(window))} before
-          the one it lands in. The exact anchor is a public input inside the proof, which this site
-          does not open.
+          A settlement may anchor at{' '}
+          {window === null
+            ? 'any canonical block inside the runtime’s block-hash window'
+            : `any canonical block in the ${formatCount(window)} before the one it lands in`}
+          . The exact anchor is a public input inside the proof, which this site does not open.
         </p>
         <p>
           There is no analytics of any kind here, and no request leaves the page except to the
-          configured node.
+          configured node and to the host serving this page, which answers for{' '}
+          <span className="mono">config.json</span> at startup and for the page&rsquo;s own assets.
         </p>
       </Panel>
     </>

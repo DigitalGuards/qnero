@@ -21,6 +21,10 @@ function ciphertextNote(bytes: number): ReactNode {
  * sender's change is hidden only because the wallet draws the payment's output
  * slot per spend, so labelling one "to" and one "change" here would reintroduce
  * by presentation exactly what the protocol pays to hide.
+ *
+ * The two nullifiers and the two commitments of one slot are published
+ * together and the page says so. What the chain hides is which note each
+ * nullifier spent, and that is the only thing the note under them claims.
  */
 export function SettlementView({
   settlement,
@@ -57,7 +61,9 @@ export function SettlementView({
                 <Hash value={slot.nullifiers[1]} full />
               </div>
               <span className="field__note">
-                Membership proves some note was spent. Nothing on chain joins a nullifier to a leaf.
+                Membership proves some note was spent and says nothing about which note it was:
+                nothing on chain joins a nullifier to the leaf it spent. The two leaves beside it
+                are the outputs this spend created, and the chain publishes that link.
               </span>
             </div>
             <div>
