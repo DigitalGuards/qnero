@@ -8,7 +8,7 @@ import { blockHashAt, fetchDetail, type BlockDetail, type ExtrinsicRow } from '.
 import { decodeU512, formatDifficulty } from '../lib/difficulty';
 import { seedHeight } from '../lib/seed';
 import { formatBytes, formatCount, formatQnr, REFERENCE_CIPHERTEXT_BYTES } from '../lib/units';
-import { Empty, ErrorBox, Field, Fields, Hash, Loading, Notice, Panel } from '../components/ui';
+import { Empty, ErrorBox, Field, Fields, Hash, Loading, NotRead, Notice, Panel } from '../components/ui';
 import { SettlementLink, SettlementView } from './parts/SettlementView';
 
 function isHash(id: string): boolean {
@@ -32,24 +32,6 @@ function BlockProblem({ children }: { children: ReactNode }): ReactNode {
         <a href={href({ name: 'home' })}>Back to the chain</a>.
       </p>
     </>
-  );
-}
-
-/**
- * A panel the node kept no state for.
- *
- * The absence sentence beside it ("no coinbase note", "no settlement") is a
- * claim about what the chain published at this height. Over a read that failed
- * it is a false one, and it is read by someone checking whether something
- * happened here.
- */
-function NotRead({ what, error }: { what: string; error: string }): ReactNode {
-  return (
-    <Empty>
-      <span className="dim" title={error}>
-        State not kept at this block, so {what} could not be read. This is not an absence.
-      </span>
-    </Empty>
   );
 }
 
@@ -138,9 +120,10 @@ export function Block({ id }: { id: string }): ReactNode {
       {block.stateError === null ? null : (
         <Notice>
           <p>
-            The node answered no state at this block, so the coinbase, the settlements, the entries
-            and the outcomes below are empty because they could not be read: {block.stateError}.
-            The header and the body are archived, and those are what this page still shows.
+            The node answered no state at this block, so the coinbase, the settlements, the entries,
+            the outcomes and this block&rsquo;s retarget below are empty because they could not be
+            read: {block.stateError}. The header and the body are archived, and those are what this
+            page still shows.
           </p>
         </Notice>
       )}
@@ -184,7 +167,13 @@ export function Block({ id }: { id: string }): ReactNode {
           <Field
             label="Mined at difficulty"
             value={<span className="num">{minedAt === null ? '-' : formatDifficulty(minedAt)}</span>}
-            note={minedAt === null ? 'no retarget event in this block' : 'from this block’s retarget'}
+            note={
+              minedAt !== null
+                ? 'from this block’s retarget'
+                : block.stateError === null
+                  ? 'no retarget event in this block'
+                  : 'state not kept at this block, so the retarget event could not be read'
+            }
           />
           <Field
             label="Difficulty after"
@@ -192,9 +181,11 @@ export function Block({ id }: { id: string }): ReactNode {
               <span className="num">{afterRetarget === null ? '-' : formatDifficulty(afterRetarget)}</span>
             }
             note={
-              block.difficulty === null
-                ? 'QPoW::CurrentDifficulty at this block'
-                : `observed block time ${formatCount(block.difficulty.observedBlockTimeMs)} ms`
+              block.difficulty !== null
+                ? `observed block time ${formatCount(block.difficulty.observedBlockTimeMs)} ms`
+                : storedDifficulty.status === 'error'
+                  ? 'the node did not answer QPoW::CurrentDifficulty at this block'
+                  : 'QPoW::CurrentDifficulty at this block'
             }
           />
           <Field

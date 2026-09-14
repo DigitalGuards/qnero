@@ -237,18 +237,97 @@ export async function fetchRecent(
 }
 
 /**
- * Rolling mean of the gaps between consecutive block timestamps, in
- * milliseconds. Null when there are not two blocks to compare.
+ * Mean time per block over the window, in milliseconds. Null when there are not
+ * two heights to compare.
+ *
+ * The divisor is the heights the two end samples span. A block whose state did
+ * not answer carries no timestamp, so dividing by the samples that survived
+ * shortens the divisor while the span stays as long as it was: two gaps in a
+ * twelve-block window reported a block time about a fifth high and, through
+ * `estimateHashrate`, a network hash rate about a fifth low, under a note
+ * saying the window was twelve blocks.
+ *
+ * Genesis carries a zero timestamp where every other block carries a time, so
+ * it is filtered out with the unread ones and the window starts at block 1.
  */
 export function rollingBlockTimeMs(summaries: readonly BlockSummary[]): number | null {
-  const times = summaries
-    .map((summary) => summary.timestampMs)
-    .filter((value): value is number => value !== null && Number.isFinite(value) && value > 0)
-    .sort((a, b) => a - b);
-  const first = times.at(0);
-  const last = times.at(-1);
-  if (first === undefined || last === undefined || times.length < 2) {
+  const timed = summaries
+    .map((summary) => ({ height: summary.header.number, timestampMs: summary.timestampMs }))
+    .filter((sample): sample is { height: number; timestampMs: number } => {
+      const value = sample.timestampMs;
+      return value !== null && Number.isFinite(value) && value > 0;
+    })
+    .sort((a, b) => a.height - b.height);
+  const first = timed.at(0);
+  const last = timed.at(-1);
+  if (first === undefined || last === undefined) {
     return null;
   }
-  return (last - first) / (times.length - 1);
+  const blocks = last.height - first.height;
+  if (blocks <= 0) {
+    return null;
+  }
+  return (last.timestampMs - first.timestampMs) / blocks;
+}
+
+/**
+ * What a block's state answered about one extrinsic, or that it did not answer.
+ *
+ * A settlement's slots are events, and events are state. A node that keeps the
+ * body of a block below its state window still serves the extrinsic, so
+ * `detail.settlements` comes back empty there for a spend that published two
+ * nullifiers and two commitments. Reading that empty list as "settled nothing"
+ * is a negative inferred from a failure, on the one page whose subject is what
+ * a settlement publishes, so the unread case is its own answer here and the
+ * caller has to spell it.
+ */
+export type SettlementRead =
+  | { kind: 'read'; settlement: Settlement | null }
+  | { kind: 'not-read'; error: string };
+
+export function settlementOf(block: BlockSummary, extrinsicIndex: number): SettlementRead {
+  if (block.stateError !== null) {
+    return { kind: 'not-read', error: block.stateError };
+  }
+  return {
+    kind: 'read',
+    settlement:
+      block.settlements.find((entry) => entry.extrinsicIndex === extrinsicIndex) ?? null,
+  };
+}
+
+/**
+ * What the newest block in a window says about its coinbase note.
+ *
+ * Emission is the one quantity this chain publishes in full, and the home page
+ * invites a reader to total it block by block, so "the newest block minted no
+ * note" is a checkable claim about the chain. It is true only when a state read
+ * answered and held no `CoinbaseMinted`. While the window is still being read,
+ * when the read failed, and when the newest block's own state was not kept,
+ * nothing was established and the page says which of those it is.
+ */
+export type LatestCoinbase =
+  | { kind: 'reading' }
+  | { kind: 'unread'; why: 'recent-read-failed' | 'no-block' | 'state-not-kept' }
+  | { kind: 'none' }
+  | { kind: 'minted'; note: CoinbaseNote };
+
+export function latestCoinbase(
+  status: 'loading' | 'error' | 'ready',
+  blocks: readonly BlockSummary[],
+): LatestCoinbase {
+  if (status === 'loading') {
+    return { kind: 'reading' };
+  }
+  if (status === 'error') {
+    return { kind: 'unread', why: 'recent-read-failed' };
+  }
+  const newest = blocks.at(0);
+  if (newest === undefined) {
+    return { kind: 'unread', why: 'no-block' };
+  }
+  if (newest.stateError !== null) {
+    return { kind: 'unread', why: 'state-not-kept' };
+  }
+  return newest.coinbase === null ? { kind: 'none' } : { kind: 'minted', note: newest.coinbase };
 }

@@ -70,6 +70,26 @@ export function Empty({ children }: { children: ReactNode }): ReactNode {
   return <div className="empty">{children}</div>;
 }
 
+/**
+ * A panel the node kept no state for.
+ *
+ * The absence sentence this replaces ("no coinbase note", "no settlement",
+ * "settled no slot") is a claim about what the chain published at that block.
+ * Over a read that failed it is a false one, and it is read by someone checking
+ * whether something happened there. Every page that reads events shares this,
+ * because a settlement below a node's state window is the same unread block
+ * from the block page and from the settlement page.
+ */
+export function NotRead({ what, error }: { what: string; error: string }): ReactNode {
+  return (
+    <Empty>
+      <span className="dim" title={error}>
+        State not kept at this block, so {what} could not be read. This is not an absence.
+      </span>
+    </Empty>
+  );
+}
+
 export function Loading({ what }: { what: string }): ReactNode {
   return (
     <p className="loading" role="status">

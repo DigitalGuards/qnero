@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-import { readFacts, type DevnetFacts } from './devnet';
+import { readFacts, RPC_PORT, type DevnetFacts } from './devnet';
 
 // Read lazily: the spec files are loaded before global setup has written them.
 let cached: DevnetFacts | null = null;
@@ -147,16 +147,22 @@ test('a settlement page states what it publishes and what it does not', async ({
 });
 
 test('search answers a height, a block hash and a settled nullifier', async ({ page }) => {
-  // Every frame this page sends, so the point lookup can be counted. It is the
-  // one read on this site that names its argument to whoever runs the node.
+  // Every frame this page sends, so the reads that carry the query's own 32
+  // bytes can be counted. The match is on the bare hex, because a value reaches
+  // the node in two shapes: as the whole parameter of a header read, and inside
+  // a Blake2_128Concat key, which is the hash followed by the raw key. Counting
+  // only frames naming `state_getStorage` counted the second and missed the
+  // first, which is how an automatic header read survived three rounds here.
   const sent: string[] = [];
   page.on('websocket', (socket) => {
     socket.on('framesent', (frame) => {
       sent.push(String(frame.payload));
     });
   });
-  const lookups = (): number =>
-    sent.filter((frame) => frame.includes('"state_getStorage"')).length;
+  const naming = (value: string): number => {
+    const bytes = value.replace(/^0x/, '').toLowerCase();
+    return sent.filter((frame) => frame.toLowerCase().includes(bytes)).length;
+  };
 
   await open(page, `#/search?q=${facts().settlementHeight}`);
   await expect(panel(page, 'Height')).toContainText(`Block ${facts().settlementHeight}`);
@@ -169,50 +175,70 @@ test('search answers a height, a block hash and a settled nullifier', async ({ p
     .first()
     .innerText();
 
+  // The block check is a request carrying the query's 32 bytes, so it waits for
+  // a click like the rest. The count is taken first because the block page
+  // above already asked the node for this hash, which it is entitled to: a
+  // block page opened by hash has to send the hash it was asked for.
+  const askedHash = naming(blockHash);
   await open(page, `#/search?q=${blockHash}`);
+  await expect(page.locator('.notice').first()).toContainText('Opening it sends the node nothing');
+  // The count first: it is the claim. The missing field below it is only how
+  // the page shows that the read has not run.
+  expect(naming(blockHash)).toBe(askedHash);
+  await expect(page.locator('[data-field="A block on this chain"]')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Ask the node for the header' }).click();
   await expect(field(page, 'A block on this chain')).toContainText(
     `block ${facts().settlementHeight}`,
   );
-
-  // The nullifier lookup names its argument to the node, so it never runs on
-  // its own: the warning is on the page and the answer is not, until asked.
-  const lookup = panel(page, 'The settled nullifier set');
-  await expect(page.locator('.notice')).toContainText('learns that someone asked about that value');
-  await expect(page.locator('[data-field="In the settled nullifier set"]')).toHaveCount(0);
-  await lookup.getByRole('button', { name: 'Check the settled nullifier set' }).click();
-  await expect(field(page, 'In the settled nullifier set')).toHaveText('not seen');
+  expect(naming(blockHash)).toBeGreaterThan(askedHash);
 
   // A second 32-byte query starts from the warning again: one click is not
-  // permission for every value typed after it.
+  // permission for every value typed after it. This one is a settled nullifier
+  // read off the chain moments ago, and nothing this browser sent has ever
+  // named it, because it arrived in a frame the node sent.
   await open(page, `#/search?q=${nullifier}`);
   // The value being asked about is on screen inside the same keyed subtree as
   // the consent notice, so the copy's "those 32 bytes" cannot name one value
   // while the lookup sends another.
   await expect(page.locator('.notice').first()).toContainText(nullifier);
-  await expect(field(page, 'A block on this chain')).toHaveText('not seen');
-  await expect(page.locator('[data-field="In the settled nullifier set"]')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Check the settled nullifier set' }).click();
-  await expect(field(page, 'In the settled nullifier set')).toHaveText('seen');
-  // The answer names the block it is as of, because it was asked once.
-  await expect(page.locator('[data-field="In the settled nullifier set"] .field__note')).toContainText(
-    'as of block',
+  await expect(page.locator('.notice')).toContainText(
+    'tells whoever runs the node that someone asked about this value',
   );
+  expect(naming(nullifier)).toBe(0);
+  await expect(page.locator('[data-field="A block on this chain"]')).toHaveCount(0);
+  await expect(page.locator('[data-field="In the settled nullifier set"]')).toHaveCount(0);
 
-  // The scans are explicit too, and the nullifier one finds the settling block.
+  await page.getByRole('button', { name: 'Ask the node for the header' }).click();
+  await expect(field(page, 'A block on this chain')).toHaveText('not seen');
+  expect(naming(nullifier)).toBe(1);
+
+  await panel(page, 'The settled nullifier set')
+    .getByRole('button', { name: 'Check the settled nullifier set' })
+    .click();
+  await expect(field(page, 'In the settled nullifier set')).toHaveText('seen');
+  expect(naming(nullifier)).toBe(2);
+  // The answer names the block it is as of, because it was asked once.
+  await expect(
+    page.locator('[data-field="In the settled nullifier set"] .field__note'),
+  ).toContainText('as of block');
+
+  // The scans are explicit too, and the nullifier one finds the settling block
+  // by reading events in bulk, so it names the value to nobody.
   await page.getByRole('button', { name: /Read the last/ }).click();
   await expect(panel(page, 'Which settlement published it')).toContainText(
     `block ${facts().settlementHeight}`,
   );
+  expect(naming(nullifier)).toBe(2);
 
   // One consent is one read. Keyed on the live head, this lookup re-sent the
   // nullifier to the node on every imported block and dropped the answer back
   // to loading each time, which unmounted the walk above mid-flight.
-  const asked = lookups();
+  const asked = naming(nullifier);
   const before = await stripHeight(page);
   await expect
     .poll(async () => stripHeight(page), { timeout: 60_000, intervals: [1000] })
     .toBeGreaterThan(before);
-  expect(lookups()).toBe(asked);
+  expect(naming(nullifier)).toBe(asked);
   await expect(field(page, 'In the settled nullifier set')).toHaveText('seen');
   await expect(panel(page, 'Which settlement published it')).toContainText(
     `block ${facts().settlementHeight}`,
@@ -253,7 +279,154 @@ test('the reveals page states both halves in plain words', async ({ page }) => {
   await expect(panel(page, 'What this site does not ask the node')).toContainText(
     'never calls the Merkle-proof endpoint',
   );
+  // A page does send what it was asked to open, and the difference between a
+  // route carrying a block hash and a reader pasting 32 bytes of unknown kind
+  // is stated here rather than left to the search page's own copy.
+  await expect(panel(page, 'What this site does not ask the node')).toContainText(
+    'nothing there is sent until a button is pressed',
+  );
   await expect(page.locator('.notice')).toContainText('1,792');
+});
+
+/**
+ * The node's answer at a block it no longer keeps state for, without pruning a
+ * dev chain to get there.
+ *
+ * Substrate refuses a state read below its pruning window and serves the header
+ * and the body out of the archive regardless, so a settlement older than the
+ * window comes back as an extrinsic with no events beside it. That shape is
+ * what turned an unread event log into the sentence "this extrinsic settled no
+ * slot", on a spend that published two nullifiers and two commitments.
+ *
+ * The socket is relayed rather than mocked: every frame goes to the real node
+ * and back, except a `state_` request naming this one block hash, which is
+ * answered with the node's own wording and never forwarded.
+ */
+const DISCARDED = 'Client error: UnknownBlock: State already discarded for';
+
+interface RpcRequest {
+  id: unknown;
+  method: string;
+  params?: unknown;
+}
+
+function isRequest(value: unknown): value is RpcRequest {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'method' in value &&
+    typeof value.method === 'string'
+  );
+}
+
+/** The frames to refuse and the frames to forward, out of one client frame. */
+function split(text: string, target: string): { refused: unknown[]; kept: unknown[]; batch: boolean } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { refused: [], kept: [text], batch: false };
+  }
+  const batch = Array.isArray(parsed);
+  const list: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+  const refused: unknown[] = [];
+  const kept: unknown[] = [];
+  for (const entry of list) {
+    const names =
+      isRequest(entry) &&
+      entry.method.startsWith('state_') &&
+      JSON.stringify(entry.params ?? []).toLowerCase().includes(target);
+    if (names && isRequest(entry)) {
+      refused.push({
+        jsonrpc: '2.0',
+        id: entry.id,
+        error: { code: -32000, message: `${DISCARDED} ${target}` },
+      });
+    } else {
+      kept.push(entry);
+    }
+  }
+  return { refused, kept, batch };
+}
+
+/**
+ * Relay the page's socket to the node, refusing state reads at whichever block
+ * the caller names.
+ *
+ * The relay is installed before the first navigation, because a route reaches
+ * only sockets opened after it was set, and the block to refuse is not known
+ * until a page has been read. It refuses nothing until `refuse` is called.
+ */
+async function relayWithStateBoundary(page: Page): Promise<(blockHash: string) => void> {
+  let target: string | null = null;
+  await page.routeWebSocket(
+    (url) => url.href.includes(`:${String(RPC_PORT)}`),
+    (client) => {
+      const node = client.connectToServer();
+      client.onMessage((message) => {
+        const text = typeof message === 'string' ? message : message.toString('utf8');
+        if (target === null) {
+          node.send(text);
+          return;
+        }
+        const { refused, kept, batch } = split(text, target);
+        if (refused.length > 0) {
+          client.send(JSON.stringify(batch ? refused : refused[0]));
+        }
+        if (kept.length > 0) {
+          node.send(JSON.stringify(batch ? kept : kept[0]));
+        }
+      });
+      node.onMessage((message) => {
+        client.send(message);
+      });
+    },
+  );
+  return (blockHash: string) => {
+    target = blockHash.toLowerCase();
+  };
+}
+
+test('a settlement whose block state is gone is never written up as one that settled nothing', async ({
+  page,
+}) => {
+  const refuse = await relayWithStateBoundary(page);
+  await open(page, `#/block/${facts().settlementHeight}`);
+  const blockHash = await field(page, 'Hash').innerText();
+  const link = await page
+    .getByRole('link', { name: /submit_private_batch/ })
+    .first()
+    .getAttribute('href');
+  expect(link).not.toBeNull();
+
+  refuse(blockHash);
+
+  // The settlement, opened the way a block page's link opens it: the block it
+  // came from is in the query, so this is one body read and one state read.
+  // The reload is what makes it a read: a hash change keeps the document, and
+  // polkadot-js memoises a storage query at a fixed block, so the events the
+  // block page just read would be answered out of memory and this page would
+  // never touch the socket.
+  await page.goto(`/${String(link)}`);
+  await page.reload();
+  await expect(page.getByRole('status').first()).toContainText('connected');
+  // The body is archived, so the submission is all still here.
+  await expect(field(page, 'Call')).toHaveText('Shielded.submit_private_batch');
+  await expect(field(page, 'Included in')).toContainText(`block ${facts().settlementHeight}`);
+
+  // What is not here is a claim about what it settled. The page said
+  // "Extrinsic", dropped the anchor window and the publishes/does-not notice,
+  // and printed "This extrinsic settled no slot" with no error anywhere.
+  await expect(page.locator('.notice')).toContainText('State already discarded');
+  await expect(panel(page, 'Slots')).toContainText('This is not an absence');
+  await expect(panel(page, 'Slots')).not.toContainText('settled no slot');
+
+  // The block page under the identical failure has always said this, which is
+  // the wording the settlement page now shares.
+  await open(page, `#/block/${blockHash}`);
+  await expect(page.locator('.notice')).toContainText('The node answered no state at this block');
+  await expect(panel(page, 'Settlements (0)')).toContainText('This is not an absence');
+  await expect(panel(page, 'Settlements (0)')).not.toContainText('No settlement landed');
 });
 
 test('every page is reachable from the keyboard and readable at 400 px', async ({ page }) => {

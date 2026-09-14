@@ -7,7 +7,7 @@ import { Notice, Panel } from '../components/ui';
 /**
  * What an observer learns, and what stays hidden.
  *
- * Taken from `docs/CIRCUIT.md` section 10 and `docs/WALLET.md`. It is linked
+ * Taken from `docs/CIRCUIT.md` section 10.7 and `docs/WALLET.md`. It is linked
  * from the rail on every page because a reader deciding what this chain is has
  * to be able to find it without reading the circuit.
  */
@@ -152,6 +152,14 @@ export function Reveals(): ReactNode {
           whoever runs the node, which is the correlation a wallet&rsquo;s local tree rebuild exists
           to avoid, and an explorer making that call for a viewer would hand the node a per-viewer
           leaf-interest log. It reads leaves and the root as public ranges.
+        </p>
+        <p>
+          What a page does send is whatever it was asked to open. A block page opened by hash asks
+          the node for that hash, because the route is the question, and a block hash is published
+          by the chain. The search page is the one place a reader arrives holding 32 bytes that
+          could be a nullifier or a commitment, so nothing there is sent until a button is pressed:
+          the header check and the nullifier lookup both carry the value in the request, and the
+          page says which button sends it.
         </p>
         <p>
           A settlement may anchor at{' '}

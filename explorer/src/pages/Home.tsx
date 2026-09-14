@@ -3,13 +3,48 @@ import type { ReactNode } from 'react';
 import { useChain } from '../app/chainContext';
 import { href } from '../app/router';
 import { useAsync } from '../app/useAsync';
-import { blockHashAt, fetchRecent, rollingBlockTimeMs } from '../chain/blocks';
+import {
+  blockHashAt,
+  fetchRecent,
+  latestCoinbase,
+  rollingBlockTimeMs,
+  type LatestCoinbase,
+} from '../chain/blocks';
 import { countNullifiers, fetchSnapshot } from '../chain/state';
 import { estimateHashrate, formatDifficulty, formatHashrate } from '../lib/difficulty';
 import { blocksToNextSeed, nextSeedHeight, seedHeight } from '../lib/seed';
 import { formatCount, formatQnr, formatSeconds } from '../lib/units';
 import { Empty, ErrorBox, Field, Fields, Hash, Loading, Notice, Panel } from '../components/ui';
 import { RecentBlocks } from './parts/RecentBlocks';
+
+/**
+ * The sentence under the latest coinbase.
+ *
+ * Only one of these is a claim about the chain. The rest say which read has not
+ * answered, because a page that read no block cannot report what that block
+ * minted, and emission is the one total this chain publishes in full.
+ */
+function coinbaseNote(coinbase: LatestCoinbase): string {
+  if (coinbase.kind === 'minted') {
+    return `leaf ${formatCount(coinbase.note.leafIndex)} at block ${formatCount(
+      coinbase.note.blockNumber,
+    )}`;
+  }
+  if (coinbase.kind === 'none') {
+    return 'the newest block minted no note';
+  }
+  if (coinbase.kind === 'reading') {
+    return 'reading the newest block';
+  }
+  switch (coinbase.why) {
+    case 'recent-read-failed':
+      return 'the recent-block read did not answer, so this is not an absence';
+    case 'state-not-kept':
+      return 'state not kept at the newest block, so its coinbase could not be read';
+    case 'no-block':
+      return 'no block in the window to read';
+  }
+}
 
 export function Home(): ReactNode {
   const { bundle, head } = useChain();
@@ -76,7 +111,11 @@ export function Home(): ReactNode {
   }
 
   const blockTimeMs = recent.status === 'ready' ? rollingBlockTimeMs(recent.value) : null;
-  const latest = recent.status === 'ready' ? recent.value[0] : undefined;
+  // What the newest block says about its coinbase, or which read did not
+  // answer. "The newest block minted no note" is a claim about this chain's
+  // emission, and this page invites a reader to total emission block by block,
+  // so it is said only when a state read answered and held no coinbase.
+  const coinbase = latestCoinbase(recent.status, recent.status === 'ready' ? recent.value : []);
   const observedMs =
     blockTimeMs ?? (snapshot.status === 'ready' ? snapshot.value.lastBlockDurationMs : null);
   const constants = bundle.constants;
@@ -202,6 +241,7 @@ export function Home(): ReactNode {
       </Panel>
 
       <Panel title="Shielded pool">
+        {counted.status === 'error' ? <ErrorBox>{counted.error}</ErrorBox> : null}
         <Fields>
           <Field
             label="Commitment tree leaves"
@@ -230,9 +270,11 @@ export function Home(): ReactNode {
               </span>
             }
             note={
-              counted.status === 'ready' && counted.value.capped
-                ? 'a floor: the set is unbounded and this count stops at its page budget'
-                : 'each settled slot spends two'
+              counted.status === 'error'
+                ? 'the node did not answer, so this is not a count'
+                : counted.status === 'ready' && counted.value.capped
+                  ? 'a floor: the set is unbounded and this count stops at its page budget'
+                  : 'each settled slot spends two'
             }
           />
           <Field
@@ -254,18 +296,10 @@ export function Home(): ReactNode {
             label="Latest coinbase"
             value={
               <span className="num">
-                {latest?.coinbase === undefined || latest.coinbase === null
-                  ? '-'
-                  : formatQnr(latest.coinbase.valuePlanck)}
+                {coinbase.kind === 'minted' ? formatQnr(coinbase.note.valuePlanck) : '-'}
               </span>
             }
-            note={
-              latest?.coinbase == null
-                ? 'the newest block minted no note'
-                : `leaf ${formatCount(latest.coinbase.leafIndex)} at block ${formatCount(
-                    latest.coinbase.blockNumber,
-                  )}`
-            }
+            note={coinbaseNote(coinbase)}
           />
         </Fields>
       </Panel>

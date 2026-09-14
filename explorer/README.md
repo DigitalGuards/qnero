@@ -145,7 +145,10 @@ Each of these is a decision.
   to whoever runs the node, which is the correlation a wallet's local tree
   rebuild exists to avoid. An explorer making that call for a viewer would hand
   the node a per-viewer leaf-interest log. Leaves and the root are read as
-  public ranges instead, and a lint rule fails the build if that call reappears.
+  public ranges instead, and `npm run lint` fails on the call in either of the
+  two forms the node serves it in: the `zkTree_getMerkleProof` method and the
+  `ZkTreeApi_get_merkle_proof` runtime call behind `state_call` and
+  `archive_v1_call`.
 - **It renders a slot's two outputs unordered.** Which one is the sender's
   change is hidden only because the wallet draws the payment's output slot per
   spend. Ordering them, or labelling one "to" and one "change", would
@@ -177,16 +180,19 @@ is a bounded walk that says how far it looked.
 | Home | One header, four storage values, and one state decoration per recent block carrying that block's events and timestamp. Blocks are cached by hash, so a poll fetches only what is new. The three consensus constants are three runtime calls, made after the connection is published |
 | Block | One body and one state decoration |
 | Settlement from a block link | One body. From a bare hash, one body per block walked backwards, capped at `searchWindowBlocks` |
-| Search, nullifier | One point lookup on a constructed key, which names that nullifier to the node. The page prints that before it offers the button, and the lookup runs once per click, pinned to the block the chain was at when it was asked, so an imported block never re-sends it |
+| Search, a 32-byte value | Nothing, until a button says so. The same 32 bytes can be a block hash, a nullifier or a commitment, so the page cannot tell which without asking, and the request is what leaks |
+| Search, block check | One `chain_getHeader` whose one parameter is the value itself. The answer names nothing the chain does not already publish; the question names the value, so it is behind the same click as the rest |
+| Search, nullifier | One point lookup on a constructed key, which names that nullifier to the node: a `Blake2_128Concat` key is the hash followed by the raw key. The page prints that before it offers the button, and the lookup runs once per click, pinned to the block the chain was at when it was asked, so an imported block never re-sends it |
 | Search, commitment | `ZkTree::Leaves` newest first, 256 keys per request, capped. A match is followed by a read of the window it came out of, so no request the scan makes names one leaf |
 | Nullifier count | `state_getKeysPaged` at 1000 keys a page, capped by `nullifierPageLimit`, and reported as a floor when it hits the cap. It is pinned to a baseline block that moves once per recent-list window, and the blocks after the baseline are counted from the settlement events the recent list already holds, so an imported block costs no new walk |
 
 Every one of these degrades rather than failing a page. A refused unsafe method
 or a missing runtime call empties the fields that needed it and leaves the rest
 readable; a block whose state the node no longer keeps still renders its header
-and its body, with the panels that read events saying that the state was not
-kept; and a walk that reaches the bottom of a pruned state window ends as a
-bounded miss that names the boundary. A node that never answers at all is a
+and its body, on the block page and on the settlement page alike, with the
+panels that read events saying that the state was not kept; and a walk that
+reaches the bottom of a pruned state window ends as a bounded miss that names
+the boundary. A node that never answers at all is a
 written failure after fifteen seconds naming the endpoint that did not answer
 and the file it is set in, so the commonest deployment mistake does not read as
 an indefinite "connecting".
@@ -199,7 +205,11 @@ three blocks into a 512-block walk raises an error where it would otherwise have
 concluded "not published" about 509 blocks nobody read. A block whose state did
 not answer says so in every panel that needed it, down to the outcome column,
 and it is not cached, so a blip does not pin those rows for the life of the
-tab.
+tab. The same rule reaches the sentences beside a figure: a settlement whose
+block state was not kept is never written up as an extrinsic that settled no
+slot, the newest block is called empty of a coinbase note only once a state
+read has answered for it, and a nullifier count that did not answer says so
+instead of printing a dash under a note about what the number would have meant.
 
 ## Two decoder seams worth knowing about
 
@@ -237,10 +247,11 @@ nice -n 19 npm test
 nice -n 19 npm run build
 ```
 
-`npm test` is vitest over the decoders: the settlement, coinbase and shield
-event shapes, the header and its digest, the extrinsic envelope, the `U512`
-difficulty, the units, the seed-height and rotation rules, and the route
-grammar. The fixtures in
+`npm test` is vitest over the decoders and the reads built on them: the
+settlement, coinbase and shield event shapes, the header and its digest, the
+extrinsic envelope, the `U512` difficulty, the units, the seed-height and
+rotation rules, the route grammar, and the three answers a page is allowed to
+give about a block whose state the node did not keep. The fixtures in
 `tests/fixtures/` were captured from a `--dev --tmp` node that had shielded once
 and sent once, by:
 
@@ -261,9 +272,13 @@ It starts its own dev node at one mining thread, shields once so an entry
 exists, sends once so a settlement exists, builds the site, serves the build,
 and drives a headless Chromium over the home, block, settlement, search and
 reveals pages asserting the values the wallet reported. It also counts the
-frames the page sends, so a consent that ran twice fails the run; it opens
-genesis and an unknown block hash, which are the two pages a dereference used to
-take down; and at 400 px it checks that a wide table scrolls inside its wrapper
+frames the page sends that carry the query's own 32 bytes, so a read that runs
+before its button, or twice after it, fails the run; it relays the page's own
+socket and answers the state reads at one block the way a node below its
+pruning window does, so the settlement page is driven through the failure that
+used to render as an extrinsic which settled nothing; it opens genesis and an
+unknown block hash, which are the two pages a dereference used to take down;
+and at 400 px it checks that a wide table scrolls inside its wrapper
 and that the skip link lands in the page with the route intact. It stops the
 node by its pidfile and does not finish until the RPC port is free again.
 

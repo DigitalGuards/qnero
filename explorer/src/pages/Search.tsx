@@ -87,12 +87,15 @@ function HeightResult({ height }: { height: number }): ReactNode {
 /**
  * What a 32-byte value can be, one question at a time.
  *
- * Only the block check runs on its own. It reads a header, which names nothing
- * the chain does not already publish, and a block hash is public by
- * construction. Everything below it is asked for, because a nullifier lookup
- * names the value to whoever runs the node and the two scans walk the chain.
- * The warning is on the page before any of them can run, which is the point of
- * running none of them automatically.
+ * Nothing here runs on its own. The same 32 bytes can be a block hash, a
+ * nullifier or a commitment, and the site cannot know which until it asks, so
+ * the request is what leaks: a header read carries the value as its one
+ * parameter and a nullifier lookup carries it inside a `Blake2_128Concat` key,
+ * which is the hash followed by the raw key. Either one puts this reader and
+ * this value in the node's request log together, which is the per-viewer
+ * interest log the gated panels exist to prevent, so the block check is behind
+ * a button beside the rest. The two scans are asked for as well, and they read
+ * leaves and events in ranges and name no single one of them.
  *
  * The whole subtree is keyed by the query, so every button is back to unasked
  * when the query changes. Without that, one click would carry its permission
@@ -100,10 +103,6 @@ function HeightResult({ height }: { height: number }): ReactNode {
  */
 function HashResult({ hash }: { hash: string }): ReactNode {
   const { bundle } = useChain();
-  const asBlock = useAsync(
-    bundle === null ? null : `block-for:${hash}`,
-    bundle === null ? null : () => blockForHash(bundle.context, hash),
-  );
 
   if (bundle === null) {
     return <Loading what="the chain" />;
@@ -116,37 +115,93 @@ function HashResult({ hash }: { hash: string }): ReactNode {
           This page is answering for <span className="mono">{hash}</span>.
         </p>
         <p>
-          A nullifier lookup builds a map key out of those 32 bytes and asks the node for it, so
-          whoever runs the node learns that someone asked about that value. It runs only when you
-          ask for it below, and so do the two scans, which read leaves and events in ranges and
-          name no single one of them.
+          Opening it sends the node nothing. Every answer below is a request that carries those 32
+          bytes: the block check asks for the header at them, and the nullifier lookup builds a map
+          key out of them, so either one tells whoever runs the node that someone asked about this
+          value. Each runs when you press its button and not before. The two scans read leaves and
+          events in ranges and name no single one of them.
         </p>
       </Notice>
 
-      <Panel title="Direct answers">
-        <Fields>
-          <Field
-            label="A block on this chain"
-            value={
-              asBlock.status === 'loading' ? (
-                'reading'
-              ) : asBlock.status === 'error' ? (
-                'not answered'
-              ) : asBlock.value === null ? (
-                'not seen'
-              ) : (
-                <a href={href({ name: 'block', id: hash })}>block {formatCount(asBlock.value)}</a>
-              )
-            }
-            note="one header read, which names nothing the chain does not already publish"
-          />
-        </Fields>
-      </Panel>
-
+      <BlockCheck hash={hash} />
       <NullifierLookup hash={hash} />
       <CommitmentScan hash={hash} />
       <ExtrinsicScan hash={hash} />
     </>
+  );
+}
+
+/**
+ * Whether the value is a block on this chain, behind the same consent as the
+ * rest.
+ *
+ * The answer names nothing the chain does not already publish. The question
+ * does: `chain_getHeader` takes the 32 bytes as its only parameter, so a value
+ * a reader pasted because they suspect it is a nullifier is in the node's log
+ * beside them before any button is pressed. That is the same naming the three
+ * panels below are gated for, and a page that ran it on load while printing
+ * "it runs only when you ask" was falsifying its own notice.
+ *
+ * A block page opened by hash does send the hash it was asked for, because the
+ * route is the question. The reveals page says so.
+ */
+function BlockCheck({ hash }: { hash: string }): ReactNode {
+  const { bundle } = useChain();
+  const [asked, setAsked] = useState(false);
+  const result = useAsync(
+    bundle === null || !asked ? null : `block-for:${hash}`,
+    bundle === null || !asked ? null : () => blockForHash(bundle.context, hash),
+  );
+  if (bundle === null) {
+    return null;
+  }
+
+  return (
+    // Titled for the question, like the three panels under it. The answer
+    // inside keeps the label the field has always carried.
+    <Panel title="As a block hash">
+      {!asked ? (
+        <>
+          <p>
+            This asks the node for the header at these 32 bytes. The request carries the value
+            itself, so whoever runs the node learns that someone asked about it. What comes back
+            names nothing the chain does not already publish.
+          </p>
+          <button
+            className="button"
+            type="button"
+            onClick={() => {
+              setAsked(true);
+            }}
+          >
+            Ask the node for the header
+          </button>
+        </>
+      ) : (
+        <Fields>
+          <Field
+            label="A block on this chain"
+            value={
+              result.status === 'loading' ? (
+                'reading'
+              ) : result.status === 'error' ? (
+                'not answered'
+              ) : result.value === null ? (
+                'not seen'
+              ) : (
+                <a href={href({ name: 'block', id: hash })}>block {formatCount(result.value)}</a>
+              )
+            }
+            note={
+              result.status === 'error'
+                ? 'the node did not answer, so this is not an absence'
+                : 'one header read, asked once, whose request carried these 32 bytes to the node'
+            }
+          />
+        </Fields>
+      )}
+      {result.status === 'error' ? <ErrorBox>{result.error}</ErrorBox> : null}
+    </Panel>
   );
 }
 

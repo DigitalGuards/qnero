@@ -3,10 +3,10 @@ import { useState, type ReactNode } from 'react';
 import { useChain } from '../app/chainContext';
 import { href } from '../app/router';
 import { useAsync } from '../app/useAsync';
-import { fetchDetail, type BlockDetail } from '../chain/blocks';
+import { fetchDetail, settlementOf, type BlockDetail } from '../chain/blocks';
 import { findExtrinsic } from '../chain/search';
 import { formatBytes, formatCount } from '../lib/units';
-import { Empty, ErrorBox, Field, Fields, Hash, Loading, Notice, Panel } from '../components/ui';
+import { Empty, ErrorBox, Field, Fields, Hash, Loading, NotRead, Notice, Panel } from '../components/ui';
 import { SettlementView } from './parts/SettlementView';
 
 interface Located {
@@ -25,6 +25,13 @@ interface Located {
  * settlement's statement of what a spend publishes and what it does not;
  * anything else gets neither, because that statement over a timestamp inherent
  * would say a block's clock spent notes.
+ *
+ * What the extrinsic is comes out of the block's events, and events are state.
+ * A node that has pruned the state at this block still serves the body, so the
+ * read can come back empty for a spend that published two nullifiers and two
+ * commitments. That case is written as a third one here. The page keeps the
+ * neutral title, says the state was not kept, and claims neither that this
+ * settled nothing nor that it settled anything.
  */
 export function Settlement({ hash, at }: { hash: string; at: string | null }): ReactNode {
   const { bundle, head } = useChain();
@@ -120,10 +127,11 @@ export function Settlement({ hash, at }: { hash: string; at: string | null }): R
 
   const { detail, index } = located.value.found;
   const extrinsic = detail.extrinsics[index];
-  const settlement = detail.settlements.find((entry) => entry.extrinsicIndex === index);
+  const read = settlementOf(detail, index);
+  const settlement = read.kind === 'read' ? read.settlement : null;
   const constant = bundle.context.api.consts['shielded']?.['blockHashWindow'];
   const window = constant === undefined ? null : Number(constant.toString());
-  const isSettlement = settlement !== undefined;
+  const isSettlement = settlement !== null;
 
   return (
     <>
@@ -133,6 +141,17 @@ export function Settlement({ hash, at }: { hash: string; at: string | null }): R
           <Hash value={hash} full />
         </p>
       </header>
+
+      {read.kind === 'not-read' ? (
+        <Notice>
+          <p>
+            The node answered no state at this block, so the events that say what this extrinsic
+            settled could not be read: {read.error}. Whether this is a settlement, and what it
+            published if it is, are among the things this page could not establish. The header and
+            the body are archived, and those are what it still shows.
+          </p>
+        </Notice>
+      ) : null}
 
       <Panel title="Submission">
         <Fields>
@@ -181,14 +200,16 @@ export function Settlement({ hash, at }: { hash: string; at: string | null }): R
       </Panel>
 
       <Panel title="Slots">
-        {settlement === undefined ? (
+        {read.kind === 'not-read' ? (
+          <NotRead what="the settlement" error={read.error} />
+        ) : settlement === null ? (
           <Empty>This extrinsic settled no slot.</Empty>
         ) : (
           <SettlementView settlement={settlement} blockHeight={detail.header.number} />
         )}
       </Panel>
 
-      {settlement === undefined ? null : (
+      {settlement === null ? null : (
         <Notice>
           <p>
             What this publishes: that some notes were spent, how many slots settled, which
