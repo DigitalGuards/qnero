@@ -56,6 +56,32 @@ export function formatQuantaAsQnr(quanta: bigint): string {
   return formatQnr(quantaToPlanck(quanta));
 }
 
+/**
+ * An amount split into the digits that carry value and the zeros that pad.
+ *
+ * MyMonero renders a twelve-decimal balance as a bright "10.37" and a dim
+ * "00000000000", which is what keeps a long number readable without rounding
+ * away what is held. The rule is significance rather than the decimal point,
+ * and the difference matters here: a pool quantum is a hundredth of a QNR, so
+ * [`formatPlanck`] emits exactly two decimals for every quanta balance and
+ * both of them carry value. Splitting on the point dimmed all of it.
+ *
+ * `6.92` splits into `6.92` and nothing; `6.00` into `6` and `.00`.
+ */
+export function splitAmountForDisplay(text: string): { significant: string; pad: string } {
+  const point = text.indexOf('.');
+  if (point < 0) {
+    return { significant: text, pad: '' };
+  }
+  const whole = text.slice(0, point);
+  const fraction = text.slice(point + 1);
+  const carried = fraction.replace(/0+$/, '');
+  if (carried.length === 0) {
+    return { significant: whole, pad: `.${fraction}` };
+  }
+  return { significant: `${whole}.${carried}`, pad: fraction.slice(carried.length) };
+}
+
 /** Thousands-separated integer, for leaf counts and heights. */
 export function formatCount(value: bigint | number): string {
   return value.toLocaleString('en-US');

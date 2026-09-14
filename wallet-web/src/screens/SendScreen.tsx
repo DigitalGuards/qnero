@@ -23,22 +23,13 @@ import { Field, Input, Textarea } from '../components/UI/Field';
 import { Notice } from '../components/UI/Notice';
 import { Address } from '../components/UI/Address';
 import { Panel, Prose } from '../components/UI/Panel';
+import { Tooltip } from '../components/UI/Tooltip';
+import { PHASES, progressFraction } from './sendPhases';
 import { Num, Table, TableScroll } from '../components/UI/Table';
 import { formatBytes, formatDuration, parseQuanta } from '../lib/format';
 import { memoByteLength, memoIsPlainAscii, memoRefusal } from '../lib/memo';
 import { formatCount } from '../lib/units';
 import type { SpendProgress, SpendResult } from '../wallet/send';
-
-const PHASES: { key: SpendProgress['stage']; label: string }[] = [
-  { key: 'fee', label: 'fee floor' },
-  { key: 'select', label: 'choosing notes' },
-  { key: 'build', label: 'building the circuits' },
-  { key: 'anchor', label: 'anchoring to the head' },
-  { key: 'tree', label: 'rebuilding the tree' },
-  { key: 'prove', label: 'proving the private batch' },
-  { key: 'submit', label: 'submitting' },
-  { key: 'confirm', label: 'waiting for inclusion' },
-];
 
 interface SendForm {
   to: string;
@@ -51,8 +42,10 @@ export function SendScreen({
   memoBytes,
   reachable,
   expectedSeconds,
+  expectedFrom,
   circuitsBuilt,
   proverThreads,
+  checkAddress,
   onSend,
   progress,
   running,
@@ -64,8 +57,12 @@ export function SendScreen({
   memoBytes: number;
   reachable: bigint;
   expectedSeconds: number;
+  /** Whether the figure is this machine's last payment or the published one. */
+  expectedFrom: 'measured' | 'published';
   circuitsBuilt: boolean;
   proverThreads: number;
+  /** The module's bech32m check, asked as the address is typed. */
+  checkAddress: (address: string) => Promise<boolean>;
   onSend: (to: string, amount: bigint, memo: string) => void;
   progress: SpendProgress | null;
   running: boolean;
@@ -107,21 +104,39 @@ export function SendScreen({
 
   if (running) {
     const current = PHASES.findIndex((phase) => phase.key === progress?.stage);
+    const expectedMillis = expectedSeconds * 1000;
+    // The estimate stops being quoted the moment it is wrong. Two numbers in
+    // one panel that disagree are worse than one number and an admission.
+    const overdue = elapsed > expectedMillis;
     return (
       <Panel title="Sending">
         <Prose>
           <p>
-            The proof is being built in a background worker. This browser expects about{' '}
-            {expectedSeconds} seconds for one payment
-            {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}; a slower
-            machine takes longer, and there is no way to know how much longer until it finishes.{' '}
+            The proof is being built in a background worker.{' '}
+            {overdue ? (
+              <>
+                This is longer than this browser expected
+                {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}; the worker
+                is still proving.
+              </>
+            ) : (
+              <>
+                {expectedFrom === 'measured'
+                  ? "This browser's last payment took about "
+                  : 'The published figure for one payment is about '}
+                {expectedSeconds} seconds
+                {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}.
+              </>
+            )}{' '}
             <strong className="text-ink">Leave this tab open.</strong>
           </p>
         </Prose>
         <div className="elev-inset mt-3 h-1 w-full overflow-hidden rounded-full bg-field">
           <div
             className="h-full bg-accent-fill transition-[width] duration-300"
-            style={{ width: `${Math.min(100, ((current + 1) / PHASES.length) * 100)}%` }}
+            style={{
+              width: `${Math.min(100, progressFraction(current, elapsed, expectedMillis) * 100)}%`,
+            }}
           />
         </div>
         <ul className="mt-3 list-none space-y-1 p-0 text-meta" data-testid="send-phases">
@@ -180,8 +195,22 @@ export function SendScreen({
             autoComplete="off"
             spellCheck={false}
             {...form.register('to', {
-              validate: (value) =>
-                value.trim().length > 0 || 'enter the address this payment goes to',
+              // The checksum as it is typed, from the module that will decode
+              // it. Without this a truncated paste is refused inside wasm
+              // after the circuit build, the anchor read and a rebuild of
+              // every leaf on the chain, which is the failure shape the memo
+              // check was moved up here to remove.
+              validate: async (value) => {
+                const address = value.trim();
+                if (address.length === 0) {
+                  return 'enter the address this payment goes to';
+                }
+                return (
+                  (await checkAddress(address)) ||
+                  'that is not a valid Qnero address: its checksum does not hold, which is what a ' +
+                    'truncated or edited paste looks like'
+                );
+              },
             })}
           />
         </Field>
@@ -222,7 +251,8 @@ export function SendScreen({
           htmlFor="send-memo"
           hint={
             memoIsPlainAscii(memo)
-              ? `${memoLength} of ${memoBytes} bytes, padded to ${memoBytes}`
+              ? `${memoLength} of ${memoBytes} bytes, padded to ${memoBytes} so both ciphertexts ` +
+                'are one size and the memo\'s length is not published in the clear'
               : 'anything outside printable ASCII will be shown escaped at the other end'
           }
           error={form.formState.errors.memo?.message}
@@ -243,16 +273,27 @@ export function SendScreen({
         </Field>
 
         <div className="mt-4 flex items-center justify-between gap-2 border-t border-edge pt-3">
-          <span className="mm-label mb-0">Fee</span>
+          {/* The explanation is a tooltip rather than four lines of 11 px text
+              between the fee and the button, which is where MyMonero puts its
+              own fee note and what the Tooltip primitive was carried over
+              for. The padding half of it belongs on the memo field's hint,
+              which is where a reader is when it matters. */}
+          <Tooltip
+            label={`The floor this runtime charges for one slot: a flat minimum plus one quantum
+              per block of ciphertext bytes. It is a public input fixed at proving time, so it
+              cannot be raised after the proof exists.`}
+          >
+            <button
+              type="button"
+              className="mm-label mb-0 cursor-help underline decoration-dotted underline-offset-2"
+            >
+              Fee
+            </button>
+          </Tooltip>
           <span className="font-mono text-body text-ink" data-testid="send-fee">
             {formatCount(feeFloor)} quanta
           </span>
         </div>
-        <p className="mt-1 text-meta text-muted">
-          The floor this runtime charges for one slot: a flat minimum plus one quantum per block of
-          ciphertext bytes. Both memos are padded to {memoBytes} bytes so the two ciphertexts are
-          the same length, which is what stops the memo&apos;s length being published in the clear.
-        </p>
 
         {error !== null && (
           <Notice tone="error" className="mt-3" testId="send-error" sensitive>

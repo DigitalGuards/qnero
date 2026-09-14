@@ -45,6 +45,16 @@ export class ProverClient {
   private nextId = 1;
   private waiting = new Map<number, Waiting>();
   private listeners = new Set<Progress>();
+  /**
+   * Whether the prover was stopped deliberately.
+   *
+   * Without it every path that reaches [`call`] resurrects a worker the
+   * operator switched off: the settings switch reads off while a fresh,
+   * uninitialised worker runs, and the first request to it fails with "the
+   * prover module has not been loaded", which names neither the switch nor the
+   * cause.
+   */
+  private stopped = false;
 
   /** Whether a worker is running and therefore whether memory is held. */
   get isRunning(): boolean {
@@ -94,6 +104,11 @@ export class ProverClient {
   }
 
   private call<T>(request: WorkerRequest, transfer?: Transferable[]): Promise<T> {
+    if (this.stopped && request.kind !== 'init') {
+      return Promise.reject(
+        new Error('the prover is stopped; turn it back on in settings before syncing or sending'),
+      );
+    }
     const worker = this.ensureWorker();
     const id = this.nextId;
     this.nextId += 1;
@@ -108,6 +123,9 @@ export class ProverClient {
   }
 
   init(wasmBase: string, numLeaves: number, maxThreads: number): Promise<InitAnswer> {
+    // Starting the prover is what lifts a deliberate stop, and the only thing
+    // that does.
+    this.stopped = false;
     return this.call<InitAnswer>({ kind: 'init', wasmBase, numLeaves, maxThreads });
   }
 
@@ -119,8 +137,9 @@ export class ProverClient {
     return this.call<ProverAccount>({ kind: 'deriveAccount', seedHex });
   }
 
-  minerKey(seedHex: string): Promise<string> {
-    return this.call<string>({ kind: 'minerKey', seedHex });
+  /** No seed. The worker has held one since the unlock: see `protocol.ts`. */
+  minerKey(): Promise<string> {
+    return this.call<string>({ kind: 'minerKey' });
   }
 
   /**
@@ -134,7 +153,17 @@ export class ProverClient {
     return this.call<ProverAccount>({ kind: 'unlock', seed }, [seed.buffer]);
   }
 
+  /**
+   * Drop the worker's seed.
+   *
+   * A no-op when there is no worker. Locking after the prover was stopped used
+   * to spawn a fresh one to tell it to forget a seed it never had, which left
+   * a worker running while the settings switch still read off.
+   */
   lock(): Promise<null> {
+    if (this.worker === null) {
+      return Promise.resolve(null);
+    }
     return this.call<null>({ kind: 'lock' });
   }
 
@@ -207,6 +236,7 @@ export class ProverClient {
    * rejected by name rather than left hanging.
    */
   terminate(): void {
+    this.stopped = true;
     if (this.worker === null) {
       return;
     }

@@ -172,7 +172,7 @@ export function SettingsScreen({
             id="prover-resident"
             checked={proverRunning}
             disabled={busy}
-            data-testid="prover-resident"
+            testId="prover-resident"
             onCheckedChange={(next) => {
               if (next) {
                 onStartProver();
@@ -190,7 +190,10 @@ export function SettingsScreen({
             Storage is {persisted ? 'marked persistent' : 'not marked persistent'} in this browser.
             {persisted
               ? ' The browser has been asked not to evict it under storage pressure.'
-              : " A browser under storage pressure may drop it, and this store is the only copy of every note's randomness. Value settled on chain becomes unspendable if it goes."}
+              : ' A browser under storage pressure may drop it. Every note re-derives from the seed,' +
+                " because every note's plaintext is on the chain inside its ciphertext, so what a" +
+                ' drop costs is a full rescan and the record of which notes are spent. Without the' +
+                ' 32 bytes written down it costs the wallet.'}
           </p>
         </Prose>
         <div className="mt-3 flex flex-wrap gap-2">
@@ -218,14 +221,14 @@ export function SettingsScreen({
               title="Erase this wallet?"
               description={
                 <p>
-                  This erases the encrypted seed and every note from this browser. Without the 32
-                  bytes you wrote down there is no way back, and nothing anywhere else holds a copy.
+                  This clears every record and deletes the database. Without the 32 bytes you
+                  wrote down there is no way back into this wallet. A browser may keep the freed
+                  pages on disk until it compacts.
                 </p>
               }
             >
               <Button
                 variant="destructive"
-                className="flex-1"
                 data-testid="confirm-forget"
                 onClick={onForget}
               >

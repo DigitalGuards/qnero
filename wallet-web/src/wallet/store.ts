@@ -7,20 +7,21 @@
  * or does not land, which is exactly what the rename was for.
  *
  * What it does not replace is durability against the browser. IndexedDB is
- * evictable, and this store is the only copy of every note's `r`: a note whose
- * `r` is gone is value settled on chain that nothing can ever spend.
+ * evictable, and while it stands it is the fastest copy of every note's `r`.
  * [`requestPersistence`] asks for the origin to be exempt and the settings
- * screen reports the answer, which may be no. There is no encrypted export
- * yet, so the answer to an eviction today is the seed: every note's plaintext
- * is on the chain inside its ciphertext, and what a fresh store loses is the
- * spent history, which comes back as the refusals a rescan records.
+ * screen reports the answer, which may be no. The answer to an eviction is the
+ * seed: every note's plaintext is on the chain inside its ciphertext, so a
+ * fresh store re-derives every note from a rescan. What it loses is the spent
+ * history, which comes back as the refusals that rescan records, and the time
+ * a full rescan costs.
  *
  * # Ordering rules that are not about storage
  *
  * The pending change note of a spend is written **before**
- * `author_submitExtrinsic`, in one committed transaction. The store is the
- * only place its `r` exists, and a tab that is reclaimed between the submit
- * and the write has published a note nobody can open.
+ * `author_submitExtrinsic`, in one committed transaction. The row seals no
+ * randomness (`wallet/send.ts` rule 8): it is a claim that the note exists, so
+ * a tab reclaimed between the submit and the write shows a balance missing its
+ * own change until the next sync reaches the leaf.
  */
 
 import {
@@ -135,11 +136,36 @@ export function openDatabase(factory: IDBFactory = indexedDB): Promise<IDBDataba
 }
 
 /**
+ * Delete the database itself, after its stores have been cleared.
+ *
+ * `onblocked` fires when another tab still holds the database open. The delete
+ * then completes whenever that tab closes and there is nothing useful to wait
+ * for here, so this resolves and the caller carries on: the records this call
+ * came to remove are already gone.
+ */
+function deleteDatabase(factory: IDBFactory = indexedDB): Promise<void> {
+  return new Promise((resolve) => {
+    const request_ = factory.deleteDatabase(DB_NAME);
+    request_.onsuccess = (): void => {
+      resolve();
+    };
+    request_.onblocked = (): void => {
+      resolve();
+    };
+    request_.onerror = (): void => {
+      resolve();
+    };
+  });
+}
+
+/**
  * Ask the browser not to evict this origin.
  *
- * Without it a browser under storage pressure can drop everything here, and
- * what it drops is the only copy of every note's `r`. The answer may be no,
- * and the caller says so rather than assuming.
+ * Without it a browser under storage pressure can drop everything here: the
+ * sealed seed, every note and the record of which ones are spent. What comes
+ * back from a written-down seed is every note, by rescanning the chain; what
+ * does not is the spent history, which returns as refusals. The answer may be
+ * no, and the caller says so rather than assuming.
  */
 export async function requestPersistence(): Promise<boolean> {
   if (typeof navigator === 'undefined') {
@@ -422,7 +448,21 @@ export class WalletStore {
     return true;
   }
 
-  /** Erase the whole wallet, seed included. */
+  /**
+   * Erase the whole wallet, seed included, and take the database with it.
+   *
+   * `clear()` alone removes what the API can see and leaves the freed records
+   * in the backing store until the browser compacts, which is not what
+   * "erases the encrypted seed and every note from this browser" promises to
+   * somebody wiping a wallet before handing the machine on. So the stores are
+   * cleared first, in one transaction, and then the database itself is
+   * deleted: the clear is what makes the promise hold even if the delete is
+   * blocked by another tab.
+   *
+   * The handle is closed on the way, so the caller reopens. A delete blocked
+   * by a second tab is reported as done rather than waited on forever: the
+   * records are already gone.
+   */
   async destroy(): Promise<void> {
     const transaction = this.db.transaction([...ALL_STORES], 'readwrite');
     for (const store of ALL_STORES) {
@@ -430,6 +470,8 @@ export class WalletStore {
     }
     await transactionDone(transaction);
     this.lock();
+    this.db.close();
+    await deleteDatabase();
   }
 }
 

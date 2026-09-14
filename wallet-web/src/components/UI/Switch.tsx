@@ -8,6 +8,12 @@ import { cn } from '../../utils/cn';
  *
  * Radix's primitive carries the role and the keyboard behaviour; what is here
  * is MyMonero's geometry and the accent.
+ *
+ * `testId` is a named prop rather than a spread `data-testid`, because JSX
+ * skips type checking for hyphenated attribute names: a caller writing
+ * `data-testid` on a component that destructures a fixed prop list compiles,
+ * renders nothing, and the hook it advertised is missing with no error
+ * anywhere. This is the same shape `Notice` and `Table` use.
  */
 export function Switch({
   checked,
@@ -15,16 +21,19 @@ export function Switch({
   id,
   disabled = false,
   className,
+  testId,
 }: {
   checked: boolean;
   onCheckedChange: (checked: boolean) => void;
   id?: string;
   disabled?: boolean;
   className?: string;
+  testId?: string;
 }): ReactNode {
   return (
     <SwitchPrimitive.Root
       id={id}
+      data-testid={testId}
       checked={checked}
       onCheckedChange={onCheckedChange}
       disabled={disabled}

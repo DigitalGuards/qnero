@@ -11,10 +11,19 @@
  * arithmetic and a payload beside it carries zero, so opening one under the
  * ordinary transfer rule rebuilds at the wrong value, fails the commitment
  * check and reads this wallet's own coinbase as nobody's, silently.
+ *
+ * The third is the seed's lifecycle, which is the one with a plaintext spend
+ * key on the wrong side of it. An unlock used to install the seed and then
+ * ask for the module, so an unlock against a worker that had never been
+ * initialised (stop the prover on the settings screen, lock, unlock) left the
+ * seed resident while the page read "locked" on every screen, with both
+ * controls that could clear it behind an open wallet. The module comes first
+ * now and the seed is installed only once a derivation has answered.
  */
 
 import { describe, expect, it } from 'vitest';
 
+import { ProverClient } from '../src/worker/client';
 import { ProverCore, type ModuleLoader, type WasmModule, type WasmProver } from '../src/worker/core';
 
 const LIMITS = {
@@ -207,5 +216,86 @@ describe('a coinbase leaf', () => {
       )
     ).value as (object | null)[];
     expect(answer[0]).toBeNull();
+  });
+});
+
+describe("the seed the worker holds", () => {
+  it('installs nothing when there is no module to derive with', async () => {
+    const counts: Counts = { builds: 0, digests: [] };
+    const load: ModuleLoader = () => Promise.resolve({ module: stubModule(counts), threads: 1 });
+    const core = new ProverCore(load);
+
+    // The unlock a page makes against a worker it never initialised.
+    await expect(
+      core.handle({ kind: 'unlock', seed: new Uint8Array(32) }, () => undefined),
+    ).rejects.toThrow(/the prover module has not been loaded/);
+
+    // The module arrives, and the worker is still locked: nothing was kept
+    // from the refused unlock.
+    await core.handle({ kind: 'init', wasmBase: 'wasm/', numLeaves: 6, maxThreads: 1 }, () => undefined);
+    await expect(core.handle({ kind: 'decryptBatch', items: [] }, () => undefined)).rejects.toThrow(
+      /this wallet is locked, so the worker holds no seed/,
+    );
+  });
+
+  it('installs nothing when the derivation refuses', async () => {
+    const counts: Counts = { builds: 0, digests: [] };
+    const load: ModuleLoader = () =>
+      Promise.resolve({
+        module: {
+          ...stubModule(counts),
+          deriveAccount: (): string => {
+            throw new Error('this seed does not derive');
+          },
+        },
+        threads: 1,
+      });
+    const core = new ProverCore(load);
+    await core.handle({ kind: 'init', wasmBase: 'wasm/', numLeaves: 6, maxThreads: 1 }, () => undefined);
+    await expect(
+      core.handle({ kind: 'unlock', seed: new Uint8Array(32) }, () => undefined),
+    ).rejects.toThrow(/does not derive/);
+    await expect(core.handle({ kind: 'decryptBatch', items: [] }, () => undefined)).rejects.toThrow(
+      /this wallet is locked, so the worker holds no seed/,
+    );
+  });
+
+  it('answers the miner key from what it holds, so no request carries a seed', async () => {
+    const { core } = await started();
+    // Before the unlock there is nothing to derive from, and the refusal says
+    // so rather than taking a seed off the caller.
+    await expect(core.handle({ kind: 'minerKey' }, () => undefined)).rejects.toThrow(
+      /this wallet is locked, so the worker holds no seed/,
+    );
+    await core.handle({ kind: 'unlock', seed: new Uint8Array(32) }, () => undefined);
+    expect((await core.handle({ kind: 'minerKey' }, () => undefined)).value).toBe('qnm1stub');
+  });
+
+  it('drops it on lock', async () => {
+    const { core } = await started();
+    await core.handle({ kind: 'unlock', seed: new Uint8Array(32) }, () => undefined);
+    await core.handle({ kind: 'lock' }, () => undefined);
+    await expect(core.handle({ kind: 'minerKey' }, () => undefined)).rejects.toThrow(
+      /this wallet is locked, so the worker holds no seed/,
+    );
+  });
+});
+
+describe('the prover the settings screen stopped', () => {
+  it('does not start a worker to be told to forget a seed it never had', async () => {
+    // `Worker` does not exist in this environment, so a `lock()` that reached
+    // `ensureWorker()` would throw here and did: locking after the prover was
+    // stopped spawned a fresh worker, and the settings switch went on reading
+    // off while one ran.
+    const client = new ProverClient();
+    await expect(client.lock()).resolves.toBeNull();
+    expect(client.isRunning).toBe(false);
+  });
+
+  it('stays stopped, and says which switch turns it back on', async () => {
+    const client = new ProverClient();
+    client.terminate();
+    await expect(client.minerKey()).rejects.toThrow(/the prover is stopped/);
+    expect(client.isRunning).toBe(false);
   });
 });

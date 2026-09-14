@@ -24,11 +24,18 @@
  *
  * # What never crosses
  *
- * The leaf proof, which is not returned by the module at all. The seed, once
- * it is in: it goes in as a transferred `Uint8Array` and the page's copy is
- * zeroed. And 910 MiB of linear memory, which cannot be copied and does not
- * need to be: a result is one proof of 150,908 bytes and two ciphertexts of
- * 1792 bytes each.
+ * The leaf proof, which is not returned by the module at all. And 910 MiB of
+ * linear memory, which cannot be copied and does not need to be: a result is
+ * one proof of 150,908 bytes and two ciphertexts of 1792 bytes each.
+ *
+ * The seed crosses exactly twice, and both are the page having it already:
+ * `unlock`, where it goes in as a transferred `Uint8Array` and the page's copy
+ * is detached by the transfer, and `deriveAccount`, which is the create path,
+ * where the page generated the seed a moment ago and has to hand it over to
+ * learn the address. Every other request that needs it is answered from what
+ * the worker holds. `minerKey` used to carry one and does not: a page that
+ * read the vault back out to ask a routine question held an uncleanable copy
+ * of the spend key for the life of the tab.
  */
 
 import type { Anchor } from '../chain/anchor';
@@ -168,7 +175,7 @@ export type WorkerRequest =
   | { kind: 'init'; wasmBase: string; numLeaves: number; maxThreads: number }
   | { kind: 'limits' }
   | { kind: 'deriveAccount'; seedHex: string }
-  | { kind: 'minerKey'; seedHex: string }
+  | { kind: 'minerKey' }
   | { kind: 'unlock'; seed: Uint8Array }
   | { kind: 'lock' }
   | { kind: 'addressIsValid'; address: string }

@@ -31,6 +31,7 @@ import { loadConfig, type WalletConfig } from './chain/config';
 import { fetchHead } from './chain/reads';
 import { chainAdapter, cryptoAdapter } from './app/adapters';
 import { readEndpoint, writeEndpoint } from './app/endpoint';
+import { readMeasuredProveSeconds, writeMeasuredProveSeconds } from './app/proverMode';
 import { Session, type ConnectionState } from './app/session';
 import { Notice } from './components/UI/Notice';
 import { Panel } from './components/UI/Panel';
@@ -56,7 +57,13 @@ import { createStore, WalletStore } from './wallet/store';
 import type { Balances, NoteRow, RejectedNote, StoreMeta, StoredNote } from './wallet/model';
 import { reachableTotal, spendable } from './wallet/select';
 import { runSync, type SyncReport } from './wallet/sync';
-import { feeFloorFor, spend, type SpendProgress, type SpendResult } from './wallet/send';
+import {
+  chainMismatchRefusal,
+  feeFloorFor,
+  spend,
+  type SpendProgress,
+  type SpendResult,
+} from './wallet/send';
 
 type Phase =
   | { kind: 'booting' }
@@ -107,6 +114,8 @@ export function App(): ReactNode {
     endpoint: '',
   });
   const [proverThreads, setProverThreads] = useState(1);
+  /** What the last payment on this machine cost, in seconds, or null. */
+  const [measuredProveSeconds, setMeasuredProveSeconds] = useState<number | null>(null);
   const [circuitsBuilt, setCircuitsBuilt] = useState(false);
   // Mirrors of session fields a screen reads. The session is a module
   // singleton and React does not re-render for a field on one, so the two that
@@ -292,6 +301,7 @@ export function App(): ReactNode {
         }
         setProverThreads(threads);
         setProverRunning(session.prover.isRunning);
+        setMeasuredProveSeconds(readMeasuredProveSeconds(threads));
         const meta = await session.loadMeta();
         if (stopped()) {
           return;
@@ -382,7 +392,13 @@ export function App(): ReactNode {
         if (account.address !== phase.meta.address) {
           // The post-decrypt identity check. A valid envelope from another
           // wallet is refused here even when AAD binding did not catch it.
+          //
+          // Both sides are locked, not just this one. By this point the worker
+          // has been handed the seed, and locking only the page's key handle
+          // would leave a spend key this wallet has just refused resident in
+          // the worker for the life of the tab.
           store.lock();
+          await current.prover.lock().catch(() => undefined);
           throw new WrongPassphraseError(
             'the seed this passphrase opened does not derive this wallet\'s address',
           );
@@ -394,6 +410,12 @@ export function App(): ReactNode {
         await refresh();
         setPhase({ kind: 'open' });
       } catch (error_) {
+        // Whatever failed, nothing stays unlocked. An unlock that threw after
+        // the seed reached the worker (a module that is not loaded, a
+        // derivation that refused) would otherwise leave the seed there with
+        // every control that could clear it behind an open wallet.
+        await current.lock().catch(() => undefined);
+        setStoreUnlocked(false);
         setUnlockError((error_ as Error).message);
       } finally {
         setBusy(false);
@@ -507,6 +529,15 @@ export function App(): ReactNode {
         );
         return;
       }
+      const mismatch = chainMismatchRefusal((await store.meta()).genesisHash, context.genesisHash);
+      if (mismatch !== null) {
+        // The gate `spend` opens with, hoisted here so it renders as a spend
+        // error rather than arriving as a thrown string mid-payment. A note
+        // written off against the wrong chain is a real note out of every
+        // balance until a full rescan.
+        setSpendError(mismatch);
+        return;
+      }
       setSpendRunning(true);
       setSpendError(null);
       setSpendResult(null);
@@ -555,6 +586,10 @@ export function App(): ReactNode {
           },
         );
         setSpendResult(result);
+        // What the sending screen quotes next time. The published figure is
+        // one workstation's; this one is the machine the reader is on.
+        writeMeasuredProveSeconds(proverThreads, result.proveMillis);
+        setMeasuredProveSeconds(readMeasuredProveSeconds(proverThreads));
         await refresh();
       } catch (sendError) {
         setSpendError((sendError as Error).message);
@@ -563,7 +598,7 @@ export function App(): ReactNode {
         setSpendProgress(null);
       }
     },
-    [address, refresh],
+    [address, proverThreads, refresh],
   );
 
   const forget = useCallback(async (): Promise<void> => {
@@ -575,6 +610,10 @@ export function App(): ReactNode {
     await store.destroy();
     await current.lock();
     current.store = null;
+    // `destroy` closed the handle and deleted the database. The next operation
+    // that needs one opens a fresh database rather than writing through a
+    // handle to a database that is gone.
+    current.db = null;
     setStoreUnlocked(false);
     setAddress('');
     setMinerKey(null);
@@ -720,8 +759,8 @@ export function App(): ReactNode {
                     storageWarning={
                       !persisted
                         ? 'This browser has not marked its storage persistent. Under storage ' +
-                          "pressure it may drop this wallet, and this browser holds the only copy " +
-                          "of every note's randomness. Write the spend key down."
+                          'pressure it may drop this wallet, and the seed written down is then ' +
+                          'the only way back to it. Write the spend key down.'
                         : null
                     }
                   />,
@@ -785,7 +824,10 @@ export function App(): ReactNode {
                     report={syncReport}
                     syncing={syncing}
                     syncStage={syncStage}
-                    canSync={connection.kind === 'live'}
+                    // The prover too. A sync runs every node gate and pages
+                    // the whole settled set before it needs the worker, so a
+                    // stopped prover spends all of that to refuse.
+                    canSync={connection.kind === 'live' && proverRunning}
                     onSync={() => {
                       void sync(false);
                     }}
@@ -801,12 +843,18 @@ export function App(): ReactNode {
                     memoBytes={session.limits?.memo_bytes ?? 61}
                     reachable={balances.reachable}
                     expectedSeconds={
-                      // The figure and the mode it names come from the same
-                      // row: see `chain/config.ts`.
-                      proverThreads > 1
+                      // This machine's last payment if there has been one.
+                      // The published figure is a first-payment estimate and
+                      // it was out by a factor of two on this workstation,
+                      // which the sending screen then printed beside its own
+                      // elapsed clock. See `app/proverMode.ts`.
+                      measuredProveSeconds ??
+                      (proverThreads > 1
                         ? (config?.expectedProveSeconds.threaded ?? 11)
-                        : (config?.expectedProveSeconds.single ?? 38)
+                        : (config?.expectedProveSeconds.single ?? 38))
                     }
+                    expectedFrom={measuredProveSeconds === null ? 'published' : 'measured'}
+                    checkAddress={(candidate) => session.prover.addressIsValid(candidate)}
                     circuitsBuilt={circuitsBuilt}
                     proverThreads={proverThreads}
                     progress={spendProgress}
@@ -834,16 +882,12 @@ export function App(): ReactNode {
                     locked={!storeUnlocked}
                     onRevealMinerKey={() => {
                       void (async (): Promise<void> => {
-                        const store = session.store;
-                        if (store === null) {
-                          return;
-                        }
-                        const seed = await store.seed();
-                        const hex = bytesToHex(seed);
-                        // The array this page allocated is erased. The hex
-                        // string it produced is the garbage collector's.
-                        seed.fill(0);
-                        setMinerKey(await session.prover.minerKey(hex));
+                        // No seed crosses here. The worker has held it since
+                        // the unlock, and re-reading the vault to hand it back
+                        // would put a second uncleanable copy of the spend key
+                        // in this page and a third in the worker, for a
+                        // derivation the worker can already do.
+                        setMinerKey(await session.prover.minerKey());
                       })();
                     }}
                   />,
@@ -875,7 +919,10 @@ export function App(): ReactNode {
                     onStopProver={() => {
                       session.stopProver();
                       setCircuitsBuilt(false);
-                      setProverRunning(false);
+                      // Read back rather than assumed: the switch on screen
+                      // and the session have to agree about whether a worker
+                      // is running, and the client is what knows.
+                      setProverRunning(session.prover.isRunning);
                     }}
                     onStartProver={() => {
                       void (async (): Promise<void> => {

@@ -187,10 +187,19 @@ export class ProverCore {
       }
 
       case 'minerKey': {
-        return { value: this.requireWasm().minerKey(request.seedHex) };
+        // From the seed this worker already holds. The request carries none:
+        // a page that had to read the vault back out to ask this question
+        // would hold an uncleanable copy of the spend key for the life of the
+        // tab, on a screen anybody may open.
+        return { value: this.requireWasm().minerKey(this.requireSeed()) };
       }
 
       case 'unlock': {
+        // The module before the seed. Installing the seed first and then
+        // finding there is no module to derive with left the worker holding a
+        // plaintext spend key while the page read "locked" on every screen,
+        // with the two controls that could clear it behind an open wallet.
+        const module = this.requireWasm();
         const bytes = request.seed;
         let hex = '';
         for (const byte of bytes) {
@@ -200,8 +209,11 @@ export class ProverCore {
         // cannot be erased is `hex`: a JavaScript string is immutable and
         // garbage collected, which is the boundary the crate docs name.
         bytes.fill(0);
+        // Installed only once the derivation has answered, so a refusal
+        // leaves this worker holding nothing.
+        const account = accountOf(module.deriveAccount(hex));
         this.seedHex = hex;
-        return { value: accountOf(this.requireWasm().deriveAccount(hex)) };
+        return { value: account };
       }
 
       case 'lock': {

@@ -379,10 +379,24 @@ describe('the version gate', () => {
 });
 
 describe('erasing the wallet', () => {
-  it('leaves nothing behind, seed included', async () => {
+  it('clears every record, closes the handle and deletes the database', async () => {
     const store = await makeStore(db);
     await store.destroy();
-    expect(await store.notes()).toHaveLength(0);
-    expect(await WalletStore.open(db)).toBeNull();
+
+    // The handle is closed with the database it pointed at, so a read through
+    // it is an error rather than an empty answer. "Erase everything" promised
+    // more than `clear()` keeps: an IndexedDB clear removes what the API can
+    // see and leaves the freed records in the backing store, so the sealed
+    // seed could still be in the profile directory after the dialog said
+    // otherwise.
+    await expect(store.notes()).rejects.toThrow();
+
+    const fresh = await openDatabase();
+    try {
+      expect(await WalletStore.open(fresh)).toBeNull();
+      expect(await WalletStore.locked(fresh, ADDRESS).notes()).toHaveLength(0);
+    } finally {
+      fresh.close();
+    }
   });
 });
