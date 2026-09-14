@@ -23,6 +23,12 @@ async function open(page: Page, route: string): Promise<void> {
   await expect(page.getByRole('status').first()).toContainText('connected');
 }
 
+/** The head height the status strip is showing, which is how a new block is noticed. */
+async function stripHeight(page: Page): Promise<number> {
+  const text = await page.getByRole('status').first().innerText();
+  return Number((/block ([\d,]+)/.exec(text)?.[1] ?? '0').replace(/,/g, ''));
+}
+
 test('the home page reads the head, the work and the pool off the node', async ({ page }) => {
   await open(page, '#/');
   await expect(page.getByRole('heading', { name: 'Qnero devnet' })).toBeVisible();
@@ -141,6 +147,17 @@ test('a settlement page states what it publishes and what it does not', async ({
 });
 
 test('search answers a height, a block hash and a settled nullifier', async ({ page }) => {
+  // Every frame this page sends, so the point lookup can be counted. It is the
+  // one read on this site that names its argument to whoever runs the node.
+  const sent: string[] = [];
+  page.on('websocket', (socket) => {
+    socket.on('framesent', (frame) => {
+      sent.push(String(frame.payload));
+    });
+  });
+  const lookups = (): number =>
+    sent.filter((frame) => frame.includes('"state_getStorage"')).length;
+
   await open(page, `#/search?q=${facts().settlementHeight}`);
   await expect(panel(page, 'Height')).toContainText(`Block ${facts().settlementHeight}`);
 
@@ -168,16 +185,56 @@ test('search answers a height, a block hash and a settled nullifier', async ({ p
   // A second 32-byte query starts from the warning again: one click is not
   // permission for every value typed after it.
   await open(page, `#/search?q=${nullifier}`);
+  // The value being asked about is on screen inside the same keyed subtree as
+  // the consent notice, so the copy's "those 32 bytes" cannot name one value
+  // while the lookup sends another.
+  await expect(page.locator('.notice').first()).toContainText(nullifier);
   await expect(field(page, 'A block on this chain')).toHaveText('not seen');
   await expect(page.locator('[data-field="In the settled nullifier set"]')).toHaveCount(0);
   await page.getByRole('button', { name: 'Check the settled nullifier set' }).click();
   await expect(field(page, 'In the settled nullifier set')).toHaveText('seen');
+  // The answer names the block it is as of, because it was asked once.
+  await expect(page.locator('[data-field="In the settled nullifier set"] .field__note')).toContainText(
+    'as of block',
+  );
 
   // The scans are explicit too, and the nullifier one finds the settling block.
   await page.getByRole('button', { name: /Read the last/ }).click();
   await expect(panel(page, 'Which settlement published it')).toContainText(
     `block ${facts().settlementHeight}`,
   );
+
+  // One consent is one read. Keyed on the live head, this lookup re-sent the
+  // nullifier to the node on every imported block and dropped the answer back
+  // to loading each time, which unmounted the walk above mid-flight.
+  const asked = lookups();
+  const before = await stripHeight(page);
+  await expect
+    .poll(async () => stripHeight(page), { timeout: 60_000, intervals: [1000] })
+    .toBeGreaterThan(before);
+  expect(lookups()).toBe(asked);
+  await expect(field(page, 'In the settled nullifier set')).toHaveText('seen');
+  await expect(panel(page, 'Which settlement published it')).toContainText(
+    `block ${facts().settlementHeight}`,
+  );
+});
+
+test('genesis and an unknown hash are pages, not stack traces', async ({ page }) => {
+  await open(page, '#/block/0');
+  await expect(page.getByRole('heading', { name: 'Block 0' })).toBeVisible();
+  // Genesis names an all-zero parent that is no block on this chain, so the
+  // page does not offer it as a link to one.
+  await expect(page.locator('[data-field="Parent"] a')).toHaveCount(0);
+  await expect(page.locator('[data-field="Parent"] .field__note')).toContainText(
+    'genesis has no parent',
+  );
+  await expect(panel(page, 'Extrinsics (0)')).toContainText('This block carries no extrinsics');
+
+  const unknown = `0x${'00'.repeat(31)}01`;
+  await open(page, `#/block/${unknown}`);
+  await expect(page.getByRole('heading', { name: 'Block' })).toBeVisible();
+  await expect(page.locator('.error')).toContainText('no block with hash');
+  await expect(page.getByRole('link', { name: 'Back to the chain' })).toBeVisible();
 });
 
 test('the reveals page states both halves in plain words', async ({ page }) => {
@@ -221,4 +278,44 @@ test('every page is reachable from the keyboard and readable at 400 px', async (
   }
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'What this chain reveals' })).toBeVisible();
+
+  // The skip link moves focus into the page and leaves the route alone. Its
+  // href is the fragment the router owns, so following it as a link would
+  // navigate to "main" and render the not-a-page view over every page. The
+  // reload puts the focus starting point back at the top of the document: a
+  // hash navigation keeps the document, and with it whatever holds focus.
+  await open(page, '#/');
+  await page.reload();
+  await expect(page.getByRole('status').first()).toContainText('connected');
+  await page.keyboard.press('Tab');
+  await expect(page.locator(':focus')).toHaveText('Skip to content');
+  await page.keyboard.press('Enter');
+  await expect(page.locator(':focus')).toHaveAttribute('id', 'main');
+  expect(await page.evaluate(() => window.location.hash)).toBe('#/');
+  await expect(page.getByRole('heading', { name: 'Qnero devnet' })).toBeVisible();
+
+  // A wide table scrolls inside its wrapper instead of collapsing its cells:
+  // a hash is one line and an amount is never clipped into a smaller amount.
+  await open(page, `#/block/${facts().settlementHeight}`);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    ),
+  ).toBe(0);
+  const extrinsics = page.locator('[data-panel^="Extrinsics"] .table-wrap');
+  const box = await extrinsics.evaluate((element) => ({
+    scroll: element.scrollWidth,
+    client: element.clientWidth,
+  }));
+  expect(box.scroll).toBeGreaterThan(box.client);
+  const cell = await page
+    .locator('[data-panel^="Extrinsics"] td.mono')
+    .first()
+    .evaluate((element) => element.getBoundingClientRect().height);
+  expect(cell).toBeLessThan(40);
+
+  // The block list drops the author label at phone width and keeps the amount.
+  await open(page, '#/');
+  await expect(page.locator('thead th', { hasText: 'Author label' })).toBeHidden();
+  await expect(page.locator('thead th', { hasText: 'Coinbase' })).toBeVisible();
 });

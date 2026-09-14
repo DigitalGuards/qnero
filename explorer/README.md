@@ -260,8 +260,12 @@ nice -n 19 npm run e2e
 It starts its own dev node at one mining thread, shields once so an entry
 exists, sends once so a settlement exists, builds the site, serves the build,
 and drives a headless Chromium over the home, block, settlement, search and
-reveals pages asserting the values the wallet reported. It stops the node by its
-pidfile and does not finish until the RPC port is free again.
+reveals pages asserting the values the wallet reported. It also counts the
+frames the page sends, so a consent that ran twice fails the run; it opens
+genesis and an unknown block hash, which are the two pages a dereference used to
+take down; and at 400 px it checks that a wide table scrolls inside its wrapper
+and that the skip link lands in the page with the route intact. It stops the
+node by its pidfile and does not finish until the RPC port is free again.
 
 It needs release builds of both binaries and it needs port 9944 to itself:
 
