@@ -256,19 +256,59 @@ absent. For each leaf it reads `ZkTree::Leaves`, `Shielded::Ciphertexts`,
 `state_queryStorageAt`. All four maps are `Identity` hashed on the leaf index,
 so paging is by index and never by `state_getKeysPaged`.
 
-**A leaf the node withholds refuses the pass.** `pallet-zk-tree` appends a leaf
-and raises `LeafCount` in one call and nothing ever removes one, so the map has
-no gaps below the count, and the count is read at the same block hash every
-leaf is. An absent `ZkTree::Leaves` answer at an index below it is therefore a
-node withholding one, and it used to be stepped over in silence: the leaf was
-counted as scanned, the pass saved `next_leaf` and a checkpoint above it, and
-every later sync started above it, so a payment on that leaf was out of the
-balance permanently with no error, no warning and no line in the report. It is
-refused by name now, naming the index, the count and the block, and nothing is
-written. The browser wallet refuses the identical answer in its read layer and
-again in its scan (`wallet-web/src/chain/reads.ts`, `src/wallet/sync.ts`). An
-absent answer *above* the count is ordinary: a window may run past the end of
-the tree and nothing is being withheld there.
+**A key the node withholds refuses the pass, and the rule covers all three
+keys a leaf must have.** `pallet-zk-tree` appends a leaf and raises `LeafCount`
+in one call and nothing ever removes one, and `pallet-shielded` writes that
+leaf's other keys in the same call. Three writers, and this is the whole set:
+
+| Writer | `ZkTree::Leaves` | `Shielded::Ciphertexts` | `Shielded::LeafBlocks` | `Shielded::CoinbaseValues` |
+|---|---|---|---|---|
+| `shield` | yes | yes | yes | no |
+| a settled slot, per output | yes | yes | yes | no |
+| the coinbase inherent | yes | only with a payload, which under v1 is never | yes | yes |
+
+So below the count, read at the same block hash every leaf is, there is a
+commitment and a block at every index and a ciphertext at every index that is
+not a coinbase. An absent answer for one of those is a node withholding it, and
+each of the three used to be stepped over in silence: the leaf was counted as
+scanned, the pass saved `next_leaf` and a checkpoint above it, and every later
+sync started above it, so a payment on that leaf was out of the balance
+permanently with no error, no warning and no line in the report. The three hide
+it in three ways. Without the commitment the leaf is skipped; without the
+ciphertext it reads as a leaf nobody can open, which is the ordinary answer for
+almost every leaf on the chain and therefore says nothing; without the block a
+coinbase leaf is stepped over, and that is a miner's own income. Each is
+refused by name now, naming the key, the index, the count and the block, and
+nothing is written. `Chain::leaves` refuses them in the read layer and
+`Wallet::sync_with` again in the scan, and the browser wallet refuses the
+identical set in `wallet-web/src/chain/reads.ts` and again in `runSync`.
+
+`CoinbaseValues` is the one key of the four that is never required, because
+presence in that map is what makes a leaf a coinbase. A node that withholds it
+is caught by the ciphertext rule beside it: a v1 coinbase leaf carries no
+ciphertext either, so what is left below the count is a leaf with neither, and
+that is refused.
+
+An absent answer *above* the count is ordinary: a window may run past the end
+of the tree and nothing is being withheld there.
+
+**Every integer read out of storage is decoded at its declared width**, and the
+leaf count is bounded as well as sized. `u64::decode` takes the first eight
+bytes of whatever it is handed and ignores the rest, so a value of another
+width decodes to a plausible number rather than to an error, and each of these
+numbers is one the wallet turns into work or into a statement about somebody's
+money: `ZkTree::LeafCount` (u64) decides how many leaves a pass reads,
+`ZkTree::Depth` (u8) is the depth a local rebuild has to reach the chain's root
+at, `Shielded::EntryCount` (u64) is walked once per unit by the shield-origin
+rule, `Shielded::LeafBlocks` (u32) dates a leaf and is what a coinbase note is
+rebuilt from, and `Shielded::CoinbaseValues` (u64) is that note's value. Each
+is refused by name at any other width. The count is then refused above
+`4 ** MAX_TREE_DEPTH`, which is what a 4-ary tree at the depth the circuit can
+prove holds and what `pallet-zk-tree` enforces on the way in: thirty-two bytes
+of `0xff` used to read as `u64::MAX` and open a scan that never ends. The one
+deliberate partial decode left is `System::Account`, whose first field is the
+nonce and whose remainder this wallet needs nothing from. The browser wallet
+holds the same rule in `decodeInteger` and `readTreeShape`.
 
 **Coinbase leaves.** Every block mints one note to its author, and a leaf with
 a `CoinbaseValues` entry is one of those. Such a leaf is read differently, and
@@ -299,10 +339,13 @@ The scan reports both counts: `coinbase_leaves` is every coinbase leaf it
 walked, which is one per block in the range, and `coinbase_received` is how many
 of them were this wallet's.
 
-A leaf with neither a ciphertext nor a coinbase value is skipped, and on a chain
-with history from before v1 that is most of them: wormhole transfer leaves and
-the transparent mining-reward leaf every block used to append carry neither.
-Nothing appends either any more.
+A leaf with neither a ciphertext nor a coinbase value is refused rather than
+skipped, by the rule above. It used to be skipped, because a chain with history
+from before v1 carried leaves of that shape: wormhole transfer leaves and the
+transparent mining-reward leaf every block used to append carry neither. No
+pallet in this runtime writes one, the wormhole pallet left it at M6 and its
+index is vacant, so on the chain this wallet reads that shape is no longer a
+leaf anybody appended. It is what a withheld ciphertext looks like.
 
 Before anything else, the node itself is checked. Everything a sync derives is
 derived from what one node answers at one block, and a node that answers with
@@ -1022,7 +1065,16 @@ QNERO_DEV_NODE=http://127.0.0.1:9944 RAYON_NUM_THREADS=4 nice -n 19 \
 ```
 
 `dev_node_e2e` skips itself, loudly, when `QNERO_DEV_NODE` is unset, so the
-workspace gate does not need a chain.
+workspace gate does not need a chain. Its two tests run against one node,
+which is what that command starts, so neither asserts on a number the other
+moves: the miner test measures the emission band over blocks that appended
+nothing but their own coinbase, which it reads off the chain as a leaf count
+that grew by exactly one, since a shield adds a leaf and a settled slot adds
+two. A fee is credited to the coinbase of the block that settled it, so a band
+taken over every mined block read the other test's payment as a break in the
+emission. Give the coinbase test a node started with `QNERO_MINER_KEY` from
+`qnero-wallet miner-address` and `QNERO_MINER_SEED` pointing at that seed, or
+it skips itself the same way.
 
 Two of the default tests run the wallet against a scriptable JSON-RPC node in
 `tests/support/mod.rs` that records every request body:
@@ -1069,9 +1121,11 @@ local. A spend never names a leaf: Merkle paths are rebuilt from
 `--merkle-rpc` in the browser and a lint fence refuses every spelling of the
 call. The node gates run in the same order with the same refusals: genesis
 binding recorded by the first operation that commits, the checkpoint-hash fork
-walk over at most 16 checkpoints, the leaf-count gate, the refusal of a leaf
-withheld below the count read at the same block, and a rescan that is add-only
-and never bypasses the chain check. The short-tree refusal is one sentence with
+walk over at most 16 checkpoints, the leaf-count gate, the refusal of any
+per-leaf key withheld below the count read at the same block, which is
+`ZkTree::Leaves` and `Shielded::LeafBlocks` at every index and
+`Shielded::Ciphertexts` at every index that is not a coinbase, and a rescan
+that is add-only and never bypasses the chain check. The short-tree refusal is one sentence with
 two callers in each wallet now, the caller passing where it read the count and
 what it would have gone on to do with it (`short_tree_refusal` and `ShortTree`
 here). The scan pins every read of a pass

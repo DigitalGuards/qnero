@@ -57,6 +57,19 @@ pub struct NodeState {
     /// filled by [`storage_at`], because a fixture with a hole in it is a
     /// chain no node can serve.
     pub withheld_leaves: BTreeSet<u64>,
+    /// The same hook for `Shielded::Ciphertexts`.
+    ///
+    /// One hook per key rather than one for all four. `pallet-shielded` writes
+    /// each of these in the same call that appends the leaf and removes none
+    /// of them, so each is its own withheld answer with its own way of hiding
+    /// the leaf, and a test that can only take the commitment away cannot
+    /// cover the other three.
+    pub withheld_ciphertexts: BTreeSet<u64>,
+    /// The same hook for `Shielded::LeafBlocks`.
+    pub withheld_leaf_blocks: BTreeSet<u64>,
+    /// The same hook for `Shielded::CoinbaseValues`, which is the one key of
+    /// the four a leaf is allowed not to have: presence marks a coinbase.
+    pub withheld_coinbase_values: BTreeSet<u64>,
     /// Heights `chain_getBlockHash` answers `null` for, whatever the head is.
     ///
     /// A node that has a head and no block at a lower height: pruned, or
@@ -274,43 +287,93 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
     }
 }
 
-/// One storage value, with the leaf map filled in below its own count.
+/// One storage value, with every per-leaf map filled in below its own count.
 ///
 /// `pallet-zk-tree` appends a leaf and raises `LeafCount` in one call and
-/// nothing ever removes one, so a real chain carries a commitment at every
-/// index below its count, and the wallet refuses an absent one there by name:
-/// below the count, no answer is an answer withheld, and scanning past it
-/// hides a payment behind a watermark written above it
-/// (`Wallet::sync_with`). A fixture that writes one leaf and a count of six is
-/// describing a chain no node can serve, so the gaps are filled here rather
-/// than in every test: what a fixture sets is what the wallet reads, and the
-/// rest is a leaf that belongs to nobody and carries no ciphertext.
+/// nothing ever removes one, and `pallet-shielded` writes the leaf's other
+/// keys in that same call: a shield and a settled output write `Ciphertexts`
+/// and `LeafBlocks`, and a coinbase writes `LeafBlocks` and `CoinbaseValues`.
+/// So a real chain carries a commitment, a block and, where the leaf is not a
+/// coinbase, a ciphertext at every index below its count, and the wallet
+/// refuses an absent one there by name: below the count, no answer is an
+/// answer withheld, and scanning past it hides a payment behind a watermark
+/// written above it (`Chain::leaves` and `Wallet::sync_with`). A fixture that
+/// writes one leaf and a count of six is describing a chain no node can serve,
+/// so the gaps are filled here rather than in every test: what a fixture sets
+/// is what the wallet reads, and the rest is a leaf that belongs to nobody.
+///
+/// `CoinbaseValues` is never filled. Presence in that map is what makes a leaf
+/// a coinbase, so filling it would turn every leaf a fixture did not write
+/// into one.
 fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
-    if let Some(index) = leaf_index(key) {
-        if state.withheld_leaves.contains(&index) {
-            return None;
-        }
+    let Some((item, index)) = leaf_key(key) else {
+        return state.storage.get(key).cloned();
+    };
+    let withheld = match item {
+        LeafKey::Leaves => &state.withheld_leaves,
+        LeafKey::Ciphertexts => &state.withheld_ciphertexts,
+        LeafKey::LeafBlocks => &state.withheld_leaf_blocks,
+        LeafKey::CoinbaseValues => &state.withheld_coinbase_values,
+    };
+    if withheld.contains(&index) {
+        return None;
     }
     if let Some(value) = state.storage.get(key) {
         return Some(value.clone());
     }
-    unset_leaf_index(state, key).map(filler_leaf)
+    if index >= node_leaf_count(state) {
+        return None;
+    }
+    match item {
+        LeafKey::Leaves => Some(filler_leaf(index)),
+        LeafKey::LeafBlocks => Some(codec::Encode::encode(&FILLER_BLOCK)),
+        // Not for a coinbase leaf: under v1 the inherent refuses a payload, so
+        // a coinbase leaf carries no ciphertext, and a fixture whose coinbase
+        // was handed a filler would be exercising the payload branch by
+        // accident.
+        LeafKey::Ciphertexts if !has_storage(state, "Shielded", "CoinbaseValues", index) => {
+            Some(codec::Encode::encode(&filler_ciphertext(index)))
+        }
+        LeafKey::Ciphertexts | LeafKey::CoinbaseValues => None,
+    }
 }
 
-/// The leaf index of a `ZkTree::Leaves` key below this node's own leaf count.
-fn unset_leaf_index(state: &NodeState, key: &str) -> Option<u64> {
-    leaf_index(key).filter(|index| *index < node_leaf_count(state))
+/// The four maps a scan reads per leaf.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeafKey {
+    Leaves,
+    Ciphertexts,
+    LeafBlocks,
+    CoinbaseValues,
 }
 
-/// The leaf index a `ZkTree::Leaves` key names, whatever the count says.
-fn leaf_index(key: &str) -> Option<u64> {
-    let prefix = format!(
+/// Which per-leaf map a storage key names, and at which index.
+fn leaf_key(key: &str) -> Option<(LeafKey, u64)> {
+    for (item, pallet, name) in [
+        (LeafKey::Leaves, "ZkTree", "Leaves"),
+        (LeafKey::Ciphertexts, "Shielded", "Ciphertexts"),
+        (LeafKey::LeafBlocks, "Shielded", "LeafBlocks"),
+        (LeafKey::CoinbaseValues, "Shielded", "CoinbaseValues"),
+    ] {
+        let prefix = format!(
+            "0x{}",
+            hex::encode(qnero_wallet::scale::storage_prefix(pallet, name))
+        );
+        if let Some(index) = key.strip_prefix(&prefix) {
+            let bytes: [u8; 8] = hex::decode(index).ok()?.try_into().ok()?;
+            return Some((item, u64::from_le_bytes(bytes)));
+        }
+    }
+    None
+}
+
+/// Whether a fixture wrote one per-leaf key itself.
+fn has_storage(state: &NodeState, pallet: &str, name: &str, index: u64) -> bool {
+    let key = format!(
         "0x{}",
-        hex::encode(qnero_wallet::scale::storage_prefix("ZkTree", "Leaves"))
+        hex::encode(qnero_wallet::scale::identity_map_key(pallet, name, index))
     );
-    let index = key.strip_prefix(&prefix)?;
-    let bytes: [u8; 8] = hex::decode(index).ok()?.try_into().ok()?;
-    Some(u64::from_le_bytes(bytes))
+    state.storage.contains_key(&key)
 }
 
 fn node_leaf_count(state: &NodeState) -> u64 {
@@ -326,8 +389,18 @@ fn node_leaf_count(state: &NodeState) -> u64 {
         .unwrap_or(0)
 }
 
-/// A leaf that is nobody's: 32 bytes derived from the index, with no
-/// ciphertext beside it, which is what a wormhole or reward leaf looks like.
+/// The block a filled-in leaf is dated at. One number: a fixture that cares
+/// which block a leaf landed in writes `LeafBlocks` itself.
+const FILLER_BLOCK: u32 = 1;
+
+/// A ciphertext that is nobody's: bytes derived from the index, which
+/// `NoteCiphertext::from_bytes` refuses at its length before any key is tried.
+fn filler_ciphertext(index: u64) -> Vec<u8> {
+    qnero_wallet::scale::blake2_256(&index.to_le_bytes()).to_vec()
+}
+
+/// A leaf that is nobody's: 32 bytes derived from the index, with a filler
+/// ciphertext beside it that decrypts for no one.
 fn filler_leaf(index: u64) -> Vec<u8> {
     qnero_wallet::scale::blake2_256(&index.to_le_bytes()).to_vec()
 }

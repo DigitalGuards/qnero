@@ -232,6 +232,162 @@ fn a_leaf_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing() {
     assert_eq!(wallet.store.unspent_total(), 1_000);
 }
 
+/// A ciphertext the node withholds refuses the pass the same way a withheld
+/// commitment does.
+///
+/// The regression: the refusal covered `ZkTree::Leaves` alone. A settled
+/// output's ciphertext is written by the same call that appends its leaf, in
+/// `pallet-shielded`, and nothing removes it, so an absent one below the count
+/// is an answer withheld exactly as a missing commitment is. Read as "no
+/// ciphertext here" it was a leaf nobody could open: the scan stepped over it,
+/// the pass saved `next_leaf` above it, and the payment on that leaf was out
+/// of the balance permanently with no error anywhere, which is the defect the
+/// commitment rule closed arriving through the key beside it.
+#[test]
+fn a_ciphertext_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing() {
+    let dir = support::scratch_dir("withheld-ciphertext");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    let address = wallet.address();
+
+    let mine = note_for(address.pk, 1_000, "withheld-ct");
+    let ct = ct_for(&address, &mine, 7);
+
+    let mut state = NodeState {
+        head_number: 9,
+        // The commitment of leaf 1 is answered for and its ciphertext is not,
+        // which is the shape that used to pass silently.
+        withheld_ciphertexts: [1].into_iter().collect(),
+        ..Default::default()
+    };
+    put_leaf(&mut state, 0, 8, Digest::hash_bytes(&[b"leaf zero"]), &[]);
+    put_leaf(&mut state, 1, 8, mine.commitment(), &ct);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let metadata = test_metadata();
+
+    let before = serde_json::to_value(&wallet.store).expect("the store serializes");
+    let refused = wallet
+        .sync(&chain, &metadata)
+        .expect_err("a ciphertext withheld below the count is refused");
+    let message = format!("{refused:#}");
+    assert!(message.contains("no Shielded::Ciphertexts(1)"), "{message}");
+    assert!(message.contains("reports 2 leaves"), "{message}");
+
+    assert_eq!(wallet.store.next_leaf, 0);
+    assert_eq!(
+        serde_json::to_value(&wallet.store).expect("the store serializes"),
+        before,
+        "a refused sync must not have written anything"
+    );
+
+    // The same node answering for it finds the payment.
+    node.state().withheld_ciphertexts.clear();
+    let report = wallet
+        .sync(&chain, &metadata)
+        .expect("the pass runs once the ciphertext is answered for");
+    assert_eq!(report.received, 1);
+    assert_eq!(wallet.store.next_leaf, 2);
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+}
+
+/// A leaf block the node withholds refuses the pass too.
+///
+/// `Shielded::LeafBlocks` is written by all three of the pallet's writers in
+/// the call that appends the leaf. What it decides is which block a note is
+/// dated at, which is the block a coinbase note's `rho` and `r` are derived
+/// from and the block the shield-origin rule is checked against, so a coinbase
+/// leaf whose block was withheld used to be skipped whole: the miner's own
+/// note, out of the balance, behind a watermark written above it.
+#[test]
+fn a_leaf_block_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing() {
+    let dir = support::scratch_dir("withheld-leaf-block");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    let address = wallet.address();
+
+    let mine = note_for(address.pk, 700, "withheld-block");
+    let ct = ct_for(&address, &mine, 9);
+
+    let mut state = NodeState {
+        head_number: 9,
+        withheld_leaf_blocks: [1].into_iter().collect(),
+        ..Default::default()
+    };
+    put_leaf(&mut state, 0, 8, Digest::hash_bytes(&[b"leaf zero"]), &[]);
+    put_leaf(&mut state, 1, 8, mine.commitment(), &ct);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let metadata = test_metadata();
+
+    let before = serde_json::to_value(&wallet.store).expect("the store serializes");
+    let refused = wallet
+        .sync(&chain, &metadata)
+        .expect_err("a leaf block withheld below the count is refused");
+    let message = format!("{refused:#}");
+    assert!(message.contains("no Shielded::LeafBlocks(1)"), "{message}");
+    assert!(message.contains("reports 2 leaves"), "{message}");
+
+    assert_eq!(wallet.store.next_leaf, 0);
+    assert_eq!(
+        serde_json::to_value(&wallet.store).expect("the store serializes"),
+        before,
+        "a refused sync must not have written anything"
+    );
+
+    node.state().withheld_leaf_blocks.clear();
+    let report = wallet
+        .sync(&chain, &metadata)
+        .expect("the pass runs once the block is answered for");
+    assert_eq!(report.received, 1);
+    assert_eq!(wallet.store.next_leaf, 2);
+    assert_eq!(wallet.store.unspent_total(), 700);
+    assert_eq!(wallet.store.notes[0].block_number, Some(8));
+}
+
+/// A leaf above the count with no answers at all is ordinary.
+///
+/// The rule is about the count, and a window can run past the end of the tree:
+/// `send` reads a range the anchor's tree does not reach, and nothing there is
+/// being withheld. Only below the count is an absent key an answer the node
+/// declined to give.
+#[test]
+fn a_leaf_above_the_count_carries_no_keys_and_is_not_a_refusal() {
+    let mut state = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    state.put_storage(
+        &identity_map_key("ZkTree", "Leaves", 0),
+        &Digest::hash_bytes(&[b"the only leaf"]).to_bytes(),
+    );
+    state.put_storage(
+        &identity_map_key("Shielded", "LeafBlocks", 0),
+        &codec::Encode::encode(&8u32),
+    );
+    state.put_storage(
+        &identity_map_key("Shielded", "Ciphertexts", 0),
+        &codec::Encode::encode(&Vec::<u8>::new()),
+    );
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+
+    let rows = chain
+        .leaves(0..3, &support::block_hash(9), 1)
+        .expect("a range past the end of the tree is not a withheld answer");
+    assert_eq!(rows.len(), 3);
+    assert!(rows[1].commitment.is_none());
+    assert!(rows[2].commitment.is_none());
+}
+
 /// Rule 1, second half. A node with no block at a checkpoint's height is
 /// refused, and no checkpoint is popped.
 ///

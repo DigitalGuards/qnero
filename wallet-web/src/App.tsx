@@ -148,7 +148,17 @@ export function App(): ReactNode {
    *
    * A ref, because the `syncing` and `spendRunning` state is set for the
    * screens and React applies it after the handler returns: two taps inside one
-   * frame both read `false`. This is set on the way in.
+   * frame both read `false`.
+   *
+   * **Claimed before the first `await` in both handlers**, and that ordering is
+   * the whole of the guarantee. A ref read and written in one synchronous run
+   * cannot be interleaved, because a handler holds the thread until it awaits;
+   * anything read or awaited before the claim is a window two presses both get
+   * through. `send` used to read `store.meta()` for the genesis check above its
+   * claim, so two presses inside that one await both claimed `spend` and the
+   * second proved against a note set the first had already selected from. Every
+   * check above the claim in either handler is synchronous, and the ones that
+   * need the store were moved under it.
    */
   const running = useRef<'sync' | 'spend' | null>(null);
 
@@ -527,6 +537,8 @@ export function App(): ReactNode {
         );
         return;
       }
+      // Claimed above every `await` in this function, the way `send` claims it:
+      // every check before this line reads state the render already holds.
       running.current = 'sync';
       setSyncing(true);
       setError(null);
@@ -616,15 +628,6 @@ export function App(): ReactNode {
         );
         return;
       }
-      const mismatch = chainMismatchRefusal((await store.meta()).genesisHash, context.genesisHash);
-      if (mismatch !== null) {
-        // The gate `spend` opens with, hoisted here so it renders as a spend
-        // error rather than arriving as a thrown string mid-payment. A note
-        // written off against the wrong chain is a real note out of every
-        // balance until a full rescan.
-        setSpendError(mismatch);
-        return;
-      }
       if (running.current !== null) {
         setSpendError(
           running.current === 'sync'
@@ -635,6 +638,9 @@ export function App(): ReactNode {
         );
         return;
       }
+      // Claimed here, above every `await` in this function. The genesis check
+      // below reads the store, and while it was above this line two presses
+      // inside that one await both reached it and both claimed `spend`.
       running.current = 'spend';
       setSpendRunning(true);
       setSpendError(null);
@@ -643,6 +649,19 @@ export function App(): ReactNode {
       // figure it quotes is measured from here too.
       const startedAt = performance.now();
       try {
+        const mismatch = chainMismatchRefusal(
+          (await store.meta()).genesisHash,
+          context.genesisHash,
+        );
+        if (mismatch !== null) {
+          // The gate `spend` opens with, hoisted here so it renders as a spend
+          // error rather than arriving as a thrown string mid-payment. A note
+          // written off against the wrong chain is a real note out of every
+          // balance until a full rescan. The `finally` below hands the job slot
+          // back on this return like any other.
+          setSpendError(mismatch);
+          return;
+        }
         const stored = await store.notes();
         const candidates = [];
         for (const note of stored) {
@@ -1050,6 +1069,7 @@ export function App(): ReactNode {
                     chainName={chainName}
                     endpoint={connection.endpoint}
                     busy={busy || syncing}
+                    spending={spendRunning}
                     persisted={persisted}
                     proverThreads={proverThreads}
                     proverRunning={proverRunning}

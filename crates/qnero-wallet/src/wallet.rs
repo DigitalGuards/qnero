@@ -16,7 +16,7 @@ use qnero_notes::{IncomingViewingKey, SpendingKey};
 use qnero_prover::WalletProver;
 use rand::{Rng, TryRngCore};
 
-use crate::chain::{Chain, ChainHead};
+use crate::chain::{withheld_key, Chain, ChainHead};
 use crate::extrinsic::{
     encode_shield_call, encode_signed, encode_submit_private_batch, ShieldedOutput, SigningContext,
 };
@@ -401,36 +401,53 @@ impl Wallet {
                 report.entry_walk_truncated = Some(entry_count);
             }
             let miner_key = self.key.miner_key();
-            for record in chain.leaves(start..leaf_count, &head.hash)? {
+            for record in chain.leaves(start..leaf_count, &head.hash, leaf_count)? {
                 report.leaves_scanned += 1;
+                // A gap in what the node answered, which the chain never
+                // leaves. Every leaf below the count this pass read at this
+                // same block hash was appended by one of `pallet-shielded`'s
+                // three writers, and each writes its per-leaf keys in the call
+                // that appends the leaf: a shield and a settled output write
+                // `Leaves`, `Ciphertexts` and `LeafBlocks`, and a coinbase
+                // writes `Leaves`, `LeafBlocks` and `CoinbaseValues` with a
+                // ciphertext only where an author encrypted a payload, which
+                // under v1 is nowhere. Nothing removes any of them, so an
+                // absent answer below the count is one this node withheld.
+                //
+                // Stepping over any of the three is silent and permanent. The
+                // leaf would be counted as scanned, `next_leaf` and a
+                // checkpoint would be written above it at the end of the pass,
+                // and every later sync starts above it, so a payment on that
+                // leaf is out of the balance with no error and no line in the
+                // report until somebody rescans. The pass is refused instead,
+                // before anything is saved. `Chain::leaves` refuses the same
+                // set one layer down, so a wallet on the real read layer never
+                // reaches these lines, and `wallet-web` refuses them in
+                // `chain/reads.ts` and again in `runSync`.
                 let Some(commitment) = record.commitment else {
-                    // A gap in the leaf map, which the tree never leaves.
-                    // `pallet-zk-tree` appends a leaf and raises `LeafCount`
-                    // in one call and nothing ever removes one, so below the
-                    // count this pass read at this same block hash there is a
-                    // commitment at every index: an absent one is an answer
-                    // this node withheld.
-                    //
-                    // Stepping over it is silent and permanent. The leaf would
-                    // be counted as scanned, `next_leaf` and a checkpoint
-                    // would be written above it at the end of the pass, and
-                    // every later sync starts above it, so a payment on that
-                    // leaf is out of the balance with no error and no line in
-                    // the report until somebody rescans. The pass is refused
-                    // instead, before anything is saved. `wallet-web` refuses
-                    // the same answer in `chain/reads.ts` and in `runSync`.
-                    bail!(
-                        "this node answered with no ZkTree::Leaves({}) at block {}, where it \
-                         reports {leaf_count} leaves. The tree has no gaps below its own count: \
-                         the pallet appends a leaf and raises the count in one call and nothing \
-                         removes one, so an absent commitment below it is an answer withheld. \
-                         Scanning past it would step over a payment on that leaf and then write \
-                         a watermark above it, and nothing would read it again. Nothing has been \
-                         changed.",
+                    return Err(withheld_key(
                         record.index,
-                        hex::encode(head.hash)
-                    );
+                        leaf_count,
+                        &head.hash,
+                        "ZkTree::Leaves",
+                    ));
                 };
+                let Some(block_number) = record.block_number else {
+                    return Err(withheld_key(
+                        record.index,
+                        leaf_count,
+                        &head.hash,
+                        "Shielded::LeafBlocks",
+                    ));
+                };
+                if record.ciphertext.is_none() && record.coinbase_value.is_none() {
+                    return Err(withheld_key(
+                        record.index,
+                        leaf_count,
+                        &head.hash,
+                        "Shielded::Ciphertexts",
+                    ));
+                }
                 let Ok(commitment) = Digest::from_bytes(&commitment) else {
                     continue;
                 };
@@ -442,14 +459,11 @@ impl Wallet {
                     // this wallet's own miner key, or read out of a payload
                     // when the author encrypted one.
                     report.coinbase_leaves += 1;
-                    let Some(block) = record.block_number else {
-                        continue;
-                    };
                     match receive_coinbase(
                         &miner_key,
                         &ivk,
                         &genesis_hash,
-                        block,
+                        block_number,
                         value,
                         &commitment,
                         record.ciphertext.as_deref(),
@@ -459,9 +473,12 @@ impl Wallet {
                     }
                 } else {
                     let Some(ciphertext) = record.ciphertext else {
-                        // A leaf from before v1: a wormhole transfer or a
-                        // transparent mining reward. Neither carries a
-                        // ciphertext and nothing appends either any more.
+                        // Unreachable: the gate above refuses a leaf below the
+                        // count that carries neither a ciphertext nor a
+                        // coinbase value, which is the only shape that reaches
+                        // here without one. Written as a binding rather than
+                        // an unwrap so that a leaf outside the count, if one
+                        // ever arrives here, is skipped rather than panicking.
                         continue;
                     };
                     let Ok(parsed) = NoteCiphertext::from_bytes(&ciphertext) else {
@@ -490,7 +507,7 @@ impl Wallet {
                     // note to where the chain has it and marks it on chain.
                     if self
                         .store
-                        .relocate_note(&commitment_hex, record.index, record.block_number)
+                        .relocate_note(&commitment_hex, record.index, Some(block_number))
                     {
                         report.relocated += 1;
                     }
@@ -531,15 +548,10 @@ impl Wallet {
                     // chain's value produce. `entry_rho_matches` would walk the
                     // shield counter for a `rho` that never came from it.
                     NoteOrigin::Coinbase
+                } else if entry_rho_matches(block_number, &received.note.rho, entry_count) {
+                    NoteOrigin::Shield
                 } else {
-                    match record.block_number {
-                        Some(block)
-                            if entry_rho_matches(block, &received.note.rho, entry_count) =>
-                        {
-                            NoteOrigin::Shield
-                        }
-                        _ => NoteOrigin::Spend,
-                    }
+                    NoteOrigin::Spend
                 };
                 report.received += 1;
                 if origin == NoteOrigin::Coinbase {
@@ -554,7 +566,7 @@ impl Wallet {
                 }
                 self.store.notes.push(StoredNote {
                     leaf_index: record.index,
-                    block_number: record.block_number,
+                    block_number: Some(block_number),
                     value: received.note.value,
                     commitment: commitment_hex.clone(),
                     nullifier: nullifier_hex.into(),

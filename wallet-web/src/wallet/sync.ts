@@ -237,6 +237,40 @@ export class NodeRefusedError extends Error {
 }
 
 /**
+ * A per-leaf key the node answered nothing for below the count it reports at
+ * the same block.
+ *
+ * One sentence per key for what stepping over it costs, because the three hide
+ * a leaf in three different ways and an operator reading the refusal is
+ * reading about the one that happened. The set of keys and why each is
+ * required is on `fetchLeaves` in `chain/reads.ts`, which refuses the same
+ * answers one layer down; the wording is kept the same on both sides so a bug
+ * report carries one sentence whichever layer caught it.
+ */
+function withheldLeafKey(
+  key: string,
+  index: number,
+  leafCount: number,
+  at: string,
+): NodeRefusedError {
+  const cost =
+    key === 'ZkTree::Leaves'
+      ? 'Scanning past it would step over whatever was on that leaf and then write a watermark ' +
+        'above it'
+      : key === 'Shielded::LeafBlocks'
+        ? 'A leaf with no block is stepped over where it is a coinbase, and dated by nothing ' +
+          'where it is not, and the pass would write a watermark above it'
+        : 'A leaf with no ciphertext and no coinbase value reads as a leaf nobody can open, so a ' +
+          'payment on it would be skipped and the pass would write a watermark above it';
+  return new NodeRefusedError(
+    `this node answered with no ${key}(${index}) at block ${at}, where it reports ${leafCount} ` +
+      'leaves. `pallet-shielded` writes that key in the same call that appends the leaf and ' +
+      'nothing removes it, so below the count it is an answer withheld rather than an absent ' +
+      `one. ${cost}, and nothing would read it again. Nothing has been changed.`,
+  );
+}
+
+/**
  * Where this node stands against the store, decided before anything is
  * written.
  *
@@ -597,30 +631,51 @@ export async function runSync(
 
       for (const record of records) {
         report.leavesScanned += 1;
+        // A gap in what the node answered, which the chain never leaves.
+        // Every leaf below the count this pass read at this same block hash
+        // was appended by one of `pallet-shielded`'s three writers, and each
+        // writes its per-leaf keys in the call that appends the leaf: a shield
+        // and a settled output write `Leaves`, `Ciphertexts` and `LeafBlocks`,
+        // and a coinbase writes `Leaves`, `LeafBlocks` and `CoinbaseValues`,
+        // with a ciphertext only where an author encrypted a payload, which
+        // under v1 is nowhere. Nothing removes any of them, so an absent
+        // answer below the count is one this node withheld.
+        //
+        // Stepping over any of them is silent and permanent. The leaf would be
+        // counted as scanned, the pass would commit a watermark and a
+        // checkpoint above it, and every later pass starts above it, so a
+        // payment on that leaf is out of the balance with no error, no warning
+        // and no field in the report until somebody rescans. The pass is
+        // refused instead, and nothing is written: this function writes
+        // nothing at all and its caller commits only what it returns.
+        // `chain/reads.ts` refuses the same set one layer down, so a wallet on
+        // the real read layer never reaches these lines, and `Chain::leaves`
+        // and `Wallet::sync_with` refuse them in the command-line wallet.
+        if (record.index < shape.leafCount) {
+          if (record.commitment === null) {
+            throw withheldLeafKey('ZkTree::Leaves', record.index, shape.leafCount, head.hash);
+          }
+          if (record.blockNumber === null) {
+            throw withheldLeafKey(
+              'Shielded::LeafBlocks',
+              record.index,
+              shape.leafCount,
+              head.hash,
+            );
+          }
+          if (record.ciphertext === null && record.coinbaseQuanta === null) {
+            throw withheldLeafKey(
+              'Shielded::Ciphertexts',
+              record.index,
+              shape.leafCount,
+              head.hash,
+            );
+          }
+        }
         if (record.commitment === null) {
-          // A gap in the leaf map, which the tree never leaves. The pallet
-          // appends a leaf and raises `LeafCount` in one call and nothing ever
-          // removes one, so below the count this pass read at this same block
-          // hash there is a commitment at every index: an absent one is a node
-          // withholding an answer.
-          //
-          // Stepping over it is silent and permanent. The leaf would be
-          // counted as scanned, the pass would commit a watermark and a
-          // checkpoint above it, and every later pass starts above it, so a
-          // payment on that leaf is out of the balance with no error, no
-          // warning and no field in the report until somebody rescans. The
-          // pass is refused instead, and nothing is written: this function
-          // writes nothing at all and its caller commits only what it returns.
-          // `chain/reads.ts` refuses the same answer one layer down, so a
-          // wallet on the real read layer never reaches this line, and
-          // `Wallet::sync_with` refuses it in the command-line wallet.
-          throw new NodeRefusedError(
-            `this node answered with no ZkTree::Leaves(${record.index}) at block ${head.hash}, ` +
-              `where it reports ${shape.leafCount} leaves. The tree has no gaps below its own ` +
-              'count, so that answer is withheld rather than absent, and scanning past it would ' +
-              'hide any payment on that leaf behind a watermark written above it. Nothing has ' +
-              'been changed.',
-          );
+          // Above the count, where a window may run past the end of the tree
+          // and nothing is being withheld.
+          continue;
         }
         const commitment = normaliseHash(record.commitment);
 
@@ -641,13 +696,17 @@ export async function runSync(
           isCoinbase = true;
           report.coinbaseLeaves += 1;
           if (record.blockNumber === null) {
+            // Unreachable below the count, where the gate above refuses a leaf
+            // with no block. Left as a skip rather than an assertion so that a
+            // leaf outside the count never decides the shape of a note.
             continue;
           }
           received = minted.get(record.index) ?? null;
         } else {
-          // A leaf with neither ciphertext nor coinbase value is skipped: a
-          // pre-v1 wormhole transfer or a transparent reward leaf, and nothing
-          // appends either any more.
+          // Not this wallet's, or a ciphertext nothing in this wallet can
+          // open. A leaf with neither a ciphertext nor a coinbase value does
+          // not reach here: the gate above refuses it below the count, and
+          // above the count the loop has already moved on.
           received = decrypted.get(record.index) ?? null;
         }
         if (received === null) {

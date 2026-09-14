@@ -14,6 +14,16 @@
 //! Without `--features parallel` a private batch is about 20 seconds where
 //! with it a batch is about 6, and the whole test grows from under a minute to
 //! a few.
+//!
+//! Both tests in this file run against **one** node, which is what the command
+//! above starts, so neither may assert on a number the other one moves. The
+//! one that did was the miner's flat-emission band: a fee settled by the other
+//! test lands in the coinbase of the block that settled it, and a band
+//! measured over every block this wallet mined therefore read the other test's
+//! payment as a break in the emission. The band is measured over blocks that
+//! appended nothing but their own coinbase now, which [`leaves_appended`]
+//! decides from the chain, so the two tests share a chain and assert over
+//! disjoint blocks.
 
 use std::fs;
 use std::path::PathBuf;
@@ -250,26 +260,36 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
     // The emission is flat over a few blocks, to within the one quantum the
     // sub-quantum carry adds: a block's credit is not a whole number of pool
     // quanta, so the remainder waits and occasionally completes one.
-    let ordinary = |wallet: &Wallet, except: Option<u32>| -> (u64, u64) {
+    //
+    // Measured over quiet blocks alone, which is what keeps this test off the
+    // other one's chain activity. A settled fee is credited to the coinbase of
+    // the block that settled it, so any block carrying a settlement is above
+    // the band by the author's share of that fee, whichever test submitted it.
+    let quiet_band = |wallet: &Wallet| -> (u64, u64) {
         let values: Vec<u64> = wallet
             .store
             .notes
             .iter()
-            .filter(|note| {
-                note.origin == qnero_wallet::store::NoteOrigin::Coinbase
-                    && note.block_number != except
-            })
-            .map(|note| note.value)
+            .filter(|note| note.origin == qnero_wallet::store::NoteOrigin::Coinbase)
+            .filter_map(|note| note.block_number.map(|block| (block, note.value)))
+            .filter(|(block, _)| leaves_appended(&chain, *block) == 1)
+            .map(|(_, value)| value)
             .collect();
+        assert!(
+            !values.is_empty(),
+            "no block this wallet mined carried its coinbase alone, so there is nothing to \
+             measure the emission over"
+        );
         (
             *values.iter().min().expect("a coinbase note"),
             *values.iter().max().expect("a coinbase note"),
         )
     };
-    let (low, high) = ordinary(&miner, None);
+    let (low, high) = quiet_band(&miner);
     assert!(
         high - low <= 1,
-        "the emission moves by at most the carry: {low} to {high}"
+        "the emission moves by at most the carry over blocks that carried nothing else: {low} \
+         to {high}"
     );
 
     // A payment out of a mined note, to a wallet that has never been paid.
@@ -320,21 +340,42 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
                 && note.block_number == Some(payment.included_at)
         })
         .expect("the settling block minted a coinbase note");
-    let (low, high) = ordinary(&miner, Some(payment.included_at));
+    let (low, high) = quiet_band(&miner);
+    let settled_leaves = leaves_appended(&chain, payment.included_at);
     println!(
-        "coinbase of block {}: {} quanta against {low} to {high} elsewhere, author share {}",
+        "coinbase of block {}: {} quanta against {low} to {high} on quiet blocks, author share \
+         {}, {settled_leaves} leaves appended",
         payment.included_at, settling.value, author_share
-    );
-    assert!(
-        settling.value >= low + author_share && settling.value <= high + author_share,
-        "the settling block's coinbase carries the author's share of the fee: {} against \
-         {low}..={high} plus {author_share}",
-        settling.value
     );
     assert!(
         author_share > 1,
         "the fee must be large enough to tell from the carry"
     );
+    assert!(
+        settling.value >= low + author_share,
+        "the settling block's coinbase carries the author's share of the fee: {} against \
+         {low}..={high} plus {author_share}",
+        settling.value
+    );
+    // The upper bound only where this payment is the whole of what settled in
+    // that block. One slot appends two leaves and the coinbase appends the
+    // third, so three is this payment and nothing else; more than that is a
+    // block shared with the other test in this file, whose fee is not this
+    // test's to predict.
+    if settled_leaves == 3 {
+        assert!(
+            settling.value <= high + author_share,
+            "the settling block's coinbase carries this payment's fee and no other: {} against \
+             {low}..={high} plus {author_share}",
+            settling.value
+        );
+    } else {
+        println!(
+            "block {} appended {settled_leaves} leaves, so it carried more than this payment: \
+             the upper bound on its coinbase is not this test's to assert",
+            payment.included_at
+        );
+    }
 
     // A transparent transfer between two dev accounts, signed properly and
     // refused by the runtime's call filter.
@@ -464,6 +505,29 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
              dispatch nor a pallet-vesting error: {dry_run}"
         ),
     }
+}
+
+/// How many leaves a block appended: its own tree less its parent's.
+///
+/// The pallet appends one leaf per coinbase, one per shield and two per
+/// settled slot, so a block whose tree grew by exactly one carried nothing but
+/// its own coinbase and its credit is the flat emission plus the sub-quantum
+/// carry. That is what lets the miner test measure an emission band on a chain
+/// it shares with the test above it: a block either carried a settlement, in
+/// which case it is not in the band, or it did not, in which case no fee
+/// reached its coinbase.
+fn leaves_appended(chain: &Chain, block: u32) -> u64 {
+    let at = chain.block_hash(block).expect("a block hash");
+    let parent = chain
+        .block_hash(block.saturating_sub(1))
+        .expect("the parent's block hash");
+    let after = chain
+        .leaf_count_at(&at)
+        .expect("the leaf count at the block");
+    let before = chain
+        .leaf_count_at(&parent)
+        .expect("the leaf count at its parent");
+    after.saturating_sub(before)
 }
 
 /// One account's free balance, straight out of `System::Account`.

@@ -102,6 +102,57 @@ fn a_mined_block_becomes_a_spendable_note() {
     assert_eq!(wallet.store.spendable().len(), 2);
 }
 
+/// A coinbase value the node withholds refuses the pass.
+///
+/// `Shielded::CoinbaseValues` is the one per-leaf key a leaf is allowed not to
+/// have, since presence in that map is what makes a leaf a coinbase. So the
+/// rule that catches a withheld one is the ciphertext rule beside it: under v1
+/// the inherent refuses a payload, so a coinbase leaf carries no ciphertext,
+/// and a node that withholds the value leaves a leaf below the count with
+/// neither. Without the refusal that leaf is read as somebody else's and the
+/// miner's own block reward is stepped over, with a watermark written above
+/// it: the whole of a mining wallet's income, gone with no error anywhere.
+#[test]
+fn a_coinbase_value_withheld_below_the_leaf_count_refuses_the_pass() {
+    let dir = support::scratch_dir("coinbase-withheld-value");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    let miner_key = wallet.miner_key();
+    let mined = miner_key.coinbase_note(&genesis(), 3, 25).expect("a note");
+
+    let mut state = NodeState {
+        head_number: 4,
+        withheld_coinbase_values: [0].into_iter().collect(),
+        ..Default::default()
+    };
+    put_coinbase(&mut state, 0, 3, mined.commitment(), 25, None);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
+    let node = node_with(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+
+    let refused = wallet
+        .sync(&chain, &test_metadata())
+        .expect_err("a coinbase leaf with neither value nor ciphertext is refused");
+    let message = format!("{refused:#}");
+    assert!(
+        message.contains("no Shielded::Ciphertexts(0)"),
+        "the leaf carries neither key, and the refusal names the one that must \
+         be there for a leaf that is not a coinbase: {message}"
+    );
+    assert_eq!(wallet.store.next_leaf, 0);
+    assert!(wallet.store.notes.is_empty());
+
+    // The same node answering for the value pays the miner.
+    node.state().withheld_coinbase_values.clear();
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the pass runs once the value is answered for");
+    assert_eq!(report.coinbase_received, 1);
+    assert_eq!(wallet.store.unspent_total(), 25);
+}
+
 /// The other way in: an author that does not hold the recipient's coinbase
 /// viewing key encrypts the payload instead. The value inside it is ignored
 /// and the note is rebuilt against the chain's.

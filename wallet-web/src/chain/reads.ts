@@ -329,6 +329,33 @@ function decodeCommitment(value: string | undefined, index: number): string | nu
 }
 
 /**
+ * A key the node answered nothing for below the count it reports at the same
+ * block.
+ *
+ * One sentence per key for what stepping over it costs, because the three hide
+ * a leaf in three different ways and an operator reading the refusal is
+ * reading about the one that happened. The rule behind all three, and the set
+ * of keys it covers, is on [`fetchLeaves`].
+ */
+function withheld(key: string, index: number, leafCount: number, at: string): Error {
+  const cost =
+    key === 'ZkTree::Leaves'
+      ? 'Scanning past it would step over whatever was on that leaf and then write a watermark ' +
+        'above it'
+      : key === 'Shielded::LeafBlocks'
+        ? 'A leaf with no block is stepped over where it is a coinbase, and dated by nothing ' +
+          'where it is not, and the pass would write a watermark above it'
+        : 'A leaf with no ciphertext and no coinbase value reads as a leaf nobody can open, so a ' +
+          'payment on it would be skipped and the pass would write a watermark above it';
+  return new Error(
+    `this node answered with no ${key}(${index}) at block ${at}, where it reports ${leafCount} ` +
+      'leaves. `pallet-shielded` writes that key in the same call that appends the leaf and ' +
+      'nothing removes it, so below the count it is an answer withheld rather than an absent ' +
+      `one. ${cost}, and nothing would read it again. Nothing has been changed.`,
+  );
+}
+
+/**
  * Four items for each leaf in `[from, to)`, at one block.
  *
  * `CoinbaseValues` is the fourth and it is what makes a coinbase note
@@ -336,16 +363,33 @@ function decodeCommitment(value: string | undefined, index: number): string | nu
  * the chain hashes it into a commitment over an `inner` it cannot open.
  *
  * `leafCount` is `ZkTree::LeafCount` read at this same block hash, and it is
- * what makes an absent commitment mean something. `pallet-zk-tree` inserts a
- * leaf and increments the count in one call and nothing ever removes one, so
- * the map has no gaps below the count: an absent commitment at an index below
- * it is a node withholding an answer, at a block it has just told this wallet
- * the tree is that long. Read as "no leaf here" it is silent and permanent,
- * because the scan would step over the leaf and the caller would then write a
- * watermark past it, so a payment on that leaf is never looked at again
- * without a rescan. It is refused by name instead, and the pass is refused
- * with it. `Wallet::sync_with` in the command-line wallet refuses the same
- * answer at the same point.
+ * what makes an absent answer mean something. Every leaf below it was appended
+ * by one of `pallet-shielded`'s three writers, each of which writes its keys
+ * in the same call:
+ *
+ * - `shield` writes `Leaves`, `Ciphertexts` and `LeafBlocks`;
+ * - a settled slot writes `Leaves`, `Ciphertexts` and `LeafBlocks` for each of
+ *   its two outputs;
+ * - the coinbase writes `Leaves`, `LeafBlocks` and `CoinbaseValues`, and
+ *   `Ciphertexts` only where the author encrypted a payload, which under v1
+ *   never happens.
+ *
+ * Nothing removes any of them, so below the count there is a commitment and a
+ * block at every index and a ciphertext at every index that is not a coinbase.
+ * An absent one there is a node withholding an answer at a block it has just
+ * told this wallet the tree is that long. Read as "nothing here" it is silent
+ * and permanent, because the scan steps over the leaf and the caller then
+ * writes a watermark past it, so a payment on that leaf is never looked at
+ * again without a rescan. Each is refused by name instead, and the pass with
+ * it.
+ *
+ * `CoinbaseValues` is the one of the four that is never required: presence is
+ * what marks a coinbase leaf, so an absent one is an ordinary shield or
+ * settled output. A node that withholds it on a coinbase leaf is caught by the
+ * ciphertext rule, since a v1 coinbase carries no ciphertext either.
+ *
+ * `Chain::leaves` and `Wallet::sync_with` in the command-line wallet refuse
+ * the identical set.
  */
 export async function fetchLeaves(
   context: ChainContext,
@@ -380,24 +424,25 @@ export async function fetchLeaves(
       at,
     );
     for (const row of rows) {
+      const rawCommitment = values.get(row.keys[0]);
+      const rawCiphertext = values.get(row.keys[1]);
       const block = values.get(row.keys[2]);
       const coinbase = values.get(row.keys[3]);
-      const height = decodeInteger(block, `Shielded::LeafBlocks(${row.index})`, 4);
-      const commitment = decodeCommitment(values.get(row.keys[0]), row.index);
-      if (commitment === null && row.index < leafCount) {
-        throw new Error(
-          `this node answered with no ZkTree::Leaves(${row.index}) at block ${at}, where it ` +
-            `reports ${leafCount} leaves. The tree has no gaps below its own count: the pallet ` +
-            'appends a leaf and raises the count in one call and nothing removes one, so an ' +
-            'absent commitment below it is an answer withheld. Scanning past it would step over ' +
-            'a payment on that leaf and then write a watermark above it, and nothing would read ' +
-            'it again. Nothing has been changed.',
-        );
+      const belowCount = row.index < leafCount;
+      if (belowCount && rawCommitment === undefined) {
+        throw withheld('ZkTree::Leaves', row.index, leafCount, at);
       }
+      if (belowCount && block === undefined) {
+        throw withheld('Shielded::LeafBlocks', row.index, leafCount, at);
+      }
+      if (belowCount && rawCiphertext === undefined && coinbase === undefined) {
+        throw withheld('Shielded::Ciphertexts', row.index, leafCount, at);
+      }
+      const height = decodeInteger(block, `Shielded::LeafBlocks(${row.index})`, 4);
       out.push({
         index: row.index,
-        commitment,
-        ciphertext: decodeBytes(values.get(row.keys[1]), `Shielded::Ciphertexts(${row.index})`),
+        commitment: decodeCommitment(rawCommitment, row.index),
+        ciphertext: decodeBytes(rawCiphertext, `Shielded::Ciphertexts(${row.index})`),
         blockNumber: height === null ? null : Number(height),
         coinbaseQuanta: decodeInteger(coinbase, `Shielded::CoinbaseValues(${row.index})`, 8),
       });

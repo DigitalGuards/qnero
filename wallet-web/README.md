@@ -128,13 +128,23 @@ has the bug too.
   tried against this wallet's viewing key in the worker; coinbase notes are
   rebuilt from the miner key; the whole settled nullifier set is paged and
   spent status is decided locally. The node is never told which leaves or
-  which nullifiers are this wallet's. A leaf the node answers nothing for
-  below the count it reports at that same block refuses the pass: the tree has
-  no gaps under its own count, so that answer is withheld rather than absent,
-  and stepping over it would hide a payment on that leaf behind a watermark
-  written above it. One at a time with a payment, in both directions: a scan
-  reads every note before it starts and commits them at the end, and a payment
-  writes `spent` on those same rows the moment it settles.
+  which nullifiers are this wallet's. A per-leaf key the node answers nothing
+  for below the count it reports at that same block refuses the pass, and the
+  rule covers `ZkTree::Leaves` and `Shielded::LeafBlocks` at every index and
+  `Shielded::Ciphertexts` at every index that is not a coinbase, which is the
+  set `pallet-shielded` writes in the call that appends the leaf and never
+  removes. The chain has no gaps under its own count, so such an answer is
+  withheld rather than absent, and stepping over any of the three would hide a
+  payment on that leaf behind a watermark written above it: no commitment and
+  the leaf is skipped, no ciphertext and it reads as a leaf nobody can open,
+  no block and a coinbase is stepped over.
+  `Shielded::CoinbaseValues` is the one key a leaf may be without, since
+  presence is what marks a coinbase, and a node withholding it leaves a leaf
+  with no ciphertext either, which the rule above refuses. One at a time with a
+  payment, in both directions: a scan reads every note before it starts and
+  commits them at the end, and a payment writes `spent` on those same rows the
+  moment it settles, so the Settings screen's rescan is disabled while a
+  payment is being proved and says so.
 - **Balance.** Unspent, pending, off chain, and what one payment can reach,
   with the note table under it.
 - **Send.** The fee floor from the runtime's own constants, note selection
@@ -155,7 +165,10 @@ has the bug too.
   labelled control, because the miner key is not the address and it carries the
   coinbase viewing key.
 - **Settings.** The node, the lock, a rescan, and a plain statement of what
-  this wallet reveals to the node.
+  this wallet reveals to the node. The rescan is disabled while a scan or a
+  payment is running, with the reason under it: the one-job-at-a-time rule is
+  the screen's as well as the handler's, and a control that presses and then
+  refuses is the screen contradicting what it says.
 
 ### What it cannot do
 
@@ -255,7 +268,8 @@ own contract, the fee floor and the memo pad against a runtime's constants,
 note selection and the conflict-set rule, memo escaping, the node gates on both
 the sync and the spend, the spent reconciliation in both directions, the widths
 every storage value is decoded at and the tree capacity `ZkTree::LeafCount` is
-bounded by, the refusal of a leaf withheld below that count, the merge that
+bounded by, the refusal of each per-leaf key withheld below that count, one
+test per key on both the read layer and the scan, the merge that
 keeps a spend's own writes when a scan commits over them, the bound on the
 shield-origin walk, and the lint fence that keeps `zkTree_getMerkleProof` out
 of every spelling it has.

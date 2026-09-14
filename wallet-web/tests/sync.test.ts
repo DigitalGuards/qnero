@@ -59,6 +59,23 @@ interface FakeLeaf {
 /** The runtime's `BlockHashWindow`, which is 256 on this chain. */
 const ANCHOR_WINDOW = 256;
 
+/** The four per-leaf keys a node can answer with nothing. */
+type LeafKey = 'commitment' | 'ciphertext' | 'blockNumber' | 'coinbaseQuanta';
+
+/**
+ * Every leaf below the count, with all four of its keys.
+ *
+ * `pallet-zk-tree` appends a leaf and raises `LeafCount` in one call and
+ * `pallet-shielded` writes the leaf's other keys in that same call, so a chain
+ * has no gaps under its own count: a fixture that names three leaves and a
+ * count of 130 is describing something no node can serve, and a scan driven by
+ * one is never asked the question the refusals exist for. The leaves a test
+ * names are the ones with notes on them; the rest are filled in here and
+ * belong to nobody.
+ *
+ * `withheld` is the hook a test takes one key away with, per key and per
+ * index, because each of the four hides a leaf in its own way.
+ */
 function fakeChain(options: {
   head: number;
   leaves: FakeLeaf[];
@@ -69,8 +86,12 @@ function fakeChain(options: {
   drift?: string[];
   anchorWindow?: number;
   entryCount?: bigint;
+  withheld?: Partial<Record<LeafKey, number[]>>;
 }): SyncChain {
   const leafCount = options.leafCount ?? options.leaves.length;
+  const declared = new Map(options.leaves.map((leaf) => [leaf.index, leaf]));
+  const withheld = (key: LeafKey, index: number): boolean =>
+    options.withheld?.[key]?.includes(index) ?? false;
   return {
     storageDrift: options.drift ?? [],
     anchorWindow: options.anchorWindow ?? ANCHOR_WINDOW,
@@ -80,18 +101,27 @@ function fakeChain(options: {
       Promise.resolve(options.hashAt === undefined ? hashAtHeight(height) : options.hashAt(height)),
     treeShape: () =>
       Promise.resolve({ leafCount, depth: 3, entryCount: options.entryCount ?? 0n }),
-    leaves: (from, to) =>
-      Promise.resolve(
-        options.leaves
-          .filter((leaf) => leaf.index >= from && leaf.index < to)
-          .map((leaf) => ({
-            index: leaf.index,
-            commitment: leaf.commitment,
-            ciphertext: leaf.coinbaseQuanta === undefined ? new Uint8Array([1, 2, 3]) : null,
-            blockNumber: leaf.blockNumber,
-            coinbaseQuanta: leaf.coinbaseQuanta ?? null,
-          })),
-      ),
+    leaves: (from, to) => {
+      const rows = [];
+      for (let index = from; index < Math.min(to, leafCount); index += 1) {
+        const leaf = declared.get(index);
+        const isCoinbase = leaf?.coinbaseQuanta !== undefined;
+        rows.push({
+          index,
+          commitment: withheld('commitment', index)
+            ? null
+            : (leaf?.commitment ?? `f${index.toString(16)}`.padStart(64, '0')),
+          // A coinbase leaf carries no ciphertext under v1, and every other
+          // leaf carries one: an unnamed leaf gets bytes nothing can open.
+          ciphertext:
+            isCoinbase || withheld('ciphertext', index) ? null : new Uint8Array([1, 2, 3]),
+          blockNumber: withheld('blockNumber', index) ? null : (leaf?.blockNumber ?? 1),
+          coinbaseQuanta:
+            withheld('coinbaseQuanta', index) ? null : (leaf?.coinbaseQuanta ?? null),
+        });
+      }
+      return Promise.resolve(rows);
+    },
     usedNullifiers: () => Promise.resolve(options.settled ?? new Set<string>()),
   };
 }
@@ -269,76 +299,114 @@ describe('the gates a sync passes before it writes', () => {
   });
 });
 
-describe('a leaf the node withholds inside the scanned range', () => {
+describe('a key the node withholds inside the scanned range', () => {
   /**
    * The pass is refused, nothing is written, and the watermark does not move.
    *
-   * `ZkTree::Leaves` has no gaps below `LeafCount`: the pallet appends a leaf
-   * and raises the count in one call and nothing removes one. So an absent
-   * commitment at an index below the count read at this same block hash is a
-   * node withholding an answer, and it used to be stepped over in silence. The
-   * pass reported the leaf as scanned, committed `nextLeaf` and a checkpoint
-   * above it, and every later pass started above it: a payment on that leaf
-   * was out of the balance permanently, with no error, no warning and no field
-   * in the report.
+   * The chain has no gaps below `LeafCount`: `pallet-zk-tree` appends a leaf
+   * and raises the count in one call, and `pallet-shielded` writes that leaf's
+   * `Ciphertexts`, `LeafBlocks` and, for a coinbase, `CoinbaseValues` in the
+   * same call. Nothing removes any of them. So an absent answer at an index
+   * below the count read at this same block hash is a node withholding one,
+   * and every one of them used to be stepped over in silence: the pass
+   * reported the leaf as scanned, committed `nextLeaf` and a checkpoint above
+   * it, and every later pass started above it, so a payment on that leaf was
+   * out of the balance permanently with no error, no warning and no field in
+   * the report.
+   *
+   * The refusal covered the commitment alone, which left the keys beside it as
+   * three more ways to hide the same payment. One test each.
    */
-  it('refuses the pass rather than scanning past it', async () => {
-    const mine = note(1000n, 'a1');
-    const leaves: FakeLeaf[] = [
-      { index: 0, commitment: 'cd'.repeat(32), blockNumber: 1, note: null },
-      { index: 1, commitment: mine.commitment, blockNumber: 1, note: mine },
-      { index: 2, commitment: 'ce'.repeat(32), blockNumber: 2, note: null },
-    ];
-    const honest = fakeChain({ head: 5, leaves, leafCount: 3 });
-    const withholding: SyncChain = {
-      ...honest,
-      leaves: async (from, to, at, leafCount, onProgress) =>
-        (await honest.leaves(from, to, at, leafCount, onProgress)).map((record) =>
-          // Leaf 1 is this wallet's incoming payment, and the node answers
-          // with nothing for it.
-          record.index === 1 ? { ...record, commitment: null } : record,
-        ),
-    };
+  const mine = note(1000n, 'a1');
+  const leaves: FakeLeaf[] = [
+    { index: 0, commitment: 'cd'.repeat(32), blockNumber: 1, note: null },
+    { index: 1, commitment: mine.commitment, blockNumber: 1, note: mine },
+    { index: 2, commitment: 'ce'.repeat(32), blockNumber: 2, note: null },
+  ];
 
-    await expect(
-      runSync(
-        { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
-        withholding,
-        fakeCrypto(leaves),
-      ),
-    ).rejects.toThrow(/no ZkTree::Leaves\(1\)/);
-
-    // The same fixture with the answer in it finds the note and moves the
-    // watermark, which is what the refusal above is stopping.
+  it('finds the payment when the node answers for every key, which is what the refusals guard', async () => {
     const found = await runSync(
       { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
-      honest,
+      fakeChain({ head: 5, leaves, leafCount: 3 }),
       fakeCrypto(leaves),
     );
     expect(found.report.received).toBe(1);
     expect(found.meta.nextLeaf).toBe(3);
   });
 
-  it('is a node refusal, so the caller leaves the store alone', async () => {
-    const leaves: FakeLeaf[] = [
-      { index: 0, commitment: 'cd'.repeat(32), blockNumber: 1, note: null },
-    ];
-    const honest = fakeChain({ head: 5, leaves, leafCount: 1 });
-    const withholding: SyncChain = {
-      ...honest,
-      leaves: async (from, to, at, leafCount, onProgress) =>
-        (await honest.leaves(from, to, at, leafCount, onProgress)).map((record) => ({
-          ...record,
-          commitment: null,
-        })),
-    };
+  it('refuses an absent commitment rather than scanning past it', async () => {
     await expect(
       runSync(
-        { meta: meta({ nextLeaf: 0 }), held: [], rejected: [], checkpoints: [], pending: [] },
-        withholding,
+        { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+        fakeChain({ head: 5, leaves, leafCount: 3, withheld: { commitment: [1] } }),
         fakeCrypto(leaves),
       ),
-    ).rejects.toBeInstanceOf(NodeRefusedError);
+    ).rejects.toThrow(/no ZkTree::Leaves\(1\)/);
+  });
+
+  it('refuses an absent ciphertext on a leaf that is not a coinbase', async () => {
+    // The leaf is answered for and its ciphertext is not, so the scan reads it
+    // as a leaf nobody can open: the same payment hidden through the key
+    // beside the commitment.
+    await expect(
+      runSync(
+        { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+        fakeChain({ head: 5, leaves, leafCount: 3, withheld: { ciphertext: [1] } }),
+        fakeCrypto(leaves),
+      ),
+    ).rejects.toThrow(/no Shielded::Ciphertexts\(1\)/);
+  });
+
+  it('refuses an absent block height', async () => {
+    // `LeafBlocks` is what a coinbase note is rebuilt from and what the
+    // shield-origin rule reads, so a leaf without it is a coinbase stepped
+    // over and a note dated by nothing.
+    await expect(
+      runSync(
+        { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+        fakeChain({ head: 5, leaves, leafCount: 3, withheld: { blockNumber: [1] } }),
+        fakeCrypto(leaves),
+      ),
+    ).rejects.toThrow(/no Shielded::LeafBlocks\(1\)/);
+  });
+
+  it('refuses a coinbase leaf whose value is withheld, through the ciphertext rule', async () => {
+    // `CoinbaseValues` is the one key of the four a leaf is allowed not to
+    // have, since presence is what marks a coinbase. A withheld one leaves a
+    // leaf below the count with neither a value nor a ciphertext, which is
+    // what the rule beside it refuses: without that, a miner's own block
+    // reward is read as somebody else's and stepped over.
+    const mined = note(25n, 'c0');
+    const coinbase: FakeLeaf[] = [
+      { index: 0, commitment: mined.commitment, blockNumber: 3, note: mined, coinbaseQuanta: 25n },
+    ];
+    await expect(
+      runSync(
+        { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+        fakeChain({ head: 5, leaves: coinbase, leafCount: 1, withheld: { coinbaseQuanta: [0] } }),
+        fakeCrypto(coinbase),
+      ),
+    ).rejects.toThrow(/no Shielded::Ciphertexts\(0\)/);
+
+    // The same fixture answered for pays the miner.
+    const paid = await runSync(
+      { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+      fakeChain({ head: 5, leaves: coinbase, leafCount: 1 }),
+      fakeCrypto(coinbase),
+    );
+    expect(paid.report.coinbaseReceived).toBe(1);
+  });
+
+  it('is a node refusal, so the caller leaves the store alone', async () => {
+    for (const key of ['commitment', 'ciphertext', 'blockNumber'] as const) {
+      await expect(
+        runSync(
+          { meta: meta({ nextLeaf: 0 }), held: [], rejected: [], checkpoints: [], pending: [] },
+          fakeChain({ head: 5, leaves, leafCount: 3, withheld: { [key]: [0] } }),
+          fakeCrypto(leaves),
+        ),
+      ).rejects.toBeInstanceOf(NodeRefusedError);
+    }
   });
 });
 
@@ -374,7 +442,9 @@ describe('a scan over more leaves than one window', () => {
     );
 
     expect(result.report.received).toBe(3);
-    expect(result.report.leavesScanned).toBe(3);
+    // Every leaf below the count, which is what the chain carries and what the
+    // three windows below walk. Three of them are this wallet's.
+    expect(result.report.leavesScanned).toBe(130);
     expect(result.notes.map((entry) => entry.note.leafIndex).sort((a, b) => a - b)).toEqual([
       0, 70, 129,
     ]);

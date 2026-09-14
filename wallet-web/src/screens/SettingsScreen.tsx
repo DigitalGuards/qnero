@@ -36,6 +36,7 @@ export function SettingsScreen({
   proverRunning,
   persisted,
   busy,
+  spending,
 }: {
   connection: ConnectionState;
   chainName: string;
@@ -50,6 +51,16 @@ export function SettingsScreen({
   proverRunning: boolean;
   persisted: boolean;
   busy: boolean;
+  /**
+   * Whether a payment is being proved and submitted.
+   *
+   * Apart from `busy`, which already covers a running scan, because this
+   * screen states the one-job-at-a-time rule in prose and a control that
+   * presses and then refuses is the screen contradicting what it says. The
+   * rule itself is held in `App.tsx`, by a ref claimed before either handler
+   * awaits anything; this is the screen agreeing with it.
+   */
+  spending: boolean;
 }): ReactNode {
   const [draft, setDraft] = useState(endpoint);
 
@@ -201,11 +212,18 @@ export function SettingsScreen({
             <Lock className="size-3.5" aria-hidden />
             Lock
           </Button>
-          <Button disabled={busy} data-testid="rescan" onClick={onRescan}>
+          <Button disabled={busy || spending} data-testid="rescan" onClick={onRescan}>
             <RotateCcw className="size-3.5" aria-hidden />
             Rescan from leaf zero
           </Button>
         </div>
+        {spending && (
+          <p className="mt-2 text-meta text-muted" data-testid="rescan-needs-quiet">
+            A rescan is unavailable while a payment is being proved. A scan reads every note
+            before it starts and commits them at the end, so the two would write the same rows
+            from two different moments. It can run once the payment has settled.
+          </p>
+        )}
         {!proverRunning && (
           <p className="mt-2 text-meta text-muted" data-testid="lock-needs-prover">
             Locking is unavailable while the prover is stopped. Unlocking hands the worker the

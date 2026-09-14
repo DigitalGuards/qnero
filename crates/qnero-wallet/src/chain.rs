@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{anyhow, bail, Context, Result};
 use codec::Decode;
+use qnero_circuit::chain::MAX_TREE_DEPTH;
 use qnero_circuit::header::{HeaderInputs, DIGEST_LOGS_SIZE};
 use qnero_circuit::merkle::{CommitmentTree, MerklePath, SIBLINGS_PER_LEVEL};
 use qnero_notes::Digest;
@@ -187,12 +188,34 @@ impl<'a> Chain<'a> {
     }
 
     /// Leaf count as of one block, so a scan's reads are all pinned to the
-    /// same state.
+    /// same state, at its declared width and bounded by what the circuit can
+    /// prove over.
+    ///
+    /// `u64::decode` reads the first eight bytes of whatever it is handed and
+    /// ignores the rest, so a node answering thirty-two bytes of `0xff` was
+    /// read as `u64::MAX` and nothing bounded it: this count is what the scan
+    /// turns into work, one window of reads per 64 of it, so that one answer
+    /// was an unbounded scan. A 4-ary tree of depth `d` holds `4 ** d` leaves
+    /// and `d` is capped by [`MAX_TREE_DEPTH`], which `pallet-zk-tree`'s
+    /// `CIRCUIT_MAX_TREE_DEPTH` equals, so a count above that capacity is not
+    /// a tree this chain carries. `wallet-web/src/chain/reads.ts` reads it the
+    /// same way, in `readTreeShape`.
     pub fn leaf_count_at(&self, at: &[u8; 32]) -> Result<u64> {
         let key = storage_prefix(ZK_TREE_PALLET, "LeafCount");
         match self.rpc.storage(&key, Some(&hex_0x(at)))? {
             Some(bytes) => {
-                Ok(u64::decode(&mut &bytes[..]).context("ZkTree::LeafCount is not a u64")?)
+                let count = decode_u64_exact(&bytes, "ZkTree::LeafCount")?;
+                let capacity = tree_capacity();
+                if count > capacity {
+                    bail!(
+                        "ZkTree::LeafCount is {count} at block {} and a tree this wallet can \
+                         prove over holds at most {capacity} leaves, which is 4 ** \
+                         {MAX_TREE_DEPTH}. A count above that is not a tree this chain carries, \
+                         and it is the number that decides how many leaves a scan reads.",
+                        hex::encode(at)
+                    );
+                }
+                Ok(count)
             }
             None => Ok(0),
         }
@@ -201,9 +224,7 @@ impl<'a> Chain<'a> {
     pub fn entry_count_at(&self, at: &[u8; 32]) -> Result<u64> {
         let key = storage_prefix(SHIELDED_PALLET, "EntryCount");
         match self.rpc.storage(&key, Some(&hex_0x(at)))? {
-            Some(bytes) => {
-                Ok(u64::decode(&mut &bytes[..]).context("Shielded::EntryCount is not a u64")?)
-            }
+            Some(bytes) => decode_u64_exact(&bytes, "Shielded::EntryCount"),
             None => Ok(0),
         }
     }
@@ -217,7 +238,16 @@ impl<'a> Chain<'a> {
     pub fn tree_depth_at(&self, at: &[u8; 32]) -> Result<u8> {
         let key = storage_prefix(ZK_TREE_PALLET, "Depth");
         match self.rpc.storage(&key, Some(&hex_0x(at)))? {
-            Some(bytes) => Ok(u8::decode(&mut &bytes[..]).context("ZkTree::Depth is not a u8")?),
+            Some(bytes) => {
+                let depth: [u8; 1] = bytes.as_slice().try_into().map_err(|_| {
+                    anyhow!(
+                        "ZkTree::Depth is {} bytes and this build decodes it as 1. This runtime \
+                         declares a different type for it.",
+                        bytes.len()
+                    )
+                })?;
+                Ok(depth[0])
+            }
             None => Ok(0),
         }
     }
@@ -350,11 +380,42 @@ impl<'a> Chain<'a> {
     /// ciphertext beside it carries `(rho, r)` and a value of zero. Presence in
     /// that map is also what tells a coinbase leaf from a settled output.
     ///
-    /// An absent ciphertext is normal on a chain with history from before v1:
-    /// wormhole transfer leaves and the transparent mining-reward leaves carry
-    /// none. Nothing appends those any more.
-    pub fn leaves(&self, range: std::ops::Range<u64>, at: &[u8; 32]) -> Result<Vec<LeafRecord>> {
-        let at = hex_0x(at);
+    /// **A key the node withholds below `leaf_count` refuses the read.**
+    /// `leaf_count` is `ZkTree::LeafCount` read at this same block hash, and
+    /// every leaf under it was appended by one of the three writers in
+    /// `pallet-shielded`, each of which writes its keys in the same call:
+    ///
+    /// - `shield` writes `Leaves`, `Ciphertexts` and `LeafBlocks`;
+    /// - a settled slot writes `Leaves`, `Ciphertexts` and `LeafBlocks` for
+    ///   each of its two outputs;
+    /// - the coinbase writes `Leaves`, `LeafBlocks` and `CoinbaseValues`, and
+    ///   `Ciphertexts` only when the author encrypted a payload, which under
+    ///   v1 never happens.
+    ///
+    /// Nothing removes any of them. So below the count there is a commitment
+    /// and a block at every index, and a ciphertext at every index that is not
+    /// a coinbase, and an absent answer for one of those is a node withholding
+    /// it. Each of the three hides a leaf in its own way and every one of them
+    /// is permanent: without the commitment the leaf is skipped, without the
+    /// ciphertext it reads as a leaf nobody can open, and without the block a
+    /// coinbase leaf is stepped over, and in all three cases the pass commits
+    /// a watermark above it and nothing reads it again without a rescan. The
+    /// read is refused instead, naming the key, the index, the count and the
+    /// block. `fetchLeaves` in `wallet-web/src/chain/reads.ts` refuses the
+    /// identical set.
+    ///
+    /// `CoinbaseValues` is the one of the four that is never required:
+    /// presence is what marks a coinbase leaf, so an absent one is an ordinary
+    /// shield or settled output. A node that withholds it on a coinbase leaf
+    /// is caught by the ciphertext rule, since a v1 coinbase carries no
+    /// ciphertext either.
+    pub fn leaves(
+        &self,
+        range: std::ops::Range<u64>,
+        at: &[u8; 32],
+        leaf_count: u64,
+    ) -> Result<Vec<LeafRecord>> {
+        let at_hash = hex_0x(at);
         let mut out = Vec::new();
         for chunk_start in range.clone().step_by(LEAF_BATCH) {
             let chunk_end = (chunk_start + LEAF_BATCH as u64).min(range.end);
@@ -365,12 +426,22 @@ impl<'a> Chain<'a> {
                 keys.push(identity_map_key(SHIELDED_PALLET, "LeafBlocks", index));
                 keys.push(identity_map_key(SHIELDED_PALLET, "CoinbaseValues", index));
             }
-            let values = self.rpc.storage_batch(&keys, &at)?;
+            let values = self.rpc.storage_batch(&keys, &at_hash)?;
             for (offset, index) in (chunk_start..chunk_end).enumerate() {
                 let commitment = values[offset * 4].clone();
                 let ciphertext = values[offset * 4 + 1].clone();
                 let block = values[offset * 4 + 2].clone();
                 let coinbase_value = values[offset * 4 + 3].clone();
+                let below_count = index < leaf_count;
+                if below_count && commitment.is_none() {
+                    return Err(withheld_key(index, leaf_count, at, "ZkTree::Leaves"));
+                }
+                if below_count && block.is_none() {
+                    return Err(withheld_key(index, leaf_count, at, "Shielded::LeafBlocks"));
+                }
+                if below_count && ciphertext.is_none() && coinbase_value.is_none() {
+                    return Err(withheld_key(index, leaf_count, at, "Shielded::Ciphertexts"));
+                }
                 out.push(LeafRecord {
                     index,
                     commitment: commitment
@@ -381,24 +452,16 @@ impl<'a> Chain<'a> {
                         .transpose()?,
                     // `BoundedVec<u8, _>` encodes as a `Vec<u8>`.
                     ciphertext: ciphertext
-                        .map(|bytes| {
-                            Vec::<u8>::decode(&mut &bytes[..]).with_context(|| {
-                                format!("Shielded::Ciphertexts({index}) is not a byte vector")
-                            })
-                        })
+                        .map(|bytes| decode_stored_bytes(&bytes, "Shielded::Ciphertexts", index))
                         .transpose()?,
                     block_number: block
                         .map(|bytes| {
-                            u32::decode(&mut &bytes[..]).with_context(|| {
-                                format!("Shielded::LeafBlocks({index}) is not a u32")
-                            })
+                            decode_u32_exact(&bytes, &format!("Shielded::LeafBlocks({index})"))
                         })
                         .transpose()?,
                     coinbase_value: coinbase_value
                         .map(|bytes| {
-                            u64::decode(&mut &bytes[..]).with_context(|| {
-                                format!("Shielded::CoinbaseValues({index}) is not a u64")
-                            })
+                            decode_u64_exact(&bytes, &format!("Shielded::CoinbaseValues({index})"))
                         })
                         .transpose()?,
                 });
@@ -586,6 +649,103 @@ impl LocalTree {
             .map_err(|_| anyhow!("leaf index {index} does not fit in memory"))?;
         self.tree.path(index)
     }
+}
+
+/// How many leaves a 4-ary tree at the depth the circuit can prove holds.
+///
+/// `pallet-zk-tree::capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)` is the same
+/// arithmetic on the chain's side, and `pallet-shielded` asserts the two
+/// depths are one number.
+fn tree_capacity() -> u64 {
+    4u64.saturating_pow(MAX_TREE_DEPTH as u32)
+}
+
+/// A key the node answered nothing for below the count it reports at the same
+/// block.
+///
+/// One sentence per key for what stepping over it costs, because the three
+/// hide a leaf in three different ways and an operator reading the refusal is
+/// reading about the one that happened. The rule behind all three, and the set
+/// of keys it covers, is on [`Chain::leaves`].
+pub(crate) fn withheld_key(index: u64, leaf_count: u64, at: &[u8; 32], key: &str) -> anyhow::Error {
+    let cost = match key {
+        "ZkTree::Leaves" => {
+            "Scanning past it would step over whatever was on that leaf and then write a \
+             watermark above it"
+        }
+        "Shielded::LeafBlocks" => {
+            "A leaf with no block is stepped over where it is a coinbase, and dated by nothing \
+             where it is not, and the pass would write a watermark above it"
+        }
+        _ => {
+            "A leaf with no ciphertext and no coinbase value reads as a leaf nobody can open, so \
+             a payment on it would be skipped and the pass would write a watermark above it"
+        }
+    };
+    anyhow!(
+        "this node answered with no {key}({index}) at block {}, where it reports {leaf_count} \
+         leaves. `pallet-shielded` writes that key in the same call that appends the leaf and \
+         nothing removes it, so below the count it is an answer withheld rather than an absent \
+         one. {cost}, and nothing would read it again. Nothing has been changed.",
+        hex::encode(at)
+    )
+}
+
+/// A stored `Vec<u8>`: a compact length prefix, then exactly that many bytes.
+///
+/// The length is checked against what follows it rather than left to
+/// `Vec::<u8>::decode`, which stops at the declared length and ignores
+/// whatever trails it. `decodeBytes` in `wallet-web/src/chain/reads.ts`
+/// refuses the same disagreement, and a wallet that took the prefix's word for
+/// it would hand the ciphertext to `try_receive` at a length the chain did not
+/// store: the decryption fails, the leaf counts as somebody else's, and the
+/// pass reports a zero balance over a completed scan.
+fn decode_stored_bytes(bytes: &[u8], what: &str, index: u64) -> Result<Vec<u8>> {
+    let mut cursor = bytes;
+    let value = Vec::<u8>::decode(&mut cursor)
+        .with_context(|| format!("{what}({index}) is not a byte vector"))?;
+    if !cursor.is_empty() {
+        bail!(
+            "{what}({index}) declares {} bytes and carries {} more after them. This runtime \
+             stores it differently from what this build decodes.",
+            value.len(),
+            cursor.len()
+        );
+    }
+    Ok(value)
+}
+
+/// A `u64` storage value, refused by name at any other width.
+///
+/// `u64::decode` takes the first eight bytes of whatever it is handed and
+/// leaves the rest, so a value of another width decodes to a plausible number
+/// rather than to an error: a leaf count read out of thirty-two bytes of
+/// `0xff`, or an entry counter the origin walk then hashes once per unit of.
+/// Every integer this wallet reads out of storage is a number it turns into
+/// work or into a label, and a runtime that changed the type is a runtime this
+/// build cannot read. `decodeInteger` in `wallet-web/src/chain/reads.ts` is
+/// the same rule on the browser's side.
+fn decode_u64_exact(bytes: &[u8], what: &str) -> Result<u64> {
+    let value: [u8; 8] = bytes.try_into().map_err(|_| {
+        anyhow!(
+            "{what} is {} bytes and this build decodes it as 8. This runtime declares a \
+             different type for it.",
+            bytes.len()
+        )
+    })?;
+    Ok(u64::from_le_bytes(value))
+}
+
+/// The same rule for a `u32`, which is what `Shielded::LeafBlocks` holds.
+fn decode_u32_exact(bytes: &[u8], what: &str) -> Result<u32> {
+    let value: [u8; 4] = bytes.try_into().map_err(|_| {
+        anyhow!(
+            "{what} is {} bytes and this build decodes it as 4. This runtime declares a \
+             different type for it.",
+            bytes.len()
+        )
+    })?;
+    Ok(u32::from_le_bytes(value))
 }
 
 /// Leaves read per `state_queryStorageAt` call.
