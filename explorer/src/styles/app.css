@@ -205,6 +205,12 @@ a:hover {
   .main {
     padding: var(--space-3) var(--space-2) var(--space-4);
   }
+
+  /* A phone gets the columns that carry the block's answer. The two counts
+     that fall out of the others are 160 px of a 340 px table. */
+  .col--wide {
+    display: none;
+  }
 }
 
 /* Type ---------------------------------------------------------------- */
@@ -225,13 +231,25 @@ h2 {
   font-size: 14px;
 }
 
+/* A section heading is never smaller than the body it heads, and it binds
+   downward: a heading with equal space above and below reads as a paragraph
+   break rather than as the start of a section. */
 h3 {
-  font-size: var(--fs-ui);
+  font-size: var(--fs-body);
+}
+
+.panel h3 {
+  margin-top: var(--space-4);
+  margin-bottom: var(--space-1);
+}
+
+.panel h3:first-of-type {
+  margin-top: 0;
 }
 
 p {
   margin: 0 0 var(--space-2);
-  max-width: 70ch;
+  max-width: min(100%, var(--measure));
   color: var(--text-secondary);
 }
 
@@ -261,6 +279,12 @@ p {
   border-radius: var(--radius-md);
   padding: var(--space-4);
   margin-bottom: var(--space-3);
+}
+
+/* Prose carries its measure on the box. A panel holding a table or the field
+   grid keeps the full width. */
+.panel--prose {
+  max-width: var(--measure);
 }
 
 .panel__title {
@@ -305,6 +329,12 @@ p {
   word-break: break-word;
 }
 
+/* Two hashes under one label, such as a slot's pair of nullifiers. Flush
+   against each other they read as one run of hex. */
+.field__value + .field__value {
+  margin-top: var(--space-1);
+}
+
 .field__note {
   display: block;
   font-size: var(--fs-meta);
@@ -315,6 +345,7 @@ p {
 /* Notices ------------------------------------------------------------- */
 
 .notice {
+  max-width: var(--measure);
   padding: 6px var(--space-2) var(--space-2);
   font-size: var(--fs-meta);
   color: var(--notice);
@@ -353,8 +384,25 @@ p {
 
 /* Tables -------------------------------------------------------------- */
 
+/* An overlay scrollbar is invisible until it is dragged, so a table wider than
+   its box hides columns with nothing to say so. The two gradients are pinned
+   to the content box, so an edge shadow appears exactly while something is off
+   screen on that side. */
 .table-wrap {
   overflow-x: auto;
+  scrollbar-width: thin;
+  background:
+    linear-gradient(to right, var(--bg-panel) 30%, rgba(0, 0, 0, 0)),
+    linear-gradient(to left, var(--bg-panel) 30%, rgba(0, 0, 0, 0)) 100% 0,
+    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0)),
+    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0)) 100% 0;
+  background-repeat: no-repeat;
+  background-size:
+    32px 100%,
+    32px 100%,
+    12px 100%,
+    12px 100%;
+  background-attachment: local, local, scroll, scroll;
 }
 
 table {
