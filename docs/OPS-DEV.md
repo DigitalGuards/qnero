@@ -76,6 +76,28 @@ file name moves.
 
 Kept as upstream, deliberately:
 
+- **The two-variant signature enum, with the runtime refusing one variant.**
+  `qp-dilithium-crypto`'s `DilithiumSignatureScheme` carries `Dilithium87`
+  (ML-DSA-87) and `Dilithium65` (ML-DSA-65). Qnero refuses the second one at
+  the transparent entry and leaves every primitive under it exactly as upstream
+  wrote it: the enum, its `Verify` and `IdentifyAccount` implementations, the
+  `define_dilithium_scheme!` invocation, its unit tests, and
+  `chain/Cargo.toml`'s `ml-dsa-65` feature on `qp-rusty-crystals-dilithium`,
+  which the macro invocation will not compile without. Deleting the variant
+  would conflict on every merge and would move the runtime's metadata, which is
+  where a client reads the encoded length of a signature per variant index.
+
+  The refusal sits one layer up, in the runtime, where merges do not reach:
+  `chain/runtime/src/extrinsic.rs` wraps the generic extrinsic, and its
+  `Checkable` implementation refuses a signed extrinsic carrying the
+  `Dilithium65` variant with `InvalidTransaction::BadSigner`, on the live path
+  and on the `try-runtime` replay path alike. That is a consensus rule, written
+  up in `docs/DESIGN.md` section 7.3, guarded by
+  `chain/runtime/tests/transactions/signature_scheme.rs` and by the
+  repository-wide `crates/qnero-wallet/tests/one_signature_scheme.rs`. The
+  vendored `sc-cli` fork still offers `key generate --scheme dilithium65`; it
+  is upstream CLI surface, left alone, and the rule is what makes anything it
+  mints inert.
 - **Every other crate under `chain/`**: `client/*`, `frame/*`, `pallets/*`,
   `primitives/*` and the `qp-*` dependencies. Renaming them buys nothing an
   operator sees and costs a conflict in every merge. Two went away at M7

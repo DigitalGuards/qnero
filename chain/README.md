@@ -6,6 +6,14 @@ where every unit of value minted after genesis lives as a note. It is its own
 Cargo workspace with its own lock file; the wallet and the proof crates live in
 the repository root workspace.
 
+ML-DSA-87 is the only signature scheme the transparent entry admits, and the
+runtime enforces it as a consensus rule: `runtime/src/extrinsic.rs`
+refuses a signed extrinsic carrying the level-3 variant of the upstream
+`DilithiumSignatureScheme` enum with `InvalidTransaction::BadSigner`, before
+its signature is verified and before its call is dispatched. The enum keeps
+both variants so the next subtree merge stays clean. `docs/DESIGN.md` section
+7.3 in the repository root is the write-up.
+
 The project README at the repository root is the place to start. This file
 covers what is specific to building and running the node.
 

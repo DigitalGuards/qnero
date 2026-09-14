@@ -12,11 +12,11 @@ the runtime. `docs/DESIGN.md` section 7 is the v1 policy this inventory is the
 surface of.
 
 - **Crate:** `qnero-runtime` (`runtime/`), version `1.0.0-gm`. Renamed from `quantus-runtime` in `e3d3889`, along with the node package; the wasm it emits is `wbuild/qnero-runtime/qnero_runtime.wasm`. The chain identifies itself by the spec below.
-- **Spec:** `spec_name = qnero`, `impl_name = qnero-node`, `spec_version = 101`, `transaction_version = 7`, `authoring_version = 1`
+- **Spec:** `spec_name = qnero`, `impl_name = qnero-node`, `spec_version = 103`, `transaction_version = 7`, `authoring_version = 1`
 - **Build:** `no_std` WASM via `substrate-wasm-builder` (`runtime/build.rs`); native `std` build for the node/client
 - **Block time target:** 12s (`TARGET_BLOCK_TIME_MS = 12_000`)
 - **Consensus:** QPoW (quantum-resistant Proof of Work, Poseidon2-based)
-- **Signatures:** Dilithium post-quantum signature schemes (ML-DSA-87 and ML-DSA-65)
+- **Signatures:** ML-DSA-87 at the transparent entry. The upstream `DilithiumSignatureScheme` enum keeps its second variant so subtree merges stay clean, and `runtime/src/extrinsic.rs` refuses a signed extrinsic carrying it with `InvalidTransaction::BadSigner`. That is a consensus rule; `docs/DESIGN.md` section 7.3 in the repository root is the write-up
 - **SS58 prefix:** 189
 
 ---
@@ -28,6 +28,7 @@ surface of.
 | `lib.rs` | Crate root. Core type aliases, `RuntimeVersion`, opaque types, `TxExtension`, `UncheckedExtrinsic`, `Executive`, and the `#[frame_support::runtime]` pallet composition (indices 0–24). |
 | `configs/mod.rs` | All `impl pallet::Config for Runtime` blocks, `parameter_types!`, fee model, `HighSecurityConfig`, `TryFrom<RuntimeCall>` impls, the `QneroCallFilter` v1 call filter, the `QpowAuthor` `FindAuthor` seam, and `NoTransferProofNeeded`. |
 | `apis.rs` | `impl_runtime_apis!` - every runtime API exposed to the client/RPC. |
+| `extrinsic.rs` | `QneroUncheckedExtrinsic`, the runtime's own extrinsic type. SCALE-transparent wrapper over the upstream generic one whose `Checkable` implementation carries one consensus rule: the transparent entry admits ML-DSA-87 and refuses the ML-DSA-65 variant with `InvalidTransaction::BadSigner`, on the live path and the `try-runtime` replay path alike. |
 | `transaction_extensions.rs` | Custom transaction extension `ReversibleTransactionExtension`, and `HighSecurityFungibleAdapter`, the configured `OnChargeTransaction`. |
 | `governance/mod.rs` + `governance/definitions.rs` | Referenda tracks (`TechCollectiveTracksInfo`, the only lane), preimage deposit model, custom origins, rank converters. |
 | `genesis_config_presets/` | Genesis presets: `dev`, `heisenberg`, `planck`, `mainnet`. Mainnet allocation is `mainnet_vesting.rs`. |
@@ -37,7 +38,7 @@ surface of.
 
 | Type | Definition |
 | --- | --- |
-| `Signature` | `DilithiumSignatureScheme` (post-quantum) |
+| `Signature` | `DilithiumSignatureScheme` (post-quantum). Only the ML-DSA-87 variant is admissible; `extrinsic.rs` refuses the other one at the entry |
 | `AccountId` | Derived from the Dilithium signer (`AccountId32`) |
 | `Balance` | `u128` |
 | `AssetId` | `u32` |
@@ -47,7 +48,7 @@ surface of.
 | `Difficulty` | `U512` |
 | `Address` | `MultiAddress<AccountId, ()>` |
 | `Header` | `qp_header::Header<BlockNumber, BlakeTwo256>` (Poseidon block hash, Blake2 state trie) |
-| `Block` | `generic::Block<Header, UncheckedExtrinsic>` |
+| `Block` | `generic::Block<Header, UncheckedExtrinsic>`, where `UncheckedExtrinsic` is `extrinsic::QneroUncheckedExtrinsic` |
 | `Executive` | `frame_executive::Executive<Runtime, Block, ChainContext, Runtime, AllPalletsWithSystem, ()>` |
 | `SessionKeys` | empty (`impl_opaque_keys!` - no session keys; PoW chain) |
 
@@ -322,7 +323,7 @@ Related transaction-payment RPC surface (patched for WASM + node builds):
 
 | Crate | Path | Role in runtime |
 | --- | --- | --- |
-| `qp-dilithium-crypto` | `primitives/dilithium-crypto` | ML-DSA-87/ML-DSA-65 post-quantum signatures; `DilithiumSignatureScheme` = the chain's `Signature`/`AccountId`. |
+| `qp-dilithium-crypto` | `primitives/dilithium-crypto` | Post-quantum signatures; `DilithiumSignatureScheme` = the chain's `Signature`/`AccountId`. Upstream, untouched, both variants intact; the runtime refuses the ML-DSA-65 one at the entry (`runtime/src/extrinsic.rs`). |
 | `qp-header` | `primitives/header` | Custom block `Header` (Poseidon block hash + Blake2 state trie); `ZkTreeRootProvider` trait. |
 | `qp-high-security` | `primitives/high-security` | `HighSecurityInspector` trait shared by multisig, reversible-transfers, tx-extensions (breaks circular dep). |
 | `qp-scheduler` | `primitives/scheduler` | `BlockNumberOrTimestamp`, `DispatchTime`, `ScheduleNamed` trait for delayed dispatch. |

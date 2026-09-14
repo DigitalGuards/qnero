@@ -44,6 +44,7 @@ lives.
 | Ring size / decoys | Anonymity set = the whole tree (all notes ever) | `pallet-zk-tree` |
 | Transaction signature | Spend proof bound to the transaction digest as a public input | plonky2 public inputs |
 | RandomX PoW | RandomX, `rx/0`, stock constants, since M7 (section 10) | `client/consensus/randomx`, `pallets/qpow` for difficulty |
+| Transparent spend authorization | ML-DSA-87 only; the runtime refuses the ML-DSA-65 variant at the entry (section 7.3) | `qp-dilithium-crypto` + `runtime/src/extrinsic.rs` |
 | Node identity, p2p | ML-DSA-87 accounts, PQ Noise (ML-KEM) | Quantus |
 
 Field: Goldilocks. Hash: Poseidon (Quantus parameters, Eiger reviewed). Proof
@@ -70,7 +71,7 @@ Verified on this machine 2026-09-11: `cargo test -p qp-wormhole-circuit
 | `pallet-wormhole` verify flow: PI parse, block hash check, nullifier dedupe, plonky2 verify, tx-pool tags | fork as `pallet-shielded` | Exit-account minting becomes commitment append + ciphertext event |
 | `pallet-zk-tree` 4-ary Poseidon tree | small fork | Node hashing unchanged; `Leaves` holds a raw `Hash256`, the note commitment, see `docs/CIRCUIT.md` section 4 |
 | `UsedNullifiers` storage | as is | |
-| ML-DSA-87 accounts, hdwallet | as is | Transparent layer. At v0 it carried miner rewards and fees; at v1 it carries fees, the shield entry and the genesis vesting payout, and no transfer between accounts a user chooses (section 7.2) |
+| ML-DSA-87 accounts, hdwallet | primitives as is, one rule added | Transparent layer. At v0 it carried miner rewards and fees; at v1 it carries fees, the shield entry and the genesis vesting payout, and no transfer between accounts a user chooses (section 7.2). The primitives are untouched, including the two-variant signature enum; what Qnero adds is the entry rule that refuses the ML-DSA-65 variant (section 7.3) |
 | Audits | as is | Eiger Wormhole audit 2026-03-20, Substrate audit 2026-05-13, PoW + Poseidon review |
 
 ## 4. Keys and addresses
@@ -452,6 +453,63 @@ exit and the transaction extension that scanned balance events into spendable
 leaves. There are no transparent transfers left to scan. The crate stays in the
 tree, and `qp-wormhole`, the primitives crate, stays in the runtime: the QPoW
 author derivation lives there and the runtime's one author seam calls it.
+
+### 7.3 One signature scheme at the entry (consensus rule)
+
+Qnero has one signature scheme at the transparent entry, ML-DSA-87 (FIPS 204,
+level 5). The rule, in full:
+
+> A signed extrinsic whose signature is the `Dilithium65` variant of
+> `DilithiumSignatureScheme` is invalid. It is refused with
+> `InvalidTransaction::BadSigner`, before its signature is verified, before any
+> transaction extension runs, and before its call is dispatched. ML-DSA-65 is
+> refused at the entry; ML-DSA-87 is the scheme that passes it.
+
+The rule is `chain/runtime/src/extrinsic.rs` and its guard is
+`chain/runtime/tests/transactions/signature_scheme.rs`.
+
+Three things about where it sits are load bearing.
+
+**The enum keeps both variants.** `qp-dilithium-crypto` is upstream's, and its
+`DilithiumSignatureScheme` carries two arms. Deleting one would conflict on
+every subtree merge into `chain/`, and it would move the runtime's metadata,
+which is where a client reads the encoded length of a signature per variant
+index. The type stays; the chain refuses one of its arms.
+
+**It cannot be a transaction extension.** By the time an extension runs, the
+extrinsic's `check` has already verified and dropped the signature and handed
+the extension an `AccountId32`, and both variants hash to an `AccountId32` of
+the same shape. A Dilithium65 account is byte-indistinguishable from a
+Dilithium87 one in state, in an address and in `origin`, so there is nothing
+left for an extension to look at. The refusal therefore lives in `Checkable`,
+one layer below every extension, which also means it costs no change to the
+signed extrinsic encoding: `transaction_version` stays where it is.
+
+**It covers every signed call, including `shield`.** The seam is the extrinsic,
+so nothing is enumerated per call. Section 7.2's call filter is a different
+question answered at a different place: the filter decides what may run, and
+this rule decides who may sign. A transparent transfer signed with ML-DSA-87 is
+still admitted and still refused at dispatch with `CallFiltered`; the same
+transfer signed with ML-DSA-65 never reaches a block at all.
+
+The other half of one scheme is that nothing on Qnero's own paths constructs an
+account under the other one. The presets derive every key-backed account from
+an ML-DSA-87 pair (`every_key_derived_preset_account_is_ml_dsa_87` is the
+test), the miner key is a `qnero_note_core::MinerKey` and carries no signature
+key at all, the block-author label is a Poseidon digest, and `qnero-node key
+qnero --scheme standard` builds an ML-DSA-87 pair. One gap is worth naming: the
+Planck and mainnet accounts are SS58 literals, and both variants hash into the
+same 32-byte account, so a literal carries no variant for a test to assert on.
+The entry rule is what covers those.
+
+Two consequences worth writing down. The vendored `sc-cli` fork still offers
+`key generate --scheme dilithium65` and the keystore will still hold what it
+mints: that is upstream CLI surface, left alone, and this rule is what makes
+the material inert. And the rule breaks consensus. Before it, an ML-DSA-65
+extrinsic passed every check and entered the block, refused only later at
+dispatch by the call filter, so a block already carrying one fails to
+re-execute under the rule. Qnero is devnet-only, so a devnet carrying
+such a block has to be reset.
 
 ## 8. Milestones
 
