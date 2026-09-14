@@ -1,0 +1,159 @@
+/**
+ * Chain-wide state: the head, the difficulty, the tree, the pool.
+ *
+ * Difficulty comes from `QPoWApi_get_difficulty` rather than from
+ * `QPoW::CurrentDifficulty`, because the storage item reads back null before
+ * the first retarget, where the effective value is the chain spec's
+ * `InitialDifficulty`, and the runtime call resolves that case.
+ */
+
+import { decodeU512 } from '../lib/difficulty';
+import { hexToBytes, leBytesToBigInt } from '../lib/hex';
+import { storage, type ChainContext } from './api';
+
+async function stateCallHex(context: ChainContext, method: string): Promise<string> {
+  return context.provider.send<string>('state_call', [method, '0x']);
+}
+
+async function stateCallInt(context: ChainContext, method: string): Promise<bigint> {
+  return leBytesToBigInt(hexToBytes(await stateCallHex(context, method)));
+}
+
+export interface ConsensusConstants {
+  seedEpochBlocks: number;
+  seedEpochLag: number;
+  /** Blocks below the tip that a reorg may still replace. There is no finality gadget under this. */
+  maxReorgDepth: number;
+}
+
+export async function fetchConsensusConstants(context: ChainContext): Promise<ConsensusConstants> {
+  const [epoch, lag, reorg] = await Promise.all([
+    stateCallInt(context, 'QPoWApi_get_seed_epoch_blocks'),
+    stateCallInt(context, 'QPoWApi_get_seed_epoch_lag'),
+    stateCallInt(context, 'QPoWApi_get_max_reorg_depth'),
+  ]);
+  return {
+    seedEpochBlocks: Number(epoch),
+    seedEpochLag: Number(lag),
+    maxReorgDepth: Number(reorg),
+  };
+}
+
+export interface TreeState {
+  leafCount: bigint;
+  depth: number;
+  root: string;
+}
+
+export interface PoolState {
+  poolValuePlanck: bigint;
+  entryCount: bigint;
+}
+
+export interface ChainSnapshot {
+  headNumber: number;
+  headHash: string;
+  /** What the node calls finalized. This chain is proof of work with no finality gadget. */
+  finalizedNumber: number;
+  finalizedHash: string;
+  difficulty: bigint;
+  lastBlockDurationMs: number;
+  tree: TreeState;
+  pool: PoolState;
+}
+
+export async function fetchSnapshot(context: ChainContext): Promise<ChainSnapshot> {
+  const headHash = await context.provider.send<string>('chain_getBlockHash', []);
+  const finalizedHash = await context.provider.send<string>('chain_getFinalizedHead', []);
+  const [head, finalized, difficultyHex, duration, leafCount, depth, root, poolValue, entryCount] =
+    await Promise.all([
+      context.provider.send<{ number: string }>('chain_getHeader', [headHash]),
+      context.provider.send<{ number: string }>('chain_getHeader', [finalizedHash]),
+      stateCallHex(context, 'QPoWApi_get_difficulty'),
+      stateCallInt(context, 'QPoWApi_get_last_block_duration'),
+      storage(context, 'zkTree', 'leafCount')(),
+      storage(context, 'zkTree', 'depth')(),
+      storage(context, 'zkTree', 'root')(),
+      storage(context, 'shielded', 'poolValue')(),
+      storage(context, 'shielded', 'entryCount')(),
+    ]);
+  return {
+    headNumber: Number(BigInt(head.number)),
+    headHash,
+    finalizedNumber: Number(BigInt(finalized.number)),
+    finalizedHash,
+    difficulty: decodeU512(difficultyHex),
+    lastBlockDurationMs: Number(duration),
+    tree: {
+      leafCount: BigInt(leafCount.toString()),
+      depth: Number(depth.toString()),
+      root: root.toHex(),
+    },
+    pool: {
+      poolValuePlanck: BigInt(poolValue.toString()),
+      entryCount: BigInt(entryCount.toString()),
+    },
+  };
+}
+
+export interface NullifierCount {
+  count: number;
+  /** True when the page limit was reached first, so `count` is a floor rather than a total. */
+  capped: boolean;
+}
+
+const NULLIFIER_PAGE = 1000;
+
+/**
+ * The size of the settled nullifier set.
+ *
+ * `UsedNullifiers` is `Blake2_128Concat` and grows forever, so counting it
+ * means paging its keys and gets slower every day. This is capped, says so
+ * when it hits the cap, and never blocks the rest of a page.
+ */
+export async function countNullifiers(
+  context: ChainContext,
+  at: string,
+  pageLimit: number,
+): Promise<NullifierCount> {
+  const prefix = storage(context, 'shielded', 'usedNullifiers').keyPrefix();
+  let count = 0;
+  let cursor: string | null = null;
+  for (let page = 0; page < pageLimit; page += 1) {
+    const params: unknown[] = [prefix, NULLIFIER_PAGE, cursor, at];
+    const keys: string[] = await context.provider.send<string[]>('state_getKeysPaged', params);
+    if (keys.length === 0) {
+      return { count, capped: false };
+    }
+    count += keys.length;
+    if (keys.length < NULLIFIER_PAGE) {
+      return { count, capped: false };
+    }
+    const last = keys.at(-1);
+    if (last === undefined) {
+      return { count, capped: false };
+    }
+    // The guard against a node whose cursor stops advancing.
+    if (cursor === last) {
+      return { count, capped: true };
+    }
+    cursor = last;
+  }
+  return { count, capped: true };
+}
+
+/**
+ * Whether one nullifier is in the settled set.
+ *
+ * This is a point lookup on a constructed key, which names that nullifier to
+ * whoever runs the node. The search page says so before it runs one.
+ */
+export async function nullifierSeen(
+  context: ChainContext,
+  nullifier: string,
+  at: string,
+): Promise<boolean> {
+  const key = storage(context, 'shielded', 'usedNullifiers').key(nullifier);
+  const value = await context.provider.send<string | null>('state_getStorage', [key, at]);
+  return value !== null;
+}
