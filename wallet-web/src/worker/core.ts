@@ -59,6 +59,9 @@ export interface WasmModule {
   coinbaseNote: (seedHex: string, genesis: string, block: number, value: bigint) => string;
   entryRho: (block: number, entryIndex: bigint) => string;
   headerBlockHash: (anchorJson: string) => string;
+  headerBlockHashes: (headersJson: string) => string;
+  authorLabel: (seedHex: string, parentHashHex: string) => string;
+  blockRoots: (leafHashes: Uint8Array, countsJson: string) => string;
   treePath: (leafHashes: Uint8Array, depth: number, leafIndex: number) => string;
   treeRoot: (leafHashes: Uint8Array, depth: number) => string;
   depthFor: (leafCount: number) => number;
@@ -330,6 +333,37 @@ export class ProverCore {
 
       case 'headerBlockHash': {
         return { value: this.requireWasm().headerBlockHash(JSON.stringify(request.anchor)) };
+      }
+
+      case 'headerBlockHashes': {
+        // One crossing for a whole scanned range. A sync rehashes every header
+        // it is handed, because the `zkTreeRoot` a block's leaf range is
+        // checked against and the author label that says whose block it is are
+        // authenticated by that hash and by nothing else.
+        return {
+          value: JSON.parse(
+            this.requireWasm().headerBlockHashes(JSON.stringify(request.headers)),
+          ) as string[],
+        };
+      }
+
+      case 'authorLabels': {
+        // From the seed this worker already holds, like `minerKey`. The label
+        // is `H("qnero/author-label", cvk, parent_hash)` and `cvk` is viewing
+        // tier secret, so it is derived here and never on the page.
+        const module = this.requireWasm();
+        const seed = this.requireSeed();
+        return {
+          value: request.parentHashes.map((parentHash) => module.authorLabel(seed, parentHash)),
+        };
+      }
+
+      case 'blockRoots': {
+        return {
+          value: JSON.parse(
+            this.requireWasm().blockRoots(request.leafHashes, JSON.stringify(request.counts)),
+          ) as string[],
+        };
       }
 
       case 'treePath': {

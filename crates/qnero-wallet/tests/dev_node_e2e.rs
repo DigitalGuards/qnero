@@ -257,6 +257,54 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
             "the only notes a miner holds before it spends are its coinbases"
         );
     }
+
+    // The rule a leaf's kind is decided by, on real blocks. A coinbase is
+    // minted in `on_finalize`, after every shield and every settled output, so
+    // it is the last leaf its block appended and no other index in that block
+    // carries a `Shielded::CoinbaseValues`. Both wallets refuse a node that
+    // says otherwise (`crates/qnero-wallet/src/typing.rs`), and this is the
+    // half of that rule only a running chain can show.
+    let mut checked_blocks = 0usize;
+    for note in miner.store.notes.clone() {
+        let Some(block) = note.block_number else {
+            continue;
+        };
+        let at = chain.block_hash(block).expect("a block hash");
+        let parent = chain
+            .block_hash(block.saturating_sub(1))
+            .expect("the parent's block hash");
+        let after = chain.leaf_count_at(&at).expect("the leaf count");
+        let before = chain
+            .leaf_count_at(&parent)
+            .expect("the parent's leaf count");
+        if after <= before {
+            continue;
+        }
+        let records = chain
+            .leaves(before..after, &at, after)
+            .expect("the block's leaves");
+        for record in &records {
+            let is_last = record.index + 1 == after;
+            assert_eq!(
+                record.coinbase_value.is_some(),
+                is_last,
+                "block {block} carries a coinbase value at leaf {} where its last leaf is {}",
+                record.index,
+                after - 1
+            );
+        }
+        assert_eq!(
+            note.leaf_index,
+            after - 1,
+            "this wallet's coinbase for block {block} is that block's last leaf"
+        );
+        checked_blocks += 1;
+    }
+    assert!(
+        checked_blocks > 0,
+        "no block with a coinbase leaf to check the position rule on"
+    );
+    println!("the coinbase is the last leaf of its block, on {checked_blocks} real blocks");
     // The emission is flat over a few blocks, to within the one quantum the
     // sub-quantum carry adds: a block's credit is not a whole number of pool
     // quanta, so the remainder waits and occasionally completes one.

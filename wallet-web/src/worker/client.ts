@@ -244,6 +244,47 @@ export class ProverClient {
     return this.call({ kind: 'headerBlockHash', anchor });
   }
 
+  /**
+   * A whole scanned range of headers, rehashed in one crossing.
+   *
+   * A sync rehashes every header it is handed: the `zkTreeRoot` a block's leaf
+   * range is checked against and the pre-runtime author label that says whose
+   * block it is are authenticated by that hash and by nothing else. One call
+   * per block would be one crossing per block on a first sync.
+   */
+  headerBlockHashes(headers: Anchor[]): Promise<string[]> {
+    return this.call({ kind: 'headerBlockHashes', headers });
+  }
+
+  /**
+   * This wallet's own author label for each of these parent hashes.
+   *
+   * Derived from the coinbase viewing key, which is why it happens behind this
+   * boundary. What a sync does with the answer is require the coinbase value
+   * of its own blocks, so a node cannot hide a mined reward by withholding one
+   * key and inventing another.
+   */
+  authorLabels(parentHashes: string[]): Promise<string[]> {
+    return this.call({ kind: 'authorLabels', parentHashes });
+  }
+
+  /**
+   * The commitment-tree root after each of a list of leaf counts.
+   *
+   * One call covers every block of a scanned range, folded incrementally, so
+   * the cost is one Poseidon path update per leaf rather than one whole tree
+   * per block.
+   *
+   * The leaf range is **copied** rather than transferred, which is the one
+   * place this client does that. The caller keeps reading those bytes after
+   * this returns: they are the authenticated commitments every leaf of the
+   * scan is checked against, and a transferred buffer is detached on the
+   * page's side the moment the message is posted.
+   */
+  blockRoots(leafHashes: Uint8Array, counts: number[]): Promise<string[]> {
+    return this.call({ kind: 'blockRoots', leafHashes, counts });
+  }
+
   /** The leaf range is transferred: it is 32 bytes a leaf and copying is waste. */
   treePath(leafHashes: Uint8Array<ArrayBuffer>, depth: number, leafIndex: number): Promise<PathAnswer> {
     return this.call({ kind: 'treePath', leafHashes, depth, leafIndex }, [leafHashes.buffer]);

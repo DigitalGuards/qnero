@@ -301,6 +301,34 @@ pub fn header_block_hash(anchor_json: &str) -> Result<String, JsError> {
     wallet::header_block_hash_hex(anchor_json).map_err(js_error)
 }
 
+/// The same recomputation over a whole scanned range, in one crossing.
+///
+/// See [`wallet::header_block_hashes_json`]: a wallet rehashes every header of
+/// a scanned range, because the `zkTreeRoot` and the author label a leaf's
+/// kind is decided from are authenticated by this hash and nothing else.
+#[wasm_bindgen(js_name = headerBlockHashes)]
+pub fn header_block_hashes(headers_json: &str) -> Result<String, JsError> {
+    wallet::header_block_hashes_json(headers_json).map_err(js_error)
+}
+
+/// This wallet's author label for a block with this parent.
+///
+/// Secret bearing: derived from the coinbase viewing key. See
+/// [`wallet::author_label_hex`].
+#[wasm_bindgen(js_name = authorLabel)]
+pub fn author_label(seed_hex: &str, parent_hash_hex: &str) -> Result<String, JsError> {
+    wallet::author_label_hex(seed_hex, parent_hash_hex).map_err(js_error)
+}
+
+/// The commitment-tree root after each of a list of leaf counts.
+///
+/// See [`wallet::block_roots_json`]: the per-block check that turns a node's
+/// claim about which block appended which leaves into a fact.
+#[wasm_bindgen(js_name = blockRoots)]
+pub fn block_roots(leaf_hashes: &[u8], counts_json: &str) -> Result<String, JsError> {
+    wallet::block_roots_json(leaf_hashes, counts_json).map_err(js_error)
+}
+
 /// Rebuild the commitment tree over a leaf range and take one leaf's path.
 ///
 /// `leaf_hashes` is `32 * n` bytes, `ZkTree::Leaves` in index order read at

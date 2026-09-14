@@ -374,6 +374,121 @@ impl CommitmentTree {
     }
 }
 
+/// The same tree, appended to one leaf at a time, keeping only the frontier.
+///
+/// `CommitmentTree` materialises every level, which is what a path needs.
+/// A wallet that has to check the root the chain published at **every** block
+/// of a range needs something else: the root after `n` leaves, for many `n`,
+/// without rebuilding `n` levels each time. This keeps, per level, the
+/// completed children of the node currently being filled there, which is at
+/// most three digests a level, and folds them on demand.
+///
+/// The rule is `pallet-zk-tree`'s, unchanged: children sorted, a missing child
+/// is the all-zero digest, and the depth is the smallest one that holds the
+/// count. So [`TreeFrontier::root`] equals the `zkTreeRoot` the chain put in
+/// the header of the block that ended on this many leaves, and
+/// `a_frontier_matches_the_full_tree_at_every_prefix` pins it against
+/// [`CommitmentTree`].
+///
+/// Cost is one Poseidon path update per leaf and one fold per root, where a
+/// rebuild is one whole tree per root. That is what makes a per-block check
+/// affordable.
+#[derive(Debug, Clone, Default)]
+pub struct TreeFrontier {
+    /// `levels[l]` holds the completed level-`l` nodes that belong to the
+    /// level-`l + 1` node currently being filled, so it is never four long.
+    levels: Vec<Vec<Digest>>,
+    count: u64,
+}
+
+impl TreeFrontier {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// Append one leaf, carrying completed nodes upward.
+    pub fn push(&mut self, leaf: Digest) {
+        let mut carry = Some(leaf);
+        let mut level = 0usize;
+        while let Some(node) = carry {
+            if self.levels.len() == level {
+                self.levels.push(Vec::with_capacity(ARITY));
+            }
+            self.levels[level].push(node);
+            if self.levels[level].len() == ARITY {
+                let mut children = [empty_digest(); ARITY];
+                children.copy_from_slice(&self.levels[level]);
+                self.levels[level].clear();
+                carry = Some(hash_node(&children));
+                level += 1;
+            } else {
+                carry = None;
+            }
+        }
+        self.count = self.count.saturating_add(1);
+    }
+
+    /// The depth the chain folds this many leaves at.
+    ///
+    /// `pallet-zk-tree`'s growth loop is `while capacity_at_depth(depth) <
+    /// leaf_count { depth += 1 }` over `capacity_at_depth(0) == 0`, started at
+    /// the depth already stored and never shrunk, so it lands on the smallest
+    /// depth that holds the count. An empty tree stays at depth zero and
+    /// publishes the default root, which is the all-zero digest.
+    pub fn depth(&self) -> anyhow::Result<usize> {
+        if self.count == 0 {
+            return Ok(0);
+        }
+        CommitmentTree::depth_for(usize::try_from(self.count).unwrap_or(usize::MAX))
+    }
+
+    /// The root the chain publishes after this many leaves.
+    pub fn root(&self) -> anyhow::Result<Digest> {
+        let depth = self.depth()?;
+        if depth == 0 {
+            // `process_pending_leaves` returns before it writes anything when
+            // nothing is pending, so a chain that has appended no leaf at all
+            // still carries `Root`'s default.
+            return Ok(empty_digest());
+        }
+        let mut carry: Option<Digest> = None;
+        for level in 0..depth {
+            let filled = self.levels.get(level).map_or(0, Vec::len);
+            if filled == 0 && carry.is_none() {
+                // Nothing is under construction at this level, so the node
+                // above it is already complete and sits a level higher. A
+                // parent hashed over four empty children here would be a node
+                // the chain never wrote.
+                continue;
+            }
+            let mut children = [empty_digest(); ARITY];
+            if let Some(nodes) = self.levels.get(level) {
+                children[..filled].copy_from_slice(nodes);
+            }
+            if let Some(node) = carry {
+                children[filled] = node;
+            }
+            carry = Some(hash_node(&children));
+        }
+        match carry {
+            Some(root) => Ok(root),
+            // Every level below the depth was empty, which happens exactly
+            // when the count fills the tree: the root is the completed node
+            // the last carry landed on.
+            None => self
+                .levels
+                .get(depth)
+                .and_then(|nodes| nodes.first())
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("a tree of depth {depth} folded to nothing")),
+        }
+    }
+}
+
 // ============================================================================
 // In-circuit
 // ============================================================================
@@ -501,6 +616,38 @@ mod tests {
 
     fn leaf(tag: &[u8]) -> Digest {
         Digest::hash_bytes(&[b"merkle-test", tag])
+    }
+
+    /// The frontier and the full rebuild are one tree.
+    ///
+    /// A wallet checks the root the chain published at every block of a range,
+    /// and it does that from the frontier alone. If the two ever disagreed at
+    /// one prefix, every sync would refuse an honest node at that height with
+    /// a message about a node lying about a block's leaf range.
+    #[test]
+    fn a_frontier_matches_the_full_tree_at_every_prefix() {
+        let leaves: Vec<Digest> = (0u32..70).map(|index| leaf(&index.to_le_bytes())).collect();
+        let mut frontier = TreeFrontier::new();
+        assert_eq!(frontier.count(), 0);
+        assert_eq!(
+            frontier.root().expect("an empty tree roots"),
+            empty_digest(),
+            "a chain that has appended no leaf publishes the default root"
+        );
+        for (count, next) in leaves.iter().enumerate() {
+            frontier.push(*next);
+            let prefix = &leaves[..count + 1];
+            let depth = CommitmentTree::depth_for(prefix.len()).expect("a depth");
+            let full = CommitmentTree::new(prefix, depth).expect("a tree");
+            assert_eq!(frontier.count(), prefix.len() as u64);
+            assert_eq!(frontier.depth().expect("a depth"), depth);
+            assert_eq!(
+                frontier.root().expect("a root"),
+                full.root(),
+                "the frontier and the rebuild disagree at {} leaves",
+                prefix.len()
+            );
+        }
     }
 
     /// The node rule is `qp-poseidon-core` off circuit and plonky2's Poseidon2

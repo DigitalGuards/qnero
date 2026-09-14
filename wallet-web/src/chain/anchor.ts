@@ -21,7 +21,7 @@
  * Goldilocks is not something a second implementation should exist for.
  */
 
-import { bytesToHex, hexToBytes } from '../lib/hex';
+import { bytesToHex, hexToBytes, readCompact } from '../lib/hex';
 import { concatBytes, encodeCompact } from '../lib/scale';
 
 /** The digest blob length the header hash commits to. */
@@ -102,4 +102,48 @@ export function anchorFromHeader(header: RawChainHeader): Anchor {
     zk_tree_root: strip(header.zkTreeRoot),
     digest_logs: strip(bytesToHex(digestBytes(header.digest.logs))),
   };
+}
+
+/** `DigestItem::PreRuntime`'s SCALE variant index. */
+const PRE_RUNTIME_VARIANT = 6;
+
+/** `sp_consensus_qpow::POW_ENGINE_ID`, the four bytes consensus tags with. */
+const POW_ENGINE_ID = [0x70, 0x6f, 0x77, 0x5f];
+
+/**
+ * The 32 bytes of the block author's label, out of the pre-runtime digest
+ * item.
+ *
+ * The item is `DigestItem::PreRuntime(POW_ENGINE_ID, label)` and the label is
+ * `H("qnero/author-label", cvk, parent_hash)`, which
+ * `qnero_note_core::MinerKey::author_label` derives. `cvk` is the miner's
+ * secret, so nobody can compute another wallet's label and nobody can group
+ * one operator's blocks; the wallet that holds the key recomputes its own and
+ * compares.
+ *
+ * The header's hash commits to the digest, so this is authenticated by the
+ * same recomputation that authenticates the rest of the header. That is what
+ * makes it usable for deciding which blocks this wallet mined: a node cannot
+ * present one of this wallet's blocks as somebody else's without changing the
+ * hash. `RawHeader::author_label` in `crates/qnero-wallet/src/chain.rs` reads
+ * the identical item.
+ *
+ * `null` when there is no such item, which is a block no Qnero node built.
+ */
+export function authorLabelFromHeader(header: RawChainHeader): string | null {
+  for (const log of header.digest.logs) {
+    const bytes = hexToBytes(log);
+    if (bytes.length < 6 || bytes[0] !== PRE_RUNTIME_VARIANT) {
+      continue;
+    }
+    if (!POW_ENGINE_ID.every((byte, index) => bytes[1 + index] === byte)) {
+      continue;
+    }
+    const { value: length, next } = readCompact(bytes, 5);
+    if (length !== 32 || bytes.length - next !== 32) {
+      continue;
+    }
+    return bytesToHex(bytes.subarray(next)).slice(2);
+  }
+  return null;
 }

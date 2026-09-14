@@ -292,6 +292,18 @@ test.describe('the browser wallet against a dev chain', () => {
     const startedAt = Date.now();
     await page.getByTestId('do-send').click();
     await expect(page.getByTestId('send-phases')).toBeVisible();
+
+    // The spending guard, while there is a spend to guard against. A scan
+    // reads every note before it starts and commits them at the end, so a
+    // rescan running beside a payment writes the same rows from two different
+    // moments and the payment's own change note is the row that loses. The
+    // control is disabled and the reason is on the screen, and both are
+    // checked here because the two cannot be driven together anywhere else.
+    await page.getByTestId('tab-settings').click();
+    await expect(page.getByTestId('rescan')).toBeDisabled();
+    await expect(page.getByTestId('rescan-needs-quiet')).toBeVisible();
+    await page.getByTestId('tab-send').click();
+
     // The proof is the long pole: a circuit build and two proofs in wasm.
     await expect(page.getByTestId('send-result')).toBeVisible({ timeout: 600_000 });
     const wholeSendMillis = Date.now() - startedAt;

@@ -12,6 +12,9 @@ import type { ChainContext } from '../chain/api';
 import {
   blockHashAt,
   fetchHead,
+  fetchHeaderRange,
+  fetchLeafBlocks,
+  fetchLeafHashes,
   fetchLeaves,
   fetchTreeTotals,
   fetchUsedNullifiers,
@@ -45,6 +48,9 @@ export function chainAdapter(context: ChainContext, limits: ProverLimits): SyncC
     leaves: (from, to, at, leafCount, onProgress) =>
       fetchLeaves(context, from, to, at, leafCount, onProgress),
     usedNullifiers: (at, onProgress) => fetchUsedNullifiers(context, at, undefined, onProgress),
+    headers: (anchor, head, onProgress) => fetchHeaderRange(context, anchor, head, onProgress),
+    leafBlocks: (from, to, at) => fetchLeafBlocks(context, from, to, at),
+    leafHashes: (to, at, onProgress) => fetchLeafHashes(context, 0, to, at, onProgress),
   };
 }
 
@@ -97,5 +103,8 @@ export function cryptoAdapter(prover: ProverClient): SyncCrypto {
     },
     entryRhoMatches: (blockNumber, rho, entryCount) =>
       prover.entryRhoMatches(blockNumber, rho, entryCount),
+    headerHashes: (headers) => prover.headerBlockHashes(headers),
+    authorLabels: (parentHashes) => prover.authorLabels(parentHashes),
+    blockRoots: (leafHashes, counts) => prover.blockRoots(leafHashes, counts),
   };
 }

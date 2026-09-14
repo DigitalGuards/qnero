@@ -931,6 +931,51 @@ Both build scripts run the pass when binaryen is on `PATH` and say so when it
 is not, because a size pass is not a correctness pass and a clone without
 binaryen should still produce a working module.
 
+## What per-block header verification costs a sync (2026-09-14)
+
+A leaf's kind is derived from what the headers authenticate rather than from
+which storage keys a node chose to answer, so a sync now walks the header of
+every block its range covers: see `docs/WALLET.md` under "How a leaf's kind is
+decided". The cost is one request per block and one Poseidon path update per
+leaf, and this is what it measures out at.
+
+Measured against a `--dev --tmp` node at one mining thread, through a counting
+proxy on loopback, with the command-line wallet:
+
+| Pass | blocks | leaves | `chain_getHeader` | `chain_getBlockHash` | `state_queryStorageAt` | wall clock |
+|---|---|---|---|---|---|---|
+| first sync, empty store | 0 to 103 | 110 | 105 | 3 | 2 | 0.05 to 0.08 s |
+| the next sync, one block later | 103 to 104 | 1 | 3 | 4 | 2 | 0.02 s |
+
+Three things set that shape.
+
+- **One `chain_getHeader` per block, and no `chain_getBlockHash` at all.** The
+  walk goes downward from the head by `parentHash`, so each header names the
+  hash the next one is fetched by. Walking upward would cost a second call per
+  block to learn each height's hash, and those answers would be the node's
+  rather than the chain's.
+- **The fold is incremental.** `qnero_circuit::merkle::TreeFrontier` keeps, per
+  level, the completed children of the node being filled there, which is at
+  most three digests a level over at most `MAX_TREE_DEPTH` levels. An append is
+  one Poseidon permutation per level it carries into, and a root is one fold of
+  the frontier. Rebuilding the whole tree once per block would be one tree per
+  block of the range.
+- **The leaves below the watermark are read once.** The anchor block's own
+  `zkTreeRoot` is what checks them, at one key per leaf in pages of 256, which
+  is the same wide read a spend already makes to rebuild its paths. A first
+  sync pays nothing for it, because the watermark is zero.
+
+What this does not measure is a chain deep enough for the per-block term to
+matter. At a twelve-second target a year is about 2.6 million blocks, so a
+first sync on such a chain is 2.6 million header requests, against the 2.6
+million coinbase leaves it already reads. The two grow together, which is why
+the header walk does not change the shape of a first sync, and it is also why
+neither is affordable at that depth without the checkpointed frontier the
+structure is already built for: `TreeFrontier` is a few dozen digests and
+serializes, so an incremental sync can stand on a stored one rather than
+reading the tree below the watermark again. That is the next step and it is not
+taken here.
+
 ## What M10 leaves unmeasured
 
 - **A phone.** Still the 2 to 4 factor with no device under it, and now over a
@@ -944,11 +989,12 @@ binaryen should still produce a working module.
   screen no longer quotes a figure from this file: after the first payment it
   quotes what the machine it is running on actually took, and the published
   figure is the first payment's estimate alone.
-- **Scanning at chain scale.** The wallet's sync reads every leaf and tries
-  every ciphertext, and this suite's chain is tens of blocks deep. Nothing here
-  bounds the *time* of a sync against a chain with a million leaves, and the
-  batching constants (64 leaves per query, 1000 keys per page) are the CLI's
-  rather than a measured optimum. What is bounded is the memory: the scan reads
+- **Scanning at chain scale.** The wallet's sync reads every leaf, tries every
+  ciphertext and now walks every block's header, and this suite's chain is tens
+  of blocks deep. Nothing here bounds the *time* of a sync against a chain with
+  a million leaves, and the batching constants (64 leaves per query, 256 per
+  wide page, 1000 keys per key page) are the CLI's rather than a measured
+  optimum. What is bounded is the memory: the scan reads
   one 64-leaf window, folds it in and drops it, so a first sync holds one
   window plus the notes the wallet keeps rather than every ciphertext on the
   chain at once.

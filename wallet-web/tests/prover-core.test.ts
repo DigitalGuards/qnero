@@ -108,6 +108,11 @@ function stubModule(counts: Counts): WasmModule {
       return `entry-${block}-${index.toString()}`;
     },
     headerBlockHash: () => '00'.repeat(32),
+    headerBlockHashes: (headersJson: string) =>
+      JSON.stringify((JSON.parse(headersJson) as { block_number: number }[]).map(() => '00'.repeat(32))),
+    authorLabel: () => 'aa'.repeat(32),
+    blockRoots: (_leafHashes: Uint8Array, countsJson: string) =>
+      JSON.stringify((JSON.parse(countsJson) as number[]).map(() => '00'.repeat(32))),
     treePath: () => '{}',
     treeRoot: () => '00'.repeat(32),
     depthFor: () => 3,

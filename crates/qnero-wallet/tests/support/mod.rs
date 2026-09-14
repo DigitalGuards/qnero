@@ -18,6 +18,9 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
 use codec::Encode;
+use qnero_circuit::header::{HeaderInputs, DIGEST_LOGS_SIZE};
+use qnero_circuit::merkle::TreeFrontier;
+use qnero_notes::{Digest, MinerKey};
 use qnero_wallet::metadata::{
     ChainMetadata, StorageItem, KNOWN_SIGNED_EXTENSIONS, REQUIRED_STORAGE,
 };
@@ -70,6 +73,47 @@ pub struct NodeState {
     /// The same hook for `Shielded::CoinbaseValues`, which is the one key of
     /// the four a leaf is allowed not to have: presence marks a coinbase.
     pub withheld_coinbase_values: BTreeSet<u64>,
+    /// Blocks this node has already dated a leaf to, once and for good.
+    ///
+    /// Filled in by [`seal_leaves`] on the first request after a leaf appears,
+    /// which is what keeps a fixture's history stable: a leaf that shows up
+    /// when the head is block twenty is dated there, and raising the count
+    /// again later cannot move it back into a block the wallet has already
+    /// checkpointed.
+    pub sealed: BTreeMap<u64, u32>,
+    /// What `ZkTree::LeafCount` answers, where the chain this node's headers
+    /// describe is longer.
+    ///
+    /// A node serving a head it has not finished executing is on this wallet's
+    /// chain and answers a short count, and its history is unchanged: the
+    /// blocks it already published still carry the roots they carried. Writing
+    /// a shorter count into storage instead would rewrite every root and every
+    /// hash above it, which is a different branch and not lag at all.
+    pub short_leaf_count: Option<u64>,
+    /// The miner key whose author label the blocks in [`NodeState::authored`]
+    /// carry.
+    ///
+    /// A wallet decides which blocks it mined by recomputing
+    /// `H("qnero/author-label", cvk, parent_hash)` and comparing it against
+    /// the pre-runtime digest item in the header, so a fixture that wants a
+    /// block to be the wallet's own hands over the wallet's own miner key and
+    /// names the heights.
+    pub miner_key: Option<MinerKey>,
+    /// Heights whose author label is [`NodeState::miner_key`]'s. Every other
+    /// height carries a label no key in the test produces.
+    pub authored: BTreeSet<u32>,
+    /// Leaves this node answers a `Shielded::LeafBlocks` for that is not the
+    /// block its own headers put them in.
+    ///
+    /// The map is advisory: it proposes a block's leaf range and the root in
+    /// that block's header settles it, so a node that moves a leaf between
+    /// blocks is what this models. Which block a leaf is in is what decides
+    /// where a coinbase sits.
+    pub misdated_leaves: BTreeMap<u64, u32>,
+    /// Heights whose header this node serves with a field changed after the
+    /// hash was fixed, so the header no longer hashes to the name it was
+    /// asked for.
+    pub lying_headers: BTreeSet<u32>,
     /// Heights `chain_getBlockHash` answers `null` for, whatever the head is.
     ///
     /// A node that has a head and no block at a lower height: pruned, or
@@ -103,14 +147,157 @@ impl NodeState {
     }
 
     /// The hash this node answers at a height, on whichever branch it is on.
+    ///
+    /// A real header hash: the Poseidon2 hash of the preimage the chain
+    /// hashes, over this node's own answers. A wallet fetches every header of
+    /// a scanned range by the hash its child names and rehashes it, so a
+    /// fixture whose hashes were not its headers' hashes would be a node that
+    /// cannot serve a header at all.
     pub fn hash_at(&self, number: u32) -> [u8; 32] {
-        let tag = if number >= self.fork_from {
-            self.fork_tag
-        } else {
-            0
-        };
-        forked_block_hash(number, tag)
+        self.chain().hash_at(number)
     }
+
+    /// The genesis this node serves, which is what a wallet binds its store to
+    /// and what a coinbase note is derived against.
+    ///
+    /// Block zero's header carries no leaves, so this is fixed before any
+    /// fixture writes one and a test can derive a coinbase note from it.
+    pub fn genesis_hash(&self) -> [u8; 32] {
+        self.hash_at(0)
+    }
+
+    /// Every header this node would serve, built from its own storage.
+    pub fn chain(&self) -> ChainView {
+        ChainView::build(self)
+    }
+}
+
+/// The header chain a [`NodeState`] implies, block by block.
+///
+/// Built from the same storage the node answers reads out of, so the
+/// `zkTreeRoot` in each header is the root of exactly the leaves this node
+/// dates to that block and a wallet's per-block check passes on an honest
+/// fixture. A fixture that wants to be caught moves a leaf, a block or a key
+/// and the check fails where the wallet says it does.
+pub struct ChainView {
+    hashes: Vec<[u8; 32]>,
+    headers: Vec<Value>,
+}
+
+impl ChainView {
+    fn build(state: &NodeState) -> Self {
+        let leaf_count = node_leaf_count(state).min(MAX_FIXTURE_LEAVES);
+        let dates = leaf_blocks(state);
+        let leaves: Vec<(Digest, u32)> = (0..leaf_count)
+            .map(|index| {
+                let bytes = storage_at(
+                    state,
+                    &format!(
+                        "0x{}",
+                        hex::encode(qnero_wallet::scale::identity_map_key(
+                            "ZkTree", "Leaves", index
+                        ))
+                    ),
+                )
+                .unwrap_or_else(|| filler_leaf(index));
+                let commitment = <[u8; 32]>::try_from(bytes.as_slice())
+                    .ok()
+                    .and_then(|bytes| Digest::from_bytes(&bytes).ok())
+                    .unwrap_or_else(|| {
+                        Digest::hash_bytes(&[b"fixture leaf", &index.to_le_bytes()])
+                    });
+                (commitment, dates[index as usize])
+            })
+            .collect();
+
+        let mut frontier = TreeFrontier::new();
+        let mut cursor = 0usize;
+        let mut parent = [0u8; 32];
+        let mut hashes = Vec::with_capacity(state.head_number as usize + 1);
+        let mut headers = Vec::with_capacity(state.head_number as usize + 1);
+        for number in 0..=state.head_number {
+            while cursor < leaves.len() && leaves[cursor].1 == number {
+                frontier.push(leaves[cursor].0);
+                cursor += 1;
+            }
+            let root = frontier.root().expect("a fixture tree roots");
+            let label = match (&state.miner_key, state.authored.contains(&number)) {
+                (Some(key), true) => key.author_label(&parent).to_bytes(),
+                _ => qnero_wallet::scale::blake2_256(
+                    &[b"somebody else", &number.to_le_bytes()[..]].concat(),
+                ),
+            };
+            let mut state_root = [0x11u8; 32];
+            state_root[0] = if number >= state.fork_from {
+                state.fork_tag
+            } else {
+                0
+            };
+            let logs = vec![format!("0x{}", hex::encode(pre_runtime_item(&label)))];
+            let header = HeaderInputs::new(
+                Digest::from_bytes(&parent).expect("a canonical parent"),
+                number,
+                state_root,
+                [0x22u8; 32],
+                root,
+                &digest_window(&logs),
+            )
+            .expect("a header");
+            let hash = header.block_hash().to_bytes();
+            headers.push(json!({
+                "parentHash": format!("0x{}", hex::encode(parent)),
+                "number": format!("0x{number:x}"),
+                "stateRoot": format!("0x{}", hex::encode(state_root)),
+                "extrinsicsRoot": format!("0x{}", hex::encode([0x22u8; 32])),
+                "zkTreeRoot": format!("0x{}", root.to_hex()),
+                "digest": {"logs": logs},
+            }));
+            hashes.push(hash);
+            parent = hash;
+        }
+        Self { hashes, headers }
+    }
+
+    pub fn hash_at(&self, number: u32) -> [u8; 32] {
+        self.hashes
+            .get(number as usize)
+            .copied()
+            .unwrap_or([0u8; 32])
+    }
+
+    fn number_of(&self, hash: &str) -> Option<u32> {
+        let wanted = hash.trim_start_matches("0x").to_ascii_lowercase();
+        self.hashes
+            .iter()
+            .position(|candidate| hex::encode(candidate) == wanted)
+            .map(|index| index as u32)
+    }
+
+    fn header(&self, number: u32) -> Option<Value> {
+        self.headers.get(number as usize).cloned()
+    }
+}
+
+/// `DigestItem::PreRuntime(POW_ENGINE_ID, label)`, SCALE encoded.
+fn pre_runtime_item(label: &[u8; 32]) -> Vec<u8> {
+    let mut out = vec![6u8];
+    out.extend_from_slice(b"pow_");
+    // A `Vec<u8>` of 32 bytes: compact(32) is one byte, `32 << 2`.
+    out.push(32u8 << 2);
+    out.extend_from_slice(label);
+    out
+}
+
+/// The 110-byte window the chain hashes the digest through.
+fn digest_window(logs: &[String]) -> [u8; DIGEST_LOGS_SIZE] {
+    let mut encoded = qnero_wallet::scale::compact_len(logs.len());
+    for log in logs {
+        encoded.extend_from_slice(&hex::decode(log.trim_start_matches("0x")).expect("hex"));
+    }
+    let mut padded = [0u8; DIGEST_LOGS_SIZE];
+    let taken = encoded.len().min(DIGEST_LOGS_SIZE);
+    padded[..taken].copy_from_slice(&encoded[..taken]);
+    padded
 }
 
 pub struct FakeNode {
@@ -188,13 +375,26 @@ fn serve(mut stream: TcpStream, state: Arc<Mutex<NodeState>>) -> std::io::Result
 }
 
 fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value, String> {
+    seal_leaves(state);
     match method {
         "chain_getHeader" => {
+            let chain = state.chain();
             let number = match params.get(0).and_then(Value::as_str) {
-                Some(hash) => block_number_of(hash),
+                Some(hash) => chain
+                    .number_of(hash)
+                    .ok_or_else(|| format!("no block at {hash}"))?,
                 None => state.head_number,
             };
-            Ok(header_json(number, state.hash_at(number.saturating_sub(1))))
+            let mut header = chain
+                .header(number)
+                .ok_or_else(|| format!("no header at {number}"))?;
+            if state.lying_headers.contains(&number) {
+                // One field changed after the hash was fixed. A wallet
+                // rehashes every header it is handed, so this is what a node
+                // serving a header it did not build looks like.
+                header["stateRoot"] = json!(format!("0x{}", "ee".repeat(32)));
+            }
+            Ok(header)
         }
         "chain_getBlockHash" => {
             let number = params
@@ -207,10 +407,11 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
             Ok(json!(format!("0x{}", hex::encode(state.hash_at(number)))))
         }
         "chain_getBlock" => {
+            let chain = state.chain();
             let number = params
                 .get(0)
                 .and_then(Value::as_str)
-                .map(block_number_of)
+                .and_then(|hash| chain.number_of(hash))
                 .unwrap_or(state.head_number);
             let extrinsics = state.blocks.get(&number).cloned().unwrap_or_default();
             Ok(json!({"block": {"extrinsics": extrinsics}}))
@@ -306,6 +507,15 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
 /// a coinbase, so filling it would turn every leaf a fixture did not write
 /// into one.
 fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
+    if let Some(short) = state.short_leaf_count {
+        let count_key = format!(
+            "0x{}",
+            hex::encode(qnero_wallet::scale::storage_prefix("ZkTree", "LeafCount"))
+        );
+        if key == count_key {
+            return Some(short.to_le_bytes().to_vec());
+        }
+    }
     let Some((item, index)) = leaf_key(key) else {
         return state.storage.get(key).cloned();
     };
@@ -318,6 +528,11 @@ fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
     if withheld.contains(&index) {
         return None;
     }
+    if item == LeafKey::LeafBlocks {
+        if let Some(block) = state.misdated_leaves.get(&index) {
+            return Some(codec::Encode::encode(block));
+        }
+    }
     if let Some(value) = state.storage.get(key) {
         return Some(value.clone());
     }
@@ -326,7 +541,9 @@ fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
     }
     match item {
         LeafKey::Leaves => Some(filler_leaf(index)),
-        LeafKey::LeafBlocks => Some(codec::Encode::encode(&FILLER_BLOCK)),
+        LeafKey::LeafBlocks => leaf_blocks(state)
+            .get(index as usize)
+            .map(codec::Encode::encode),
         // Not for a coinbase leaf: under v1 the inherent refuses a payload, so
         // a coinbase leaf carries no ciphertext, and a fixture whose coinbase
         // was handed a filler would be exercising the payload branch by
@@ -389,9 +606,72 @@ fn node_leaf_count(state: &NodeState) -> u64 {
         .unwrap_or(0)
 }
 
-/// The block a filled-in leaf is dated at. One number: a fixture that cares
-/// which block a leaf landed in writes `LeafBlocks` itself.
+/// The block a filled-in leaf is dated at when nothing else decides.
 const FILLER_BLOCK: u32 = 1;
+
+/// How many leaves this node will build a chain over.
+///
+/// A fixture that writes an absurd `ZkTree::LeafCount` is testing the wallet's
+/// bound on that number, and the node must not try to fold four billion filler
+/// leaves to answer it. Every real fixture is far below this.
+const MAX_FIXTURE_LEAVES: u64 = 4096;
+
+/// The block every leaf below the count is dated at.
+///
+/// Three sources in order: what the fixture wrote, what this node has already
+/// sealed, and a derivation for a leaf nobody has dated yet. The derivation is
+/// the head at the moment the leaf first appeared, held below the next leaf a
+/// fixture did date and above the last one, because leaves are appended in
+/// block order and a wallet now checks exactly that against the root in each
+/// header.
+fn leaf_blocks(state: &NodeState) -> Vec<u32> {
+    let count = node_leaf_count(state).min(MAX_FIXTURE_LEAVES);
+    let mut out = Vec::with_capacity(count as usize);
+    let mut floor = 0u32;
+    for index in 0..count {
+        let block = if let Some(block) = explicit_leaf_block(state, index) {
+            block
+        } else if let Some(block) = state.sealed.get(&index).copied() {
+            block
+        } else {
+            let ceiling = (index + 1..count)
+                .find_map(|above| explicit_leaf_block(state, above))
+                .unwrap_or(u32::MAX);
+            state.head_number.min(ceiling).max(floor).max(FILLER_BLOCK)
+        };
+        floor = block;
+        out.push(block);
+    }
+    out
+}
+
+/// Date every leaf this node has not dated yet, at the head it has now.
+fn seal_leaves(state: &mut NodeState) {
+    let blocks = leaf_blocks(state);
+    for (index, block) in blocks.into_iter().enumerate() {
+        let index = index as u64;
+        if explicit_leaf_block(state, index).is_none() {
+            state.sealed.insert(index, block);
+        }
+    }
+}
+
+/// What a fixture wrote at `Shielded::LeafBlocks(index)`, if anything.
+fn explicit_leaf_block(state: &NodeState, index: u64) -> Option<u32> {
+    let key = format!(
+        "0x{}",
+        hex::encode(qnero_wallet::scale::identity_map_key(
+            "Shielded",
+            "LeafBlocks",
+            index
+        ))
+    );
+    state
+        .storage
+        .get(&key)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes.as_slice()).ok())
+        .map(u32::from_le_bytes)
+}
 
 /// A ciphertext that is nobody's: bytes derived from the index, which
 /// `NoteCiphertext::from_bytes` refuses at its length before any key is tried.
@@ -405,37 +685,17 @@ fn filler_leaf(index: u64) -> Vec<u8> {
     qnero_wallet::scale::blake2_256(&index.to_le_bytes()).to_vec()
 }
 
-/// Block hashes are the block number, repeated. The wallet treats them as
-/// opaque keys, and a readable one makes a failing assertion legible.
+/// An opaque 32 bytes to pin a read to.
+///
+/// This fake node answers every storage read out of one map whatever block
+/// hash it is handed, so a test that only needs *a* hash for an `at`
+/// parameter uses this. It is **not** the hash this node serves at that
+/// height: that is [`NodeState::hash_at`], a real header hash, and a test
+/// comparing hashes or deriving a coinbase note has to use that one.
 pub fn block_hash(number: u32) -> [u8; 32] {
-    forked_block_hash(number, 0)
-}
-
-/// The same, on a named branch. Two branches answer different hashes at one
-/// height, which is what a wallet's fork check reads.
-pub fn forked_block_hash(number: u32, fork_tag: u8) -> [u8; 32] {
     let mut hash = [0u8; 32];
     hash[..4].copy_from_slice(&number.to_le_bytes());
-    hash[4] = fork_tag;
     hash
-}
-
-fn block_number_of(hash: &str) -> u32 {
-    let bytes = hex::decode(hash.trim_start_matches("0x")).unwrap_or_default();
-    let mut number = [0u8; 4];
-    number.copy_from_slice(&bytes[..4]);
-    u32::from_le_bytes(number)
-}
-
-fn header_json(number: u32, parent_hash: [u8; 32]) -> Value {
-    json!({
-        "parentHash": format!("0x{}", hex::encode(parent_hash)),
-        "number": format!("0x{number:x}"),
-        "stateRoot": format!("0x{}", "11".repeat(32)),
-        "extrinsicsRoot": format!("0x{}", "22".repeat(32)),
-        "zkTreeRoot": format!("0x{}", "00".repeat(32)),
-        "digest": {"logs": []},
-    })
 }
 
 /// A `ChainMetadata` shaped like the dev runtime's, without a blob to parse.

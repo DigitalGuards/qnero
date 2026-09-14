@@ -22,6 +22,7 @@
  */
 
 import { hexByteLength, hexToBytes, leBytesToBigInt, readCompact } from '../lib/hex';
+import { parseRawHeader, type RawChainHeader } from './anchor';
 import { storage, type ChainContext } from './api';
 
 /** Leaves per `state_queryStorageAt` when four items are read per leaf. */
@@ -117,6 +118,91 @@ export async function blockHashAt(context: ChainContext, number: number): Promis
 /** A raw header, as `chain_getHeader` returns it. */
 export async function headerAt(context: ChainContext, hash: string): Promise<unknown> {
   return context.send<unknown>('chain_getHeader', [hash]);
+}
+
+/**
+ * Every header from `anchor` up to `head`, walked **downward** by
+ * `parentHash`.
+ *
+ * Downward, and by the parent link, is what makes the range a chain rather
+ * than a list of answers: each header is fetched by the hash its child names,
+ * so one trusted hash at the bottom authenticates every field of every header
+ * above it once the caller rehashes them. That is where a block's
+ * `zkTreeRoot` and its pre-runtime author label come from, and those are what
+ * decide a leaf's kind.
+ *
+ * One `chain_getHeader` per block and no `chain_getBlockHash` at all, because
+ * each header names its parent. It asks nothing about this wallet: every
+ * wallet on the chain reads the same headers.
+ *
+ * Returned in ascending order, `anchor` first. The caller must rehash every
+ * one and compare `anchor`'s against a hash it already trusts;
+ * `wallet/sync.ts` does both.
+ */
+export async function fetchHeaderRange(
+  context: ChainContext,
+  anchor: number,
+  head: Head,
+  onProgress?: (done: number) => void,
+): Promise<RawChainHeader[]> {
+  if (anchor > head.number) {
+    throw new Error(`a header walk was asked for block ${anchor} down from block ${head.number}`);
+  }
+  const out: RawChainHeader[] = [];
+  let hash = head.hash;
+  for (let number = head.number; ; number -= 1) {
+    const header = parseRawHeader(await context.send<unknown>('chain_getHeader', [hash]));
+    const claimed = Number(BigInt(header.number));
+    if (claimed !== number) {
+      throw new Error(
+        `this node answered a header numbered ${claimed} for the hash it gave as block ` +
+          `${number}. A header read at the hash its child names is the only thing tying a block ` +
+          'to a height, so the walk is refused rather than dating leaves by it. Nothing has been ' +
+          'changed.',
+      );
+    }
+    out.push(header);
+    onProgress?.(out.length);
+    if (number === anchor) {
+      break;
+    }
+    hash = header.parentHash;
+  }
+  out.reverse();
+  return out;
+}
+
+/**
+ * `Shielded::LeafBlocks` over a range, at one block.
+ *
+ * The block each leaf is dated at, as the node reports it. Advisory: the
+ * authenticated block ranges are what decide, and this is what they are
+ * checked against. Read on its own, one key per leaf, because the typing pass
+ * needs every leaf's block before the windowed scan can say which leaf is a
+ * block's last one, and a window carries kilobytes of ciphertext per leaf.
+ */
+export async function fetchLeafBlocks(
+  context: ChainContext,
+  from: number,
+  to: number,
+  at: string,
+): Promise<(number | null)[]> {
+  const leafBlocks = storage(context, 'shielded', 'leafBlocks');
+  const out: (number | null)[] = [];
+  for (let start = from; start < to; start += LEAF_HASH_BATCH) {
+    const end = Math.min(start + LEAF_HASH_BATCH, to);
+    const keys = new Map<number, string>();
+    for (let index = start; index < end; index += 1) {
+      keys.set(index, leafBlocks.key(index));
+    }
+    const values = await queryAt(context, [...keys.values()], at);
+    for (let index = start; index < end; index += 1) {
+      const raw = values.get(keys.get(index) ?? '');
+      const height = decodeInteger(raw, `Shielded::LeafBlocks(${index})`, 4);
+      out.push(height === null ? null : Number(height));
+    }
+  }
+  return out;
 }
 
 /**
@@ -383,10 +469,15 @@ function withheld(key: string, index: number, leafCount: number, at: string): Er
  * again without a rescan. Each is refused by name instead, and the pass with
  * it.
  *
- * `CoinbaseValues` is the one of the four that is never required: presence is
- * what marks a coinbase leaf, so an absent one is an ordinary shield or
- * settled output. A node that withholds it on a coinbase leaf is caught by the
- * ciphertext rule, since a v1 coinbase carries no ciphertext either.
+ * The ciphertext rule here is the coarse half of a rule that is finished one
+ * layer up. Presence of `CoinbaseValues` does **not** decide that a leaf is a
+ * coinbase: presence is the node's to write, and eight invented bytes beside
+ * an incoming transfer used to route it onto the coinbase rebuild and hide the
+ * payment. What decides is where the block headers put the leaf, which
+ * `wallet/sync.ts` works out from the header chain and the root each block
+ * published. So this refuses only the shape that is wrong whatever kind the
+ * leaf turns out to be, a leaf carrying neither key, and the typed rules
+ * refuse the rest by name.
  *
  * `Chain::leaves` and `Wallet::sync_with` in the command-line wallet refuse
  * the identical set.

@@ -49,9 +49,32 @@ interface Call {
   params: unknown[];
 }
 
-const HEAD_HASH = '0x' + 'aa'.repeat(32);
-const GENESIS = '0x' + '11'.repeat(32);
 const HEAD_NUMBER = 12;
+
+/**
+ * The hash this fixture's node serves at a height, and the one a wallet
+ * recomputes from that block's header.
+ *
+ * A sync walks the headers down from the head to a hash it already trusts and
+ * rehashes every one, so a fixture whose hashes were not its headers' hashes
+ * is a node that cannot serve a header at all.
+ */
+function hashAt(height: number): string {
+  return `0x${String(height).padStart(64, '0')}`;
+}
+
+/** The root this fixture's tree reaches after `count` leaves. */
+function rootFor(count: number): string {
+  return `0x${String(count).padStart(64, '7')}`;
+}
+
+/** Leaves folded in by the end of a block: leaf `i` is appended in block `i + 1`. */
+function countAt(block: number): number {
+  return Math.max(0, Math.min(block, LEAF_COUNT));
+}
+
+const HEAD_HASH = hashAt(HEAD_NUMBER);
+const GENESIS = hashAt(0);
 const LEAF_COUNT = 8;
 /** The leaf this wallet owns. The point of the test is that it is not named. */
 const OUR_LEAF = 5;
@@ -124,10 +147,21 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
       if (height === undefined) {
         return Promise.resolve(HEAD_HASH as T);
       }
-      return Promise.resolve((height === 0 ? GENESIS : `0x${String(height).padStart(64, 'b')}`) as T);
+      return Promise.resolve(hashAt(height) as T);
     }
     if (method === 'chain_getHeader') {
-      return Promise.resolve({ number: `0x${HEAD_NUMBER.toString(16)}` } as T);
+      const asked = params[0] as string | undefined;
+      const number =
+        asked === undefined ? HEAD_NUMBER : Number(asked.replace(/^0x0*/, '') || '0');
+      return Promise.resolve({
+        parentHash: hashAt(number - 1),
+        number: `0x${number.toString(16)}`,
+        stateRoot: `0x${'22'.repeat(32)}`,
+        extrinsicsRoot: `0x${'33'.repeat(32)}`,
+        zkTreeRoot: rootFor(countAt(number)),
+        // One pre-runtime item, the author label of somebody else.
+        digest: { logs: [`0x06706f775f80${'9a'.repeat(32)}`] },
+      } as T);
     }
     if (method === 'state_queryStorageAt') {
       const keys = params[0] as string[];
@@ -198,6 +232,13 @@ function crypto(): SyncCrypto {
     coinbaseBatch: () =>
       Promise.reject(new Error('this chain has no coinbase leaves in the fixture')),
     entryRhoMatches: () => Promise.resolve(false),
+    // The module's own hash rules, stood in for: what this test covers is the
+    // request stream, and the recomputations are covered against the pallet in
+    // Rust.
+    headerHashes: (headers) =>
+      Promise.resolve(headers.map((header) => hashAt(header.block_number))),
+    authorLabels: (parentHashes) => Promise.resolve(parentHashes.map(() => 'ff'.repeat(32))),
+    blockRoots: (_leafHashes, counts) => Promise.resolve(counts.map((count) => rootFor(count))),
   };
 }
 

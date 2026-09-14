@@ -216,6 +216,9 @@ export type WorkerRequest =
   | { kind: 'entryRhoMatches'; blockNumber: number; rho: string; entryCount: string }
   | { kind: 'noteDigests'; value: string; rho: string; r: string }
   | { kind: 'headerBlockHash'; anchor: Anchor }
+  | { kind: 'headerBlockHashes'; headers: Anchor[] }
+  | { kind: 'authorLabels'; parentHashes: string[] }
+  | { kind: 'blockRoots'; leafHashes: Uint8Array; counts: number[] }
   | { kind: 'treePath'; leafHashes: Uint8Array; depth: number; leafIndex: number }
   | { kind: 'treeRoot'; leafHashes: Uint8Array; depth: number }
   | { kind: 'depthFor'; leafCount: number }

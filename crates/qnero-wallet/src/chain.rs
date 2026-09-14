@@ -69,6 +69,47 @@ impl RawHeader {
         Ok(padded)
     }
 
+    /// The 32 bytes of the block author's label, out of the pre-runtime
+    /// digest item consensus puts there.
+    ///
+    /// The item is `DigestItem::PreRuntime(POW_ENGINE_ID, label)` and the
+    /// label is `qnero_note_core::MinerKey::author_label(parent_hash)`, which
+    /// is `H("qnero/author-label", cvk, parent_hash)`. `cvk` is the miner's
+    /// secret, so nobody can compute another wallet's label and no wallet's
+    /// blocks can be grouped by a reader; the wallet that holds the key
+    /// recomputes its own and compares.
+    ///
+    /// The header's hash commits to the digest, so this is authenticated by
+    /// the same recomputation that authenticates the rest of the header. That
+    /// is what makes it usable for deciding which blocks this wallet mined:
+    /// a node cannot present a block of this wallet's as somebody else's
+    /// without changing the hash.
+    ///
+    /// `None` when there is no such item, which is a block no Qnero node
+    /// built.
+    pub fn author_label(&self) -> Result<Option<[u8; 32]>> {
+        for log in &self.digest.logs {
+            let bytes = decode_hex(log)?;
+            // `PreRuntime` is variant 6, then four bytes of engine id, then a
+            // `Vec<u8>` with its compact length prefix.
+            let Some(rest) = bytes.strip_prefix(&[PRE_RUNTIME_VARIANT]) else {
+                continue;
+            };
+            let Some(rest) = rest.strip_prefix(&POW_ENGINE_ID) else {
+                continue;
+            };
+            let mut cursor = rest;
+            let Ok(payload) = Vec::<u8>::decode(&mut cursor) else {
+                continue;
+            };
+            if !cursor.is_empty() {
+                continue;
+            }
+            return Ok(<[u8; 32]>::try_from(payload.as_slice()).ok());
+        }
+        Ok(None)
+    }
+
     /// The circuit's view of this header.
     ///
     /// `parent_hash` and `zk_tree_root` are Poseidon2 outputs and take the
@@ -180,6 +221,105 @@ impl<'a> Chain<'a> {
             );
         }
         Ok((header, hash))
+    }
+
+    /// The headers of `anchor..=head`, each authenticated by its own hash.
+    ///
+    /// Walked **downward**, by `parentHash`, which is what makes the chain a
+    /// chain rather than a list of answers. Every header is fetched by the
+    /// hash its child named, its preimage is rehashed here, and the result has
+    /// to be that hash; so from a single trusted hash at the bottom, every
+    /// field of every header above it is authenticated: the `zkTreeRoot` a
+    /// leaf range is checked against, and the pre-runtime author label that
+    /// says whose block it is.
+    ///
+    /// The walk costs one `chain_getHeader` per block, and no
+    /// `chain_getBlockHash` at all, because each header names its parent. It
+    /// names nothing about this wallet: every wallet on the chain reads the
+    /// same headers.
+    ///
+    /// The caller supplies the bottom of the chain and must compare
+    /// `blocks[0].hash` against a hash it already trusts, which is the store's
+    /// genesis or a checkpoint an earlier pass recorded. Without that
+    /// comparison this returns a self-consistent chain and nothing more, and a
+    /// node can build one of those out of nothing.
+    pub fn header_chain(&self, head: &ChainHead, anchor: u32) -> Result<Vec<VerifiedBlock>> {
+        ensure_le(anchor, head.number)?;
+        let span = usize::try_from(head.number - anchor).unwrap_or(usize::MAX);
+        let mut blocks = Vec::with_capacity(span.saturating_add(1));
+        let mut hash = head.hash;
+        let mut number = head.number;
+        loop {
+            let raw = self.header_at(&hash)?;
+            let claimed = raw.block_number()?;
+            if claimed != number {
+                bail!(
+                    "this node answered a header numbered {claimed} for the hash it gave as \
+                     block {number}. A header read at the hash its child names is the only thing \
+                     tying a block to a height, so the walk is refused rather than dating leaves \
+                     by it. Nothing has been changed."
+                );
+            }
+            let header = raw.to_header_inputs()?;
+            let recomputed = header.block_hash().to_bytes();
+            if recomputed != hash {
+                bail!(
+                    "the header this node served for block {number} hashes to {} where the hash \
+                     asked for is {}. The header preimage is what authenticates a block's \
+                     zkTreeRoot and its author label, so a header that does not hash to its own \
+                     name authenticates nothing. Nothing has been changed.",
+                    hex::encode(recomputed),
+                    hex::encode(hash)
+                );
+            }
+            blocks.push(VerifiedBlock {
+                number,
+                hash,
+                parent_hash: decode_hash(&raw.parent_hash)?,
+                zk_tree_root: Digest::from_bytes(&decode_hash(&raw.zk_tree_root)?).map_err(
+                    |_| anyhow!("block {number}'s zkTreeRoot is not a canonical digest"),
+                )?,
+                author_label: raw.author_label()?,
+            });
+            if number == anchor {
+                break;
+            }
+            hash = decode_hash(&raw.parent_hash)?;
+            number -= 1;
+        }
+        blocks.reverse();
+        Ok(blocks)
+    }
+
+    /// `Shielded::LeafBlocks` over a range, at one block.
+    ///
+    /// The block each leaf is dated at, as the node reports it. Advisory: the
+    /// authenticated block ranges are what decide, and this is compared
+    /// against them. See `crate::typing`.
+    pub fn leaf_blocks(
+        &self,
+        range: std::ops::Range<u64>,
+        at: &[u8; 32],
+    ) -> Result<Vec<Option<u32>>> {
+        let at = hex_0x(at);
+        let mut out = Vec::with_capacity((range.end.saturating_sub(range.start)) as usize);
+        for chunk_start in range.clone().step_by(LEAF_HASH_BATCH) {
+            let chunk_end = (chunk_start + LEAF_HASH_BATCH as u64).min(range.end);
+            let keys: Vec<Vec<u8>> = (chunk_start..chunk_end)
+                .map(|index| identity_map_key(SHIELDED_PALLET, "LeafBlocks", index))
+                .collect();
+            for (offset, value) in self.rpc.storage_batch(&keys, &at)?.into_iter().enumerate() {
+                let index = chunk_start + offset as u64;
+                out.push(
+                    value
+                        .map(|bytes| {
+                            decode_u32_exact(&bytes, &format!("Shielded::LeafBlocks({index})"))
+                        })
+                        .transpose()?,
+                );
+            }
+        }
+        Ok(out)
     }
 
     /// `zkTree_getState`, the tree's own view at the best block.
@@ -404,11 +544,16 @@ impl<'a> Chain<'a> {
     /// block. `fetchLeaves` in `wallet-web/src/chain/reads.ts` refuses the
     /// identical set.
     ///
-    /// `CoinbaseValues` is the one of the four that is never required:
-    /// presence is what marks a coinbase leaf, so an absent one is an ordinary
-    /// shield or settled output. A node that withholds it on a coinbase leaf
-    /// is caught by the ciphertext rule, since a v1 coinbase carries no
-    /// ciphertext either.
+    /// The ciphertext rule here is the coarse half of a rule that is finished
+    /// one layer up. Presence of `CoinbaseValues` does **not** decide that a
+    /// leaf is a coinbase: presence is the node's to write, and eight invented
+    /// bytes beside an incoming transfer used to route it onto the coinbase
+    /// rebuild and hide the payment. What decides is where the block headers
+    /// put the leaf, in `crate::typing`, which refuses an invented coinbase
+    /// value below a block's last leaf and a withheld one at the coinbase
+    /// position of a block this wallet mined. So this function refuses only
+    /// the shape that is wrong whatever kind the leaf turns out to be, a leaf
+    /// carrying neither key, and the typed rules refuse the rest by name.
     pub fn leaves(
         &self,
         range: std::ops::Range<u64>,
@@ -748,6 +893,13 @@ fn decode_u32_exact(bytes: &[u8], what: &str) -> Result<u32> {
     Ok(u32::from_le_bytes(value))
 }
 
+/// `DigestItem::PreRuntime`'s SCALE variant index.
+const PRE_RUNTIME_VARIANT: u8 = 6;
+
+/// `sp_consensus_qpow::POW_ENGINE_ID`, the four bytes consensus tags its
+/// pre-runtime item with.
+const POW_ENGINE_ID: [u8; 4] = *b"pow_";
+
 /// Leaves read per `state_queryStorageAt` call.
 const LEAF_BATCH: usize = 64;
 
@@ -765,6 +917,26 @@ pub struct TreeState {
     pub depth: u8,
 }
 
+/// One block of a header walk, authenticated by its own preimage hash.
+#[derive(Debug, Clone)]
+pub struct VerifiedBlock {
+    pub number: u32,
+    pub hash: [u8; 32],
+    pub parent_hash: [u8; 32],
+    /// The commitment-tree root this block published, which is what a leaf
+    /// range is checked against.
+    pub zk_tree_root: Digest,
+    /// The pre-runtime author label, absent on a block no Qnero node built.
+    pub author_label: Option<[u8; 32]>,
+}
+
+fn ensure_le(anchor: u32, head: u32) -> Result<()> {
+    if anchor > head {
+        bail!("a header walk was asked for block {anchor} down from block {head}");
+    }
+    Ok(())
+}
+
 /// One leaf as the chain holds it.
 #[derive(Debug, Clone)]
 pub struct LeafRecord {
@@ -775,4 +947,41 @@ pub struct LeafRecord {
     /// The public value of a coinbase note, in pool quanta. `Some` for exactly
     /// the leaves a block's coinbase minted.
     pub coinbase_value: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stored `Vec<u8>` whose length prefix and body disagree is refused.
+    ///
+    /// `Vec::<u8>::decode` stops at the declared length and ignores whatever
+    /// trails it, so without this check a wallet hands `try_receive` a
+    /// ciphertext at a length the chain did not store: the decryption fails,
+    /// the leaf counts as somebody else's, and the pass reports a zero balance
+    /// over a completed scan. `decodeBytes` in
+    /// `wallet-web/src/chain/reads.ts` refuses the same disagreement.
+    #[test]
+    fn a_stored_byte_vector_whose_prefix_and_body_disagree_is_refused() {
+        // Compact 3, then three bytes: the honest shape.
+        let honest = [0x0cu8, 1, 2, 3];
+        assert_eq!(
+            decode_stored_bytes(&honest, "Shielded::Ciphertexts", 7).expect("decodes"),
+            vec![1, 2, 3]
+        );
+
+        // The same prefix with a fourth byte trailing it.
+        let trailing = [0x0cu8, 1, 2, 3, 4];
+        let error = decode_stored_bytes(&trailing, "Shielded::Ciphertexts", 7)
+            .expect_err("a body longer than its prefix is refused");
+        let message = format!("{error:#}");
+        assert!(message.contains("Shielded::Ciphertexts(7)"), "{message}");
+        assert!(message.contains("declares 3 bytes"), "{message}");
+        assert!(message.contains("carries 1 more"), "{message}");
+
+        // And a prefix that promises more than the value carries, which
+        // `Vec::<u8>::decode` refuses on its own.
+        let short = [0x0cu8, 1, 2];
+        assert!(decode_stored_bytes(&short, "Shielded::Ciphertexts", 7).is_err());
+    }
 }

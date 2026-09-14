@@ -52,11 +52,28 @@ fn node_with(state: NodeState) -> FakeNode {
     FakeNode::start(state)
 }
 
-/// The genesis of the chain the fake node serves. A derived coinbase note is
+/// A node that names this wallet as the author of `blocks`.
+///
+/// A block's author label is `H("qnero/author-label", cvk, parent_hash)` in
+/// its pre-runtime digest item, and the header hash commits to it, so a wallet
+/// knows which blocks it mined without asking. What the wallet does with that
+/// is ask for the coinbase value of its own blocks by name, so a fixture that
+/// wants a block to be the wallet's own says so here.
+fn node_authoring(miner_key: &MinerKey, head: u32, blocks: &[u32]) -> NodeState {
+    NodeState {
+        head_number: head,
+        miner_key: Some(miner_key.clone()),
+        authored: blocks.iter().copied().collect(),
+        ..Default::default()
+    }
+}
+
+/// The genesis of the chain a fake node serves. A derived coinbase note is
 /// bound to it, so every note a test builds has to name the same chain the
-/// wallet will sync against.
-fn genesis() -> [u8; 32] {
-    support::block_hash(0)
+/// wallet will sync against. Block zero carries no leaves, so this is fixed
+/// before a fixture writes any.
+fn genesis_of(state: &NodeState) -> [u8; 32] {
+    state.genesis_hash()
 }
 
 /// The path every Qnero node takes: the node publishes `inner` alone, the
@@ -71,13 +88,11 @@ fn a_mined_block_becomes_a_spendable_note() {
     let miner_key = wallet.miner_key();
 
     // Two blocks this wallet authored, at two heights, worth different amounts.
-    let first = miner_key.coinbase_note(&genesis(), 7, 42).expect("a note");
-    let second = miner_key.coinbase_note(&genesis(), 8, 41).expect("a note");
+    let mut state = node_authoring(&miner_key, 9, &[7, 8]);
+    let genesis = genesis_of(&state);
+    let first = miner_key.coinbase_note(&genesis, 7, 42).expect("a note");
+    let second = miner_key.coinbase_note(&genesis, 8, 41).expect("a note");
 
-    let mut state = NodeState {
-        head_number: 9,
-        ..Default::default()
-    };
     put_coinbase(&mut state, 0, 7, first.commitment(), 42, None);
     put_coinbase(&mut state, 1, 8, second.commitment(), 41, None);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
@@ -119,13 +134,11 @@ fn a_coinbase_value_withheld_below_the_leaf_count_refuses_the_pass() {
     create_seed(&seed).expect("a fresh seed");
     let mut wallet = Wallet::open(&seed).expect("the wallet opens");
     let miner_key = wallet.miner_key();
-    let mined = miner_key.coinbase_note(&genesis(), 3, 25).expect("a note");
-
-    let mut state = NodeState {
-        head_number: 4,
-        withheld_coinbase_values: [0].into_iter().collect(),
-        ..Default::default()
-    };
+    let mut state = node_authoring(&miner_key, 4, &[3]);
+    state.withheld_coinbase_values = [0].into_iter().collect();
+    let mined = miner_key
+        .coinbase_note(&genesis_of(&state), 3, 25)
+        .expect("a note");
     put_coinbase(&mut state, 0, 3, mined.commitment(), 25, None);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
     let node = node_with(state);
@@ -210,12 +223,17 @@ fn a_value_that_does_not_open_the_commitment_is_not_received() {
     let mut wallet = Wallet::open(&seed).expect("the wallet opens");
     let miner_key = wallet.miner_key();
 
-    // The commitment of a 42-quantum note, published beside a claim of 1000.
-    let note = miner_key.coinbase_note(&genesis(), 7, 42).expect("a note");
+    // The commitment of a 42-quantum note, published beside a claim of 1000,
+    // in a block whose author label is not this wallet's. A block this wallet
+    // *did* author refuses the pass instead: see
+    // `a_wrong_value_on_this_wallets_own_block_refuses_the_pass`.
     let mut state = NodeState {
         head_number: 8,
         ..Default::default()
     };
+    let note = miner_key
+        .coinbase_note(&genesis_of(&state), 7, 42)
+        .expect("a note");
     put_coinbase(&mut state, 0, 7, note.commitment(), 1_000, None);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
     let node = node_with(state);
@@ -254,12 +272,13 @@ fn another_miners_coinbase_is_not_this_wallets_note() {
         head_number: 6,
         ..Default::default()
     };
+    let genesis = genesis_of(&state);
     put_coinbase(
         &mut state,
         0,
         4,
         theirs
-            .coinbase_note(&genesis(), 4, 10)
+            .coinbase_note(&genesis, 4, 10)
             .expect("a note")
             .commitment(),
         10,
@@ -270,7 +289,7 @@ fn another_miners_coinbase_is_not_this_wallets_note() {
         1,
         5,
         same_address
-            .coinbase_note(&genesis(), 5, 10)
+            .coinbase_note(&genesis, 5, 10)
             .expect("a note")
             .commitment(),
         10,
@@ -304,15 +323,15 @@ fn a_coinbase_from_another_chain_is_not_this_wallets_note() {
     let miner_key = wallet.miner_key();
 
     // This wallet's own miner key at height 7, mined on a chain whose genesis
-    // is not the one this node serves.
+    // is not the one this node serves. On this chain block 7 belongs to
+    // somebody else, which is what its author label says.
+    let mut state = node_authoring(&miner_key, 9, &[8]);
     let elsewhere = miner_key.coinbase_note(&[0xAB; 32], 7, 42).expect("a note");
     // And the same key at the same height here, which must still be found.
-    let here = miner_key.coinbase_note(&genesis(), 8, 5).expect("a note");
+    let here = miner_key
+        .coinbase_note(&genesis_of(&state), 8, 5)
+        .expect("a note");
 
-    let mut state = NodeState {
-        head_number: 9,
-        ..Default::default()
-    };
     put_coinbase(&mut state, 0, 7, elsewhere.commitment(), 42, None);
     put_coinbase(&mut state, 1, 8, here.commitment(), 5, None);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
@@ -348,14 +367,15 @@ fn the_miner_key_round_trips_to_the_note_a_node_would_build() {
         wallet.address().pk,
         "the key names this wallet's address"
     );
+    let chain = [0x5Au8; 32];
     assert_eq!(
         decoded
-            .coinbase_note(&genesis(), 11, 5)
+            .coinbase_note(&chain, 11, 5)
             .expect("a note")
             .commitment(),
         wallet
             .miner_key()
-            .coinbase_note(&genesis(), 11, 5)
+            .coinbase_note(&chain, 11, 5)
             .expect("a note")
             .commitment()
     );

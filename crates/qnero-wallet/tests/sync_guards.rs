@@ -922,6 +922,18 @@ fn a_heavier_shorter_branch_is_a_fork_and_syncs() {
         state.remove_storage(&identity_map_key("ZkTree", "Leaves", 4));
         state.remove_storage(&identity_map_key("Shielded", "Ciphertexts", 4));
         state.remove_storage(&identity_map_key("Shielded", "LeafBlocks", 4));
+        // The replacement branch appended leaves 4 and 5 in block 9 as well,
+        // and dating them says so: a leaf's block can never be below the block
+        // of a leaf with a smaller index, and the wallet checks that against
+        // the root each header carries.
+        state.put_storage(
+            &identity_map_key("Shielded", "LeafBlocks", 4),
+            &codec::Encode::encode(&9u32),
+        );
+        state.put_storage(
+            &identity_map_key("Shielded", "LeafBlocks", 5),
+            &codec::Encode::encode(&9u32),
+        );
         put_leaf(
             &mut state,
             6,
@@ -1016,11 +1028,14 @@ fn a_leaf_count_below_the_watermark_is_refused_without_a_fork() {
     let before = serde_json::to_value(&wallet.store).expect("the store serializes");
 
     // The head moves forward, every checkpoint hash still stands, and the tree
-    // is two leaves shorter than the wallet has already read.
+    // is two leaves shorter than the wallet has already read. The short count
+    // is what this node *answers*, where the blocks it published still carry
+    // the roots they carried: that is a head it has not finished executing,
+    // and it is what makes the gate's subject lag rather than a fork.
     {
         let mut state = node.state();
         state.head_number = 12;
-        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(4));
+        state.short_leaf_count = Some(4);
     }
     let refused = wallet
         .sync(&chain, &metadata)
@@ -1048,7 +1063,7 @@ fn a_leaf_count_below_the_watermark_is_refused_without_a_fork() {
     // The node finishes executing and the sync runs with nothing rewound.
     {
         let mut state = node.state();
-        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(6));
+        state.short_leaf_count = None;
     }
     let report = wallet.sync(&chain, &metadata).expect("the sync runs again");
     assert_eq!(report.rewound_from, None);
@@ -1193,6 +1208,14 @@ fn a_rescan_recovers_a_leaf_below_the_watermark_and_keeps_every_note() {
         held.commitment(),
         &ct_for(&address, &held, 8),
     );
+    // Leaf 2 was always there, and an older build never kept it.
+    put_leaf(
+        &mut state,
+        2,
+        9,
+        twin.commitment(),
+        &ct_for(&address, &twin, 10),
+    );
     put_leaf(
         &mut state,
         3,
@@ -1208,27 +1231,34 @@ fn a_rescan_recovers_a_leaf_below_the_watermark_and_keeps_every_note() {
 
     wallet.sync(&chain, &metadata).expect("the first sync runs");
     assert_eq!(wallet.store.next_leaf, 6);
+
+    // The store an older build left behind. That build refused the second note
+    // it met that shared a nullifier with one it already held: it wrote a
+    // `rejected` entry, kept no copy of the note's secrets, and left the leaf
+    // below the watermark. The chain is untouched here, because this is a
+    // property of the file rather than of the chain: a leaf whose secrets are
+    // only on chain and a watermark written above it.
+    wallet
+        .store
+        .notes
+        .retain(|note| note.commitment != twin.commitment().to_hex());
+    wallet
+        .store
+        .record_rejected(qnero_wallet::store::RejectedNote {
+            leaf_index: 2,
+            commitment: twin.commitment().to_hex(),
+            nullifier: String::new().into(),
+            value: 0,
+            reason: "its nullifier is already settled on chain".into(),
+        });
+    wallet.save().expect("the store saves");
     assert_eq!(wallet.store.unspent_total(), 650);
 
-    // Leaf 2 was always there and this wallet never read it: an older build
-    // decrypted it, refused it as a duplicate nullifier and moved on. Leaf 3
-    // is gone, its block orphaned and its settlement never re-included.
+    // An ordinary sync sees none of it: the leaf is below the watermark.
     {
         let mut state = node.state();
-        put_leaf(
-            &mut state,
-            2,
-            9,
-            twin.commitment(),
-            &ct_for(&address, &twin, 10),
-        );
-        state.remove_storage(&identity_map_key("ZkTree", "Leaves", 3));
-        state.remove_storage(&identity_map_key("Shielded", "Ciphertexts", 3));
-        state.remove_storage(&identity_map_key("Shielded", "LeafBlocks", 3));
         state.head_number = 11;
     }
-
-    // An ordinary sync sees none of it: both leaves are below the watermark.
     let report = wallet.sync(&chain, &metadata).expect("the plain sync runs");
     assert_eq!(report.received, 0);
     assert_eq!(report.vanished, 0);
@@ -1295,6 +1325,10 @@ fn a_rescan_recovers_a_leaf_below_the_watermark_and_keeps_every_note() {
         state.fork_from = 10;
         state.fork_tag = 4;
         state.head_number = 12;
+        // The branch that survived never re-included the settlement that
+        // created leaf 3's note, so that leaf holds something else now.
+        state.remove_storage(&identity_map_key("ZkTree", "Leaves", 3));
+        state.remove_storage(&identity_map_key("Shielded", "Ciphertexts", 3));
     }
     let report = wallet
         .sync(&chain, &metadata)
@@ -1394,6 +1428,7 @@ fn a_rescan_bypasses_the_node_gate_and_only_adds() {
         state.remove_storage(&identity_map_key("ZkTree", "Leaves", 6));
         state.remove_storage(&identity_map_key("Shielded", "Ciphertexts", 6));
         state.remove_storage(&identity_map_key("Shielded", "LeafBlocks", 6));
+        state.remove_storage(&identity_map_key("Shielded", "LeafBlocks", 5));
         put_leaf(
             &mut state,
             2,
@@ -1402,6 +1437,10 @@ fn a_rescan_bypasses_the_node_gate_and_only_adds() {
             &ct_for(&address, &unread, 22),
         );
         state.head_number = 17;
+        // This node re-executed onto a branch of its own, so the blocks it
+        // dated leaves to on the branch it left do not survive either: a node
+        // whose head is block 17 cannot answer a leaf dated to block 19.
+        state.sealed.clear();
         state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(4));
     }
     let refused = wallet

@@ -26,10 +26,45 @@ import {
 import { STORE_VERSION, type NoteSecret, type StoreMeta, type StoredNote } from '../src/wallet/model';
 import { ENTRY_WALK_LIMIT } from '../src/worker/protocol';
 
-const GENESIS = '11'.repeat(32);
+import { chainParts, cryptoParts, GENESIS, hashAtHeight, type ChainShape } from './fixtures/chain';
 
-function hashAtHeight(height: number): string {
-  return `${height}`.padStart(64, '0');
+/**
+ * The chain behind a fixture's leaves.
+ *
+ * A leaf's kind is decided from the headers now, so a list of leaves is not a
+ * chain on its own: every fixture needs a block per leaf, a header per block
+ * carrying the root after exactly the leaves that block appended, and the
+ * author label of whoever mined it. `tests/fixtures/chain.ts` builds all of
+ * that from the same list the leaf reads answer out of.
+ */
+function shapeOf(options: {
+  head: number;
+  leafCount: number;
+  leaves: readonly FakeLeaf[];
+  ours?: ReadonlySet<number>;
+  withheldBlocks?: ReadonlySet<number>;
+  misdated?: ReadonlyMap<number, number>;
+}): ChainShape {
+  const declared = new Map(options.leaves.map((leaf) => [leaf.index, leaf]));
+  // Carried forward, because leaves are appended in block order: a leaf a
+  // fixture does not name belongs to the block of the newest leaf it did name
+  // below it.
+  const dates: number[] = [];
+  let running = 1;
+  for (let index = 0; index < options.leafCount; index += 1) {
+    running = Math.max(running, declared.get(index)?.blockNumber ?? running);
+    dates.push(running);
+  }
+  return {
+    head: options.head,
+    leafCount: options.leafCount,
+    blockOf: (index) => dates[index] ?? running,
+    commitmentAt: (index) =>
+      declared.get(index)?.commitment ?? `f${index.toString(16)}`.padStart(64, '0'),
+    ours: options.ours,
+    withheldBlocks: options.withheldBlocks,
+    misdated: options.misdated,
+  };
 }
 
 function meta(overrides: Partial<StoreMeta> = {}): StoreMeta {
@@ -87,12 +122,23 @@ function fakeChain(options: {
   anchorWindow?: number;
   entryCount?: bigint;
   withheld?: Partial<Record<LeafKey, number[]>>;
+  ours?: ReadonlySet<number>;
+  misdated?: ReadonlyMap<number, number>;
 }): SyncChain {
   const leafCount = options.leafCount ?? options.leaves.length;
   const declared = new Map(options.leaves.map((leaf) => [leaf.index, leaf]));
   const withheld = (key: LeafKey, index: number): boolean =>
     options.withheld?.[key]?.includes(index) ?? false;
+  const shape = shapeOf({
+    head: options.head,
+    leafCount,
+    leaves: options.leaves,
+    ours: options.ours,
+    withheldBlocks: new Set(options.withheld?.blockNumber ?? []),
+    misdated: options.misdated,
+  });
   return {
+    ...chainParts(shape),
     storageDrift: options.drift ?? [],
     anchorWindow: options.anchorWindow ?? ANCHOR_WINDOW,
     head: () => Promise.resolve({ number: options.head, hash: hashAtHeight(options.head) }),
@@ -108,14 +154,14 @@ function fakeChain(options: {
         const isCoinbase = leaf?.coinbaseQuanta !== undefined;
         rows.push({
           index,
-          commitment: withheld('commitment', index)
-            ? null
-            : (leaf?.commitment ?? `f${index.toString(16)}`.padStart(64, '0')),
+          commitment: withheld('commitment', index) ? null : shape.commitmentAt(index),
           // A coinbase leaf carries no ciphertext under v1, and every other
           // leaf carries one: an unnamed leaf gets bytes nothing can open.
           ciphertext:
             isCoinbase || withheld('ciphertext', index) ? null : new Uint8Array([1, 2, 3]),
-          blockNumber: withheld('blockNumber', index) ? null : (leaf?.blockNumber ?? 1),
+          blockNumber: withheld('blockNumber', index)
+            ? null
+            : (options.misdated?.get(index) ?? shape.blockOf(index)),
           coinbaseQuanta:
             withheld('coinbaseQuanta', index) ? null : (leaf?.coinbaseQuanta ?? null),
         });
@@ -126,9 +172,17 @@ function fakeChain(options: {
   };
 }
 
-function fakeCrypto(leaves: readonly FakeLeaf[]): SyncCrypto {
+function fakeCrypto(leaves: readonly FakeLeaf[], shape?: ChainShape): SyncCrypto {
   const byIndex = new Map(leaves.map((leaf) => [leaf.index, leaf.note]));
   return {
+    ...cryptoParts(
+      shape ??
+        shapeOf({
+          head: 0,
+          leafCount: leaves.length,
+          leaves,
+        }),
+    ),
     decryptBatch: (items) => Promise.resolve(items.map((item) => byIndex.get(item.index) ?? null)),
     coinbaseBatch: (items) =>
       Promise.resolve(

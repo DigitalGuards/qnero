@@ -256,8 +256,10 @@ absent. For each leaf it reads `ZkTree::Leaves`, `Shielded::Ciphertexts`,
 `state_queryStorageAt`. All four maps are `Identity` hashed on the leaf index,
 so paging is by index and never by `state_getKeysPaged`.
 
-**A key the node withholds refuses the pass, and the rule covers all three
-keys a leaf must have.** `pallet-zk-tree` appends a leaf and raises `LeafCount`
+It also walks the headers of every block the range covers, which is what
+decides a leaf's kind: see "How a leaf's kind is decided" below.
+
+**A key the node withholds refuses the pass.** `pallet-zk-tree` appends a leaf and raises `LeafCount`
 in one call and nothing ever removes one, and `pallet-shielded` writes that
 leaf's other keys in the same call. Three writers, and this is the whole set:
 
@@ -283,14 +285,99 @@ nothing is written. `Chain::leaves` refuses them in the read layer and
 `Wallet::sync_with` again in the scan, and the browser wallet refuses the
 identical set in `wallet-web/src/chain/reads.ts` and again in `runSync`.
 
-`CoinbaseValues` is the one key of the four that is never required, because
-presence in that map is what makes a leaf a coinbase. A node that withholds it
-is caught by the ciphertext rule beside it: a v1 coinbase leaf carries no
-ciphertext either, so what is left below the count is a leaf with neither, and
-that is refused.
+The rule above covers the two keys every leaf has, `ZkTree::Leaves` and
+`Shielded::LeafBlocks`. Whether a leaf owes a ciphertext or a coinbase value is
+not a flat requirement: it depends on what kind of leaf it is, and that is
+decided by the section below. The one shape refused whatever the kind is a leaf
+carrying neither, which the read layer refuses on its own.
 
 An absent answer *above* the count is ordinary: a window may run past the end
 of the tree and nothing is being withheld there.
+
+#### How a leaf's kind is decided
+
+A leaf is a coinbase or it is a transfer, and the two are opened by different
+rules: a coinbase is rebuilt from the miner key and the public value the chain
+hashed into its commitment, a transfer is trial-decrypted from the ciphertext
+beside it. Getting the kind wrong is silent. The wrong rule simply does not
+open the leaf, the scan reads it as somebody else's, and the pass then commits
+a watermark above it, so nothing looks at that leaf again without a rescan.
+
+**A leaf's kind is derived only from data the header authenticates, never from
+which storage keys a node chose to answer.** Presence of
+`Shielded::CoinbaseValues` used to be the whole test, and presence is the
+node's to write. Both directions of that were exploitable:
+
+- eight invented bytes at `CoinbaseValues(i)` on an incoming transfer leaf sent
+  it onto the coinbase rebuild, which cannot open it, and the pass committed
+  the watermark past a hidden payment;
+- an invented `Ciphertexts(i)` beside a withheld `CoinbaseValues(i)` at a
+  wallet's own coinbase leaf silenced the ciphertext rule that was documented
+  as the catch, and hid a mined reward the same way.
+
+What decides instead is what the block headers commit to. The rules are one
+implementation in each wallet, `crates/qnero-wallet/src/typing.rs` and
+`authenticateLeaves` in `wallet-web/src/wallet/sync.ts`, and they are these.
+
+1. **The header chain.** Every header from the head down to a block hash this
+   wallet already trusts is fetched by the hash its child names and rehashed
+   from its own preimage, and the result has to be that hash. The walk goes
+   downward by `parentHash`, so it costs one `chain_getHeader` per block and no
+   `chain_getBlockHash` at all. The bottom is the genesis the store is bound to
+   when the scan starts at leaf zero, and otherwise the checkpoint an earlier
+   pass recorded at the watermark, whose hash the stance walk has just
+   confirmed still stands on this node's branch. Without that comparison a node
+   can build a self-consistent chain out of nothing, so a walk that does not
+   land on the trusted hash refuses the pass.
+
+2. **Each block's leaf range.** `pallet-zk-tree` folds a block's leaves in
+   `on_finalize` and publishes the root in that block's header, so the wallet
+   appends the leaves a node attributes to block `N`, folds, and compares
+   against `header(N).zkTreeRoot`. `Shielded::LeafBlocks` proposes a block's
+   range and the header settles it; a disagreement refuses the pass by name.
+   The fold is incremental, one Poseidon path update per leaf and one
+   comparison per block, so the check costs one pass over the tree rather than
+   one tree per block.
+
+3. **The coinbase position.** `pallet-mining-rewards` mints the coinbase from
+   its own `on_finalize`, through `CoinbaseSink`, at pallet index 6, where
+   every shield and every settled output was appended during extrinsic
+   execution and `ZkTree` folds at index 21. So a block's coinbase, when it
+   mints one, is the **last** leaf that block appended, and the only leaf index
+   a coinbase can occupy is `leaf_count_at(N) - 1`.
+
+4. **Whose block it is.** `qnero_note_core::MinerKey::author_label` is
+   `H("qnero/author-label", cvk, parent_hash)` and a node publishes it in the
+   block's pre-runtime digest item, which the header hash commits to. `cvk` is
+   the miner's secret, so no node can present one of this wallet's blocks as
+   somebody else's or the other way round.
+
+The per-position expectations follow from those, and every refusal names the
+rule it broke and leaves the store untouched:
+
+| Position | `Shielded::Ciphertexts` | `Shielded::CoinbaseValues` |
+|---|---|---|
+| below its block's last leaf | required, and trial-decrypted | present is a lie, refused by name |
+| its block's last leaf, block this wallet authored | not required | required, and its recomputed commitment must equal the authenticated leaf |
+| its block's last leaf, another author's block | not required; tried when present | optional, and it decides nothing on its own |
+
+What a node can no longer do: type a leaf by inventing or withholding a key.
+An invented coinbase value below a block's last leaf is refused. A withheld one
+at the coinbase position of a block this wallet mined is refused. An invented
+one at another author's coinbase position decides nothing, because a ciphertext
+there is still trial-decrypted and the payment arrives; under v1 a coinbase
+carries no ciphertext at all, so that costs nothing on an honest chain. Moving
+a leaf between blocks, lying about a block's leaf count, and serving a header
+that does not hash to its own name are each refused by name.
+
+The one thing this does not pin is a block that mints no coinbase at all.
+`pallet-shielded::mint_coinbase` refuses a credit below one pool quantum, so a
+block whose emission plus its share of the fees rounds to nothing appends no
+coinbase leaf and its last leaf is an ordinary shield or settled output. That
+is unreachable until the emission itself has rounded away at the supply cap.
+Until then the rule asks for a coinbase value at the coinbase position of a
+block **this wallet mined**, and says so by name when a node does not answer
+one.
 
 **Every integer read out of storage is decoded at its declared width**, and the
 leaf count is bounded as well as sized. `u64::decode` takes the first eight
@@ -310,9 +397,9 @@ deliberate partial decode left is `System::Account`, whose first field is the
 nonce and whose remainder this wallet needs nothing from. The browser wallet
 holds the same rule in `decodeInteger` and `readTreeShape`.
 
-**Coinbase leaves.** Every block mints one note to its author, and a leaf with
-a `CoinbaseValues` entry is one of those. Such a leaf is read differently, and
-not from its ciphertext: usually it has none. The value comes from the chain,
+**Coinbase leaves.** Every block mints one note to its author, at the one leaf
+index the section above authenticates. Such a leaf is read differently, and not
+from its ciphertext: usually it has none. The value comes from the chain,
 which published it because it hashed it into the commitment, and the rest of
 the note is rebuilt from this wallet's own miner key,
 `rho = H(RHO_COINBASE, block)` and
@@ -340,7 +427,7 @@ walked, which is one per block in the range, and `coinbase_received` is how many
 of them were this wallet's.
 
 A leaf with neither a ciphertext nor a coinbase value is refused rather than
-skipped, by the rule above. It used to be skipped, because a chain with history
+skipped, by the rules above. It used to be skipped, because a chain with history
 from before v1 carried leaves of that shape: wormhole transfer leaves and the
 transparent mining-reward leaf every block used to append carry neither. No
 pallet in this runtime writes one, the wormhole pallet left it at M6 and its

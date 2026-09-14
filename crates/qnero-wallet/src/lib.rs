@@ -11,6 +11,7 @@ pub mod rpc;
 pub mod scale;
 pub mod select;
 pub mod store;
+pub mod typing;
 pub mod wallet;
 
 /// Planck per pool quantum.

@@ -129,19 +129,35 @@ has the bug too.
   rebuilt from the miner key; the whole settled nullifier set is paged and
   spent status is decided locally. The node is never told which leaves or
   which nullifiers are this wallet's. A per-leaf key the node answers nothing
-  for below the count it reports at that same block refuses the pass, and the
-  rule covers `ZkTree::Leaves` and `Shielded::LeafBlocks` at every index and
-  `Shielded::Ciphertexts` at every index that is not a coinbase, which is the
-  set `pallet-shielded` writes in the call that appends the leaf and never
-  removes. The chain has no gaps under its own count, so such an answer is
-  withheld rather than absent, and stepping over any of the three would hide a
-  payment on that leaf behind a watermark written above it: no commitment and
-  the leaf is skipped, no ciphertext and it reads as a leaf nobody can open,
-  no block and a coinbase is stepped over.
-  `Shielded::CoinbaseValues` is the one key a leaf may be without, since
-  presence is what marks a coinbase, and a node withholding it leaves a leaf
-  with no ciphertext either, which the rule above refuses. One at a time with a
-  payment, in both directions: a scan reads every note before it starts and
+  for below the count it reports at that same block refuses the pass:
+  `ZkTree::Leaves` and `Shielded::LeafBlocks` are required at every index,
+  because `pallet-shielded` writes both in the call that appends the leaf and
+  removes neither. The chain has no gaps under its own count, so such an answer
+  is withheld rather than absent, and stepping over either would hide a payment
+  on that leaf behind a watermark written above it.
+- **Which rule opens a leaf.** A coinbase is rebuilt from the miner key and the
+  public value the chain hashed into its commitment; everything else is
+  trial-decrypted. **The kind is derived only from data the headers
+  authenticate, never from which storage keys a node chose to answer.**
+  Presence of `Shielded::CoinbaseValues` used to decide it and presence is the
+  node's to write, so eight invented bytes on an incoming payment routed it
+  onto the coinbase rebuild, which cannot open it, and an invented
+  `Shielded::Ciphertexts` beside a withheld coinbase value hid a mined reward
+  the other way round. What decides now is the header chain, walked down from
+  the head by `parentHash` to a hash this wallet already trusts and rehashed
+  from each header's own preimage; each block's leaf range, folded and compared
+  against the `zkTreeRoot` its header carries, which makes
+  `Shielded::LeafBlocks` advisory; the coinbase position, which is a block's
+  last leaf because the pallet mints it in `on_finalize`; and the author label
+  in the block's pre-runtime digest item, which no node can compute for this
+  wallet. So a coinbase value below a block's last leaf is refused, a withheld
+  one at the coinbase position of a block this wallet mined is refused, a
+  ciphertext is required at every other position, and a coinbase value at
+  another author's coinbase position decides nothing because a ciphertext there
+  is still tried. `docs/WALLET.md` carries the table of per-position
+  expectations, and the same rules are in the command-line wallet's
+  `crates/qnero-wallet/src/typing.rs`.
+- **One scan at a time with a payment**, in both directions: a scan reads every note before it starts and
   commits them at the end, and a payment writes `spent` on those same rows the
   moment it settles, so the Settings screen's rescan is disabled while a
   payment is being proved and says so.

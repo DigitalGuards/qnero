@@ -13,6 +13,9 @@
 //!
 //! ```text
 //! header_block_hash(anchor)            the anchor check: recompute what the chain says
+//! header_block_hashes(headers)         the same over a scanned range, one crossing
+//! author_label(seed, parent_hash)      whose block it is, from this wallet's own key
+//! block_roots(leaf_hashes, counts)     the root after each of a list of leaf counts
 //! tree_path(leaf_hashes, depth, index) rebuild the tree, take one path, report the root
 //! path_from_unsorted(siblings, leaf)   the adapter for `zkTree_getMerkleProof`
 //! note_digests(seed, v, rho, r)        commitment and nullifier for a held note
@@ -48,7 +51,9 @@
 use anyhow::{bail, ensure, Context, Result};
 use qnero_circuit::chain::ct_digest as chain_ct_digest;
 use qnero_circuit::header::DIGEST_LOGS_SIZE;
-use qnero_circuit::merkle::{CommitmentTree, MerklePath, ARITY, MAX_DEPTH, SIBLINGS_PER_LEVEL};
+use qnero_circuit::merkle::{
+    CommitmentTree, MerklePath, TreeFrontier, ARITY, MAX_DEPTH, SIBLINGS_PER_LEVEL,
+};
 use qnero_notes::{Address, Digest, Note};
 use serde::Deserialize;
 use serde_json::json;
@@ -67,6 +72,81 @@ pub fn header_block_hash_hex(anchor_json: &str) -> Result<String> {
     let anchor: AnchorRequest =
         serde_json::from_str(anchor_json).context("the anchor does not parse")?;
     Ok(anchor.to_header()?.block_hash().to_hex())
+}
+
+/// The same recomputation over a whole range of headers, in one crossing.
+///
+/// A scan checks every block of its range, because the `zkTreeRoot` in a
+/// header is what makes a block's leaf range a fact and the pre-runtime author
+/// label is what says whose block it is. Both are authenticated by this hash
+/// and by nothing else, so a wallet rehashes every header it is handed. One
+/// call per block would be one boundary crossing per block on a first sync.
+///
+/// Returns the hashes in the order the headers were given.
+pub fn header_block_hashes_json(headers_json: &str) -> Result<String> {
+    let headers: Vec<AnchorRequest> =
+        serde_json::from_str(headers_json).context("the header range does not parse")?;
+    let hashes = headers
+        .iter()
+        .map(|header| Ok(header.to_header()?.block_hash().to_hex()))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(serde_json::to_string(&hashes).expect("hex strings serialize"))
+}
+
+/// This wallet's author label for a block whose parent is `parent_hash_hex`.
+///
+/// `H("qnero/author-label", cvk, parent_hash)`, which a block author's node
+/// publishes in the block's pre-runtime digest item. `cvk` is the miner's
+/// secret, so only the wallet that holds it can say which blocks it mined, and
+/// no reader can group one operator's blocks. What a wallet does with the
+/// answer is require the coinbase value of its own blocks: without it a node
+/// hides a mined reward by withholding one key and inventing another.
+///
+/// Secret bearing in the same sense `miner_key` is: it is derived from `cvk`.
+/// A label alone is one block's worth, but it must not be logged.
+pub fn author_label_hex(seed_hex: &str, parent_hash_hex: &str) -> Result<String> {
+    let key = spending_key_from_hex(seed_hex)?;
+    let parent = hex::decode(parent_hash_hex.trim_start_matches("0x"))
+        .context("the parent hash is not hex")?;
+    ensure!(parent.len() == 32, "a parent hash is 32 bytes");
+    Ok(key.miner_key().author_label(&parent).to_hex())
+}
+
+/// The commitment-tree root after each of a list of leaf counts.
+///
+/// `leaf_hashes` is `ZkTree::Leaves` in index order, `32 * n` bytes, and
+/// `counts_json` is a list of leaf counts in ascending order. The answer is
+/// the root the chain published after exactly that many leaves, so a wallet
+/// compares each against the `zkTreeRoot` of the block that ended there.
+///
+/// Folded incrementally through [`qnero_circuit::merkle::TreeFrontier`]: one
+/// Poseidon path update per leaf and one fold per count, where rebuilding the
+/// whole tree per count would be one tree per block of the range.
+pub fn block_roots_json(leaf_hashes: &[u8], counts_json: &str) -> Result<String> {
+    let counts: Vec<u64> =
+        serde_json::from_str(counts_json).context("the leaf counts do not parse")?;
+    let leaves = leaves_from_bytes(leaf_hashes)?;
+    let mut frontier = TreeFrontier::new();
+    let mut roots = Vec::with_capacity(counts.len());
+    let mut cursor = 0usize;
+    for count in counts {
+        let wanted = usize::try_from(count).context("a leaf count does not fit in memory")?;
+        ensure!(
+            wanted >= cursor,
+            "the leaf counts must ascend: {wanted} follows {cursor}"
+        );
+        ensure!(
+            wanted <= leaves.len(),
+            "a leaf count of {wanted} was asked for over {} leaves",
+            leaves.len()
+        );
+        while cursor < wanted {
+            frontier.push(leaves[cursor]);
+            cursor += 1;
+        }
+        roots.push(frontier.root()?.to_hex());
+    }
+    Ok(serde_json::to_string(&roots).expect("hex strings serialize"))
 }
 
 /// `DIGEST_LOGS_SIZE`, so the caller's re-encoding is padded to the length the
