@@ -55,6 +55,9 @@ interface FakeLeaf {
   coinbaseQuanta?: bigint;
 }
 
+/** The runtime's `BlockHashWindow`, which is 256 on this chain. */
+const ANCHOR_WINDOW = 256;
+
 function fakeChain(options: {
   head: number;
   leaves: FakeLeaf[];
@@ -62,9 +65,13 @@ function fakeChain(options: {
   genesis?: string;
   leafCount?: number;
   hashAt?: (height: number) => string | null;
+  drift?: string[];
+  anchorWindow?: number;
 }): SyncChain {
   const leafCount = options.leafCount ?? options.leaves.length;
   return {
+    storageDrift: options.drift ?? [],
+    anchorWindow: options.anchorWindow ?? ANCHOR_WINDOW,
     head: () => Promise.resolve({ number: options.head, hash: hashAtHeight(options.head) }),
     genesisHash: () => Promise.resolve(options.genesis ?? GENESIS),
     blockHashAt: (height) =>
@@ -205,6 +212,33 @@ describe('the gates a sync passes before it writes', () => {
         fakeCrypto(leaves),
       ),
     ).rejects.toBeInstanceOf(NodeRefusedError);
+  });
+
+  it('refuses a runtime whose storage it cannot read, before it reads anything', async () => {
+    // The refusal the command-line wallet opens `sync_with` with. A renamed
+    // item or a changed hasher builds a key that is simply absent, and an
+    // absent key is indistinguishable from an empty map: `LeafCount` reads
+    // zero, the scan finds nothing, and the wallet reports a zero balance with
+    // no error at all. The screen checked this and the module did not, so any
+    // caller that was not the screen skipped it.
+    const leaves: FakeLeaf[] = [];
+    let asked = 0;
+    const chain = fakeChain({ head: 5, leaves, drift: ['ZkTree::Leaves is gone'] });
+    const watched: SyncChain = {
+      ...chain,
+      genesisHash: () => {
+        asked += 1;
+        return chain.genesisHash();
+      },
+    };
+    await expect(
+      runSync(
+        { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+        watched,
+        fakeCrypto(leaves),
+      ),
+    ).rejects.toBeInstanceOf(NodeRefusedError);
+    expect(asked).toBe(0);
   });
 
   it('records the genesis on the first pass that commits', async () => {
@@ -547,5 +581,75 @@ describe('the checkpoints a pass writes', () => {
       fakeCrypto(leaves),
     );
     expect(result.checkpoints.map((entry) => entry.blockNumber)).toEqual([4, 9]);
+  });
+});
+
+/**
+ * The rows a spend writes before it submits.
+ *
+ * A change note is committed before `author_submitExtrinsic` so a tab
+ * reclaimed in the gap still shows the change, and it clears when a scan meets
+ * that commitment in the tree. A settlement that never lands leaves a
+ * commitment that is never appended, so no scan can ever clear the row: the
+ * balance then carries a pending figure forever, on the screen whose whole job
+ * is one number, and the only control that removes it erases the wallet.
+ *
+ * The anchor is what makes this decidable rather than a guess. A settlement
+ * more than `BlockHashWindow` blocks below the head cannot be admitted at all.
+ */
+describe('a pending row', () => {
+  it('clears when the scan meets its commitment, which is the ordinary path', async () => {
+    const change = note(700n, 'c1');
+    const leaves: FakeLeaf[] = [
+      { index: 0, commitment: change.commitment, blockNumber: 30, note: change },
+    ];
+    const result = await runSync(
+      {
+        meta: meta(),
+        held: [],
+        rejected: [],
+        checkpoints: [],
+        pending: [{ commitment: change.commitment, submittedAtBlock: 29 }],
+      },
+      fakeChain({ head: 31, leaves }),
+      fakeCrypto(leaves),
+    );
+    expect(result.clearedPending).toEqual([change.commitment]);
+    expect(result.report.pendingAbandoned).toBe(0);
+  });
+
+  it('is held while its anchor is still inside the window', async () => {
+    const leaves: FakeLeaf[] = [];
+    const result = await runSync(
+      {
+        meta: meta(),
+        held: [],
+        rejected: [],
+        checkpoints: [],
+        pending: [{ commitment: 'ab'.repeat(32), submittedAtBlock: 100 }],
+      },
+      fakeChain({ head: 100 + ANCHOR_WINDOW, leaves }),
+      fakeCrypto(leaves),
+    );
+    expect(result.clearedPending).toEqual([]);
+    expect(result.report.pendingAbandoned).toBe(0);
+  });
+
+  it('is dropped once its anchor falls out of the window, because it can never land', async () => {
+    const leaves: FakeLeaf[] = [];
+    const result = await runSync(
+      {
+        meta: meta(),
+        held: [],
+        rejected: [],
+        checkpoints: [],
+        pending: [{ commitment: 'ab'.repeat(32), submittedAtBlock: 100 }],
+      },
+      fakeChain({ head: 100 + ANCHOR_WINDOW + 1, leaves }),
+      fakeCrypto(leaves),
+    );
+    expect(result.clearedPending).toEqual(['ab'.repeat(32)]);
+    expect(result.report.pendingAbandoned).toBe(1);
+    expect(result.report.warnings.join(' ')).toMatch(/never settled inside/);
   });
 });

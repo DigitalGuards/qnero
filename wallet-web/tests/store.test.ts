@@ -257,6 +257,67 @@ describe('one sync commits as one transaction', () => {
   });
 });
 
+describe('the pending row a spend writes', () => {
+  it('carries no settlement bytes, because the nullifiers are readable out of them', async () => {
+    // The pallet reads a settlement's nullifiers out of the proof before it
+    // verifies anything, so the extrinsic in the clear published exactly what
+    // `nullifier` is sealed to hold back, for every spend that did not land.
+    // Nothing read the field: `waitForInclusion` takes the bytes from the
+    // spend that built them.
+    const store = await makeStore(db);
+    await store.commitPending({
+      commitment: 'cc'.repeat(32),
+      kind: 'change',
+      value: '700',
+      submittedAtBlock: 12,
+      secret: await store.sealPendingSecret('cc'.repeat(32), {
+        rho: '',
+        r: '',
+        nullifier: '',
+        memo: '',
+      }),
+    });
+    const rows = await store.pending();
+    expect(rows).toHaveLength(1);
+    expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
+      'commitment',
+      'kind',
+      'secret',
+      'submittedAtBlock',
+      'value',
+    ]);
+  });
+
+  it('can be taken back, for the settlement that never lands', async () => {
+    // Three ways a spend fails after the row is written: a pool that refuses
+    // the envelope, a segment skipped for a stale anchor or a claimed
+    // nullifier, and a settlement nothing carries inside the anchor window. In
+    // all three the change commitment is never appended, so no scan can meet
+    // it and clear the row, and the balance carries a pending figure that only
+    // erasing the wallet removes.
+    const store = await makeStore(db);
+    const commitment = 'dd'.repeat(32);
+    await store.commitPending({
+      commitment,
+      kind: 'change',
+      value: '700',
+      submittedAtBlock: 12,
+      secret: await store.sealPendingSecret(commitment, {
+        rho: '',
+        r: '',
+        nullifier: '',
+        memo: '',
+      }),
+    });
+    expect(await store.pending()).toHaveLength(1);
+    await store.dropPending(commitment);
+    expect(await store.pending()).toEqual([]);
+    // And dropping one that is already gone is not an error: a sync and a
+    // spend can both decide the same row is finished.
+    await store.dropPending(commitment);
+  });
+});
+
 describe('latching a spend', () => {
   it('marks every member of a conflict set, because they share one nullifier', async () => {
     const store = await makeStore(db);

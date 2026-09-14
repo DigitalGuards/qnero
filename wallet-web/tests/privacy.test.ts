@@ -173,6 +173,10 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
       },
     },
     storageDrift: [],
+    // The two facts the sync rules now read off the chain rather than off the
+    // screen: the drift list above, and the anchor window a pending row is
+    // measured against.
+    constants: { blockHashWindow: 256 },
   } as unknown as ChainContext;
 
   return { context, calls };
@@ -364,7 +368,10 @@ function hashOf(height: number): string {
  * and a settled set holding the two nullifiers the proof published. What the
  * test reads is the list of questions, in order.
  */
-function spendContext(): { context: ChainContext; calls: Call[] } {
+function spendContext(options: { refuseSubmission?: boolean } = {}): {
+  context: ChainContext;
+  calls: Call[];
+} {
   const calls: Call[] = [];
   const values = new Map<string, string>();
   values.set(KEYS.leafCount, le(BigInt(LEAF_COUNT), 8));
@@ -385,6 +392,11 @@ function spendContext(): { context: ChainContext; calls: Call[] } {
         // The chain moves on once the settlement is in the pool, which is what
         // the inclusion walk is walking.
         return Promise.resolve((submitted === null ? HEAD_HASH : hashOf(SUBMITTED_IN_BLOCK)) as T);
+      }
+      if (height === 0) {
+        // Which chain this node serves, read live at the top of every spend
+        // rather than taken off the connection.
+        return Promise.resolve(GENESIS as T);
       }
       return Promise.resolve(hashOf(height) as T);
     }
@@ -412,6 +424,10 @@ function spendContext(): { context: ChainContext; calls: Call[] } {
       ] as T);
     }
     if (method === 'author_submitExtrinsic') {
+      if (options.refuseSubmission === true) {
+        // What a pool that will not take the envelope looks like from here.
+        throw new Error('1010: Invalid Transaction: Transaction is outdated');
+      }
       submitted = String(params[0]);
       return Promise.resolve(`0x${'ee'.repeat(32)}` as T);
     }
@@ -538,6 +554,10 @@ function spendStore(genesisHash: string | null = GENESIS): WalletStore {
       written.push('offChain');
       return Promise.resolve(false);
     },
+    dropPending: () => {
+      written.push('dropPending');
+      return Promise.resolve();
+    },
     written: () => written,
   } as unknown as WalletStore & { written: () => string[] };
 }
@@ -645,13 +665,19 @@ describe('the request stream a payment makes', () => {
     }
   });
 
-  it('refuses a node on another chain before it asks it anything', async () => {
+  it('refuses a node on another chain having asked it one question', async () => {
     // The gate the command-line wallet opens `prepare_spend` with. Without it
     // a spend anchors on the other chain's head, rebuilds the other chain's
     // tree, passes the root gate over it (a rebuild over that node's own
     // leaves roots to that node's own header) and then writes a real,
     // spendable note off as one this chain does not carry, which no ordinary
     // later sync undoes.
+    //
+    // The one question is `chain_getBlockHash(0)`, which names nothing and is
+    // the same question every client of this chain asks. It is asked live
+    // rather than taken off the connection, because a `WsProvider` reconnects
+    // on its own and a tab left open across a chain relaunch at the same URL
+    // holds a genesis hash naming a chain that is no longer there.
     const { context, calls } = spendContext();
     const store = spendStore(`0x${'99'.repeat(32)}`) as WalletStore & { written: () => string[] };
     await expect(
@@ -670,7 +696,7 @@ describe('the request stream a payment makes', () => {
         () => undefined,
       ),
     ).rejects.toThrow(/bound to the chain whose genesis/);
-    expect(calls).toEqual([]);
+    expect(calls).toEqual([{ method: 'chain_getBlockHash', params: [0] }]);
     expect(store.written()).toEqual([]);
   });
 
@@ -704,7 +730,51 @@ describe('the request stream a payment makes', () => {
       ),
     ).rejects.toThrow(/checksum/);
     expect(built).toBe(0);
-    expect(calls).toEqual([]);
+    // The chain check is the one question that comes first, and it names
+    // nothing: see the refusal above.
+    expect(calls).toEqual([{ method: 'chain_getBlockHash', params: [0] }]);
+  });
+
+  it('takes the pending change note back when the pool refuses the settlement', async () => {
+    // The row is written before the submission so a tab reclaimed in the gap
+    // still shows the change. Once the pool has refused there is no gap left
+    // to cover, and the commitment it names is never appended, so no scan can
+    // ever meet it: leaving the row puts a figure in the balance that no sync
+    // can clear and only erasing the wallet removes.
+    const { context } = spendContext({ refuseSubmission: true });
+    const store = spendStore() as WalletStore & { written: () => string[] };
+    await expect(
+      spend(
+        context,
+        spendProver(),
+        store,
+        {
+          to: 'qn1recipient',
+          amount: 300n,
+          memo: 'lunch',
+          changeAddress: 'qn1mine',
+          candidates: [
+            {
+              note: {
+                commitment: SPEND_COMMITMENT,
+                leafIndex: SPEND_LEAF,
+                blockNumber: 4,
+                value: '1000',
+                origin: 'transfer',
+                spent: false,
+                spentSeenAtBlock: null,
+                onChain: true,
+                secret: { v: 1, iv: '', ct: '' },
+              },
+              secret: { rho: '11'.repeat(32), r: '22'.repeat(32), nullifier: SPEND_NULLIFIERS[0], memo: '' },
+            },
+          ],
+        },
+        LIMITS,
+        () => undefined,
+      ),
+    ).rejects.toThrow(/outdated/);
+    expect(store.written()).toEqual(['pending', 'dropPending']);
   });
 
   it('starts looking for its own bytes at the block after the anchor', async () => {
@@ -715,7 +785,10 @@ describe('the request stream a payment makes', () => {
     const { calls } = await spendOnce();
     const searched = calls
       .filter((call) => call.method === 'chain_getBlockHash' && call.params.length > 0)
-      .map((call) => call.params[0] as number);
+      .map((call) => call.params[0] as number)
+      // Block zero is the chain check at the top of the spend rather than a
+      // block the inclusion walk looked in.
+      .filter((height) => height > 0);
     expect(searched).toContain(SUBMITTED_IN_BLOCK);
     expect(Math.min(...searched)).toBe(SUBMITTED_IN_BLOCK);
   });

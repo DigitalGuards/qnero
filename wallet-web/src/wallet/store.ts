@@ -371,6 +371,27 @@ export class WalletStore {
   }
 
   /**
+   * Drop a pending row.
+   *
+   * Written before the submission, and there are three ways the submission
+   * then does not land: the pool refuses the envelope, the segment is skipped
+   * for a stale anchor or a claimed nullifier, or nothing carries it inside
+   * the anchor window. In all three the change commitment is never appended,
+   * so no scan can ever meet it and clear the row, and the balance carries a
+   * pending figure that never resolves on a screen whose whole job is one
+   * number.
+   *
+   * Dropping is safe even when the bytes did reach the pool: the next scan
+   * that meets the leaf adds the note as a real one, out of the ciphertext the
+   * chain carries.
+   */
+  async dropPending(commitment: string): Promise<void> {
+    const transaction = this.db.transaction([STORE_PENDING], 'readwrite');
+    transaction.objectStore(STORE_PENDING).delete(commitment);
+    await transactionDone(transaction);
+  }
+
+  /**
    * Latch a spent flag at submit time, keyed on the nullifier.
    *
    * Once both nullifiers are confirmed settled at the inclusion block, the

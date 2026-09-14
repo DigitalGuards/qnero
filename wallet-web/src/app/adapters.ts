@@ -21,6 +21,8 @@ import type { ScannedNote, SyncChain, SyncCrypto } from '../wallet/sync';
 
 export function chainAdapter(context: ChainContext): SyncChain {
   return {
+    storageDrift: context.storageDrift,
+    anchorWindow: context.constants.blockHashWindow,
     head: () => fetchHead(context),
     genesisHash: async () => {
       const hash = await blockHashAt(context, 0);

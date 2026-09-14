@@ -10,7 +10,8 @@
  * # What is encrypted and what is not
  *
  * Encrypted, each in its own envelope: `rho`, `r`, `nullifier`, `memo`. Those
- * four are the CLI's redacted set. `rho` and `r` beside a published nullifier
+ * four are the CLI's redacted set, and a pending row's settlement bytes were a
+ * fifth until they were dropped: see [`PendingNote`]. `rho` and `r` beside a published nullifier
  * link a settled spend to its note, its value and its recipient; an unspent
  * note's nullifier has appeared nowhere at all, which is exactly why it is
  * held back.
@@ -72,14 +73,27 @@ export interface NoteSecret {
   memo: string;
 }
 
-/** A note this wallet has written but the chain has not confirmed. */
+/**
+ * A note this wallet has written but the chain has not confirmed.
+ *
+ * The settlement's own bytes are deliberately **not** here. They used to be,
+ * in the clear, and the pallet reads a settlement's nullifiers straight out of
+ * the proof before it verifies anything, so a plaintext copy of them published
+ * exactly what `nullifier` is sealed to hold back: on every path where the
+ * settlement does not land, the input notes stay unspent and selectable while
+ * their nullifiers sit in a plaintext field forever. Nothing read the field.
+ * `waitForInclusion` takes the bytes as an argument, from the spend that built
+ * them.
+ *
+ * `submittedAtBlock` is the anchor. A settlement anchored more than
+ * `BlockHashWindow` blocks below the head can never be admitted, which is how
+ * a sync knows a pending row is never going to clear.
+ */
 export interface PendingNote {
   commitment: string;
   kind: 'change' | 'payment' | 'shield';
   value: string;
   submittedAtBlock: number;
-  /** The exact bytes submitted, so inclusion is matched rather than guessed. */
-  extrinsic: string;
   secret: Envelope;
 }
 

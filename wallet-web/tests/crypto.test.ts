@@ -7,7 +7,10 @@
  * - a fresh IV on every write, including a rewrite of the same value;
  * - a wrong passphrase throws rather than returning plausible bytes;
  * - an envelope is bound to the slot it was written into;
- * - the seed a store opens with has to derive that store's own address.
+ * - the seed a store opens with has to derive that store's own address;
+ * - and a store is opened with the parameters it recorded, so raising this
+ *   build's iteration count does not tell every existing wallet that its
+ *   passphrase is wrong.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -15,6 +18,9 @@ import { describe, expect, it } from 'vitest';
 import {
   bytesToHex,
   deriveKey,
+  deriveStoreKey,
+  MIN_PBKDF2_ITERATIONS,
+  PBKDF2_ITERATIONS,
   ENVELOPE_VERSION,
   hexToBytes,
   newSalt,
@@ -163,5 +169,64 @@ describe('a seed', () => {
     expect(seedHexIsWellFormed('ab'.repeat(33))).toBe(false);
     expect(seedHexIsWellFormed(`${'ab'.repeat(31)}zz`)).toBe(false);
     expect(seedHexIsWellFormed(` ${'ab'.repeat(32)} `)).toBe(true);
+  });
+});
+
+/**
+ * The key derivation, taken from the record rather than from this build.
+ *
+ * `meta.kdf` carries the algorithm, the hash, the iteration count and the
+ * salt, and unlock read only the salt. The count is the one that moves: it is
+ * OWASP's floor and that floor is periodically raised, so the first build to
+ * raise it would have derived a different key for every store ever written and
+ * reported the passphrase wrong, with the number that opens the store sitting
+ * unread beside the one it used.
+ *
+ * The iteration counts here are small on purpose. What is asserted is which
+ * number is used, and a case that used the real one would be a second of
+ * PBKDF2 per assertion.
+ */
+describe('opening a store', () => {
+  const SALT = '11'.repeat(16);
+
+  async function sealedWith(iterations: number): Promise<{ envelope: Awaited<ReturnType<typeof sealJson>>; aad: Uint8Array<ArrayBuffer> }> {
+    const aad = recordAad('qn1abc', 'vault', 'seed');
+    const key = await deriveKey('a passphrase', SALT, iterations);
+    return { envelope: await sealJson(key, aad, { seed: 'ab'.repeat(32) }), aad };
+  }
+
+  it('uses the iteration count the store recorded', async () => {
+    const { envelope, aad } = await sealedWith(MIN_PBKDF2_ITERATIONS);
+    const key = await deriveStoreKey('a passphrase', {
+      name: 'PBKDF2',
+      hash: 'SHA-256',
+      iterations: MIN_PBKDF2_ITERATIONS,
+      saltHex: SALT,
+    });
+    await expect(openJson(key, aad, envelope)).resolves.toEqual({ seed: 'ab'.repeat(32) });
+  });
+
+  it('derives a different key at a different count, which is the failure this prevents', async () => {
+    const { envelope, aad } = await sealedWith(MIN_PBKDF2_ITERATIONS);
+    // What unlock did: this build's constant over the record's salt. The store
+    // was written under another count, so the passphrase is reported wrong.
+    const compiledIn = await deriveKey('a passphrase', SALT, MIN_PBKDF2_ITERATIONS + 1);
+    await expect(openJson(compiledIn, aad, envelope)).rejects.toBeInstanceOf(WrongPassphraseError);
+  }, 20_000);
+
+  it('refuses a parameter it cannot honour by name rather than by passphrase', async () => {
+    const kdf = { name: 'PBKDF2', hash: 'SHA-256', iterations: PBKDF2_ITERATIONS, saltHex: SALT };
+    await expect(deriveStoreKey('a passphrase', { ...kdf, name: 'scrypt' })).rejects.toBeInstanceOf(
+      UnreadableStoreError,
+    );
+    await expect(deriveStoreKey('a passphrase', { ...kdf, hash: 'SHA-1' })).rejects.toBeInstanceOf(
+      UnreadableStoreError,
+    );
+    await expect(
+      deriveStoreKey('a passphrase', { ...kdf, iterations: 1 }),
+    ).rejects.toBeInstanceOf(UnreadableStoreError);
+    await expect(deriveStoreKey('a passphrase', { ...kdf, iterations: 1 })).rejects.toThrow(
+      /below the/,
+    );
   });
 });

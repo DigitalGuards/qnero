@@ -33,8 +33,25 @@
  * The browser is the trust boundary. `README.md` says so in the same words.
  */
 
-/** OWASP's 2023 floor, and what the sibling wallet uses. */
+/**
+ * OWASP's 2023 floor, and what the sibling wallet uses.
+ *
+ * What a store being **created** is written under. Opening one uses the count
+ * that store recorded, from [`deriveStoreKey`]: this number is periodically
+ * raised, and a build that raised it while unlock ignored the record derived a
+ * different key for every existing wallet and reported the passphrase wrong,
+ * on a screen whose only other button erases the wallet.
+ */
 export const PBKDF2_ITERATIONS = 600_000;
+/**
+ * The fewest iterations this build will derive a key from.
+ *
+ * A record below it is refused by name rather than derived from. No store this
+ * code has ever written is below it, so the case is a record that was edited,
+ * and answering "that passphrase does not open this wallet" to an edited
+ * parameter is an answer about the wrong thing.
+ */
+export const MIN_PBKDF2_ITERATIONS = 100_000;
 /**
  * The shortest passphrase this build will derive a key from.
  *
@@ -130,7 +147,11 @@ export function newSalt(): Uint8Array<ArrayBuffer> {
  * A passphrase below [`MIN_PASSPHRASE`] is refused here, which is the only
  * place the floor is real: see that constant.
  */
-export async function deriveKey(passphrase: string, saltHex: string): Promise<CryptoKey> {
+export async function deriveKey(
+  passphrase: string,
+  saltHex: string,
+  iterations: number = PBKDF2_ITERATIONS,
+): Promise<CryptoKey> {
   if (passphrase.length < MIN_PASSPHRASE) {
     throw new WeakPassphraseError();
   }
@@ -145,7 +166,7 @@ export async function deriveKey(passphrase: string, saltHex: string): Promise<Cr
     {
       name: 'PBKDF2',
       salt: hexToBytes(saltHex),
-      iterations: PBKDF2_ITERATIONS,
+      iterations,
       hash: 'SHA-256',
     },
     material,
@@ -153,6 +174,53 @@ export async function deriveKey(passphrase: string, saltHex: string): Promise<Cr
     false,
     ['encrypt', 'decrypt'],
   );
+}
+
+/** What a store records about how its key was derived. */
+export interface KdfParameters {
+  name: string;
+  hash: string;
+  iterations: number;
+  saltHex: string;
+}
+
+/**
+ * The key that opens an existing store, from the parameters that store
+ * recorded.
+ *
+ * The record is the authority, and it was written there to be read. Unlock
+ * derived with the compiled-in constant instead and read nothing but the salt,
+ * which made every parameter in it decorative: the first build to raise the
+ * iteration count would have told every existing wallet its passphrase was
+ * wrong, with the number that would have opened the store sitting unread in
+ * the same record. `checkVersion` could not have caught it either, because the
+ * schema version does not change when a constant does.
+ *
+ * A parameter this build cannot honour is refused by name. GCM makes a wrong
+ * passphrase distinguishable from a broken record, and the two deserve
+ * different sentences.
+ */
+export async function deriveStoreKey(
+  passphrase: string,
+  kdf: KdfParameters,
+): Promise<CryptoKey> {
+  if (kdf.name !== 'PBKDF2') {
+    throw new UnreadableStoreError(
+      `this wallet was sealed with ${kdf.name} and this build derives keys with PBKDF2`,
+    );
+  }
+  if (kdf.hash !== 'SHA-256') {
+    throw new UnreadableStoreError(
+      `this wallet's key was derived under ${kdf.hash} and this build uses SHA-256`,
+    );
+  }
+  if (!Number.isInteger(kdf.iterations) || kdf.iterations < MIN_PBKDF2_ITERATIONS) {
+    throw new UnreadableStoreError(
+      `this wallet records ${kdf.iterations} key-derivation iterations, which is below the ` +
+        `${MIN_PBKDF2_ITERATIONS} this build will derive from. Nothing has been opened.`,
+    );
+  }
+  return deriveKey(passphrase, kdf.saltHex, kdf.iterations);
 }
 
 /**

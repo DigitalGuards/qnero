@@ -167,7 +167,9 @@ M10.
 - **A locked wallet is only as strong as its passphrase.** 600,000 PBKDF2
   iterations is about a second per guess on this workstation and far less on a
   machine built for guessing. A short passphrase is a short delay, and eight
-  characters is a floor rather than a recommendation.
+  characters is a floor rather than a recommendation. The count a store was
+  written under is recorded in the store and is what opens it, so raising this
+  build's figure seals new wallets harder and leaves existing ones readable.
 - **Zeroing buys one buffer and no more.** A JavaScript `String` is immutable
   and garbage collected: a seed that has ever been a string cannot be wiped,
   and `crypto.subtle.decrypt` hands back a buffer allocated before this code
@@ -190,7 +192,11 @@ M10.
   leaf indices, with no passphrase guess needed, which is the linkage the pool
   exists to hide. A threat model that wants the graph hidden has to seal
   `value` and `leafIndex` too and give up the locked balance screen.
-  `src/wallet/model.ts` states the same list beside the type.
+  `src/wallet/model.ts` states the same list beside the type. A submitted
+  settlement's own bytes used to sit in the pending row in the clear, and the
+  pallet reads a settlement's nullifiers out of the proof before it verifies
+  anything, so that row published for every payment that did not land exactly
+  what the sealed field holds back. It is gone.
 - **What a chain reader sees** is a settlement, its fee, its anchor block, two
   commitments and two ciphertexts of a fixed size. Not the amounts, not the
   sender, not the recipient, not which output is the change. The gap between a

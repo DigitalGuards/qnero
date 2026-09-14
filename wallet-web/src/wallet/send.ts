@@ -6,9 +6,9 @@
  * authority and `crates/qnero-wallet/src/wallet.rs` is the implementation this
  * mirrors.
  *
- * 0. **The chain first.** The store is bound to a genesis hash by its first
- *    committed operation, and every note's `leafIndex` is an index into that
- *    chain's tree. A node on another chain rebuilds another tree, and the root
+ * 0. **The chain first, read off the node.** The store is bound to a genesis
+ *    hash by its first committed operation, and every note's `leafIndex` is an
+ *    index into that chain's tree. A node on another chain rebuilds another tree, and the root
  *    gate below passes over it, because a rebuild over that node's own leaves
  *    roots to that node's own header. What follows is either a phantom note
  *    written off on a chain it never lived on, or a leaf mismatch reported as
@@ -48,11 +48,16 @@
  *    off the chain, which needs only the seed. The order is kept for the
  *    weaker reason: a tab reclaimed between the submit and the write shows a
  *    balance missing its own change until the next sync reaches it.
+ * 9. **And the row goes when the settlement does not.** A submission the pool
+ *    refuses, a segment skipped for a stale anchor or a claimed nullifier, and
+ *    a settlement nothing carries inside the window all leave a change
+ *    commitment that is never appended, so no scan can meet it and clear the
+ *    row. A sync drops one anchored outside the window for the same reason.
  */
 
 import type { ChainContext } from '../chain/api';
 import { anchorFromHeader, parseRawHeader, type Anchor } from '../chain/anchor';
-import { fetchHead, fetchLeafHashes, fetchTreeShape, headerAt } from '../chain/reads';
+import { blockHashAt, fetchHead, fetchLeafHashes, fetchTreeShape, headerAt } from '../chain/reads';
 import { encodeSettlement, submitSettlement, waitForInclusion } from '../chain/submit';
 import type { ProverClient } from '../worker/client';
 import type { ProverLimits } from '../worker/protocol';
@@ -119,9 +124,11 @@ export interface SpendResult {
 /**
  * The refusal a store bound to one chain owes a node serving another, or null.
  *
- * One function, called twice: once by the page, so the message renders where a
- * spend error renders, and once at the top of [`spend`], so the non-UI path
- * cannot skip it. `runSync` writes the same refusal from its own gate
+ * One function, called twice: once by the page, against the hash the
+ * connection was opened with, so the message renders where a spend error
+ * renders without a round trip, and once at the top of [`spend`], against a
+ * hash read off the node, so the non-UI path cannot skip it and a reconnected
+ * socket cannot answer for a chain that is no longer there. `runSync` writes the same refusal from its own gate
  * (`wallet/sync.ts`), and the wording is the same on purpose: it is the same
  * mistake, met on a different screen.
  */
@@ -165,9 +172,36 @@ export async function spend(
 ): Promise<SpendResult> {
   const warnings: string[] = [];
 
+  if (context.storageDrift.length > 0) {
+    // The gate the sync opens with, here too, for the reason its own comment
+    // gives: an absent key and an empty map are the same answer, and this path
+    // reads a leaf count and a tree.
+    throw new Error(
+      'this runtime declares storage differently from what this build assumes, so spending ' +
+        `against it is refused: ${context.storageDrift.join('; ')}. Nothing has been built and ` +
+        'nothing has been submitted.',
+    );
+  }
+
   // Before the fee, before the selection, before anything is read. A wrong
   // node here is a note written off on a chain it never lived on.
-  const mismatch = chainMismatchRefusal((await store.meta()).genesisHash, context.genesisHash);
+  //
+  // Read off the node rather than off the connection. `ChainContext.genesisHash`
+  // is captured once, when the socket was first opened, and a `WsProvider`
+  // reconnects on its own: a tab left open across a chain relaunch at the same
+  // URL reconnects to a different chain with the cached hash still naming the
+  // old one. The root gate below then passes, because a rebuild over that
+  // node's leaves roots to that node's own header, and every selected note is
+  // written off as a note the chain does not carry. `runSync` reads block zero
+  // live for the same reason, and so does the command-line wallet on every
+  // sync, shield and spend.
+  const nodeGenesis = await blockHashAt(context, 0);
+  if (nodeGenesis === null) {
+    throw new Error(
+      'this node has no block zero, so it cannot say which chain it serves. Nothing has been built.',
+    );
+  }
+  const mismatch = chainMismatchRefusal((await store.meta()).genesisHash, nodeGenesis);
   if (mismatch !== null) {
     throw new Error(mismatch);
   }
@@ -396,7 +430,6 @@ export async function spend(
     kind: 'change',
     value: change.toString(),
     submittedAtBlock: anchor.block_number,
-    extrinsic: encoded,
     secret: await store.sealPendingSecret(changeCommitment, {
       // The change note's `(rho, r)` are derived inside the circuit from the
       // spend's own nullifiers, and the wallet recovers them by decrypting its
@@ -410,7 +443,18 @@ export async function spend(
   };
   await store.commitPending(pending);
 
-  const extrinsicHash = await submitSettlement(context, encoded);
+  let extrinsicHash: string;
+  try {
+    extrinsicHash = await submitSettlement(context, encoded);
+  } catch (error) {
+    // The row goes with the submission that did not happen. It is written
+    // first so a tab reclaimed in the gap still shows the change, and there is
+    // no gap left to cover once the pool has refused: leaving it makes a
+    // pending figure that no sync can ever clear, because the commitment it
+    // waits for was never appended.
+    await store.dropPending(changeCommitment);
+    throw error;
+  }
 
   report({ stage: 'confirm', detail: 'waiting for the settlement to land' });
   const inclusion = await waitForInclusion(
@@ -431,6 +475,14 @@ export async function spend(
       },
     },
   );
+
+  if (inclusion === null || !inclusion.settled) {
+    // In a block and skipped, or nowhere inside the window. Either way this
+    // settlement is not the one that appends the change note, and the screen
+    // tells the reader to prove again against a fresh anchor. The row it would
+    // otherwise leave behind is the balance's, forever.
+    await store.dropPending(changeCommitment);
+  }
 
   if (inclusion !== null && inclusion.settled) {
     // Latch the flag now, on the nullifiers rather than on the commitments. A

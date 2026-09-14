@@ -42,6 +42,23 @@ import { MAX_CHECKPOINTS, type NoteOrigin, type NoteSecret, type RejectedNote, t
 
 /** What a scan needs out of the chain, so a test can supply it. */
 export interface SyncChain {
+  /**
+   * How the runtime's storage differs from what this build assumes, empty when
+   * it does not.
+   *
+   * Checked here rather than only on the screen that starts a sync, because
+   * the rule belongs to the sync: a renamed item or a changed hasher builds a
+   * key that is simply absent, and an absent key is indistinguishable from an
+   * empty map, so `LeafCount` reads zero, a fresh store scans nothing and the
+   * wallet reports a zero balance with no error. The command-line wallet opens
+   * `sync_with`, `shield` and `prepare_spend` with the same check.
+   */
+  storageDrift: readonly string[];
+  /**
+   * `BlockHashWindow`: how far below the head an anchor may be and still be
+   * admitted. A pending settlement anchored further back can never land.
+   */
+  anchorWindow: number;
   head(): Promise<{ number: number; hash: string }>;
   genesisHash(): Promise<string>;
   blockHashAt(height: number): Promise<string | null>;
@@ -124,7 +141,13 @@ export interface SyncInput {
   held: readonly HeldNote[];
   rejected: readonly RejectedNote[];
   checkpoints: readonly SyncCheckpoint[];
-  pending: readonly string[];
+  /**
+   * The rows a spend wrote before submitting, with the block each was anchored
+   * to. The anchor is what says a row can never clear: a settlement more than
+   * `anchorWindow` blocks below the head is one the chain will not admit, so
+   * its change commitment is never appended and no scan can meet it.
+   */
+  pending: readonly { commitment: string; submittedAtBlock: number }[];
 }
 
 export interface SyncOptions {
@@ -155,6 +178,8 @@ export interface SyncReport {
   heldSpent: number;
   vanished: number;
   nullifierSetSize: number;
+  /** Pending rows dropped because their anchor fell out of the window. */
+  pendingAbandoned: number;
   recordedGenesis: boolean;
   forkedAt: number | null;
   warnings: string[];
@@ -322,6 +347,16 @@ export async function runSync(
   const progress = options.onProgress ?? ((): void => undefined);
   const warnings: string[] = [];
 
+  if (chain.storageDrift.length > 0) {
+    // Before the first read. An absent key and an empty map are the same
+    // answer, and an empty map here is a zero balance or a settled note
+    // reported unspent, so this refuses rather than scanning.
+    throw new NodeRefusedError(
+      'this runtime declares storage differently from what this build assumes, so syncing ' +
+        `against it is refused: ${chain.storageDrift.join('; ')}. Nothing has been changed.`,
+    );
+  }
+
   progress('chain', 'checking the chain this node serves');
   const genesis = normaliseHash(await chain.genesisHash());
   if (input.meta.genesisHash !== null && normaliseHash(input.meta.genesisHash) !== genesis) {
@@ -421,6 +456,7 @@ export async function runSync(
     heldSpent: 0,
     vanished: 0,
     nullifierSetSize: settled.size,
+    pendingAbandoned: 0,
     recordedGenesis: false,
     forkedAt,
     warnings,
@@ -638,7 +674,7 @@ export async function runSync(
             memo: received.memo,
           },
         });
-        if (input.pending.includes(commitment)) {
+        if (input.pending.some((entry) => entry.commitment === commitment)) {
           clearedPending.push(commitment);
         }
       }
@@ -740,6 +776,37 @@ export async function runSync(
       nextLeaf: shape.leafCount,
     },
   ].slice(-MAX_CHECKPOINTS);
+
+  // Pending rows whose settlement can no longer be admitted.
+  //
+  // A spend writes its change note before it submits, and the row clears when
+  // a scan meets that commitment in the tree. Three failures leave a
+  // commitment that is never appended: a pool that refuses the envelope, a
+  // segment skipped for a stale anchor or a claimed nullifier, and a
+  // settlement nothing carries inside the window. The spend drops the row on
+  // the first two, because it is there to see them. This is the third, and the
+  // one nothing else can see: once the anchor is more than `anchorWindow`
+  // blocks below the head, the chain will not admit that settlement at all.
+  //
+  // Dropping is safe when the bytes did land after all: the scan that meets
+  // the leaf adds the note as a real one.
+  for (const entry of input.pending) {
+    if (clearedPending.includes(entry.commitment)) {
+      continue;
+    }
+    if (head.number > entry.submittedAtBlock + chain.anchorWindow) {
+      clearedPending.push(entry.commitment);
+      report.pendingAbandoned += 1;
+    }
+  }
+  if (report.pendingAbandoned > 0) {
+    warnings.push(
+      `${report.pendingAbandoned} submitted ${report.pendingAbandoned === 1 ? 'payment' : 'payments'} ` +
+        `never settled inside the ${chain.anchorWindow}-block anchor window and ` +
+        `${report.pendingAbandoned === 1 ? 'its change note is' : 'their change notes are'} no ` +
+        'longer counted as pending. The notes they would have spent are unspent.',
+    );
+  }
 
   report.recordedGenesis = input.meta.genesisHash === null;
 

@@ -47,6 +47,7 @@ import { ReceiveScreen } from './screens/ReceiveScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import {
   deriveKey,
+  deriveStoreKey,
   newSalt,
   bytesToHex,
   hexToBytes,
@@ -397,7 +398,9 @@ export function App(): ReactNode {
       setUnlockError(null);
       try {
         const db = await current.openDatabase();
-        const key = await deriveKey(passphrase, phase.meta.kdf.saltHex);
+        // From the parameters this store recorded rather than from this
+        // build's constants: see `deriveStoreKey`.
+        const key = await deriveStoreKey(passphrase, phase.meta.kdf);
         const store = WalletStore.unlocked(db, phase.meta.address, key);
         const seed = await store.seed();
         // A prover somebody switched off in settings is started again here
@@ -494,7 +497,10 @@ export function App(): ReactNode {
             held,
             rejected: rejectedNotes,
             checkpoints,
-            pending: pending.map((entry) => entry.commitment),
+            pending: pending.map((entry) => ({
+              commitment: entry.commitment,
+              submittedAtBlock: entry.submittedAtBlock,
+            })),
           },
           chainAdapter(context),
           cryptoAdapter(current.prover),
