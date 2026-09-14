@@ -1,0 +1,205 @@
+{
+  "height": 8,
+  "hash": "0x24296ff58bc2fc881e4cbbde184e590e6964b0ffe40ac8a3ecdbe7ac9055bacd",
+  "records": [
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 0
+      },
+      "section": "system",
+      "method": "ExtrinsicSuccess",
+      "fields": {
+        "dispatch_info": {
+          "weight": {
+            "refTime": 921113000,
+            "proofSize": 1493
+          },
+          "class": "Mandatory",
+          "paysFee": "Yes"
+        }
+      }
+    },
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 1
+      },
+      "section": "system",
+      "method": "ExtrinsicSuccess",
+      "fields": {
+        "dispatch_info": {
+          "weight": {
+            "refTime": 927297000,
+            "proofSize": 5200
+          },
+          "class": "Mandatory",
+          "paysFee": "Yes"
+        }
+      }
+    },
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 2
+      },
+      "section": "balances",
+      "method": "Withdraw",
+      "fields": {
+        "who": "qzk1Nxai3dZD9Cn5kwGcgL6mKxsfxwqdis7kDQJ52aJS2vSn7",
+        "amount": 11813927000
+      }
+    },
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 2
+      },
+      "section": "balances",
+      "method": "Burned",
+      "fields": {
+        "who": "qzk1Nxai3dZD9Cn5kwGcgL6mKxsfxwqdis7kDQJ52aJS2vSn7",
+        "amount": 10000000000000
+      }
+    },
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 2
+      },
+      "section": "zkTree",
+      "method": "LeafInserted",
+      "fields": {
+        "index": 7
+      }
+    },
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 2
+      },
+      "section": "shielded",
+      "method": "Shielded",
+      "fields": {
+        "who": "qzk1Nxai3dZD9Cn5kwGcgL6mKxsfxwqdis7kDQJ52aJS2vSn7",
+        "value": 10000000000000,
+        "commitment": "0x58d2c08bceec2672da4eb08d943c5ff9f018019d75da21a4f3cf68b764d27969",
+        "leaf_index": 7,
+        "entry_index": 0,
+        "ciphertext": "0x01010000000000200600006fa70af49c28b354c5000d70e68b78fccb6d5eeae61bdeeeb477195043673a9da471504cd0759dcab37059816f3ba5cd544b9302cd543feb0547860aeb1db3ba1d73bdd97037905055fc645f0c048eff26850ca4332e33da6840974cf61f2f75e6894baf991cfd6566842777d17650bff59a838c0ece8bab4321b95a2c96981246005328764f0af403317caa708058dddfa4669c2ae1b22c3b39440b64264b1c6c426346cf9faaf795f47f90152f3e1b0e6ef7cbe6fd044628ed6f92881032c7eb5de02620a683ea681db15468e2cb0e4f67c268cd3ae7ecada71449440a3168670186c0dadd853e5e252396994ba1db39b069901a7d99ad8838d6a02c18ddc55fb30daed8b6decb03d7866312b05414853b0f7f772975df02a0863e0bc41ddb559b8c8fec0c7cdcf653667f20d38c4068cc98317a633a459ccc84405e426a7ecfa6802e2e15bd0b1c2b5a75743b080d3638b7134bc9f4c362dfe3feaccf502f20ccd09ba56f0600f32a3a73c4d5a0519cc89f9866b68d3a2680838ad31c4d940b1cc32ee23cb8bed09b2cc07056e2556e831bca31b829d64fdea95f48dae01653f503a99636397d35448c4cf748fb95ccea7bb0a8d2801b7173317f54e8d953254d526d2beba37dd98bd636c2f6e958089af2472a034cf6e92fe76ecd588aafe53dfd1eb0e8ffe63eefb4c34088d9d74e37eee66afde517363ca269d6090864f175272116090017cc8b40d9919737ccec2f52dd0e937d785d4eddf684b111be3148b4fa9869e217507c217b25fe409c7c3d931102576afe04712cdcb4e02bc2275b27145960ae0d7a069bf72422a45e6168f6e690842fc983d08ac6d07d4448f28f61d93a42064633a4e770aa377677ad8ab8f187d07d2a8f194e1cc620b3ee7fd57ec1e6b9228c4e48d4946468d24512a5f46c93e607f3eba5494df7a6161c75e8858a08e82e44c0adeb929aba70e73690a186493d4d3e5435225695c8d2bc7cae7d696e940dd48aa81e433d4b000acf933c2f4ac7af36c7a432ec1e2bcc62e7275b87d545de22da59f1547aac4dc271a4aa572a9703e30dbeebf5b5593407fa4b166e9f29fbf8d81c1d2abca2ad1f1a0910e1baf8efd06c92eddb1442035f42b751a91410667b4c928f20cdd1e0aea2720bf7ee4c04d10700cc148c9952d159a65724008d7ce794a779598cf4f8d2c3ee573e50dae81a029d4803aff995d2b55067345ca5246adf4c7dfacb4f6dc93743a69bf95850fff61ca2d3efe70899f98889e1b1ca52e981801fee5f61d6c1fbe4d48defdd4a7924799b249252bb16680496b89e633a03046b5957ed617a3d4218423637017fce00b1e0ceb4dc905c435567d970aa407d35a37d6b072843727f28cfe7474f3faedd171c41114fdc242d97faf793a1025c1157d31128d25dda9fd9b6d701f5e9be6548ac60594118e158a6eae8ec857a414bc2564bfc79fc6faca759f23115f3773f78acac6ae133cbc1a6083d16a7e51a4e19a140240d93129a96e530f43bba03fd5080a646dd998ad1ceaea32d8f72065991b8a579461dcd740fa193c8c1e343fd5696bf6df6a2a0217ae7cb7c8581e86b41d58631451b7b3bf150b32da690e6df1af58e070ab89f92c0c5482a5c290d3f9e5f34ef810239ff173f34950b58d108f5d32b39742448e98db2f20d6378573c003b7224921f19fcae939ac2c4a8af24cb83de942a2876af44441a499e3d74c97a228dc5ba2ea67e79096c04c3221fc178b6be9f64b977293d6958f8d5d037a3ed34d1c050721c59d258b8606db9ddf24561a70fa7c9eb1c676d55e7b813dd775398df6c5f576079bbd014890434689653899b4fe3286125b488d4d8d078baba63822d59fe46394ed53141e88baf7e2529f9a26e164b096bc7a420bbc8beb97b144910ef9e5f3499490db6ef25830d74d62e39c00819a15eb2a75583eb138ca61ca686b23d3f62b43b15ea4b4829a79427b6d49ab64b7ffc6d826a59c481e72b4f90f99f8edb04e91e8db8453976a4ba8152d7259e0a552bcf9137a119cfa4316aa81b1666651e73f12b1f3dc57a5e59ead99214eb230497f639dabe47f714ca53bd93ca3ed7bfb72565e6393a38e6992b6e3f39b999cbda4bae7b2aa432d32129a9cc8d989c383d41eca789e4651aada5cf47fa952de88ba3bf299643d90239cc992acbe5c7d6b456c0aa9c91d0110ef73a3002ef68fd80000000de58909a27631d1bdbca36dee32cc297dcbffd7b0279a9469e563c1fa00c09ddcd33188600a96f489301e45809b021dd7903412b4b4cd6ad3ffae3ea976cdfabbe1d4f3a9f88dec2ce1e28f5c9dd19755f329ed87d30d184a6f54cbb269d4d1c95d60d041ba0921fb48a49dfda4ac0e7478fe77c35830557964a3ba74d5010a24d00000036db1ca352921a632046ff9586969500f21fe4ce1531555610a478a0d26a754cefac72847b0cc6d153c8775088733fce1fa91471345521a951fdf331ed7b763bc92d63c13dc6fd5f531519f102"
+      }
+    },
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 2
+      },
+      "section": "balances",
+      "method": "Deposit",
+      "fields": {
+        "who": "qzk1Nxai3dZD9Cn5kwGcgL6mKxsfxwqdis7kDQJ52aJS2vSn7",
+        "amount": 175000000
+      }
+    },
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 2
+      },
+      "section": "miningRewards",
+      "method": "FeesCollected",
+      "fields": {
+        "amount": 11638927000,
+        "total": 15438753232
+      }
+    },
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 2
+      },
+      "section": "balances",
+      "method": "BurnedDebt",
+      "fields": {
+        "amount": 11638927000
+      }
+    },
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 2
+      },
+      "section": "transactionPayment",
+      "method": "TransactionFeePaid",
+      "fields": {
+        "who": "qzk1Nxai3dZD9Cn5kwGcgL6mKxsfxwqdis7kDQJ52aJS2vSn7",
+        "actual_fee": 11638927000,
+        "tip": 0
+      }
+    },
+    {
+      "phase": {
+        "kind": "applyExtrinsic",
+        "index": 2
+      },
+      "section": "system",
+      "method": "ExtrinsicSuccess",
+      "fields": {
+        "dispatch_info": {
+          "weight": {
+            "refTime": 2534927000,
+            "proofSize": 26067
+          },
+          "class": "Normal",
+          "paysFee": "Yes"
+        }
+      }
+    },
+    {
+      "phase": {
+        "kind": "finalization"
+      },
+      "section": "qPoW",
+      "method": "DifficultyAdjusted",
+      "fields": {
+        "old_difficulty": "0x86000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "new_difficulty": "0x87000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "observed_block_time": 6159
+      }
+    },
+    {
+      "phase": {
+        "kind": "finalization"
+      },
+      "section": "zkTree",
+      "method": "LeafInserted",
+      "fields": {
+        "index": 8
+      }
+    },
+    {
+      "phase": {
+        "kind": "finalization"
+      },
+      "section": "shielded",
+      "method": "CoinbaseMinted",
+      "fields": {
+        "block_number": 8,
+        "leaf_index": 8,
+        "inner": "0x0a4c4423d2c5c666ceb8ee33cb5ef33d448035266b4c2b529749037454ce1cb5",
+        "value": 420000000000,
+        "has_ciphertext": false
+      }
+    },
+    {
+      "phase": {
+        "kind": "finalization"
+      },
+      "section": "miningRewards",
+      "method": "CoinbaseCredited",
+      "fields": {
+        "amount": 420000000000
+      }
+    }
+  ]
+}

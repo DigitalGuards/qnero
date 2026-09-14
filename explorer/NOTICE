@@ -1,0 +1,23 @@
+The stylesheet in src/styles/ carries the look of MyMonero's web wallet
+(https://github.com/mymonero/mymonero-web-js, BSD-3-Clause, Copyright (c)
+2014-2019, MyMonero.com), read at commit b89b7c6 on 2026-09-14.
+
+What is carried over is the design system that stylesheet states by repetition:
+the dark surface ramp (#161416, #272527, #1d1b1d, #383638, #494749), the text
+ramp above it, the two-part elevation recipe (a half-pixel inset highlight over
+a one-pixel dark shadow), the 13/12/11/10 px type scale with 0.5 px tracking,
+the 3 px and 5 px radii, the fixed 95 px rail, the 24 px status strip, and the
+label-over-value field row. No file was copied; src/styles/tokens.css states
+those values as custom properties, which the original does not have.
+
+What is not carried over: the accent colour, which is the one value in that
+palette that carries MyMonero's identity; the light palette, which is this
+project's own; and the `Native-*` typefaces, which are a licensed retail family
+outside the BSD grant on the source. The type roles are filled by system stacks
+instead.
+
+BSD-3-Clause clause 3 forbids using the copyright holder's or contributors'
+names to endorse or promote products derived from this software. The MyMonero
+name and logo appear nowhere in this application.
+
+Full licence text: https://github.com/mymonero/mymonero-web-js/blob/master/LICENSE.txt

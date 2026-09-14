@@ -1,0 +1,11 @@
+{
+  "capturedFrom": "a local --dev --tmp node",
+  "specName": "qnero",
+  "specVersion": 102,
+  "transactionVersion": 7,
+  "tokenSymbol": "QNR",
+  "tokenDecimals": 12,
+  "ss58Format": 189,
+  "shieldHeight": 8,
+  "settlementHeight": 10
+}
