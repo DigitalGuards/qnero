@@ -1054,7 +1054,18 @@ nullifier, so both members of a conflict set are marked at once
 written off where it is met rather than left for a later sync
 (`write_off_missing_note`); a spent note is never marked off chain
 (`mark_off_chain`); and the inclusion walk starts at the anchor block plus one,
-so a block authored during the submission round trip is never skipped.
+so a block authored during the submission round trip is never skipped, and
+stops at a height the node has no block for rather than walking past it, so a
+settlement that lands at a height a reorg briefly hid is still found.
+
+The chain gate belongs to that list too. `prepare_spend` opens with
+`ensure_genesis`, and so does the browser's `spend`: a store bound to one chain
+meeting a node on another rebuilds that node's tree, passes the root gate over
+it, and writes a real note off as one this chain does not carry. And every
+storage value a scan reads is decoded by its declared type and refused by name
+at any other width, the way `Chain::leaves` and `Chain::ciphertext` do, because
+`REQUIRED_STORAGE` compares hashers and a changed value type would otherwise
+read as a chain on which no leaf is this wallet's.
 
 The property that no request names one of this wallet's own values is asserted
 rather than asserted-in-prose: `wallet-web/tests/privacy.test.ts` drives the
@@ -1075,10 +1086,18 @@ derivation, which is the only path to a key, rather than on the screen that
 asks for one. It also adds a content policy: the built page declares one, and
 `wallet-web/README.md` carries the header a host should send, because "nothing
 but the node you configure" is otherwise a description of the code rather than
-a rule the browser applies. What stays in the clear is deliberate and stated on the page:
-commitment, leaf index, block, value, origin, spent and the checkpoints, which
-is what lets a locked wallet still show a balance and still sync. It is a
-choice rather than an oversight, and a threat model that wants the value graph
+a rule the browser applies. What that policy buys is stated exactly where it is
+declared: no `http(s)` destination and no third-party subresource of any kind,
+and, in the wide form, a WebSocket to any host, which is the residual path.
+`QNERO_ENDPOINT` at build time pins `connect-src` to one origin and closes it,
+at the cost of needing a rebuild to point the wallet elsewhere.
+
+What stays in the clear is deliberate and stated on the page: commitment, leaf
+index, block, value, origin, spent and the checkpoints, which is what lets a
+locked wallet still show a balance and still sync. It is a choice rather than
+an oversight, and the cost of it is in the README's threat model: a copied
+browser profile gives up this wallet's receive history mapped onto public leaf
+indices without a passphrase guess. A threat model that wants the value graph
 hidden encrypts those too and then needs the passphrase to sync.
 
 **What the browser cannot do.** It cannot shield. Entry into the pool is a
@@ -1092,8 +1111,9 @@ index)` and `Shielded::EntryCount` are both exported.
 **What the browser costs.** A payment is a circuit build and two proofs in wasm
 rather than in native code, which `docs/BENCH.md` measures at a 2.8x to 3.6x
 penalty per stage. The wallet prints the expectation beside the elapsed clock
-while it proves, per module rather than one figure for both, so a slow machine
-reads as slow rather than as stuck. The circuits are built once per worker and
+while it proves, per module rather than one figure for both, and after the
+first payment it quotes what this machine actually took rather than the
+published figure, so the panel never shows two numbers that disagree. The circuits are built once per worker and
 every later payment is answered from that build: wasm linear memory never
 shrinks, so a second build would add its own quarter gigabyte permanently.
 Stopping the worker from the settings screen is the only thing that gives it

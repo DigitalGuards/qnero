@@ -37,12 +37,27 @@ Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval
 ```
 
 The policy is one constant in `vite.config.ts` and both the tag and the header
-come from it, so they cannot drift. `connect-src` stays `ws:`/`wss:` wide
-because the endpoint is chosen at runtime from the settings screen; it still
-refuses every `http(s)` destination, which is every path a compromised
-dependency would exfiltrate through. `'wasm-unsafe-eval'` is what lets the
+come from it, so they cannot drift. `'wasm-unsafe-eval'` is what lets the
 prover compile. `'unsafe-inline'` in `style-src` is for the `style` attributes
 React and Radix write, which have no nonce.
+
+What it refuses, measured against a built `dist/` rather than read off the
+specification: every `http(s)` destination, every third-party script, style,
+image and font, every `<base>` rewrite and every form post. **What the wide
+form still permits is a WebSocket to any host**: with `connect-src 'self' ws:
+wss:`, `new WebSocket('wss://somewhere/' + seed)` raises no violation. That is
+the residual exfiltration path, and it is the price of choosing the endpoint at
+runtime from the settings screen.
+
+A deployment with a fixed node should close it at build time:
+
+```
+QNERO_ENDPOINT=wss://node.example npm run build
+```
+
+That pins `connect-src` to `'self' wss://node.example` and drops the two wide
+schemes. The settings screen can then only be pointed at another node by
+rebuilding, which is the trade: one origin, or any host.
 
 The prover is not built by this app. It comes from `crates/qnero-prover-wasm`:
 
@@ -90,10 +105,12 @@ has the bug too.
 ## What it does
 
 - **Create a wallet.** 32 bytes from `crypto.getRandomValues`, shown once as
-  eight groups of eight hex characters and as a QR code, then three of the
-  eight groups asked back before the wallet is written. Somebody who wrote
-  nothing down cannot answer, which is the point: that screen is the last
-  moment the key is recoverable.
+  eight groups of eight hex characters, then three of the eight groups asked
+  back before the wallet is written. Somebody who wrote nothing down cannot
+  answer, which is the point: that screen is the last moment the key is
+  recoverable. Hex and no code beside it: a QR of a spend key is harvested by
+  any camera, screen share or shoulder in the room in one frame, and nothing
+  in this wallet scans one.
 - **Restore from a seed.** The 64 hex characters and nothing else. There is no
   restore height, because a scan that started at a height the wallet named
   would tell the node roughly when the wallet was created.
@@ -154,11 +171,22 @@ M10.
   is a real erase of that buffer. The wasm module's own zeroize is worth the
   same narrow thing, because linear memory is an `ArrayBuffer` the host can
   read at any time.
-- **IndexedDB is evictable and it is the only copy of every note's `r`.** The
+- **IndexedDB is evictable, and the seed is what recovers from that.** The
   wallet asks for persistent storage and reports the answer rather than
-  assuming it. A note whose `r` is gone is value settled on chain that nothing
-  can ever spend. Write the seed down: everything else re-derives from it,
-  because every note's plaintext is on the chain inside its ciphertext.
+  assuming it. Write the seed down: every note re-derives from it, because
+  every note's plaintext is on the chain inside its ciphertext, so what an
+  eviction costs is a full rescan and the record of which notes are spent.
+  Without the seed it costs the wallet.
+- **The store keeps the value graph in the clear.** Four fields are sealed,
+  plus the seed: `rho`, `r`, `nullifier` and `memo`. Everything else is
+  plaintext by choice, so that a locked wallet can still show a balance and
+  still sync: the address, and per note its commitment, its leaf index, its
+  block, its value, its origin and whether it is spent. So a copied browser
+  profile gives up this wallet's complete receive history mapped onto public
+  leaf indices, with no passphrase guess needed, which is the linkage the pool
+  exists to hide. A threat model that wants the graph hidden has to seal
+  `value` and `leafIndex` too and give up the locked balance screen.
+  `src/wallet/model.ts` states the same list beside the type.
 - **What a chain reader sees** is a settlement, its fee, its anchor block, two
   commitments and two ciphertexts of a fixed size. Not the amounts, not the
   sender, not the recipient, not which output is the change. The gap between a
