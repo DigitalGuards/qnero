@@ -384,6 +384,14 @@ fn main() -> Result<()> {
             if let Some(notice) = report.rescan_notice() {
                 println!("warning     {notice}");
             }
+            for warning in &report.warnings {
+                // What the pass gave up, could not verify, or recovered from
+                // an answer the chain does not back. Each one is rare, which
+                // is what keeps the line worth reading: today they are the two
+                // halves of the moved-leaf detector, a ciphertext of this
+                // wallet's found beside a commitment it does not open.
+                println!("warning     {warning}");
+            }
             if report.coinbase_label_disagreed > 0 {
                 // Never on a block a Qnero node built: the author label and
                 // the note's own randomness come out of one coinbase viewing

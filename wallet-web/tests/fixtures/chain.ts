@@ -88,15 +88,42 @@ function leafHexAt(leafHashes: Uint8Array, index: number): string {
 }
 
 /**
- * The same root, folded the way the chain folds: four children at a time, and
- * **sorted** before they are hashed.
+ * The depth `pallet-zk-tree` folds this many leaves at.
+ *
+ * `CommitmentTree::depth_for` is the same rule: the smallest depth a 4-ary
+ * tree holds the count at, and one for a single leaf, because the pallet's
+ * growth loop starts at `capacity_at_depth(0) == 0`.
+ */
+export function depthFor(count: number): number {
+  let depth = 1;
+  let capacity = 4;
+  while (capacity < count) {
+    capacity *= 4;
+    depth += 1;
+  }
+  return depth;
+}
+
+/**
+ * The same root, folded the way the chain folds: four children at a time,
+ * **sorted** before they are hashed, up to `depthFor(count)` levels.
  *
  * `qnero_circuit::merkle::hash_node` and `pallet-zk-tree`'s `tree::hash_node`
  * both sort a node's four children before hashing them, which is what lets a
- * Merkle path carry siblings with no position beside them. The consequence a
- * wallet has to live with is that a parent is a function of its children's
- * multiset, so two orderings of one aligned group of four reach the same root
- * and a published `zkTreeRoot` commits to no order inside a group.
+ * Merkle path carry siblings with no position beside them. Two consequences a
+ * wallet has to live with, and the bound tests here model both: a parent is a
+ * function of its children's multiset, at every level, so any composition of
+ * sibling swaps inside a block's leaf range reaches the same root; and no
+ * level is mixed into the hash, so a shorter tree of internal node values
+ * folds to the root of the leaves under them.
+ *
+ * The level count is what makes this `TreeFrontier::root` and no model of it.
+ * `TreeFrontier` folds to `depth_for(count)` and pads with `empty_digest()`,
+ * so one leaf roots at `hash_node([leaf, pad, pad, pad])` where a loop that
+ * stops as soon as one node is left roots at the leaf itself. Every other
+ * count agrees between the two, because `ceil(count / 4 ** k) == 1` exactly
+ * when `count <= 4 ** k`; one leaf is the case that diverges, and a bound test
+ * modelling a fold the production wasm does not compute proves nothing.
  *
  * [`rootOver`] is order sensitive and stays the default, because every other
  * test here wants two different leaf sets to reach two different roots and
@@ -113,7 +140,7 @@ export function sortedRootOver(leafHashes: Uint8Array, count: number): string {
   for (let index = 0; index < count; index += 1) {
     level.push(leafHexAt(leafHashes, index));
   }
-  while (level.length > 1) {
+  for (let round = 0; round < depthFor(count); round += 1) {
     while (level.length % 4 !== 0) {
       level.push(pad);
     }
@@ -125,6 +152,61 @@ export function sortedRootOver(leafHashes: Uint8Array, count: number): string {
     level = next;
   }
   return level[0] ?? pad;
+}
+
+/**
+ * The same root, folded the way `TreeFrontier` builds it: leaf by leaf,
+ * carrying a completed node upward, and rooted at `depthFor(count)`.
+ *
+ * A second implementation on purpose. [`sortedRootOver`] folds level by level
+ * over the whole range, which is the shape a test reads easily;
+ * `qnero_circuit::merkle::TreeFrontier` pushes one leaf at a time and keeps a
+ * partial node per level, which is the shape the chain and the prover module
+ * actually run. `tests/leaf-typing.test.ts` asserts the two agree across the
+ * counts where a fold can disagree, so the fixture cannot quietly model a
+ * different tree from the one the wallets check roots against.
+ */
+export function frontierRootOver(leafHashes: Uint8Array, count: number): string {
+  if (count === 0) {
+    return fold(new TextEncoder().encode('an empty tree'));
+  }
+  const pad = '00'.repeat(32);
+  const hashNode = (children: string[]): string => {
+    const four = [...children];
+    while (four.length < 4) {
+      four.push(pad);
+    }
+    return fold(new TextEncoder().encode([...four].sort().join('')));
+  };
+  const levels: string[][] = [];
+  for (let index = 0; index < count; index += 1) {
+    let carry: string | null = leafHexAt(leafHashes, index);
+    let level = 0;
+    while (carry !== null) {
+      if (levels.length === level) {
+        levels.push([]);
+      }
+      (levels[level] as string[]).push(carry);
+      if ((levels[level] as string[]).length === 4) {
+        const children = levels[level] as string[];
+        carry = hashNode(children);
+        children.length = 0;
+        level += 1;
+      } else {
+        carry = null;
+      }
+    }
+  }
+  const depth = depthFor(count);
+  let carry: string | null = null;
+  for (let level = 0; level < depth; level += 1) {
+    const filled = levels[level] ?? [];
+    if (filled.length === 0 && carry === null) {
+      continue;
+    }
+    carry = hashNode(carry === null ? filled : [...filled, carry]);
+  }
+  return carry ?? (levels[depth]?.[0] as string);
 }
 
 /** What a fixture says about the chain behind its leaves. */

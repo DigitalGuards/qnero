@@ -371,18 +371,36 @@ implementation in each wallet, `crates/qnero-wallet/src/typing.rs` and
    root a fold that stopped short reaches, so the roots agree either way. What
    makes the count a fact is the refusal of the pad below it.
 
-   **What the fold pins is a set, and inside an aligned group of four it is a
-   multiset.** `tree::hash_node` in `pallet-zk-tree` and
+   **What the fold pins is a multiset at every level, and it pins no position
+   and no height inside a block.** `tree::hash_node` in `pallet-zk-tree` and
    `qnero_circuit::merkle::hash_node` both sort a node's four children before
    hashing them, which is what lets a Merkle path carry siblings with no
-   position beside them. So two orderings of one group of four leaves reach
-   the same parent and the same root: a published `zkTreeRoot` commits to
-   **which** leaves a block appended and never to which index each one landed
-   at. The leaf range, the leaf count and the index a coinbase occupies inside
-   that range are header-authenticated; the assignment of commitments to
-   indices inside a group is not, and no rule below recovers it. "What bound A
-   does not cover" carries what a node does with that and the rescan that
-   recovers a payment hidden that way.
+   position beside them, and neither mixes the level or the child slot into the
+   hash. Two consequences, and the bound is both together:
+
+   - **Position, at every level.** The sort applies to every node, so the fold
+     is invariant under the whole automorphism group of the 4-ary tree: permute
+     leaves inside an aligned group of four, and exchange whole sibling
+     subtrees at any level above. Composed inside one block's leaf range, which
+     the root does pin, that reaches any position the range's aligned subtrees
+     allow, across group boundaries and onto the coinbase position. A published
+     `zkTreeRoot` commits to **which** leaves a block appended and never to
+     which index each one landed at.
+   - **Height and count inside a block.** With no level tag, the fold of `m`
+     level-1 node values is the fold of the `4m` leaves under them.
+     `TreeFrontier::root` folds `m` leaves to `depth_for(m)` and pads the empty
+     slots with `empty_hash()`, so a node can report a leaf count of 2 for a
+     block that appended 8, answer the two level-1 node hashes as that block's
+     leaves, and pass every root comparison under the honest chain's own
+     headers. The pad rule above pins the count only against a fold at the same
+     height.
+
+   The leaf range of each block and the index a coinbase occupies inside it are
+   header-authenticated; the assignment of commitments to indices, the leaf
+   count inside a block and the height of the fold are not, and no rule below
+   recovers them. "What bound A does not cover" carries what a node does with
+   that, the one case the scan catches on its own, and the rescan that recovers
+   a payment hidden the other way.
 
 3. **The coinbase position.** `pallet-mining-rewards` mints the coinbase from
    its own `on_finalize`, through `CoinbaseSink`, at pallet index 6, where
@@ -480,10 +498,10 @@ refused. This is the bound the per-leaf rules above deliver, and the tests that
 drive it are `crates/qnero-wallet/tests/leaf_typing.rs` and
 `wallet-web/tests/leaf-typing.test.ts`.
 
-**What bound A does not cover: the bytes at `Shielded::Ciphertexts`, and a
-leaf's index inside its aligned group of four.** Both are open, in both
-wallets, and they are stated here rather than implied away. They are one
-paragraph because they produce one reading, a leaf that opens for nobody, and
+**What bound A does not cover: the bytes at `Shielded::Ciphertexts`, and where
+a commitment sits inside its block's own leaf range.** Both are open, in both
+wallets, and they are stated here in full, with nothing implied away. They belong
+together because they produce one reading, a leaf that opens for nobody, and
 one rescan recovers either.
 
 **The bytes.** `Shielded::Ciphertexts(i)` is tied to leaf `i` by nothing on
@@ -495,66 +513,130 @@ well-formed ciphertext at this wallet's incoming payment: the AEAD does not
 open, which is the ordinary answer for almost every leaf on the chain, the leaf
 reads as somebody else's, and the pass writes the watermark above it.
 
-**The index.** `tree::hash_node` sorts a node's four children before hashing
-them, so a block's `zkTreeRoot` commits to each aligned group's multiset and to
-no order inside it. A node with honest headers can therefore permute a group:
-exchange this wallet's payment with the leaf beside it, or with the block's own
-coinbase, leaving every ciphertext where the chain published it. Onto the
-coinbase position it hides the payment outright, because a coinbase is not
-owed a ciphertext and this wallet's coinbase rebuild does not open somebody
-else's note: there is nothing to decrypt, the leaf is skipped, and the
-watermark commits past it. Between two ordinary leaves the payment still
-arrives, at an index the chain does not hold it at, and it is unspendable until
-a pass re-reads it, because a Merkle path rebuilt at that index reaches no root
-any header carries.
+**The position, and the shape.** `tree::hash_node` sorts a node's four children
+before hashing them and mixes in neither the level nor the child slot. So a
+block's `zkTreeRoot` pins that block's leaf multiset and each internal node's
+child multiset, and nothing else about the shape:
+
+- **Any position inside the block's range.** The sort runs at every level, so
+  sibling swaps compose: exchange leaves inside an aligned group of four, and
+  exchange whole sibling subtrees above it. A payment can be moved to any
+  position the range's aligned subtrees allow, the coinbase position included,
+  and never only inside one group of four. Block 8 appending leaves 0 to 7 can
+  serve the two groups exchanged with the payment ordered last, six positions
+  from where the chain has it, with every root and every header unchanged.
+- **Neither the leaf count nor the height inside a block.** The fold of `m`
+  level-1 node values equals the fold of the `4m` leaves under them, because
+  `TreeFrontier::root` folds `m` leaves to `depth_for(m)` and pads with
+  `empty_hash()`. A node can answer `ZkTree::LeafCount` 2 for a block that
+  appended 8 and hand over the two level-1 node hashes as its leaves: the
+  per-block root comparison passes against the honest chain's own header, the
+  watermark commits at 2, and every leaf the block really appended is behind
+  it. The pad rule that makes the count a fact holds only against a fold at the
+  same height.
+
+Onto the coinbase position the move hides the payment outright, because a
+coinbase is not owed a ciphertext and this wallet's coinbase rebuild does not
+open somebody else's note: there is nothing to decrypt, the leaf is skipped,
+and the watermark commits past it.
+
+**What happens to the ciphertext decides the rest, and the two variants are
+different.** Both wallets carry the detector now, in `try_transfer`
+(`OpenedLeaf::Elsewhere`) and in `decryptBatch` (`ScannedNote.moved`).
+
+- *The ciphertexts left in place.* The payment's own bytes are still at the
+  leaf the chain published them at, beside the commitment the node moved there.
+  They open under this wallet's key, which is authenticated by ML-KEM
+  decapsulation and by an AEAD over this wallet's own `pk`, so the note is this
+  wallet's and the commitment beside it says the pair was taken apart. The pass
+  searches that block's own folded leaf range, the commitments it already
+  compared against the block's `zkTreeRoot`, finds the commitment the note
+  opens, **records the note at that index and warns**, naming both indices and
+  the second node. The payment arrives with no second node needed. The index it
+  arrives at is still the node's claim, which is why the warning names a second
+  node: a rescan there moves the note to the index the chain holds it at.
+- *The ciphertext gone with the commitment, or gone altogether.* A node that
+  moves the commitment to a position owing no ciphertext and answers a
+  stranger's bytes where the payment's used to sit hands this wallet nothing
+  that opens. Nothing detects it, the leaf reads as somebody else's, and the
+  watermark commits above it.
+
+Between two ordinary leaves with the ciphertexts moved along with their
+commitments, the payment arrives at the index the node dictated, and it is
+unspendable until a pass re-reads it, because a Merkle path rebuilt at that
+index reaches no root any header carries.
 
 Every root, every position, every author label and every header still check out
-in both cases, so nothing refuses and nothing is counted.
+in every case, so nothing refuses and nothing outside the warning is counted.
 
-The checkpoint fork walk does not recover either. That walk finds a node whose
-headers disagree with a checkpoint, and here the headers agree: every later
-honest node confirms every checkpoint, the ordinary pass scans nothing, and the
-payment stays behind the watermark. **The recovery for both is a rescan against
-a second node**, which reads the range again from leaf zero and keeps every
-note.
+There is a second reading of the detector's other arm, and it is why a
+commitment the block holds nowhere is a **warning and never a refusal**: a
+sender who encrypts a payload opening a commitment it never published produces
+exactly the same answer. `ct_digest` is unconstrained inside the circuit
+(`docs/CIRCUIT.md` section 1), so no rule on chain ties a ciphertext's
+plaintext to the commitment beside it, and anyone holding this wallet's address
+could otherwise stop its sync permanently with one transaction, because that
+leaf is read again on every later pass and on a rescan as well. So the leaf is
+skipped, the warning names it, and the pass finishes.
 
-What both wallets do about it in this round is say it out loud. A pass that
-read leaves and received nothing carries one sentence naming both unbound
-values and the rescan: the command-line wallet prints it as a `hint` line
+The checkpoint fork walk does not recover what stays hidden. That walk finds a
+node whose headers disagree with a checkpoint, and here the headers agree:
+every later honest node confirms every checkpoint, the ordinary pass scans
+nothing, and the payment stays behind the watermark. **The recovery is a rescan
+against a second node**, which reads the range again from leaf zero and keeps
+every note. The false watermark left by a fold at the wrong height is louder
+than that: the leaves below it fold to something the checkpointed header does
+not carry, so the next ordinary pass against an honest node refuses by name
+and a rescan is the way back.
+
+What both wallets do about the rest is say it out loud. A pass that read leaves
+and received nothing carries one sentence naming both unbound values and the
+rescan: the command-line wallet prints it as a `hint` line
 (`SyncReport::scanned_and_received_nothing` and `CIPHERTEXT_SUBSTITUTION_HINT`)
 and the browser wallet pushes the identical text onto `report.hints`, which the
-balance screen renders under the warnings and at less weight. It is the
-ordinary case on most passes, because almost every leaf on the chain is
-somebody else's, and a pass that received some other note does not raise it at
-all, so it is a prompt for an operator waiting on a payment rather than a
-detection. `report.warnings` stays the list of what a pass gave up or could not
-verify, each entry rare, which is what keeps it worth reading. The spend-time
+balance screen renders under the warnings and at less weight. The two copies
+are held byte for byte identical by a test that reads the Rust literal out of
+`crates/qnero-wallet/src/wallet.rs`, because they had drifted apart in their
+closing clause. The hint is the ordinary case on most passes, because almost
+every leaf on the chain is somebody else's, and a pass that received some other
+note does not raise it at all, so it is a prompt for an operator waiting on a
+payment rather than a detection. `report.warnings` stays the list of what a
+pass gave up, could not verify, or recovered from an answer the chain does not
+back, each entry rare, which is what keeps it worth reading. The spend-time
 refusal for a note at an index the chain holds something else at names the
 rescan for the same reason: the leaf is below the watermark, so an ordinary
 sync starts above it and never reads it again.
 
-The tests drive the lying node and then the rescan that finds the payment, in
-both wallets:
-`a_substituted_ciphertext_hides_a_payment_until_a_rescan_reads_the_leaf_again`
-and "hides a payment behind a substituted ciphertext until a rescan reads the
-leaf again" for the bytes;
-`a_within_group_swap_onto_the_coinbase_position_hides_a_payment_until_a_rescan`
-and "hides a payment moved onto the coinbase position until a rescan reads the
-leaf again" for the index, with
-`a_within_group_swap_records_a_note_at_a_leaf_the_chain_does_not_hold` for the
-swap between two ordinary leaves and
-`a_swap_inside_one_group_of_four_moves_no_root` for the premise at the merkle
-layer.
+The tests drive the lying node and then the recovery, in both wallets:
 
-Closing either properly means never taking a per-leaf value from storage
-unbound, and the shape is in `docs/DESIGN.md` as the next wallet milestone:
-read each block's extrinsics from the body, recompute the header's
-`extrinsicsRoot` over them, and take each leaf's commitment and ciphertext from
-the settlement and shield calls in the order the pallet appends them, which
-binds the index and the bytes in one pass. `docs/DESIGN.md` section 9 also
-records the consensus-level alternative for the index, domain-separating a
-child's slot instead of sorting, as a decision to take before a testnet
-genesis.
+| What the node does | Command-line wallet | Browser wallet |
+|---|---|---|
+| substitutes the ciphertext | `a_substituted_ciphertext_hides_a_payment_until_a_rescan_reads_the_leaf_again` | "hides a payment behind a substituted ciphertext until a rescan reads the leaf again" |
+| moves the payment onto the coinbase position, ciphertext left in place | `a_moved_leaf_whose_ciphertext_stayed_is_recorded_where_the_block_holds_it` | "records a moved leaf where the block holds it when the ciphertext stayed" |
+| the same, with this wallet's ciphertext gone | `a_moved_leaf_whose_ciphertext_went_with_it_hides_a_payment_until_a_rescan` | "hides a payment moved onto the coinbase position until a rescan reads the leaf again" |
+| exchanges two groups of four, six positions | `a_cross_group_swap_onto_the_coinbase_position_hides_a_payment_until_a_rescan` | "hides a payment swapped across two groups of four until a rescan" |
+| serves two level-1 node values as two leaves | `a_shorter_tree_of_node_values_served_as_leaves_hides_a_payment_until_a_rescan` | "hides a payment behind a shorter tree of node values until a rescan" |
+| answers a ciphertext of ours the block holds no commitment for | `a_ciphertext_of_ours_beside_a_commitment_the_block_lacks_warns_and_keeps_scanning` | "warns and keeps scanning when the block holds the opened commitment nowhere" |
+| swaps two ordinary leaves, ciphertexts moving with them | `a_within_group_swap_records_a_note_at_a_leaf_the_chain_does_not_hold` | (the spend path carries it) |
+
+The premises sit beside them at the merkle layer:
+`a_swap_inside_one_group_of_four_moves_no_root`,
+`a_swap_between_two_groups_of_four_moves_no_root` and
+`two_level_one_node_values_served_as_leaves_fold_to_the_same_root`, each over
+`TreeFrontier` itself, and the browser's fixture fold is held to
+`TreeFrontier`'s level count by "folds to depthFor(count) the way TreeFrontier
+does".
+
+Closing all of it properly means never taking a per-leaf value from storage
+unbound, and the shape is in `docs/DESIGN.md` open question 6 as the next
+wallet milestone: read every per-leaf and per-chain storage value with a trie
+proof from `state_getReadProof` at the pinned block hash and verify it against
+that header's `stateRoot`, which the header walk already authenticates with the
+same hash chain as `zkTreeRoot`. That makes the count, every leaf value and
+every ciphertext a fact of the block, and closes the ciphertext, the index and
+the depth together with no consensus change. `docs/DESIGN.md` section 9 also
+records the consensus-level alternative, domain-separating a child's slot and
+its level in place of sorting, which pins the same three and costs a fork.
 
 **Bound B, forged headers above the newest checkpoint.** Here the node chooses
 every header field, so positions, labels and roots are its to invent, and it
@@ -636,11 +718,18 @@ of them were this wallet's.
 
 A pass that read leaves and received nothing prints a `hint` line naming the
 two bounds the per-leaf rules leave open, the bytes at `Shielded::Ciphertexts`
-and a leaf's index inside its aligned group of four, and the rescan against a
-second node that recovers a payment hidden either way. It is the ordinary case
-on most passes, so it reads as a prompt to check against a second node. "What
-a lying node can and cannot do" below carries the bounds and the limits of the
-hint.
+and where a commitment sits inside its block's own leaf range, and the rescan
+against a second node that recovers a payment hidden either way. It is the
+ordinary case on most passes, so it reads as a prompt to check against a second
+node. "What a lying node can and cannot do" below carries the bounds and the
+limits of the hint.
+
+A pass also prints a `warning` line for every leaf where a ciphertext this
+wallet's own key opened sat beside a commitment that note does not open. That
+is the one part of the position bound a wallet catches on its own: the note is
+recorded at the index inside the same block that holds the commitment it opens,
+or the leaf is skipped when the block holds it nowhere. The section below
+carries both arms.
 
 A leaf with neither a ciphertext nor a coinbase value is refused rather than
 skipped, by the rules above. It used to be skipped, because a chain with history

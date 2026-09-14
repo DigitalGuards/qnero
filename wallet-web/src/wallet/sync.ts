@@ -42,6 +42,34 @@ import { bytesToHex, normaliseHash } from '../lib/hex';
 import { ENTRY_WALK_LIMIT } from '../worker/protocol';
 import { MAX_CHECKPOINTS, type NoteOrigin, type NoteSecret, type RejectedNote, type StoreMeta, type StoredNote, type SyncCheckpoint } from './model';
 
+/**
+ * What a pass that read leaves and received nothing may also be, in one line.
+ *
+ * The same sentence the command-line wallet prints on its `hint` line, byte
+ * for byte: `CIPHERTEXT_SUBSTITUTION_HINT` in
+ * `crates/qnero-wallet/src/wallet.rs`, and `tests/leaf-typing.test.ts` reads
+ * that literal out of the Rust source and compares it against this one, so
+ * neither can drift on its own.
+ *
+ * It names both values the chain leaves unbound and states the second one
+ * whole, because one rescan is the recovery for either: a substituted
+ * ciphertext and a leaf moved anywhere inside its block's range produce the
+ * same reading, a leaf that opens for nobody.
+ */
+export const CIPHERTEXT_SUBSTITUTION_HINT =
+  'a pass that reads leaves and receives nothing is the ordinary case, and it is also what a ' +
+  'substituted or moved leaf looks like. Two per-leaf values are bound to a leaf by nothing on ' +
+  "chain: the bytes at Shielded::Ciphertexts, and where a commitment sits inside its block's " +
+  "own leaf range. The tree sorts a node's children at every level and tags no level, so a " +
+  "block's root pins that block's leaf multiset and each internal node's child multiset and " +
+  'nothing further: sibling swaps composed at any level reach any position the range\'s aligned ' +
+  'subtrees allow, the coinbase position included, and a shorter tree of internal node values ' +
+  'served as leaves folds to the same root, so the root pins neither the leaf count nor the ' +
+  'height inside a block. So a node with honest headers can answer a stranger\'s bytes at an ' +
+  'incoming payment, or move that payment onto its block\'s coinbase position where no ' +
+  "ciphertext is owed, and either way the leaf reads as somebody else's. If a payment was " +
+  'expected and is not here, rescan against a second node, which is the recovery for both.';
+
 /** What a scan needs out of the chain, so a test can supply it. */
 export interface SyncChain {
   /**
@@ -157,6 +185,18 @@ export interface ScannedNote {
    * it; `decryptBatch` never does.
    */
   mined?: boolean;
+  /**
+   * Set when the payload opened under this wallet's key and the commitment
+   * answered beside it is one the note does not open.
+   *
+   * The one local detector for a leaf a node moved. Opening is authenticated,
+   * by ML-KEM decapsulation and an AEAD over this wallet's own `pk`, so the
+   * note is this wallet's whatever commitment sits beside it, and `runSync`
+   * searches the block's own authenticated leaf range for the commitment the
+   * note does open. `decryptBatch` sets it; the command-line wallet's
+   * `OpenedLeaf::Elsewhere` is the same answer.
+   */
+  moved?: boolean;
 }
 
 /** What a scan needs out of the prover module. */
@@ -168,6 +208,10 @@ export interface SyncCrypto {
    * boundary, and a scan of four thousand leaves is four thousand round trips
    * otherwise. `null` is a ciphertext that is not this wallet's, which is the
    * ordinary answer for almost every leaf on the chain.
+   *
+   * `commitment` is the leaf's, and a note that opens to a different one comes
+   * back with `moved` set. The comparison happens behind the boundary, where
+   * the seed is, and this side acts on the answer: see `ScannedNote.moved`.
    */
   decryptBatch(
     items: readonly { index: number; ciphertext: Uint8Array; commitment: string }[],
@@ -695,6 +739,31 @@ export async function authenticateLeaves(
     }
   }
   return { blockOf, coinbasePositions, labelSaysOurs, commitments, checkpoints };
+}
+
+/**
+ * Where the block a leaf belongs to holds a commitment, if it holds it.
+ *
+ * The search is over the leaves this pass already folded and compared against
+ * each block's own `zkTreeRoot`, so a hit is a commitment the block
+ * demonstrably appended. It is over one block's range because that is the set
+ * the root pins: a commitment elsewhere in the chain is a claim this pass has
+ * not checked against the header that would settle it. Linear over that range,
+ * and it runs only on a mismatch, which an honest chain never produces.
+ *
+ * `crates/qnero-wallet/src/wallet.rs`'s `index_in_block` is the same rule.
+ */
+function indexInBlock(typing: LeafTyping, block: number, commitment: string): number | null {
+  for (const [index, at] of typing.blockOf) {
+    if (at !== block) {
+      continue;
+    }
+    const held = bytesToHex(typing.commitments.subarray(index * 32, index * 32 + 32)).slice(2);
+    if (held === commitment) {
+      return index;
+    }
+  }
+  return null;
 }
 
 /** The hash at a chunk's top, refused by name when this node has no block there. */
@@ -1270,10 +1339,62 @@ export async function runSync(
           continue;
         }
 
-        const existing = notes.get(commitment);
+        // Where this note is recorded, and which commitment it is recorded
+        // under. Both are the leaf the loop is standing on until the detector
+        // below moves them.
+        let leafIndex = record.index;
+        let heldAt = commitment;
+        if (received.moved === true) {
+          // The one local detector for a leaf this node moved.
+          //
+          // These bytes decapsulated under this wallet's ML-KEM key and opened
+          // under an AEAD whose associated data is this wallet's own `pk`, so
+          // the note inside them is this wallet's. A commitment beside them
+          // that the note does not open is the node taking a pair apart, and
+          // this pass can say where the pair belongs: the block's leaf range is
+          // already folded and compared against the `zkTreeRoot` its header
+          // carries, so a commitment found inside it is one the block appended.
+          const opened = normaliseHash(received.commitment);
+          const at = blockNumber === null ? null : indexInBlock(typing, blockNumber, opened);
+          if (at === null) {
+            // Skipped and said out loud, and a warning deliberately. One other
+            // thing produces this reading and nothing local tells it apart: a
+            // sender who encrypted a payload opening a commitment the sender
+            // never published. The circuit leaves `ct_digest` unconstrained
+            // (`docs/CIRCUIT.md` section 1), so no rule on chain ties a
+            // ciphertext's plaintext to the commitment beside it, and anyone
+            // holding this wallet's address can write such a leaf for the price
+            // of one transaction. Refusing the pass here would hand that sender
+            // a permanent sync denial: the leaf is read again on every later
+            // pass and on a rescan as well.
+            warnings.push(
+              `leaf ${record.index} carries a ciphertext this wallet's own key opens, and block ` +
+                `${String(blockNumber)} holds the commitment it opens at none of the leaves it ` +
+                'appended. The leaf is skipped and the pass continues, because a sender who ' +
+                'encrypts a payload opening a commitment it never published produces the same ' +
+                'reading and nothing here tells the two apart. If a payment is missing, sync ' +
+                'against a second node.',
+            );
+            continue;
+          }
+          warnings.push(
+            `leaf ${record.index} carries a ciphertext this wallet's own key opens, and the ` +
+              'commitment answered beside it is one that note does not open. Block ' +
+              `${String(blockNumber)} holds the opened note's commitment at leaf ${at}, inside ` +
+              "the range this pass folded against that block's own header, so the note is " +
+              `recorded at leaf ${at} and the payment arrives. A ciphertext that opens under ` +
+              "this wallet's key is this wallet's note, so the pair was moved. Which index " +
+              'inside a block holds which commitment is bound by nothing on chain: sync against ' +
+              'a second node before spending it.',
+          );
+          leafIndex = at;
+          heldAt = opened;
+        }
+
+        const existing = notes.get(heldAt);
         if (existing !== undefined) {
           if (rewound && reconciles) {
-            seenAgain.add(commitment);
+            seenAgain.add(heldAt);
           }
           // Unconditional, the rescan included: a commitment the chain carries
           // at another index is a note whose stored index is stale, and leaving
@@ -1286,10 +1407,10 @@ export async function runSync(
           // command-line wallet's `relocate_note` reports too.
           existing.note.onChain = true;
           if (
-            existing.note.leafIndex !== record.index ||
+            existing.note.leafIndex !== leafIndex ||
             existing.note.blockNumber !== record.blockNumber
           ) {
-            existing.note.leafIndex = record.index;
+            existing.note.leafIndex = leafIndex;
             existing.note.blockNumber = record.blockNumber;
             report.relocated += 1;
           }
@@ -1304,12 +1425,12 @@ export async function runSync(
           // A note this wallet already holds never reaches here: the branch
           // above returns first, so a wallet's own spent notes are relocated
           // rather than refused.
-          if (!rejected.has(commitment)) {
+          if (!rejected.has(heldAt)) {
             report.rejected += 1;
           }
-          rejected.set(commitment, {
-            commitment,
-            leafIndex: record.index,
+          rejected.set(heldAt, {
+            commitment: heldAt,
+            leafIndex,
             value: received.value.toString(),
             reason: 'its nullifier is already settled on chain',
           });
@@ -1327,12 +1448,12 @@ export async function runSync(
         }
         if (rewound && reconciles) {
           // A note first recorded by this scan is on chain by construction.
-          seenAgain.add(commitment);
+          seenAgain.add(heldAt);
         }
-        notes.set(commitment, {
+        notes.set(heldAt, {
           note: {
-            commitment,
-            leafIndex: record.index,
+            commitment: heldAt,
+            leafIndex,
             blockNumber: record.blockNumber,
             value: received.value.toString(),
             origin,
@@ -1349,8 +1470,8 @@ export async function runSync(
             memo: received.memo,
           },
         });
-        if (input.pending.some((entry) => entry.commitment === commitment)) {
-          clearedPending.push(commitment);
+        if (input.pending.some((entry) => entry.commitment === heldAt)) {
+          clearedPending.push(heldAt);
         }
       }
     }
@@ -1461,30 +1582,24 @@ export async function runSync(
     // `Shielded::Ciphertexts(i)` is bound to leaf `i` by nothing: the
     // commitment the tree authenticates carries no ciphertext, and `ct_digest`
     // binds the bytes only inside the settlement extrinsic at inclusion, which
-    // a storage-only reader never fetches. And the leaf's own index inside its
-    // aligned group of four is bound by nothing either: the tree sorts a
-    // node's four children before hashing, so a published `zkTreeRoot` commits
-    // to each group's multiset and to no order inside it, and a node with
-    // honest headers can move an incoming payment onto its block's coinbase
-    // position, where a ciphertext is not owed. Either way the leaf reads as
-    // somebody else's and the watermark is written above it, and the
+    // a storage-only reader never fetches. And where a commitment sits inside
+    // its block's own leaf range is bound by nothing either: the tree sorts a
+    // node's children at every level and tags no level, so a block's root pins
+    // that block's leaf multiset and each internal node's child multiset and
+    // nothing further. Sibling swaps composed at any level reach any position
+    // the range's aligned subtrees allow, the coinbase position included,
+    // where a ciphertext is not owed, and a shorter tree of internal node
+    // values served as leaves folds to the same root, so the root pins neither
+    // the leaf count nor the height inside a block. Either way the leaf reads
+    // as somebody else's and the watermark is written above it, and the
     // checkpoint fork walk does not recover either, because the headers agree.
     //
     // A hint rather than a warning: it fires on nearly every pass, and a list
     // that always has an entry stops being read. The sentence is the
-    // command-line wallet's `CIPHERTEXT_SUBSTITUTION_HINT`, and
-    // `docs/WALLET.md` carries the bound.
-    hints.push(
-      'a pass that reads leaves and receives nothing is the ordinary case, and it is also what ' +
-        'a substituted or moved leaf looks like. Two per-leaf values are bound to a leaf by ' +
-        "nothing on chain: the bytes at Shielded::Ciphertexts, and the leaf's own index inside " +
-        "its aligned group of four, because the tree sorts a node's children before hashing and " +
-        "the root therefore commits to each group's multiset rather than to an order. So a node " +
-        "with honest headers can answer a stranger's bytes at an incoming payment, or move that " +
-        "payment onto its block's coinbase position where no ciphertext is owed, and either way " +
-        "the leaf reads as somebody else's. If a payment was expected and is not here, rescan " +
-        'against a second node, which is the recovery for both.',
-    );
+    // command-line wallet's `CIPHERTEXT_SUBSTITUTION_HINT`, held identical to
+    // it by `tests/leaf-typing.test.ts`, and `docs/WALLET.md` carries the
+    // bound.
+    hints.push(CIPHERTEXT_SUBSTITUTION_HINT);
   }
 
   // One checkpoint per chunk of the header walk, ascending, and every one of

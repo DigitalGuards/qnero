@@ -180,24 +180,38 @@ has the bug too.
   by nothing on chain, because the commitment the tree authenticates carries no
   ciphertext and `ct_digest` binds the bytes only inside the settlement
   extrinsic at inclusion, which a storage-only reader never fetches. The second
-  is the leaf's own index inside its aligned group of four: the tree sorts a
-  node's four children before hashing them, which is what lets a path carry
-  siblings with no position, so a published `zkTreeRoot` commits to each
-  group's multiset and to no order inside it. A node with honest headers can
-  therefore answer a stranger's well-formed ciphertext at an incoming payment,
-  or move that payment onto its block's coinbase position where no ciphertext
-  is owed, and either way the leaf reads as somebody else's and the watermark
-  is written above it with every root and every header still checking out. The
-  checkpoint fork walk does not recover either, because the headers agree. **A
-  rescan against a second node is the recovery for both**, and a pass that read
-  leaves and received nothing says so on the balance screen, as a hint under
-  the warnings and at less weight. That sentence is the ordinary case on most
-  passes, so it reads as a prompt to check against a second node.
-  `docs/WALLET.md` states both bounds and `docs/DESIGN.md` records the closure,
-  reading each block's body and taking each leaf's commitment and ciphertext
-  from the settlement and shield calls in the order the pallet appends them, as
-  the next wallet milestone, beside the consensus-level alternative for the
-  index.
+  is where a commitment sits inside its block's own leaf range: the tree sorts
+  a node's four children before hashing them, which is what lets a path carry
+  siblings with no position, and it mixes in neither the level nor the child
+  slot. So a block's `zkTreeRoot` pins that block's leaf multiset and each
+  internal node's child multiset and nothing else. Sibling swaps compose at
+  every level, so a payment can be moved to any position the range's aligned
+  subtrees allow, across group boundaries and onto the coinbase position where
+  no ciphertext is owed; and a shorter tree of internal node values served as
+  leaves folds to the same root, so the root pins neither the leaf count nor
+  the height inside a block. Every root and every header still checks out in
+  each case.
+- **One part of that the scan catches on its own.** A move that leaves this
+  wallet's ciphertext where the chain published it puts a payload that opens
+  under this wallet's key beside a commitment that note does not open, and
+  opening is authenticated: ML-KEM decapsulation plus an AEAD over this
+  wallet's own `pk`. The pass searches that block's own folded leaf range for
+  the commitment the note opens, records the note there and puts a warning on
+  the balance screen naming both indices. A commitment the block holds nowhere
+  is warned and skipped, because a sender who encrypts a payload opening a
+  commitment it never published produces the same reading and a refusal would
+  be a sync denial anyone could buy with one transaction. What
+  stays hidden is a move that takes this wallet's ciphertext with it, and the
+  checkpoint fork walk does not recover it, because the headers agree. **A
+  rescan against a second node is the recovery**, and a pass that read leaves
+  and received nothing says so on the balance screen, as a hint under the
+  warnings and at less weight. That sentence is the ordinary case on most
+  passes, so it reads as a prompt to check against a second node, and it is the
+  command-line wallet's word for word. `docs/WALLET.md` states the whole bound
+  and `docs/DESIGN.md` open question 6 records the closure, reading every
+  per-leaf value with a `state_getReadProof` trie proof against the header's
+  own `stateRoot`, as the next wallet milestone, beside the consensus-level
+  alternative that would pin the position and the height in the tree hash.
 - **One scan at a time with a payment**, in both directions: a scan reads every note before it starts and
   commits them at the end, and a payment writes `spent` on those same rows the
   moment it settles, so the Settings screen's rescan is disabled while a

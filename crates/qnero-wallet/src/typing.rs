@@ -40,23 +40,45 @@
 //!    else, so a leaf equal to it below the reported count is refused here and
 //!    in `crate::chain::Chain::leaf_window`, and the count is a fact again.
 //!
-//!    **What the fold pins is a set, and inside an aligned group of four it
-//!    is a multiset.** `qnero_circuit::merkle::hash_node` and
-//!    `pallet-zk-tree`'s `tree::hash_node` both sort a node's four children
-//!    before hashing them, which is what lets a path carry siblings with no
-//!    position. So two orderings of one group of four leaves reach the same
-//!    parent and the same root, and a published `zkTreeRoot` commits to which
-//!    leaves a block appended and never to which index each one landed at.
-//!    The leaf range, the leaf count and the index the coinbase occupies are
-//!    header-authenticated; the assignment of commitments to indices inside a
-//!    group is not, and no rule below recovers it. A node with honest headers
-//!    can therefore permute a group, put an incoming payment at the coinbase
-//!    position, answer no ciphertext there, and hide the payment: the rules
-//!    below type that leaf a coinbase, the rebuild does not open it, there is
-//!    no ciphertext to try, the leaf is skipped and the watermark commits past
-//!    it. `docs/WALLET.md`, under "What bound A does not cover", carries that
-//!    bound and the rescan against a second node that recovers such a payment,
-//!    and `docs/DESIGN.md` section 9 carries both closures.
+//!    **What the fold pins is a multiset at every level, and it pins no
+//!    position and no height inside a block.**
+//!    `qnero_circuit::merkle::hash_node` and `pallet-zk-tree`'s
+//!    `tree::hash_node` both sort a node's four children before hashing them,
+//!    which is what lets a path carry siblings with no position, and neither
+//!    mixes the level or the child slot into the hash. Two consequences, and
+//!    the bound is both of them together:
+//!
+//!    - **Position.** The sort applies at every level, so the fold is
+//!      invariant under the whole automorphism group of the 4-ary tree:
+//!      permute leaves inside an aligned group of four, and exchange whole
+//!      sibling subtrees at any level above. Composed inside one block's leaf
+//!      range, which the root does pin, that reaches any position the range's
+//!      aligned subtrees allow, the coinbase position included and across
+//!      group boundaries. So a published `zkTreeRoot` commits to which leaves
+//!      a block appended and never to which index each one landed at.
+//!    - **Height and count inside a block.** With no level tag, the fold of
+//!      `m` level-1 node values is the fold of the `4m` leaves under them:
+//!      `TreeFrontier::root` folds `m` leaves to `depth_for(m)` and pads with
+//!      `empty_digest()`, so a node can report a leaf count of 2 for a block
+//!      that appended 8 and answer the two level-1 node hashes as its leaves,
+//!      and every root and every header still checks out. The pad rule above
+//!      pins the count only against a fold at the same height.
+//!
+//!    The leaf range of each block and the index the coinbase occupies inside
+//!    it are header-authenticated; the assignment of commitments to indices,
+//!    the leaf count inside a block and the height of the fold are not, and no
+//!    rule below recovers them. A node with honest headers can therefore move
+//!    an incoming payment to the coinbase position, answer no ciphertext
+//!    there, and hide the payment: the rules below type that leaf a coinbase,
+//!    the rebuild does not open it, there is no ciphertext to try, the leaf is
+//!    skipped and the watermark commits past it. One move the scan does catch
+//!    on its own: a move that leaves this wallet's ciphertext where the chain
+//!    published it opens under this wallet's key beside a commitment it does
+//!    not open, and `Wallet::sync_with` records the note at the index inside
+//!    the same block that holds the commitment it opens, with a warning.
+//!    `docs/WALLET.md`, under "What bound A does not cover", carries the whole
+//!    bound and the rescan against a second node that recovers a payment
+//!    hidden this way, and `docs/DESIGN.md` section 9 carries the closure.
 //! 3. The coinbase position. `pallet-mining-rewards`' `on_finalize` mints the
 //!    coinbase through `CoinbaseSink`, at pallet index 6, where every shield
 //!    and every settled output was appended during extrinsic execution and

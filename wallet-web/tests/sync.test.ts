@@ -725,7 +725,7 @@ describe('a rescan', () => {
     // Both on `warnings` the rare entry read like the constant one.
     expect(result.report.warnings).toHaveLength(1);
     expect(result.report.hints).toHaveLength(1);
-    expect(result.report.hints.join(' ')).toMatch(/aligned group of four/);
+    expect(result.report.hints.join(' ')).toMatch(/inside its block's own leaf range/);
   });
 
   it('is never a bypass of the chain check', async () => {

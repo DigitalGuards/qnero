@@ -135,6 +135,19 @@ export interface DecryptedNote {
    * `coinbaseBatch` sets it; `decryptBatch` never does.
    */
   mined?: boolean;
+  /**
+   * Set when the payload opened under this wallet's key and the commitment
+   * answered beside it is one the note does not open.
+   *
+   * The opening is authenticated: the ML-KEM ciphertext decapsulated under
+   * this wallet's key and the AEAD verified with this wallet's own `pk` as
+   * associated data, so the note is this wallet's whatever sits beside it. A
+   * commitment that the note does not open is therefore a pair taken apart,
+   * and `runSync` searches the block's own authenticated leaf range for the
+   * commitment the note does open. `decryptBatch` sets it; the command-line
+   * wallet's `OpenedLeaf::Elsewhere` is the same answer.
+   */
+  moved?: boolean;
 }
 
 export interface PathAnswer {

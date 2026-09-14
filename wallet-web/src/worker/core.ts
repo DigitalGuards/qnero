@@ -258,12 +258,26 @@ export class ProverCore {
         const out: (DecryptedNote | null)[] = [];
         for (const item of request.items) {
           try {
-            const decrypted = JSON.parse(
-              module.decryptNote(seed, item.ciphertext, item.commitment),
-            ) as { value: number; rho: string; r: string; commitment: string; memo: string };
+            // Opened without the commitment beside it, and compared here. The
+            // module refuses on a mismatch when it is handed one, which folds
+            // "this wallet's note, moved" into "somebody else's" and loses the
+            // one reading a wallet can tell apart on its own: a stranger's
+            // bytes do not open at all, while these did. The comparison is the
+            // same one `try_receive` makes, kept in this worker so the page
+            // never holds a rule the seed decides. See `OpenedLeaf` in
+            // `crates/qnero-wallet/src/wallet.rs`.
+            const decrypted = JSON.parse(module.decryptNote(seed, item.ciphertext, '')) as {
+              value: number;
+              rho: string;
+              r: string;
+              commitment: string;
+              memo: string;
+            };
             const digests = JSON.parse(
               module.noteDigests(seed, BigInt(decrypted.value), decrypted.rho, decrypted.r),
             ) as { commitment: string; nullifier: string };
+            const opened = normaliseDigest(digests.commitment);
+            const moved = opened !== normaliseDigest(item.commitment);
             out.push({
               value: String(decrypted.value),
               rho: decrypted.rho,
@@ -271,6 +285,7 @@ export class ProverCore {
               commitment: digests.commitment,
               nullifier: digests.nullifier,
               memo: decrypted.memo,
+              ...(moved ? { moved: true } : {}),
             });
           } catch {
             // Not this wallet's ciphertext, which is the ordinary answer for

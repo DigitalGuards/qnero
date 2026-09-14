@@ -76,7 +76,11 @@ function stubModule(counts: Counts): WasmModule {
     minerKey: () => 'qnm1stub',
     decryptNote: (_seed, ciphertext, expected) => {
       if (expected !== '') {
-        // The transfer rule: rebuild at the payload's value and check.
+        // Nothing in the worker takes the module's checked path any more. Both
+        // batches open the payload on its own and compare afterwards, which is
+        // what keeps "this wallet's note, moved" apart from "somebody else's":
+        // the module's refusal on a mismatch reads the same as a stranger's
+        // ciphertext and threw the one local detector away.
         throw new Error('this stub refuses the checked path');
       }
       return JSON.stringify({
@@ -240,6 +244,43 @@ describe('the shield walk', () => {
     // And the comparison is on one spelling of a digest, whatever spelling
     // each side wrote it in.
     expect(answer.value).toBe(true);
+  });
+});
+
+describe('a transfer leaf', () => {
+  /**
+   * The transfer rule, and the answer the scan acts on.
+   *
+   * The payload opens on its own and the commitment beside it is compared
+   * here. A note that opens to a different commitment comes back with `moved`
+   * set, which is what `runSync` searches the block's authenticated leaf range
+   * on. Handing the module the leaf's commitment instead would make it refuse,
+   * and a refusal reads exactly like a stranger's ciphertext.
+   */
+  it('marks a note whose leaf carries a commitment it does not open', async () => {
+    const { core } = await started();
+    await core.handle({ kind: 'unlock', seed: new Uint8Array(32) }, () => undefined);
+    const answer = (
+      await core.handle(
+        {
+          kind: 'decryptBatch',
+          items: [
+            {
+              index: 1,
+              ciphertext: new Uint8Array([1, 2, 3]),
+              commitment: `commit-${PAYLOAD_VALUE}-aaaa`,
+            },
+            { index: 2, ciphertext: new Uint8Array([1, 2, 3]), commitment: 'a-different-leaf' },
+          ],
+        },
+        () => undefined,
+      )
+    ).value as ({ commitment: string; moved?: boolean } | null)[];
+
+    expect(answer[0]?.commitment).toBe(`commit-${PAYLOAD_VALUE}-aaaa`);
+    expect(answer[0]?.moved).toBeUndefined();
+    expect(answer[1]?.commitment).toBe(`commit-${PAYLOAD_VALUE}-aaaa`);
+    expect(answer[1]?.moved).toBe(true);
   });
 });
 
