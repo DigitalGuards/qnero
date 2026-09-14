@@ -384,6 +384,28 @@ fn main() -> Result<()> {
             if let Some(notice) = report.rescan_notice() {
                 println!("warning     {notice}");
             }
+            if report.coinbase_label_disagreed > 0 {
+                // Never on a block a Qnero node built: the author label and
+                // the note's own randomness come out of one coinbase viewing
+                // key. The reward is taken, because only that key derives the
+                // commitment the tree holds, and the disagreement is printed
+                // because a header carrying this wallet's note under another
+                // author's label is a header it is being handed for a block it
+                // did not come from.
+                println!(
+                    "warning     {} coinbase {} this wallet rebuilt as its own sit in blocks \
+                     whose author label is not this wallet's. The reward is taken, because only \
+                     this wallet's coinbase viewing key derives that commitment. Sync against a \
+                     second node: a branch built for this wallet alone is what the checkpoint \
+                     walk finds there.",
+                    report.coinbase_label_disagreed,
+                    if report.coinbase_label_disagreed == 1 {
+                        "note"
+                    } else {
+                        "notes"
+                    }
+                );
+            }
             if let Some(entries) = report.entry_walk_truncated {
                 // Beside the rescan notice, and for the same reason: a pass
                 // that gave up part of what a sync normally decides says so

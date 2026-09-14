@@ -68,16 +68,34 @@ function rootFor(count: number): string {
   return `0x${String(count).padStart(64, '7')}`;
 }
 
-/** Leaves folded in by the end of a block: leaf `i` is appended in block `i + 1`. */
+/**
+ * Leaves folded in by the end of a block.
+ *
+ * Two per block, which is the shape a v1 chain has: a block appends whatever
+ * its extrinsics created and then mints its own coinbase as the last leaf, and
+ * a wallet requires a `CoinbaseValues` at every one of those last positions.
+ * So leaf `2b - 2` and leaf `2b - 1` belong to block `b`, and the odd one is
+ * that block's coinbase.
+ */
 function countAt(block: number): number {
-  return Math.max(0, Math.min(block, LEAF_COUNT));
+  return Math.max(0, Math.min(block * 2, LEAF_COUNT));
+}
+
+/** The block a leaf was appended in, the inverse of `countAt`. */
+function blockOfLeaf(index: number): number {
+  return Math.floor(index / 2) + 1;
+}
+
+/** Whether a leaf is the last one its block appended, so a coinbase sits there. */
+function isCoinbaseLeaf(index: number): boolean {
+  return index % 2 === 1;
 }
 
 const HEAD_HASH = hashAt(HEAD_NUMBER);
 const GENESIS = hashAt(0);
 const LEAF_COUNT = 8;
 /** The leaf this wallet owns. The point of the test is that it is not named. */
-const OUR_LEAF = 5;
+const OUR_LEAF = 4;
 const OUR_NULLIFIER = 'c0ffee'.padEnd(64, '0');
 const OUR_RHO = 'dd'.repeat(32);
 const OUR_R = 'ee'.repeat(32);
@@ -134,8 +152,14 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
   values.set(KEYS.entryCount, le(2n, 8));
   for (let index = 0; index < LEAF_COUNT; index += 1) {
     values.set(`${KEYS.leaves}${index}`, `0x${(index === OUR_LEAF ? OUR_COMMITMENT : 'cd'.repeat(32))}`);
-    values.set(`${KEYS.ciphertexts}${index}`, vecU8('00112233'));
-    values.set(`${KEYS.leafBlocks}${index}`, le(BigInt(index + 1), 4));
+    values.set(`${KEYS.leafBlocks}${index}`, le(BigInt(blockOfLeaf(index)), 4));
+    if (isCoinbaseLeaf(index)) {
+      // Its block's last leaf: a value and no payload, which is what the
+      // inherent writes under v1.
+      values.set(`${KEYS.coinbaseValues}${index}`, le(BigInt(index + 1), 8));
+    } else {
+      values.set(`${KEYS.ciphertexts}${index}`, vecU8('00112233'));
+    }
   }
 
   // The seam's shape is a promise and this fixture answers out of a map, so
@@ -229,8 +253,9 @@ function crypto(): SyncCrypto {
   return {
     decryptBatch: (items) =>
       Promise.resolve(items.map((item) => (item.index === OUR_LEAF ? ours : null))),
-    coinbaseBatch: () =>
-      Promise.reject(new Error('this chain has no coinbase leaves in the fixture')),
+    // Somebody else's coinbases: the label in this fixture's headers is not
+    // this wallet's and no value rebuilds its own note over those commitments.
+    coinbaseBatch: (items) => Promise.resolve(items.map(() => null)),
     entryRhoMatches: () => Promise.resolve(false),
     // The module's own hash rules, stood in for: what this test covers is the
     // request stream, and the recomputations are covered against the pallet in

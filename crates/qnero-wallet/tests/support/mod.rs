@@ -121,6 +121,21 @@ pub struct NodeState {
     /// wallet that treats it as one rewinds its watermark on a node that
     /// cannot answer for the range it rewinds into.
     pub missing_hashes: BTreeSet<u32>,
+    /// Heights whose header carries no pre-runtime digest item at all, so a
+    /// wallet reads no author label there.
+    ///
+    /// A node above the newest checkpoint chooses every header field, the
+    /// label included, and omitting it is the cheapest way to try: no rule of
+    /// either wallet may rest on a label being present.
+    pub unlabelled: BTreeSet<u32>,
+    /// The chain this node's storage implies, kept until that storage moves.
+    ///
+    /// [`ChainView::build`] folds the tree and hashes a header per block, and
+    /// `dispatch` needs one for nearly every request, so a fixture whose head
+    /// is thousands of blocks up paid that per request. The key is a digest of
+    /// everything `build` reads, so a test that reaches into any of those
+    /// fields between syncs still gets a fresh chain.
+    pub chain_cache: std::cell::RefCell<Option<(u64, Arc<ChainView>)>>,
 }
 
 impl NodeState {
@@ -167,8 +182,45 @@ impl NodeState {
     }
 
     /// Every header this node would serve, built from its own storage.
-    pub fn chain(&self) -> ChainView {
-        ChainView::build(self)
+    pub fn chain(&self) -> Arc<ChainView> {
+        let key = self.chain_key();
+        if let Some((cached, view)) = self.chain_cache.borrow().as_ref() {
+            if *cached == key {
+                return Arc::clone(view);
+            }
+        }
+        let view = Arc::new(ChainView::build(self));
+        *self.chain_cache.borrow_mut() = Some((key, Arc::clone(&view)));
+        view
+    }
+
+    /// A digest of everything [`ChainView::build`] reads.
+    fn chain_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.head_number.hash(&mut hasher);
+        self.fork_tag.hash(&mut hasher);
+        self.fork_from.hash(&mut hasher);
+        self.short_leaf_count.hash(&mut hasher);
+        self.storage.hash(&mut hasher);
+        self.sealed.hash(&mut hasher);
+        self.misdated_leaves.hash(&mut hasher);
+        self.authored.hash(&mut hasher);
+        self.unlabelled.hash(&mut hasher);
+        // The withheld sets reach `build` too, through the `storage_at` it
+        // folds the tree out of, so a test that clears one between syncs has
+        // to get a fresh chain.
+        self.withheld_leaves.hash(&mut hasher);
+        self.withheld_ciphertexts.hash(&mut hasher);
+        self.withheld_leaf_blocks.hash(&mut hasher);
+        self.withheld_coinbase_values.hash(&mut hasher);
+        self.lying_headers.hash(&mut hasher);
+        self.missing_hashes.hash(&mut hasher);
+        match &self.miner_key {
+            Some(key) => key.author_label(&[0u8; 32]).to_bytes().hash(&mut hasher),
+            None => 0u8.hash(&mut hasher),
+        }
+        hasher.finish()
     }
 }
 
@@ -233,7 +285,11 @@ impl ChainView {
             } else {
                 0
             };
-            let logs = vec![format!("0x{}", hex::encode(pre_runtime_item(&label)))];
+            let logs = if state.unlabelled.contains(&number) {
+                Vec::new()
+            } else {
+                vec![format!("0x{}", hex::encode(pre_runtime_item(&label)))]
+            };
             let header = HeaderInputs::new(
                 Digest::from_bytes(&parent).expect("a canonical parent"),
                 number,
@@ -503,9 +559,18 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
 /// so the gaps are filled here rather than in every test: what a fixture sets
 /// is what the wallet reads, and the rest is a leaf that belongs to nobody.
 ///
-/// `CoinbaseValues` is never filled. Presence in that map is what makes a leaf
-/// a coinbase, so filling it would turn every leaf a fixture did not write
-/// into one.
+/// The same argument reaches `CoinbaseValues` now that a wallet requires one
+/// at every coinbase position. A block's coinbase is the last leaf it
+/// appended and `pallet-shielded` writes the value in the call that appends
+/// it, so on a real chain every block's last leaf carries one and no leaf
+/// below it does. That is filled in here from the block ranges rather than
+/// from a fixture's intent, so a fixture that writes one leaf and a count of
+/// six still describes a chain some node could serve.
+///
+/// A fixture overrides it in either direction and both are used: writing the
+/// key sets the value, and [`NodeState::withheld_coinbase_values`] is the node
+/// answering nothing for a key the chain wrote, which is the shape the refusal
+/// tests drive.
 fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
     if let Some(short) = state.short_leaf_count {
         let count_key = format!(
@@ -539,6 +604,8 @@ fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
     if index >= node_leaf_count(state) {
         return None;
     }
+    let wrote_value = has_storage(state, "Shielded", "CoinbaseValues", index);
+    let mints_here = ends_its_block(state, index);
     match item {
         LeafKey::Leaves => Some(filler_leaf(index)),
         LeafKey::LeafBlocks => leaf_blocks(state)
@@ -548,10 +615,26 @@ fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
         // a coinbase leaf carries no ciphertext, and a fixture whose coinbase
         // was handed a filler would be exercising the payload branch by
         // accident.
-        LeafKey::Ciphertexts if !has_storage(state, "Shielded", "CoinbaseValues", index) => {
+        LeafKey::Ciphertexts if !wrote_value && !mints_here => {
             Some(codec::Encode::encode(&filler_ciphertext(index)))
         }
+        LeafKey::CoinbaseValues if mints_here => {
+            Some(codec::Encode::encode(&filler_coinbase_value(index)))
+        }
         LeafKey::Ciphertexts | LeafKey::CoinbaseValues => None,
+    }
+}
+
+/// Whether a leaf is the last one its block appended, which is the one index
+/// of that block a coinbase can occupy.
+fn ends_its_block(state: &NodeState, index: u64) -> bool {
+    let blocks = leaf_blocks(state);
+    let Some(block) = blocks.get(index as usize) else {
+        return false;
+    };
+    match blocks.get(index as usize + 1) {
+        Some(next) => next != block,
+        None => true,
     }
 }
 
@@ -677,6 +760,12 @@ fn explicit_leaf_block(state: &NodeState, index: u64) -> Option<u32> {
 /// `NoteCiphertext::from_bytes` refuses at its length before any key is tried.
 fn filler_ciphertext(index: u64) -> Vec<u8> {
     qnero_wallet::scale::blake2_256(&index.to_le_bytes()).to_vec()
+}
+
+/// A coinbase value that is nobody's: the leaf beside it is a filler, so no
+/// value rebuilds this wallet's own coinbase note over it.
+fn filler_coinbase_value(index: u64) -> u64 {
+    index + 1
 }
 
 /// A leaf that is nobody's: 32 bytes derived from the index, with a filler

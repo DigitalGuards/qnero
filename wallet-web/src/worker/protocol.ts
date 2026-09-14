@@ -126,6 +126,15 @@ export interface DecryptedNote {
   commitment: string;
   nullifier: string;
   memo: string;
+  /**
+   * Set when this wallet's own coinbase rebuild produced the note, as against
+   * a payload beside it that opened.
+   *
+   * The scan needs the two apart: ownership at a coinbase position is decided
+   * by the rebuild, and the header's author label is only compared against it.
+   * `coinbaseBatch` sets it; `decryptBatch` never does.
+   */
+  mined?: boolean;
 }
 
 export interface PathAnswer {

@@ -1,0 +1,50 @@
+{
+  "note": "One header's digest logs, read by both wallets. `RawHeader::author_label` in `crates/qnero-wallet/src/chain.rs` and `authorLabelFromHeader` in `wallet-web/src/chain/anchor.ts` are two implementations of one rule, and a wallet that reads a header differently from the other types a leaf differently from it. Each log is the SCALE encoding of one DigestItem, hex, as `chain_getHeader` serves it.",
+  "cases": [
+    {
+      "name": "the pre-runtime item this consensus engine writes",
+      "logs": [
+        "0x06706f775f80a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      ],
+      "label": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    },
+    {
+      "name": "another engine's pre-runtime item is skipped and the scan carries on",
+      "logs": [
+        "0x066175726180b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "0x06706f775f80a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      ],
+      "label": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    },
+    {
+      "name": "a pow pre-runtime item whose payload is not 32 bytes is skipped and the scan carries on",
+      "logs": [
+        "0x06706f775f10abcdef01",
+        "0x06706f775f80a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      ],
+      "label": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    },
+    {
+      "name": "a pow pre-runtime item with bytes left after its payload is skipped",
+      "logs": [
+        "0x06706f775f80a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ff",
+        "0x06706f775f80b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+      ],
+      "label": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    },
+    {
+      "name": "a short pow payload on its own leaves no label",
+      "logs": [
+        "0x06706f775f10abcdef01"
+      ],
+      "label": null
+    },
+    {
+      "name": "a header with no pre-runtime item leaves no label",
+      "logs": [
+        "0x0464656275670400"
+      ],
+      "label": null
+    }
+  ]
+}

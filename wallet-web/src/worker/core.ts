@@ -493,6 +493,11 @@ export class ProverCore {
         module.coinbaseNote(seed, item.genesisHash, item.blockNumber, BigInt(item.value)),
       ) as { rho: string; r: string; commitment: string; nullifier: string };
       if (derived.commitment.toLowerCase().replace(/^0x/, '') === expected) {
+        // `mined` is what makes ownership at a coinbase position a property of
+        // the coinbase viewing key rather than of the author label a node
+        // published: the caller requires the value at every coinbase position,
+        // rebuilds here at every coinbase position, and reads the label only
+        // as a cross-check afterwards. See `wallet/sync.ts`.
         return {
           value: item.value,
           rho: derived.rho,
@@ -500,6 +505,7 @@ export class ProverCore {
           commitment: derived.commitment,
           nullifier: derived.nullifier,
           memo: '',
+          mined: true,
         };
       }
     } catch {

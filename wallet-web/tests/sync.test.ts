@@ -151,19 +151,33 @@ function fakeChain(options: {
       const rows = [];
       for (let index = from; index < Math.min(to, leafCount); index += 1) {
         const leaf = declared.get(index);
-        const isCoinbase = leaf?.coinbaseQuanta !== undefined;
+        const declaredQuanta = leaf?.coinbaseQuanta;
+        // A block's coinbase is the last leaf it appended and `pallet-shielded`
+        // writes the value in the call that appends it, so on a real chain
+        // every block's last leaf carries one. A filled-in leaf gets that
+        // shape from the block ranges rather than from a fixture's intent,
+        // because a fixture whose last leaf carries no value is describing a
+        // chain no node can serve and a wallet refuses it by name. A fixture
+        // still overrides it in either direction: naming `coinbaseQuanta` sets
+        // the value, and `withheld` is the node answering nothing for a key the
+        // chain wrote.
+        const endsItsBlock =
+          index + 1 === leafCount || shape.blockOf(index + 1) !== shape.blockOf(index);
+        const quanta = declaredQuanta ?? (endsItsBlock ? BigInt(index + 1) : null);
         rows.push({
           index,
           commitment: withheld('commitment', index) ? null : shape.commitmentAt(index),
-          // A coinbase leaf carries no ciphertext under v1, and every other
-          // leaf carries one: an unnamed leaf gets bytes nothing can open.
+          // A coinbase a fixture named carries no ciphertext under v1, and
+          // every other leaf carries one: an unnamed leaf gets bytes nothing
+          // can open.
           ciphertext:
-            isCoinbase || withheld('ciphertext', index) ? null : new Uint8Array([1, 2, 3]),
+            declaredQuanta !== undefined || withheld('ciphertext', index)
+              ? null
+              : new Uint8Array([1, 2, 3]),
           blockNumber: withheld('blockNumber', index)
             ? null
             : (options.misdated?.get(index) ?? shape.blockOf(index)),
-          coinbaseQuanta:
-            withheld('coinbaseQuanta', index) ? null : (leaf?.coinbaseQuanta ?? null),
+          coinbaseQuanta: withheld('coinbaseQuanta', index) ? null : quanta,
         });
       }
       return Promise.resolve(rows);
@@ -184,11 +198,18 @@ function fakeCrypto(leaves: readonly FakeLeaf[], shape?: ChainShape): SyncCrypto
         }),
     ),
     decryptBatch: (items) => Promise.resolve(items.map((item) => byIndex.get(item.index) ?? null)),
+    // Only a leaf a fixture named a coinbase rebuilds, and `mined` is what
+    // says the miner key opened it: ownership at a coinbase position is the
+    // rebuild's to decide and the author label's to be compared against.
     coinbaseBatch: (items) =>
       Promise.resolve(
         items.map((item) => {
-          const leaf = leaves.find((entry) => entry.blockNumber === item.blockNumber);
-          return leaf?.note ?? null;
+          const leaf = leaves.find(
+            (entry) => entry.index === item.index && entry.coinbaseQuanta !== undefined,
+          );
+          return leaf?.note === undefined || leaf.note === null
+            ? null
+            : { ...leaf.note, mined: true };
         }),
       ),
     entryRhoMatches: () => Promise.resolve(false),
@@ -372,10 +393,15 @@ describe('a key the node withholds inside the scanned range', () => {
    * three more ways to hide the same payment. One test each.
    */
   const mine = note(1000n, 'a1');
+  // Three leaves in one block, so the payment sits below the block's last one.
+  // A leaf at the last index owes a coinbase value rather than a ciphertext, so
+  // a withheld ciphertext there is the shape a coinbase has and hides nothing;
+  // the withholding these tests are about is the one at a position that cannot
+  // be a coinbase.
   const leaves: FakeLeaf[] = [
     { index: 0, commitment: 'cd'.repeat(32), blockNumber: 1, note: null },
     { index: 1, commitment: mine.commitment, blockNumber: 1, note: mine },
-    { index: 2, commitment: 'ce'.repeat(32), blockNumber: 2, note: null },
+    { index: 2, commitment: 'ce'.repeat(32), blockNumber: 1, note: null },
   ];
 
   it('finds the payment when the node answers for every key, which is what the refusals guard', async () => {
@@ -424,12 +450,13 @@ describe('a key the node withholds inside the scanned range', () => {
     ).rejects.toThrow(/no Shielded::LeafBlocks\(1\)/);
   });
 
-  it('refuses a coinbase leaf whose value is withheld, through the ciphertext rule', async () => {
-    // `CoinbaseValues` is the one key of the four a leaf is allowed not to
-    // have, since presence is what marks a coinbase. A withheld one leaves a
-    // leaf below the count with neither a value nor a ciphertext, which is
-    // what the rule beside it refuses: without that, a miner's own block
-    // reward is read as somebody else's and stepped over.
+  it('refuses a coinbase leaf whose value is withheld, at every coinbase position', async () => {
+    // The value is required at every coinbase position, whatever the header's
+    // author label says: this wallet verifies no proof of work, so above its
+    // newest checkpoint a node picks every header field including the label,
+    // and a rule gated on the label is one the node switches off by publishing
+    // another. Without the requirement a miner's own block reward is read as
+    // somebody else's and stepped over.
     const mined = note(25n, 'c0');
     const coinbase: FakeLeaf[] = [
       { index: 0, commitment: mined.commitment, blockNumber: 3, note: mined, coinbaseQuanta: 25n },
@@ -440,7 +467,7 @@ describe('a key the node withholds inside the scanned range', () => {
         fakeChain({ head: 5, leaves: coinbase, leafCount: 1, withheld: { coinbaseQuanta: [0] } }),
         fakeCrypto(coinbase),
       ),
-    ).rejects.toThrow(/no Shielded::Ciphertexts\(0\)/);
+    ).rejects.toThrow(/no Shielded::CoinbaseValues for leaf 0/);
 
     // The same fixture answered for pays the miner.
     const paid = await runSync(

@@ -16,9 +16,21 @@
 import type { RawChainHeader } from '../../src/chain/anchor';
 import type { SyncChain, SyncCrypto } from '../../src/wallet/sync';
 
-/** The hash this fixture's node serves at a height. */
-export function hashAtHeight(height: number): string {
-  return `${height}`.padStart(64, '0');
+/**
+ * The hash this fixture's node serves at a height, on the branch `tag` names.
+ *
+ * The tag is what makes two branches of one fixture: a node on a different
+ * branch answers a different hash from the fork height up and the same hash
+ * below it, which is a reorg as a wallet sees one.
+ */
+export function hashAtHeight(height: number, tag = ''): string {
+  return `${tag}${height}`.padStart(64, '0');
+}
+
+/** The hash a shape's node serves at a height, branch included. */
+export function hashOf(shape: ChainShape, height: number): string {
+  const forked = shape.forkTag !== undefined && height >= (shape.forkFrom ?? 0);
+  return hashAtHeight(height, forked ? shape.forkTag : '');
 }
 
 /**
@@ -84,6 +96,19 @@ export interface ChainShape {
   lyingHeaders?: ReadonlySet<number>;
   /** What `ZkTree::LeafCount` answers, where the chain is longer. */
   shortLeafCount?: number;
+  /** Blocks whose header carries no pre-runtime item, so no author label. */
+  unlabelled?: ReadonlySet<number>;
+  /**
+   * Which branch this fixture's node is on, mixed into every hash at or above
+   * `forkFrom`.
+   *
+   * A node above this wallet's newest checkpoint picks every header field, so
+   * two fixtures that agree below a height and disagree above it are the same
+   * chain to the wallet until a checkpoint at a shared height says otherwise.
+   */
+  forkTag?: string;
+  /** The lowest height `forkTag` applies to. */
+  forkFrom?: number;
 }
 
 /** Every leaf hash of the chain, `32 * n` bytes. */
@@ -108,7 +133,7 @@ export function countAt(shape: ChainShape, block: number): number {
 }
 
 function headerAt(shape: ChainShape, bytes: Uint8Array, number: number): RawChainHeader {
-  const parentHash = number === 0 ? `0x${'00'.repeat(32)}` : `0x${hashAtHeight(number - 1)}`;
+  const parentHash = number === 0 ? `0x${'00'.repeat(32)}` : `0x${hashOf(shape, number - 1)}`;
   const label = shape.ours?.has(number) === true ? ourLabel(parentHash) : foreignLabel(number);
   const item = `0x06706f775f80${label}`;
   return {
@@ -117,7 +142,7 @@ function headerAt(shape: ChainShape, bytes: Uint8Array, number: number): RawChai
     stateRoot: shape.lyingHeaders?.has(number) === true ? `0x${'ee'.repeat(32)}` : `0x${'22'.repeat(32)}`,
     extrinsicsRoot: `0x${'33'.repeat(32)}`,
     zkTreeRoot: `0x${rootOver(bytes, countAt(shape, number))}`,
-    digest: { logs: [item] },
+    digest: { logs: shape.unlabelled?.has(number) === true ? [] : [item] },
   };
 }
 
@@ -125,12 +150,13 @@ function headerAt(shape: ChainShape, bytes: Uint8Array, number: number): RawChai
 export function chainParts(shape: ChainShape): Pick<SyncChain, 'headers' | 'leafBlocks' | 'leafHashes'> {
   const bytes = leafBytes(shape);
   return {
-    headers: (anchor, head) => {
-      const out: RawChainHeader[] = [];
-      for (let number = anchor; number <= head.number; number += 1) {
-        out.push(headerAt(shape, bytes, number));
+    // Descending, `top` first, which is the order the parent links can be
+    // followed in and the order the read layer hands them over in.
+    headers: (anchor, top, onHeader) => {
+      for (let number = top.number; number >= anchor; number -= 1) {
+        onHeader(headerAt(shape, bytes, number));
       }
-      return Promise.resolve(out);
+      return Promise.resolve();
     },
     leafBlocks: (from, to) => {
       const out: (number | null)[] = [];
@@ -157,7 +183,7 @@ export function cryptoParts(
         headers.map((header) =>
           shape.lyingHeaders?.has(header.block_number) === true
             ? `0x${fold(new TextEncoder().encode(`changed:${header.block_number}`))}`
-            : `0x${hashAtHeight(header.block_number)}`,
+            : `0x${hashOf(shape, header.block_number)}`,
         ),
       ),
     authorLabels: (parentHashes) => Promise.resolve(parentHashes.map((hash) => ourLabel(hash))),

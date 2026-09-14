@@ -12,11 +12,24 @@
 //! withheld coinbase value silenced the rule that was supposed to catch the
 //! withholding, and hid a mined reward. Neither is a key the chain wrote.
 //!
-//! What decides now is what the headers commit to: the header chain itself,
-//! the `zkTreeRoot` each block published, the fact that a block's coinbase is
-//! the last leaf that block appended, and the author label that says whose
-//! block it is. Every test here takes one of those away and watches the pass
-//! refuse by name.
+//! What decides now is position, and position is what the headers commit to:
+//! the header chain itself, the `zkTreeRoot` each block published, and the
+//! fact that a block's coinbase is the last leaf that block appended. Every
+//! test here takes one of those away and watches the pass refuse by name.
+//!
+//! **No rule rests on the author label.** These wallets verify no proof of
+//! work, so above the newest checkpoint a node picks every header field, the
+//! label included. So a coinbase value is required at every coinbase position
+//! whatever the label says, this wallet's own coinbase note is rebuilt at
+//! every coinbase position whatever the label says, and the label is a
+//! cross-check: a label claiming this wallet's block over a rebuild that does
+//! not match refuses the pass, and a rebuild that matches under another
+//! author's label takes the reward and reports the disagreement.
+//!
+//! What no per-leaf rule can reach is a node that rebuilds the headers
+//! themselves, and the bound that does hold is the checkpoint fork walk:
+//! `a_rebuilt_chain_hides_two_notes_until_an_honest_node_answers` drives it.
+//! `docs/WALLET.md` carries it under "What a lying node can and cannot do".
 
 mod support;
 
@@ -27,6 +40,8 @@ use qnero_wallet::memo::pad_memo;
 use qnero_wallet::rpc::RpcClient;
 use qnero_wallet::scale::{identity_map_key, storage_prefix};
 use qnero_wallet::wallet::Wallet;
+use std::collections::BTreeSet;
+
 use support::{encode_u64, test_metadata, FakeNode, NodeState};
 
 fn note_for(pk: Digest, value: u64, tag: &str) -> Note {
@@ -226,18 +241,14 @@ fn an_invented_coinbase_value_at_a_foreign_coinbase_position_still_pays() {
     assert_eq!(wallet.store.unspent_total(), 700);
 }
 
-/// An invented ciphertext beside a withheld coinbase value, at the coinbase
-/// position of a block this wallet mined.
+/// A withheld coinbase value at a coinbase position, under this wallet's own
+/// author label.
 ///
-/// This is the other direction, and it is the one the old rules documented as
-/// covered. The ciphertext rule read presence, and presence is the node's to
-/// write, so a junk ciphertext silenced it and the mined reward was stepped
-/// over. The author label is what closes it: the header commits to
-/// `H("qnero/author-label", cvk, parent_hash)`, no node can compute this
-/// wallet's, and the coinbase value of a block this wallet mined is therefore
-/// a key the node must answer.
+/// The value is public and `pallet-shielded` writes it in the call that
+/// appends the leaf, so an absent one there is an answer withheld, and a scan
+/// that stepped over it would drop a mined reward behind a watermark.
 #[test]
-fn a_withheld_coinbase_value_on_this_wallets_own_block_refuses_the_pass() {
+fn a_withheld_coinbase_value_under_this_wallets_own_label_refuses_the_pass() {
     let (_seed, mut wallet) = fresh("typing-masked-coinbase");
     let miner_key = wallet.miner_key();
 
@@ -245,20 +256,15 @@ fn a_withheld_coinbase_value_on_this_wallets_own_block_refuses_the_pass() {
         head_number: 9,
         miner_key: Some(miner_key.clone()),
         authored: [7].into_iter().collect(),
+        withheld_coinbase_values: [0].into_iter().collect(),
         ..Default::default()
     };
     let genesis = state.genesis_hash();
     let mined = miner_key.coinbase_note(&genesis, 7, 42).expect("a note");
-    state.put_storage(
-        &identity_map_key("ZkTree", "Leaves", 0),
-        &mined.commitment().to_bytes(),
-    );
-    state.put_storage(
-        &identity_map_key("Shielded", "LeafBlocks", 0),
-        &codec::Encode::encode(&7u32),
-    );
-    // `CoinbaseValues(0)` is withheld and a ciphertext nobody can open is
-    // written in its place.
+    put_coinbase(&mut state, 0, 7, mined.commitment(), 42);
+    // A ciphertext nobody can open, written where the chain wrote none. It is
+    // what keeps the read layer's "neither key was answered" refusal off this
+    // pass, so the rule under test is the one that fires.
     state.put_storage(
         &identity_map_key("Shielded", "Ciphertexts", 0),
         &codec::Encode::encode(&vec![9u8; 64]),
@@ -270,9 +276,8 @@ fn a_withheld_coinbase_value_on_this_wallets_own_block_refuses_the_pass() {
     let chain = Chain::new(&rpc);
     let refused = wallet
         .sync(&chain, &test_metadata())
-        .expect_err("a withheld coinbase value on this wallet's own block is refused");
+        .expect_err("a withheld coinbase value at a coinbase position is refused");
     let message = format!("{refused:#}");
-    assert!(message.contains("own author label"), "{message}");
     assert!(
         message.contains("no Shielded::CoinbaseValues for leaf 0"),
         "{message}"
@@ -280,14 +285,146 @@ fn a_withheld_coinbase_value_on_this_wallets_own_block_refuses_the_pass() {
     assert_eq!(wallet.store.next_leaf, 0, "nothing has been changed");
 
     // Answered for, the reward is this wallet's.
-    node.state().put_storage(
-        &identity_map_key("Shielded", "CoinbaseValues", 0),
-        &codec::Encode::encode(&42u64),
-    );
+    node.state().withheld_coinbase_values.clear();
     let report = wallet
         .sync(&chain, &test_metadata())
         .expect("the honest answer pays the miner");
     assert_eq!(report.coinbase_received, 1);
+    assert_eq!(report.coinbase_label_disagreed, 0);
+    assert_eq!(wallet.store.unspent_total(), 42);
+}
+
+/// The same withholding with the block's author label rebuilt as somebody
+/// else's, which is the shape the old rule could not see.
+///
+/// The requirement used to be gated on the label matching this wallet's, and
+/// above the trusted anchor no proof of work pins any header field, so a node
+/// that rebuilt the block under a label of its own reached the transfer arm,
+/// found no ciphertext either, and the mined coinbase was skipped behind a
+/// committed watermark. Take the required value off the coinbase position in
+/// `qnero_wallet::typing` and this goes back to a silent skip with `next_leaf`
+/// written above the hidden reward.
+#[test]
+fn a_withheld_coinbase_value_under_a_foreign_label_refuses_the_pass() {
+    let (_seed, mut wallet) = fresh("typing-masked-foreign-label");
+    let miner_key = wallet.miner_key();
+
+    let mut state = NodeState {
+        head_number: 9,
+        miner_key: Some(miner_key.clone()),
+        // Nothing this node publishes says this wallet mined anything.
+        authored: BTreeSet::new(),
+        withheld_coinbase_values: [0].into_iter().collect(),
+        ..Default::default()
+    };
+    let genesis = state.genesis_hash();
+    let mined = miner_key.coinbase_note(&genesis, 7, 42).expect("a note");
+    put_coinbase(&mut state, 0, 7, mined.commitment(), 42);
+    // A ciphertext nobody can open, written where the chain wrote none. It is
+    // what keeps the read layer's "neither key was answered" refusal off this
+    // pass, so the rule under test is the one that fires.
+    state.put_storage(
+        &identity_map_key("Shielded", "Ciphertexts", 0),
+        &codec::Encode::encode(&vec![9u8; 64]),
+    );
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let refused = wallet
+        .sync(&chain, &test_metadata())
+        .expect_err("a withheld coinbase value is refused whatever the label says");
+    let message = format!("{refused:#}");
+    assert!(
+        message.contains("no Shielded::CoinbaseValues for leaf 0"),
+        "{message}"
+    );
+    assert!(
+        message.contains("whatever the author label says"),
+        "{message}"
+    );
+    assert_eq!(wallet.store.next_leaf, 0, "nothing has been changed");
+    assert!(wallet.store.notes.is_empty());
+}
+
+/// And with no pre-runtime item at all, which is the cheapest of the three:
+/// omit the field rather than invent one.
+#[test]
+fn a_withheld_coinbase_value_under_no_label_at_all_refuses_the_pass() {
+    let (_seed, mut wallet) = fresh("typing-masked-no-label");
+    let miner_key = wallet.miner_key();
+
+    let mut state = NodeState {
+        head_number: 9,
+        miner_key: Some(miner_key.clone()),
+        authored: [7].into_iter().collect(),
+        unlabelled: [7].into_iter().collect(),
+        withheld_coinbase_values: [0].into_iter().collect(),
+        ..Default::default()
+    };
+    let genesis = state.genesis_hash();
+    let mined = miner_key.coinbase_note(&genesis, 7, 42).expect("a note");
+    put_coinbase(&mut state, 0, 7, mined.commitment(), 42);
+    // A ciphertext nobody can open, written where the chain wrote none. It is
+    // what keeps the read layer's "neither key was answered" refusal off this
+    // pass, so the rule under test is the one that fires.
+    state.put_storage(
+        &identity_map_key("Shielded", "Ciphertexts", 0),
+        &codec::Encode::encode(&vec![9u8; 64]),
+    );
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let refused = wallet
+        .sync(&chain, &test_metadata())
+        .expect_err("a withheld coinbase value is refused with no label to read");
+    let message = format!("{refused:#}");
+    assert!(
+        message.contains("no Shielded::CoinbaseValues for leaf 0"),
+        "{message}"
+    );
+    assert_eq!(wallet.store.next_leaf, 0, "nothing has been changed");
+}
+
+/// This wallet's own reward, found under a label that says another author's.
+///
+/// The rebuild runs at every coinbase position and it is what decides: only
+/// the holder of `cvk` derives the `r` inside that commitment, so a leaf the
+/// rebuild opens is this wallet's note whatever header sits beside it. Gate
+/// the rebuild on the label the way the old rule did and the reward is skipped
+/// with the watermark written above it. The disagreement is reported rather
+/// than swallowed, because on a block a Qnero node built the label and the
+/// note come out of one key.
+#[test]
+fn a_forged_foreign_label_does_not_hide_this_wallets_own_reward() {
+    let (_seed, mut wallet) = fresh("typing-forged-foreign-label");
+    let miner_key = wallet.miner_key();
+
+    let mut state = NodeState {
+        head_number: 9,
+        miner_key: Some(miner_key.clone()),
+        authored: BTreeSet::new(),
+        ..Default::default()
+    };
+    let genesis = state.genesis_hash();
+    let mined = miner_key.coinbase_note(&genesis, 7, 42).expect("a note");
+    put_coinbase(&mut state, 0, 7, mined.commitment(), 42);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the reward is found whatever the label says");
+    assert_eq!(report.coinbase_received, 1);
+    assert_eq!(
+        report.coinbase_label_disagreed, 1,
+        "the disagreement between the rebuild and the label is reported"
+    );
     assert_eq!(wallet.store.unspent_total(), 42);
 }
 
@@ -470,5 +607,285 @@ fn an_author_label_cannot_be_produced_from_the_address_alone() {
         mine.author_label(&parent),
         same_address.author_label(&parent),
         "the label is the coinbase viewing key's, and the address is not it"
+    );
+}
+
+/// Both wallets read one header the same way.
+///
+/// `RawHeader::author_label` and `wallet-web`'s `authorLabelFromHeader` are two
+/// implementations of one rule, and a wallet that reads a header differently
+/// from the other types a leaf differently from it. The Rust side used to
+/// answer `None` for the whole header at the first pre-runtime item of the
+/// right shape whose payload was not 32 bytes, where the browser skipped it and
+/// carried on. `tests/fixtures/author_label_headers.json` is the one fixture,
+/// and `wallet-web/tests/leaf-typing.test.ts` reads the same file.
+#[test]
+fn both_wallets_read_one_headers_author_label_the_same_way() {
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        logs: Vec<String>,
+        label: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        cases: Vec<Case>,
+    }
+
+    let raw = include_str!("fixtures/author_label_headers.json");
+    let fixture: Fixture = serde_json::from_str(raw).expect("the fixture parses");
+    assert!(
+        fixture.cases.len() >= 6,
+        "the fixture covers every shape both wallets have to agree on"
+    );
+    for case in &fixture.cases {
+        let header: qnero_wallet::chain::RawHeader = serde_json::from_value(serde_json::json!({
+            "parentHash": format!("0x{}", "00".repeat(32)),
+            "number": "0x1",
+            "stateRoot": format!("0x{}", "11".repeat(32)),
+            "extrinsicsRoot": format!("0x{}", "22".repeat(32)),
+            "zkTreeRoot": format!("0x{}", "33".repeat(32)),
+            "digest": {"logs": case.logs},
+        }))
+        .expect("the header parses");
+        let read = header
+            .author_label()
+            .expect("the digest logs are hex")
+            .map(hex::encode);
+        assert_eq!(read, case.label, "{}", case.name);
+    }
+}
+
+/// A pass that scans no leaf still walks the headers, so the checkpoint it
+/// records names a head it authenticated.
+///
+/// The checkpoint is what the next pass's header walk stands on. A pass that
+/// fetched no header authenticated nothing, and recording the node's claimed
+/// head anyway planted a hash the next walk then chained down to and trusted.
+/// Take the walk off the no-leaf path and this test goes green with a
+/// checkpoint written for a header that never hashed to its own name.
+#[test]
+fn a_pass_that_scans_no_leaf_still_authenticates_the_head_it_checkpoints() {
+    let (_seed, mut wallet) = fresh("typing-empty-pass");
+
+    let state = NodeState {
+        head_number: 9,
+        lying_headers: [5].into_iter().collect(),
+        ..Default::default()
+    };
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+
+    let refused = wallet
+        .sync(&chain, &test_metadata())
+        .expect_err("an empty pass over a header that does not hash to its own name is refused");
+    let message = format!("{refused:#}");
+    assert!(message.contains("hashes to"), "{message}");
+    assert!(message.contains("block 5"), "{message}");
+    assert!(
+        wallet.store.checkpoints.is_empty(),
+        "a refused pass records no checkpoint"
+    );
+
+    node.state().lying_headers.clear();
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("an empty pass over an honest chain runs");
+    assert_eq!(report.leaves_scanned, 0);
+    let head_hash = hex::encode(node.state().hash_at(9));
+    let checkpoint = wallet
+        .store
+        .newest_checkpoint()
+        .cloned()
+        .expect("an empty pass records a checkpoint for the head it walked");
+    assert_eq!(checkpoint.block_number, 9);
+    assert_eq!(checkpoint.block_hash, head_hash);
+    assert_eq!(checkpoint.next_leaf, 0);
+}
+
+/// A node that rebuilt the headers above this wallet's newest checkpoint hides
+/// a payment and a mined reward, and the first honest node undoes it.
+///
+/// This is the bound, and it is the one `docs/WALLET.md` states under "What a
+/// lying node can and cannot do". No per-leaf rule reaches this: the wallet
+/// verifies no proof of work, so above the newest checkpoint the node chooses
+/// every header field, which means it chooses where each block's leaf range
+/// ends, which leaf is a coinbase position and what label sits on each block.
+/// Here it puts an incoming payment at a coinbase position and withholds the
+/// ciphertext, and it publishes a wrong value under a foreign label over this
+/// wallet's own coinbase. Both leaves are stepped over and the watermark goes
+/// above them.
+///
+/// What it cannot do is make that branch survive contact with anyone else. The
+/// forged head is recorded only as a checkpoint, and the next pass against an
+/// honest node finds the hash at that height disagreeing, rewinds to the newest
+/// checkpoint both nodes stand on, and rescans from that checkpoint's
+/// watermark. Both hidden notes arrive. Drop the fork walk's rewind and this
+/// test keeps the balance at zero for good.
+#[test]
+fn a_rebuilt_chain_hides_two_notes_until_an_honest_node_answers() {
+    let (_seed, mut wallet) = fresh("typing-rebuilt-chain");
+    let address = wallet.address();
+    let miner_key = wallet.miner_key();
+
+    // A chain both branches agree on, checkpointed before the fork.
+    let state = NodeState {
+        head_number: 5,
+        miner_key: Some(miner_key.clone()),
+        authored: BTreeSet::new(),
+        ..Default::default()
+    };
+    let genesis = state.genesis_hash();
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    wallet
+        .sync(&chain, &test_metadata())
+        .expect("the agreed prefix syncs");
+    let agreed = wallet
+        .store
+        .newest_checkpoint()
+        .cloned()
+        .expect("a checkpoint at the agreed head");
+    assert_eq!(agreed.block_number, 5);
+
+    let mine = note_for(address.pk, 1_000, "rebuilt");
+    let mined = miner_key.coinbase_note(&genesis, 7, 42).expect("a note");
+    {
+        let mut state = node.state();
+        state.head_number = 9;
+        // The payment, at what this node's headers make the last leaf of block
+        // 6, with its ciphertext withheld. Under these headers the leaf is a
+        // coinbase position, so no rule asks for a ciphertext there.
+        put_leaf(
+            &mut state,
+            0,
+            6,
+            mine.commitment(),
+            &ct_for(&address, &mine, 7),
+        );
+        state.withheld_ciphertexts.insert(0);
+        // This wallet's own coinbase for block 7, under a foreign label and a
+        // value that rebuilds to nothing.
+        put_coinbase(&mut state, 1, 7, mined.commitment(), 999);
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
+    }
+
+    let hidden = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the rebuilt branch is self-consistent, so the pass runs");
+    assert_eq!(hidden.received, 0, "both notes are hidden");
+    assert_eq!(wallet.store.unspent_total(), 0);
+    assert_eq!(wallet.store.next_leaf, 2, "the watermark went above them");
+    let forged = wallet
+        .store
+        .newest_checkpoint()
+        .cloned()
+        .expect("the forged head is recorded as a checkpoint");
+    assert_eq!(forged.block_number, 9);
+
+    // The honest node. It agrees with the branch below block 6 and disagrees
+    // above it: block 7 carries this wallet's own author label, block 6's leaf
+    // is an ordinary payment with its ciphertext answered for, and the coinbase
+    // value is the one the chain wrote.
+    {
+        let mut state = node.state();
+        state.authored = [7].into_iter().collect();
+        state.withheld_ciphertexts.clear();
+        state.put_storage(
+            &identity_map_key("Shielded", "CoinbaseValues", 1),
+            &encode_u64(42),
+        );
+    }
+    let honest_head = hex::encode(node.state().hash_at(9));
+    assert_ne!(
+        honest_head, forged.block_hash,
+        "the two branches name different blocks at the checkpointed height"
+    );
+
+    let recovered = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the honest node syncs");
+    assert_eq!(
+        recovered.forked_at_block,
+        Some(agreed.block_number),
+        "the walk rewinds to the newest checkpoint both nodes stand on"
+    );
+    assert_eq!(recovered.rewound_from, Some(2));
+    assert_eq!(recovered.rewound_to, Some(0));
+    assert_eq!(recovered.received, 2, "both hidden notes arrive");
+    assert_eq!(recovered.coinbase_received, 1);
+    assert_eq!(wallet.store.unspent_total(), 1_042);
+}
+
+/// A chain three chunks ahead of the checkpoint syncs in one command, and
+/// records a checkpoint per chunk.
+///
+/// The head is a number the node answers with and the walk holds one header
+/// per block between the trusted anchor and it, so the range is climbed in
+/// chunks of `HEADER_WALK_LIMIT`. Each chunk learns its top's hash from
+/// `chain_getBlockHash` and then proves it by walking down to a hash already
+/// trusted, so the bound costs a request per chunk and no guarantee. Remove
+/// the chunking and the walk is one allocation the node sizes; bound it
+/// without chunking and a chain this far ahead cannot be synced at all.
+#[test]
+fn a_chain_three_chunks_ahead_syncs_in_one_command() {
+    let (_seed, mut wallet) = fresh("typing-chunked-walk");
+    let address = wallet.address();
+
+    let head = qnero_wallet::wallet::HEADER_WALK_LIMIT * 3;
+    let mine = note_for(address.pk, 700, "chunked");
+    let mut state = NodeState {
+        head_number: head,
+        ..Default::default()
+    };
+    put_leaf(
+        &mut state,
+        0,
+        head - 1,
+        mine.commitment(),
+        &ct_for(&address, &mine, 7),
+    );
+    put_leaf(
+        &mut state,
+        1,
+        head - 1,
+        Digest::hash_bytes(&[b"the block's coinbase"]),
+        &[],
+    );
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("a chain three chunks ahead syncs in one pass");
+    assert_eq!(report.received, 1);
+    assert_eq!(wallet.store.unspent_total(), 700);
+
+    let heights: Vec<u32> = wallet
+        .store
+        .checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.block_number)
+        .collect();
+    assert_eq!(
+        heights,
+        vec![
+            qnero_wallet::wallet::HEADER_WALK_LIMIT,
+            qnero_wallet::wallet::HEADER_WALK_LIMIT * 2,
+            head
+        ],
+        "one checkpoint per chunk, each at the top the chunk authenticated"
+    );
+    assert_eq!(
+        wallet
+            .store
+            .newest_checkpoint()
+            .expect("a checkpoint")
+            .block_hash,
+        hex::encode(node.state().hash_at(head))
     );
 }

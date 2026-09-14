@@ -121,8 +121,8 @@ export async function headerAt(context: ChainContext, hash: string): Promise<unk
 }
 
 /**
- * Every header from `anchor` up to `head`, walked **downward** by
- * `parentHash`.
+ * Every header from `anchor` up to `top`, walked **downward** by `parentHash`,
+ * handed to a callback one at a time.
  *
  * Downward, and by the parent link, is what makes the range a chain rather
  * than a list of answers: each header is fetched by the hash its child names,
@@ -135,22 +135,30 @@ export async function headerAt(context: ChainContext, hash: string): Promise<unk
  * each header names its parent. It asks nothing about this wallet: every
  * wallet on the chain reads the same headers.
  *
- * Returned in ascending order, `anchor` first. The caller must rehash every
- * one and compare `anchor`'s against a hash it already trusts;
- * `wallet/sync.ts` does both.
+ * A callback rather than an array, and nothing accumulates here: `top.number`
+ * is a height the caller learned from the node, and building an array of the
+ * range let one answer decide how much this page allocates. `wallet/sync.ts`
+ * climbs a longer range in chunks of `HEADER_WALK_LIMIT` blocks and holds one
+ * chunk at a time.
+ *
+ * The headers arrive **descending**, `top` first, which is the order the
+ * parent links can be followed in. The caller must rehash every one and
+ * compare `anchor`'s against a hash it already trusts; `wallet/sync.ts` does
+ * both.
  */
 export async function fetchHeaderRange(
   context: ChainContext,
   anchor: number,
-  head: Head,
+  top: Head,
+  onHeader: (header: RawChainHeader) => void,
   onProgress?: (done: number) => void,
-): Promise<RawChainHeader[]> {
-  if (anchor > head.number) {
-    throw new Error(`a header walk was asked for block ${anchor} down from block ${head.number}`);
+): Promise<void> {
+  if (anchor > top.number) {
+    throw new Error(`a header walk was asked for block ${anchor} down from block ${top.number}`);
   }
-  const out: RawChainHeader[] = [];
-  let hash = head.hash;
-  for (let number = head.number; ; number -= 1) {
+  let hash = top.hash;
+  let seen = 0;
+  for (let number = top.number; ; number -= 1) {
     const header = parseRawHeader(await context.send<unknown>('chain_getHeader', [hash]));
     const claimed = Number(BigInt(header.number));
     if (claimed !== number) {
@@ -161,15 +169,14 @@ export async function fetchHeaderRange(
           'changed.',
       );
     }
-    out.push(header);
-    onProgress?.(out.length);
+    onHeader(header);
+    seen += 1;
+    onProgress?.(seen);
     if (number === anchor) {
       break;
     }
     hash = header.parentHash;
   }
-  out.reverse();
-  return out;
 }
 
 /**

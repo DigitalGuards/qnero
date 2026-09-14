@@ -99,17 +99,26 @@ export interface SyncChain {
   >;
   usedNullifiers(at: string, onProgress?: (seen: number) => void): Promise<Set<string>>;
   /**
-   * Every header from `anchor` up to the head, ascending, walked downward by
-   * `parentHash` so the range is a chain rather than a list of answers.
+   * Every header from `anchor` up to `top`, walked downward by `parentHash`
+   * so the range is a chain rather than a list of answers, handed over one at
+   * a time as it is fetched.
    *
-   * See `chain/reads.ts`. The caller rehashes every one of them and compares
-   * the bottom against a hash it already trusts.
+   * A callback rather than an array: the caller climbs the whole range in
+   * chunks of `HEADER_WALK_LIMIT` and holds one chunk at a time, where an
+   * array of the range let a node's claimed head decide how much this page
+   * allocates before a single leaf was read.
+   *
+   * The headers arrive **descending**, `top` first, because that is the order
+   * the parent links can be followed in. See `chain/reads.ts`. The caller
+   * rehashes every one of them and compares the bottom against a hash it
+   * already trusts.
    */
   headers(
     anchor: number,
-    head: { number: number; hash: string },
+    top: { number: number; hash: string },
+    onHeader: (header: RawChainHeader) => void,
     onProgress?: (done: number) => void,
-  ): Promise<RawChainHeader[]>;
+  ): Promise<void>;
   /**
    * `Shielded::LeafBlocks` over a range, at one block.
    *
@@ -137,6 +146,17 @@ export interface ScannedNote {
   commitment: string;
   nullifier: string;
   memo: string;
+  /**
+   * Set when this wallet's own coinbase rebuild produced the note, as against
+   * a payload beside it that happened to open.
+   *
+   * It is what makes a coinbase position's ownership a property of `cvk`
+   * rather than of the author label a node published: the commitment the tree
+   * holds is over an `r` only that key derives, so a rebuild that matches is
+   * this wallet's note whatever header sits beside it. `coinbaseBatch` sets
+   * it; `decryptBatch` never does.
+   */
+  mined?: boolean;
 }
 
 /** What a scan needs out of the prover module. */
@@ -251,6 +271,18 @@ export interface SyncReport {
   receivedValue: bigint;
   coinbaseLeaves: number;
   coinbaseReceived: number;
+  /**
+   * Coinbase notes this pass rebuilt as its own at a coinbase position whose
+   * header carries another author's label.
+   *
+   * The rebuild decides ownership and the label decides nothing, so the reward
+   * is taken. It cannot happen on a block a Qnero node built: the label and the
+   * note's own randomness come out of one coinbase viewing key. A non-zero
+   * count is a header this wallet is being handed for a block it did not come
+   * from, and the checkpoint fork walk is what finds out on the next pass
+   * against another node.
+   */
+  coinbaseLabelDisagreed: number;
   relocated: number;
   rejected: number;
   rejectedCleared: number;
@@ -340,12 +372,12 @@ function withheldLeafKey(
  * withheld coinbase value silenced the rule that was meant to catch the
  * withholding and hid a mined reward. Neither is a key the chain wrote.
  *
- * What decides is what the headers commit to, and `crates/qnero-wallet/src/
- * typing.rs` carries the identical rules:
+ * What decides is position, and position is what the headers commit to.
+ * `crates/qnero-wallet/src/typing.rs` carries the identical rules:
  *
  * 1. The header chain, walked down from the head by `parentHash` to a hash
  *    this wallet already trusts, with every header rehashed from its own
- *    preimage.
+ *    preimage, in chunks of `HEADER_WALK_LIMIT` blocks.
  * 2. Each block's leaf range, because the tree is folded once per block in
  *    `pallet-zk-tree`'s `on_finalize` and the header carries that fold.
  *    `Shielded::LeafBlocks` proposes the range and the root settles it.
@@ -353,18 +385,39 @@ function withheldLeafKey(
  *    own `on_finalize`, after every shield and settled output, so a block's
  *    coinbase is the last leaf that block appended and no other index can hold
  *    one.
- * 4. Whose block it is, from the author label in the pre-runtime digest item
- *    against the one this wallet derives from its own coinbase viewing key.
+ *
+ * **No rule rests on the author label.** This wallet verifies no proof of work
+ * and will not in v1, so above the newest checkpoint a node picks every header
+ * field, the label included, and a rule gated on the label is one the node
+ * switches off by publishing another. So a coinbase value is required at every
+ * coinbase position, this wallet's own coinbase note is rebuilt at every
+ * coinbase position, and the label is a cross-check afterwards. `wallet-web/
+ * README.md` and `docs/WALLET.md` carry the bound that does hold, under "What
+ * a lying node can and cannot do".
  */
 export interface LeafTyping {
   /** Block of each leaf from the watermark up, authenticated by the roots. */
   blockOf: Map<number, number>;
   /** Leaf indices that are their block's last, the only place a coinbase sits. */
   coinbasePositions: Set<number>;
-  /** Of those, the ones in a block this wallet's own miner key authored. */
-  ownCoinbasePositions: Set<number>;
+  /**
+   * Of those, the ones whose block carries this wallet's own author label.
+   *
+   * A cross-check and never a selector: what decides ownership is the rebuild
+   * against the tree-authenticated commitment. See `LeafTyping` above.
+   */
+  labelSaysOurs: Set<number>;
   /** `ZkTree::Leaves` over the whole tree, `32 * n` bytes, index aligned. */
   commitments: Uint8Array;
+  /**
+   * One per chunk of the walk, ascending, each naming a block whose header
+   * this pass fetched and rehashed down to a hash it already trusted.
+   *
+   * The caller commits them with the watermark at the end of the pass, so the
+   * store never carries a checkpoint for a range whose scan was refused, and
+   * never one for a head no header was fetched for.
+   */
+  checkpoints: SyncCheckpoint[];
 }
 
 function strip0x(hex: string): string {
@@ -372,8 +425,37 @@ function strip0x(hex: string): string {
 }
 
 /**
+ * How many blocks one chunk of the header walk carries.
+ *
+ * The head is a number the node answers with, and the walk fetches, rehashes
+ * and holds one header per block between the trusted anchor and it. Unbounded,
+ * a node claiming a head far ahead decided how much this page allocates before
+ * a single leaf was read: `RawChainHeader` is five hex strings, so a range of
+ * a million blocks is hundreds of megabytes on the page. So the range is
+ * climbed in chunks, each authenticated against the hash below it and
+ * checkpointed before the next is read, and only one chunk is ever resident.
+ *
+ * The same number as the command-line wallet's `HEADER_WALK_LIMIT`, and
+ * `docs/BENCH.md` carries the per-block cost beside it.
+ */
+export const HEADER_WALK_LIMIT = 1024;
+
+/**
  * Walk the headers, check every block's leaf range against the root it
  * published, and say which leaf of each block is its coinbase position.
+ *
+ * Climbed in chunks of `HEADER_WALK_LIMIT`: each chunk learns its top's hash
+ * from `chain_getBlockHash` and then proves it by walking down to a hash
+ * already trusted, so the bound costs one request per chunk and no guarantee.
+ * Only the last chunk's top is the head itself.
+ *
+ * The roots are folded once for the whole walk rather than once per chunk. The
+ * fold is a single crossing into the module that owns Poseidon2
+ * (`crypto.blockRoots`), which takes the leaf range in one call and starts
+ * from an empty tree, so a per-chunk call would re-push every leaf below the
+ * chunk and turn a linear check into a quadratic one. It runs before any leaf
+ * is scanned and before the caller commits any checkpoint, so nothing stands
+ * on an unchecked root either way.
  *
  * Refuses by name and writes nothing: this module writes nothing at all, and
  * its caller commits only what it returns.
@@ -387,63 +469,19 @@ export async function authenticateLeaves(
   leafCount: number,
   progress: (stage: string, detail?: string) => void,
 ): Promise<LeafTyping> {
-  const raw = await chain.headers(trusted.number, head, (done) => {
-    progress('headers', `${done} of ${head.number - trusted.number + 1} block headers`);
-  });
-  if (raw.length !== head.number - trusted.number + 1) {
-    throw new NodeRefusedError(
-      `this node answered ${raw.length} headers for blocks ${trusted.number} to ${head.number}. ` +
-        'Nothing has been changed.',
-    );
-  }
-  const anchorBlock = raw[0];
-  if (anchorBlock === undefined) {
-    throw new NodeRefusedError('a header walk returned no blocks at all');
-  }
-  const hashes = (await crypto.headerHashes(raw.map((header) => anchorFromHeader(header)))).map(
-    strip0x,
-  );
-  // Every header is fetched by the hash its child names, so comparing each
-  // recomputed hash against that name is what makes the range a chain. The
-  // bottom is compared against a hash this wallet already trusts, and without
-  // that comparison a node can build a self-consistent chain out of nothing.
-  for (let index = 0; index < raw.length; index += 1) {
-    const child = raw[index + 1];
-    const wanted = child === undefined ? strip0x(head.hash) : strip0x(child.parentHash);
-    if (hashes[index] !== wanted) {
-      throw new NodeRefusedError(
-        `the header this node served for block ${trusted.number + index} hashes to ` +
-          `${hashes[index] ?? ''} where the hash asked for is ${wanted}. The header preimage is ` +
-          "what authenticates a block's zkTreeRoot and its author label, so a header that does " +
-          'not hash to its own name authenticates nothing. Nothing has been changed.',
-      );
-    }
-  }
-  if (hashes[0] !== strip0x(trusted.hash)) {
-    throw new NodeRefusedError(
-      `the header walk reached block ${trusted.number} at ${hashes[0] ?? ''}, and this wallet ` +
-        `trusts ${strip0x(trusted.hash)} there. Every header above it is authenticated by ` +
-        'chaining down to this one, so a walk that lands somewhere else authenticates nothing. ' +
-        'Nothing has been changed.',
-    );
-  }
-
-  // Which of these blocks this wallet mined. The label is a function of the
-  // parent hash and the coinbase viewing key, so the answers come from the
-  // worker and the comparison is against what the header carries.
-  const ownLabels = (await crypto.authorLabels(hashes.slice(0, -1))).map(strip0x);
-
-  progress('headers', 'checking each block against the tree it published');
-  const commitments = await chain.leafHashes(leafCount, head.hash, (done) => {
-    progress('headers', `${done} of ${leafCount} leaf hashes`);
-  });
-  if (commitments.length !== leafCount * 32) {
+  const scans = leafCount > watermark;
+  const commitments = scans
+    ? await chain.leafHashes(leafCount, head.hash, (done) => {
+        progress('headers', `${done} of ${leafCount} leaf hashes`);
+      })
+    : new Uint8Array(0);
+  if (scans && commitments.length !== leafCount * 32) {
     throw new NodeRefusedError(
       `this node answered ${commitments.length / 32} leaf hashes where it reports ${leafCount} ` +
         'leaves. Nothing has been changed.',
     );
   }
-  const dates = await chain.leafBlocks(watermark, leafCount, head.hash);
+  const dates = scans ? await chain.leafBlocks(watermark, leafCount, head.hash) : [];
   for (let index = watermark; index < leafCount; index += 1) {
     if (dates[index - watermark] === null || dates[index - watermark] === undefined) {
       throw withheldLeafKey('Shielded::LeafBlocks', index, leafCount, head.hash);
@@ -452,32 +490,134 @@ export async function authenticateLeaves(
 
   const blockOf = new Map<number, number>();
   const coinbasePositions = new Set<number>();
-  const ownCoinbasePositions = new Set<number>();
+  const labelSaysOurs = new Set<number>();
+  const checkpoints: SyncCheckpoint[] = [];
   const counts: number[] = [watermark];
-  const roots: string[] = [strip0x(anchorBlock.zkTreeRoot)];
+  const roots: string[] = [];
   const runs: { block: number; from: number; to: number; ours: boolean }[] = [];
   let cursor = watermark;
-  for (let index = 1; index < raw.length; index += 1) {
-    const header = raw[index];
-    if (header === undefined) {
+  let bottomNumber = trusted.number;
+  let bottomHash = strip0x(trusted.hash);
+  let anchorRoot: string | null = null;
+  let walked = 0;
+
+  for (;;) {
+    const top = Math.min(bottomNumber + HEADER_WALK_LIMIT, head.number);
+    const topHash =
+      top === head.number ? strip0x(head.hash) : strip0x(await hashAtHeightOrRefuse(chain, top));
+
+    // The chunk, streamed in descending order and reversed once. Only this
+    // many headers are ever resident.
+    const raw: RawChainHeader[] = [];
+    await chain.headers(
+      bottomNumber,
+      { number: top, hash: topHash },
+      (header) => {
+        raw.push(header);
+      },
+      (done) => {
+        progress('headers', `${walked + done} of ${head.number - trusted.number + 1} block headers`);
+      },
+    );
+    raw.reverse();
+    if (raw.length !== top - bottomNumber + 1) {
+      throw new NodeRefusedError(
+        `this node answered ${raw.length} headers for blocks ${bottomNumber} to ${top}. ` +
+          'Nothing has been changed.',
+      );
+    }
+    walked += raw.length;
+
+    const hashes = (await crypto.headerHashes(raw.map((header) => anchorFromHeader(header)))).map(
+      strip0x,
+    );
+    // Every header is fetched by the hash its child names, so comparing each
+    // recomputed hash against that name is what makes the range a chain. The
+    // bottom is compared against a hash this wallet already trusts, and without
+    // that comparison a node can build a self-consistent chain out of nothing.
+    for (let index = 0; index < raw.length; index += 1) {
+      const child = raw[index + 1];
+      const wanted = child === undefined ? topHash : strip0x(child.parentHash);
+      if (hashes[index] !== wanted) {
+        throw new NodeRefusedError(
+          `the header this node served for block ${bottomNumber + index} hashes to ` +
+            `${hashes[index] ?? ''} where the hash asked for is ${wanted}. The header preimage is ` +
+            "what authenticates a block's zkTreeRoot and its author label, so a header that does " +
+            'not hash to its own name authenticates nothing. Nothing has been changed.',
+        );
+      }
+    }
+    if (hashes[0] !== bottomHash) {
+      throw new NodeRefusedError(
+        `the header walk reached block ${bottomNumber} at ${hashes[0] ?? ''}, and this wallet ` +
+          `trusts ${bottomHash} there. Every header above it is authenticated by ` +
+          'chaining down to this one, so a walk that lands somewhere else authenticates nothing. ' +
+          'Nothing has been changed.',
+      );
+    }
+
+    // Which of these blocks this wallet mined. The label is a function of the
+    // parent hash and the coinbase viewing key, so the answers come from the
+    // worker and the comparison is against what the header carries. It decides
+    // nothing: it is compared against the rebuild in `runSync`.
+    const ownLabels = (await crypto.authorLabels(hashes.slice(0, -1))).map(strip0x);
+
+    const bottom = raw[0];
+    if (bottom === undefined) {
+      throw new NodeRefusedError('a header walk returned no blocks at all');
+    }
+    if (anchorRoot === null) {
+      anchorRoot = strip0x(bottom.zkTreeRoot);
+      roots.push(anchorRoot);
+    }
+    for (let index = 1; index < raw.length; index += 1) {
+      const header = raw[index];
+      if (header === undefined) {
+        break;
+      }
+      const block = bottomNumber + index;
+      if (!scans) {
+        // Nothing was appended between the bottom of this walk and its top, so
+        // there is no fold to seed and no leaf to check against the roots. The
+        // headers are still fetched and rehashed, because the checkpoint this
+        // pass records has to name a head it authenticated, and every block in
+        // the range has to carry the bottom block's own root: a moved root
+        // over an unchanged leaf count is a node answering a count its own
+        // headers do not carry.
+        if (strip0x(header.zkTreeRoot) !== anchorRoot) {
+          throw new NodeRefusedError(
+            `this node reports the same leaf count at block ${block} as at block ` +
+              `${trusted.number}, and their headers carry different commitment-tree roots ` +
+              `(${strip0x(header.zkTreeRoot)} against ${anchorRoot}). The tree is folded once ` +
+              'per block and only ever grows, so a moved root over an unchanged count is a node ' +
+              'answering a leaf count its own headers do not carry. Nothing has been changed.',
+          );
+        }
+        continue;
+      }
+      const from = cursor;
+      while (cursor < leafCount && dates[cursor - watermark] === block) {
+        blockOf.set(cursor, block);
+        cursor += 1;
+      }
+      const label = authorLabelFromHeader(header);
+      const ours = label !== null && label.toLowerCase() === ownLabels[index - 1];
+      runs.push({ block, from, to: cursor, ours });
+      counts.push(cursor);
+      roots.push(strip0x(header.zkTreeRoot));
+    }
+
+    checkpoints.push({ blockNumber: top, blockHash: topHash, nextLeaf: cursor });
+    if (top === head.number) {
       break;
     }
-    const block = trusted.number + index;
-    const from = cursor;
-    while (cursor < leafCount && dates[cursor - watermark] === block) {
-      blockOf.set(cursor, block);
-      cursor += 1;
-    }
-    const label = authorLabelFromHeader(header);
-    const ours = label !== null && label.toLowerCase() === ownLabels[index - 1];
-    runs.push({ block, from, to: cursor, ours });
-    counts.push(cursor);
-    roots.push(strip0x(header.zkTreeRoot));
+    bottomNumber = top;
+    bottomHash = topHash;
   }
+
   if (cursor !== leafCount) {
-    const stray = cursor;
     throw new NodeRefusedError(
-      `Shielded::LeafBlocks dates leaf ${stray} to block ${String(dates[stray - watermark])}, ` +
+      `Shielded::LeafBlocks dates leaf ${cursor} to block ${String(dates[cursor - watermark])}, ` +
         'which is not where the header walk puts it. Leaves are appended in block order and ' +
         `this pass walked blocks ${trusted.number} to ${head.number}, so a leaf that no ` +
         "block's range claims is a node disagreeing with the headers about which block " +
@@ -485,28 +625,31 @@ export async function authenticateLeaves(
     );
   }
 
-  const computed = (await crypto.blockRoots(commitments, counts)).map(strip0x);
-  for (let index = 0; index < counts.length; index += 1) {
-    if (computed[index] === roots[index]) {
-      continue;
-    }
-    if (index === 0) {
+  if (scans) {
+    progress('headers', 'checking each block against the tree it published');
+    const computed = (await crypto.blockRoots(commitments, counts)).map(strip0x);
+    for (let index = 0; index < counts.length; index += 1) {
+      if (computed[index] === roots[index]) {
+        continue;
+      }
+      if (index === 0) {
+        throw new NodeRefusedError(
+          `the ${watermark} leaves this node answered below the watermark do not hash to the ` +
+            `zkTreeRoot in the header of block ${trusted.number}, which is ${roots[0] ?? ''}. The ` +
+            'tree is folded once per block and the header carries that fold, so a leaf range that ' +
+            'roots elsewhere is a node answering with leaves this chain does not hold. Nothing ' +
+            'has been changed.',
+        );
+      }
+      const run = runs[index - 1] ?? { block: trusted.number + index, from: 0, to: 0, ours: false };
       throw new NodeRefusedError(
-        `the ${watermark} leaves this node answered below the watermark do not hash to the ` +
-          `zkTreeRoot in the header of block ${trusted.number}, which is ${roots[0] ?? ''}. The ` +
-          'tree is folded once per block and the header carries that fold, so a leaf range that ' +
-          'roots elsewhere is a node answering with leaves this chain does not hold. Nothing ' +
-          'has been changed.',
+        `this node dates ${run.to - run.from} leaves to block ${run.block}, and folding exactly ` +
+          'those into the tree does not reach the zkTreeRoot its header carries ' +
+          `(${roots[index] ?? ''}). Shielded::LeafBlocks is what proposes a block's leaf range ` +
+          'and the header is what settles it, so a disagreement is a node moving leaves between ' +
+          'blocks, which is what decides where a coinbase sits. Nothing has been changed.',
       );
     }
-    const run = runs[index - 1] ?? { block: trusted.number + index, from: 0, to: 0, ours: false };
-    throw new NodeRefusedError(
-      `this node dates ${run.to - run.from} leaves to block ${run.block}, and folding exactly ` +
-        'those into the tree does not reach the zkTreeRoot its header carries ' +
-        `(${roots[index] ?? ''}). Shielded::LeafBlocks is what proposes a block's leaf range ` +
-        'and the header is what settles it, so a disagreement is a node moving leaves between ' +
-        'blocks, which is what decides where a coinbase sits. Nothing has been changed.',
-    );
   }
 
   for (const run of runs) {
@@ -515,10 +658,23 @@ export async function authenticateLeaves(
     }
     coinbasePositions.add(run.to - 1);
     if (run.ours) {
-      ownCoinbasePositions.add(run.to - 1);
+      labelSaysOurs.add(run.to - 1);
     }
   }
-  return { blockOf, coinbasePositions, ownCoinbasePositions, commitments };
+  return { blockOf, coinbasePositions, labelSaysOurs, commitments, checkpoints };
+}
+
+/** The hash at a chunk's top, refused by name when this node has no block there. */
+async function hashAtHeightOrRefuse(chain: SyncChain, height: number): Promise<string> {
+  const hash = await chain.blockHashAt(height);
+  if (hash === null) {
+    throw new NodeRefusedError(
+      `this node answered its head above block ${height} and has no block at that height, which ` +
+        'is where the header walk was going to stand for the next chunk of the range. Nothing ' +
+        'has been changed.',
+    );
+  }
+  return hash;
 }
 
 /**
@@ -756,6 +912,7 @@ export async function runSync(
     receivedValue: 0n,
     coinbaseLeaves: 0,
     coinbaseReceived: 0,
+    coinbaseLabelDisagreed: 0,
     relocated: 0,
     rejected: 0,
     rejectedCleared: 0,
@@ -781,6 +938,39 @@ export async function runSync(
   const seenAgain = new Set<string>();
   const clearedPending: string[] = [];
 
+  // The trusted bottom of the header walk, resolved on every pass and not only
+  // on one with leaves to scan: the checkpoint this pass records has to name a
+  // head it authenticated, and a pass that fetched no header authenticated
+  // nothing. It stands on a block hash this wallet already trusts, the genesis
+  // it is bound to when the scan starts at leaf zero, and otherwise the
+  // checkpoint an earlier pass recorded at the watermark, whose hash the stance
+  // walk has just confirmed still stands on this node's own branch.
+  const anchorCheckpoint = checkpoints.at(-1);
+  let trusted: { number: number; hash: string };
+  if (watermark === 0) {
+    trusted = { number: 0, hash: genesis };
+  } else if (anchorCheckpoint !== undefined && anchorCheckpoint.nextLeaf === watermark) {
+    trusted = { number: anchorCheckpoint.blockNumber, hash: anchorCheckpoint.blockHash };
+  } else {
+    throw new NodeRefusedError(
+      `this wallet has read ${watermark} leaves and carries no checkpoint that ends on them, ` +
+        'so there is no block hash it already trusts for the header walk to stand on. Run a ' +
+        'rescan, which starts the walk at the genesis this store is bound to and keeps every ' +
+        'note. Nothing has been changed.',
+    );
+  }
+  // What kind of note each leaf holds, decided from the headers rather than
+  // from which keys this node chose to answer. See `authenticateLeaves`.
+  const typing = await authenticateLeaves(
+    chain,
+    crypto,
+    head,
+    trusted,
+    watermark,
+    shape.leafCount,
+    progress,
+  );
+
   if (shape.leafCount > watermark) {
     // Read with the tree's shape, in the same call the read layer already
     // made. The walk it feeds is bounded in the worker, and a chain past that
@@ -795,36 +985,6 @@ export async function runSync(
           'Origin is a label and no rule selects on it.',
       );
     }
-
-    // What kind of note each leaf holds, decided from the headers rather than
-    // from which keys this node chose to answer. The walk stands on a block
-    // hash this wallet already trusts: the genesis it is bound to when the
-    // scan starts at leaf zero, and otherwise the checkpoint an earlier pass
-    // recorded at the watermark, whose hash the stance walk has just confirmed
-    // still stands on this node's own branch. See `authenticateLeaves`.
-    const anchorCheckpoint = checkpoints.at(-1);
-    let trusted: { number: number; hash: string };
-    if (watermark === 0) {
-      trusted = { number: 0, hash: genesis };
-    } else if (anchorCheckpoint !== undefined && anchorCheckpoint.nextLeaf === watermark) {
-      trusted = { number: anchorCheckpoint.blockNumber, hash: anchorCheckpoint.blockHash };
-    } else {
-      throw new NodeRefusedError(
-        `this wallet has read ${watermark} leaves and carries no checkpoint that ends on them, ` +
-          'so there is no block hash it already trusts for the header walk to stand on. Run a ' +
-          'rescan, which starts the walk at the genesis this store is bound to and keeps every ' +
-          'note. Nothing has been changed.',
-      );
-    }
-    const typing = await authenticateLeaves(
-      chain,
-      crypto,
-      head,
-      trusted,
-      watermark,
-      shape.leafCount,
-      progress,
-    );
 
     // Decryption goes over the boundary in batches, so a scan is one round
     // trip per batch rather than one per leaf.
@@ -892,12 +1052,18 @@ export async function runSync(
               'cannot open it. Nothing has been changed.',
           );
         }
-        if (isCoinbasePosition && record.coinbaseQuanta === null && record.ciphertext === null) {
+        if (isCoinbasePosition && record.coinbaseQuanta === null) {
           throw new NodeRefusedError(
-            `this node answered leaf ${record.index} with no Shielded::Ciphertexts(` +
-              `${record.index}) and no Shielded::CoinbaseValues(${record.index}), at the last ` +
-              `leaf of block ${String(dated)}. One of the two is there on every leaf the chain ` +
-              'appends, so answering neither hides whichever it was. Nothing has been changed.',
+            `this node answered with no Shielded::CoinbaseValues for leaf ${record.index}, the ` +
+              `last leaf of block ${String(dated)} and the one leaf index that block's coinbase ` +
+              'can occupy. The value is public and `pallet-shielded` writes it in the same call ' +
+              'that appends the leaf, so an absent one is an answer withheld, and a scan that ' +
+              'stepped over it would drop whatever sat on that leaf behind a watermark. The ' +
+              'value is required at every coinbase position whatever the author label says: ' +
+              'this wallet verifies no proof of work, so above its newest checkpoint a node ' +
+              'chooses every header field, the label included, and a rule that asked for the ' +
+              "value only under this wallet's own label was one the node switched off by " +
+              'publishing another. Nothing has been changed.',
           );
         }
         if (!isCoinbasePosition && record.ciphertext === null) {
@@ -908,20 +1074,6 @@ export async function runSync(
               'call that appends the leaf and nothing removes it, so an absent one there is an ' +
               'answer withheld. Reading it as a leaf nobody can open would skip a payment and ' +
               'write a watermark above it. Nothing has been changed.',
-          );
-        }
-        if (
-          isCoinbasePosition &&
-          typing.ownCoinbasePositions.has(record.index) &&
-          record.coinbaseQuanta === null
-        ) {
-          throw new NodeRefusedError(
-            `block ${String(dated)} carries this wallet's own author label and this node ` +
-              `answered with no Shielded::CoinbaseValues for leaf ${record.index}, the one leaf ` +
-              "index that block's coinbase can occupy. The value is public and " +
-              '`pallet-shielded` writes it in the same call that appends the leaf, so an absent ' +
-              'one is an answer withheld, and a scan that stepped over it would drop a mined ' +
-              'reward behind a watermark. Nothing has been changed.',
           );
         }
       }
@@ -1036,7 +1188,14 @@ export async function runSync(
           report.coinbaseLeaves += 1;
           received = minted.get(record.index) ?? null;
           isCoinbase = received !== null;
-          if (received === null && typing.ownCoinbasePositions.has(record.index)) {
+          // The rebuild runs at every coinbase position and it is what decides
+          // ownership: the commitment the tree holds is over an `r` only this
+          // wallet's coinbase viewing key derives, so a leaf it opens is this
+          // wallet's note whatever header sits beside it. The author label is
+          // read afterwards and never gates the rebuild.
+          const mined = received?.mined === true;
+          const labelSaysOurs = typing.labelSaysOurs.has(record.index);
+          if (labelSaysOurs && !mined) {
             throw new NodeRefusedError(
               `block ${String(blockNumber)} carries this wallet's own author label and this ` +
                 `node answered ${String(record.coinbaseQuanta)} quanta for its coinbase at leaf ` +
@@ -1044,6 +1203,18 @@ export async function runSync(
                 'value is the one field of a coinbase note the chain decides, and a wrong one ' +
                 "reads the wallet's own reward as nobody's. Nothing has been changed.",
             );
+          }
+          if (mined && !labelSaysOurs) {
+            // Counted rather than refused. The note is this wallet's, because
+            // only its coinbase viewing key derives that commitment, and it is
+            // spendable with the key this wallet holds. Refusing here would
+            // leave the reward behind and stop every later pass with it, which
+            // is a whole-sync denial for the price of one forged header field.
+            // On a block a Qnero node built the label and the note come out of
+            // one key, so a non-zero count is a header this wallet is being
+            // handed for a block it did not come from, and the checkpoint fork
+            // walk is what finds out against another node.
+            report.coinbaseLabelDisagreed += 1;
           }
           if (received === null) {
             // Somebody else's coinbase, or a value that opens nothing. A
@@ -1232,18 +1403,26 @@ export async function runSync(
     );
   }
 
-  // Every checkpoint at or above this head goes first. Syncing twice inside
-  // one block interval otherwise appends a second entry at the same height,
-  // the trim drops the oldest real checkpoint to make room, and the store
-  // collapses the pair afterwards because it is keyed on the height: sixteen
-  // slots become fifteen, permanently, and the fork walk can rewind less far.
+  // One checkpoint per chunk of the header walk, ascending, and every one of
+  // them names a block whose header this pass fetched and rehashed down to a
+  // hash it already trusted. A pass that scanned no leaf walked the headers
+  // anyway, which is what keeps an idle pass from planting a checkpoint on a
+  // hash nothing was fetched for: the next pass's walk stands on that hash.
+  //
+  // Every existing checkpoint at or above the lowest new one goes first.
+  // Syncing twice inside one block interval otherwise appends a second entry
+  // at the same height, the trim drops the oldest real checkpoint to make
+  // room, and the store collapses the pair afterwards because it is keyed on
+  // the height: sixteen slots become fifteen, permanently, and the fork walk
+  // can rewind less far.
+  const lowestNew = typing.checkpoints[0]?.blockNumber ?? head.number;
   const nextCheckpoints = [
-    ...checkpoints.filter((checkpoint) => checkpoint.blockNumber < head.number),
-    {
-      blockNumber: head.number,
-      blockHash: normaliseHash(head.hash),
-      nextLeaf: shape.leafCount,
-    },
+    ...checkpoints.filter((checkpoint) => checkpoint.blockNumber < lowestNew),
+    ...typing.checkpoints.map((checkpoint) => ({
+      blockNumber: checkpoint.blockNumber,
+      blockHash: normaliseHash(checkpoint.blockHash),
+      nextLeaf: checkpoint.nextLeaf,
+    })),
   ].slice(-MAX_CHECKPOINTS);
 
   // Pending rows whose settlement can no longer be admitted.

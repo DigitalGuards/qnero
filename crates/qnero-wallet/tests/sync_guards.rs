@@ -263,7 +263,13 @@ fn a_ciphertext_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing
     };
     put_leaf(&mut state, 0, 8, Digest::hash_bytes(&[b"leaf zero"]), &[]);
     put_leaf(&mut state, 1, 8, mine.commitment(), &ct);
-    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
+    // Block 8's own coinbase, which is what puts the payment below the block's
+    // last leaf. A leaf at the last index owes a coinbase value rather than a
+    // ciphertext, so a withheld ciphertext there is the shape a coinbase has
+    // and says nothing; the withholding this test is about is the one at a
+    // position that cannot be a coinbase.
+    put_leaf(&mut state, 2, 8, Digest::hash_bytes(&[b"leaf two"]), &[]);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
     let node = FakeNode::start(state);
     let rpc = RpcClient::new(&node.url);
     let chain = Chain::new(&rpc);
@@ -275,7 +281,7 @@ fn a_ciphertext_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing
         .expect_err("a ciphertext withheld below the count is refused");
     let message = format!("{refused:#}");
     assert!(message.contains("no Shielded::Ciphertexts(1)"), "{message}");
-    assert!(message.contains("reports 2 leaves"), "{message}");
+    assert!(message.contains("reports 3 leaves"), "{message}");
 
     assert_eq!(wallet.store.next_leaf, 0);
     assert_eq!(
@@ -290,7 +296,7 @@ fn a_ciphertext_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing
         .sync(&chain, &metadata)
         .expect("the pass runs once the ciphertext is answered for");
     assert_eq!(report.received, 1);
-    assert_eq!(wallet.store.next_leaf, 2);
+    assert_eq!(wallet.store.next_leaf, 3);
     assert_eq!(wallet.store.unspent_total(), 1_000);
 }
 

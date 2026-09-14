@@ -48,7 +48,8 @@ export function chainAdapter(context: ChainContext, limits: ProverLimits): SyncC
     leaves: (from, to, at, leafCount, onProgress) =>
       fetchLeaves(context, from, to, at, leafCount, onProgress),
     usedNullifiers: (at, onProgress) => fetchUsedNullifiers(context, at, undefined, onProgress),
-    headers: (anchor, head, onProgress) => fetchHeaderRange(context, anchor, head, onProgress),
+    headers: (anchor, top, onHeader, onProgress) =>
+      fetchHeaderRange(context, anchor, top, onHeader, onProgress),
     leafBlocks: (from, to, at) => fetchLeafBlocks(context, from, to, at),
     leafHashes: (to, at, onProgress) => fetchLeafHashes(context, 0, to, at, onProgress),
   };
@@ -98,6 +99,10 @@ export function cryptoAdapter(prover: ProverClient): SyncCrypto {
               commitment: answer.commitment,
               nullifier: answer.nullifier,
               memo: answer.memo,
+              // Carried across the boundary: the scan decides ownership at a
+              // coinbase position by the rebuild and reads the author label
+              // only as a cross-check against it.
+              mined: answer.mined === true,
             } satisfies ScannedNote),
       );
     },

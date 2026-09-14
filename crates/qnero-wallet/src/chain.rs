@@ -80,10 +80,14 @@ impl RawHeader {
     /// recomputes its own and compares.
     ///
     /// The header's hash commits to the digest, so this is authenticated by
-    /// the same recomputation that authenticates the rest of the header. That
-    /// is what makes it usable for deciding which blocks this wallet mined:
-    /// a node cannot present a block of this wallet's as somebody else's
-    /// without changing the hash.
+    /// the same recomputation that authenticates the rest of the header, and
+    /// that is all it is: unforgeable **relative to a header this wallet
+    /// already trusts**. This wallet verifies no proof of work, so above its
+    /// newest checkpoint a node picks every header field including this one,
+    /// and no rule rests on the label alone. `crate::typing` uses it as a
+    /// cross-check against the coinbase note it rebuilds itself, and
+    /// `docs/WALLET.md` carries the bound under "What a lying node can and
+    /// cannot do".
     ///
     /// `None` when there is no such item, which is a block no Qnero node
     /// built.
@@ -105,7 +109,17 @@ impl RawHeader {
             if !cursor.is_empty() {
                 continue;
             }
-            return Ok(<[u8; 32]>::try_from(payload.as_slice()).ok());
+            // A pre-runtime item of the right shape whose payload is not 32
+            // bytes is not this consensus engine's label, so the scan carries
+            // on rather than answering `None` for the whole header. Returning
+            // there made the first shape-matching item the only one that could
+            // ever answer, where `wallet-web`'s `authorLabelFromHeader` keeps
+            // scanning, and the two wallets then read one header two ways.
+            // `tests/leaf_typing.rs` holds them to the same fixture.
+            let Ok(label) = <[u8; 32]>::try_from(payload.as_slice()) else {
+                continue;
+            };
+            return Ok(Some(label));
         }
         Ok(None)
     }
@@ -243,9 +257,32 @@ impl<'a> Chain<'a> {
     /// genesis or a checkpoint an earlier pass recorded. Without that
     /// comparison this returns a self-consistent chain and nothing more, and a
     /// node can build one of those out of nothing.
+    ///
+    /// What the walk does **not** do is verify proof of work, and it never
+    /// will in v1: a RandomX verification needs a 256 MiB cache and has no
+    /// browser build. So every field of every header above the trusted bottom
+    /// is the node's to choose, and what this returns is one self-consistent
+    /// chain descending from a hash the caller already had. `docs/WALLET.md`,
+    /// under "What a lying node can and cannot do", carries that bound and the
+    /// checkpoint fork walk that is the defence.
+    ///
+    /// **One chunk per call.** The span is bounded by
+    /// [`crate::wallet::HEADER_WALK_LIMIT`], because `head.number` is a
+    /// number the node answers with and this walks and holds one header per
+    /// unit of it. `Wallet::sync_with` climbs a longer range in chunks of that
+    /// size, authenticating and checkpointing each before it reads the next,
+    /// so a chain far ahead of the checkpoint still syncs in one command.
     pub fn header_chain(&self, head: &ChainHead, anchor: u32) -> Result<Vec<VerifiedBlock>> {
         ensure_le(anchor, head.number)?;
-        let span = usize::try_from(head.number - anchor).unwrap_or(usize::MAX);
+        let span = head.number - anchor;
+        if span > crate::wallet::HEADER_WALK_LIMIT {
+            bail!(
+                "a header walk was asked for blocks {anchor} to {}, which is {span} blocks where                  one walk carries at most {}. The head is a number this node answers with and                  this walk holds one header per unit of it, so the range is climbed in chunks                  rather than in one allocation. Nothing has been changed.",
+                head.number,
+                crate::wallet::HEADER_WALK_LIMIT
+            );
+        }
+        let span = usize::try_from(span).unwrap_or(usize::MAX);
         let mut blocks = Vec::with_capacity(span.saturating_add(1));
         let mut hash = head.hash;
         let mut number = head.number;
@@ -560,57 +597,112 @@ impl<'a> Chain<'a> {
         at: &[u8; 32],
         leaf_count: u64,
     ) -> Result<Vec<LeafRecord>> {
-        let at_hash = hex_0x(at);
         let mut out = Vec::new();
         for chunk_start in range.clone().step_by(LEAF_BATCH) {
             let chunk_end = (chunk_start + LEAF_BATCH as u64).min(range.end);
-            let mut keys = Vec::with_capacity(((chunk_end - chunk_start) * 4) as usize);
-            for index in chunk_start..chunk_end {
-                keys.push(identity_map_key(ZK_TREE_PALLET, "Leaves", index));
-                keys.push(identity_map_key(SHIELDED_PALLET, "Ciphertexts", index));
-                keys.push(identity_map_key(SHIELDED_PALLET, "LeafBlocks", index));
-                keys.push(identity_map_key(SHIELDED_PALLET, "CoinbaseValues", index));
+            out.extend(self.leaf_window(chunk_start..chunk_end, at, leaf_count)?);
+        }
+        Ok(out)
+    }
+
+    /// The leaves one chunk of the header walk claims, pinned to the pass's
+    /// own block hash.
+    ///
+    /// Leaves are appended in block order, so the leaves of blocks at or below
+    /// `top_block` are a prefix of what is left to read: this walks windows up
+    /// from `from` and stops at the first leaf `Shielded::LeafBlocks` dates
+    /// above `top_block`. That keeps a chunk's reads proportional to the
+    /// chunk rather than to the whole range, so a chain far ahead of the
+    /// checkpoint never holds every leaf's ciphertext at once.
+    ///
+    /// The dating is the node's claim and decides nothing: `crate::typing`
+    /// folds exactly these leaves into the tree and compares against each
+    /// block's own `zkTreeRoot`, so a node that under-reports a chunk's range
+    /// reaches a short fold and a node that over-reports reaches a long one,
+    /// and both are refused by name.
+    pub fn leaves_up_to_block(
+        &self,
+        from: u64,
+        leaf_count: u64,
+        top_block: u32,
+        at: &[u8; 32],
+    ) -> Result<Vec<LeafRecord>> {
+        let mut out = Vec::new();
+        let mut cursor = from;
+        while cursor < leaf_count {
+            let window_end = (cursor + LEAF_BATCH as u64).min(leaf_count);
+            let window = self.leaf_window(cursor..window_end, at, leaf_count)?;
+            let mut stopped = false;
+            for record in window {
+                if record.block_number.is_some_and(|block| block > top_block) {
+                    stopped = true;
+                    break;
+                }
+                out.push(record);
             }
-            let values = self.rpc.storage_batch(&keys, &at_hash)?;
-            for (offset, index) in (chunk_start..chunk_end).enumerate() {
-                let commitment = values[offset * 4].clone();
-                let ciphertext = values[offset * 4 + 1].clone();
-                let block = values[offset * 4 + 2].clone();
-                let coinbase_value = values[offset * 4 + 3].clone();
-                let below_count = index < leaf_count;
-                if below_count && commitment.is_none() {
-                    return Err(withheld_key(index, leaf_count, at, "ZkTree::Leaves"));
-                }
-                if below_count && block.is_none() {
-                    return Err(withheld_key(index, leaf_count, at, "Shielded::LeafBlocks"));
-                }
-                if below_count && ciphertext.is_none() && coinbase_value.is_none() {
-                    return Err(withheld_key(index, leaf_count, at, "Shielded::Ciphertexts"));
-                }
-                out.push(LeafRecord {
-                    index,
-                    commitment: commitment
-                        .map(|bytes| {
-                            <[u8; 32]>::try_from(bytes.as_slice())
-                                .map_err(|_| anyhow!("ZkTree::Leaves({index}) is not 32 bytes"))
-                        })
-                        .transpose()?,
-                    // `BoundedVec<u8, _>` encodes as a `Vec<u8>`.
-                    ciphertext: ciphertext
-                        .map(|bytes| decode_stored_bytes(&bytes, "Shielded::Ciphertexts", index))
-                        .transpose()?,
-                    block_number: block
-                        .map(|bytes| {
-                            decode_u32_exact(&bytes, &format!("Shielded::LeafBlocks({index})"))
-                        })
-                        .transpose()?,
-                    coinbase_value: coinbase_value
-                        .map(|bytes| {
-                            decode_u64_exact(&bytes, &format!("Shielded::CoinbaseValues({index})"))
-                        })
-                        .transpose()?,
-                });
+            if stopped {
+                break;
             }
+            cursor = window_end;
+        }
+        Ok(out)
+    }
+
+    /// One read window of the four per-leaf maps.
+    fn leaf_window(
+        &self,
+        range: std::ops::Range<u64>,
+        at: &[u8; 32],
+        leaf_count: u64,
+    ) -> Result<Vec<LeafRecord>> {
+        let at_hash = hex_0x(at);
+        let mut keys = Vec::with_capacity(((range.end - range.start) * 4) as usize);
+        for index in range.clone() {
+            keys.push(identity_map_key(ZK_TREE_PALLET, "Leaves", index));
+            keys.push(identity_map_key(SHIELDED_PALLET, "Ciphertexts", index));
+            keys.push(identity_map_key(SHIELDED_PALLET, "LeafBlocks", index));
+            keys.push(identity_map_key(SHIELDED_PALLET, "CoinbaseValues", index));
+        }
+        let values = self.rpc.storage_batch(&keys, &at_hash)?;
+        let mut out = Vec::with_capacity((range.end - range.start) as usize);
+        for (offset, index) in range.enumerate() {
+            let commitment = values[offset * 4].clone();
+            let ciphertext = values[offset * 4 + 1].clone();
+            let block = values[offset * 4 + 2].clone();
+            let coinbase_value = values[offset * 4 + 3].clone();
+            let below_count = index < leaf_count;
+            if below_count && commitment.is_none() {
+                return Err(withheld_key(index, leaf_count, at, "ZkTree::Leaves"));
+            }
+            if below_count && block.is_none() {
+                return Err(withheld_key(index, leaf_count, at, "Shielded::LeafBlocks"));
+            }
+            if below_count && ciphertext.is_none() && coinbase_value.is_none() {
+                return Err(withheld_key(index, leaf_count, at, "Shielded::Ciphertexts"));
+            }
+            out.push(LeafRecord {
+                index,
+                commitment: commitment
+                    .map(|bytes| {
+                        <[u8; 32]>::try_from(bytes.as_slice())
+                            .map_err(|_| anyhow!("ZkTree::Leaves({index}) is not 32 bytes"))
+                    })
+                    .transpose()?,
+                // `BoundedVec<u8, _>` encodes as a `Vec<u8>`.
+                ciphertext: ciphertext
+                    .map(|bytes| decode_stored_bytes(&bytes, "Shielded::Ciphertexts", index))
+                    .transpose()?,
+                block_number: block
+                    .map(|bytes| {
+                        decode_u32_exact(&bytes, &format!("Shielded::LeafBlocks({index})"))
+                    })
+                    .transpose()?,
+                coinbase_value: coinbase_value
+                    .map(|bytes| {
+                        decode_u64_exact(&bytes, &format!("Shielded::CoinbaseValues({index})"))
+                    })
+                    .transpose()?,
+            });
         }
         Ok(out)
     }

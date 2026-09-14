@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use qnero_circuit::chain::ct_digest;
-use qnero_circuit::merkle::MerklePath;
+use qnero_circuit::merkle::{MerklePath, TreeFrontier};
 use qnero_circuit::witness::{InputNote, OutputNote, SpendWitness};
 use qnero_notes::{
     encrypt_note, entry_rho, try_receive, try_receive_coinbase, Address, Digest, MinerKey, Note,
@@ -32,7 +32,7 @@ use crate::store::{
     NoteOrigin, PendingKind, PendingNote, RejectedNote, SecretHex, SpentDirection, StoredNote,
     WalletStore,
 };
-use crate::typing::{type_leaves, LeafKind, MinerView};
+use crate::typing::{check_chunk_appended_nothing, seed_frontier, type_chunk, LeafKind, MinerView};
 use crate::POOL_QUANTUM;
 
 /// Leaf slots in a private batch. Not a metadata value and not discoverable
@@ -110,6 +110,25 @@ const INCLUSION_TIMEOUT: Duration = Duration::from_secs(120);
 /// listing and no rule selects on it. `wallet-web` holds the same bound in
 /// `src/worker/protocol.ts`.
 pub const ENTRY_WALK_LIMIT: u64 = 100_000;
+
+/// How many blocks one chunk of the header walk carries.
+///
+/// The head is a number the node answers with, and the walk fetches, rehashes
+/// and holds one header per block between the trusted anchor and it. Unbounded,
+/// a node claiming a head billions of blocks ahead decided both how much this
+/// wallet allocates and how long it runs. So the range is climbed in chunks:
+/// each is fetched by the hash its child names down to the block below it,
+/// every header rehashed, the chunk's leaf runs folded and checked against the
+/// roots its headers carry, and a checkpoint recorded at its top before the
+/// next chunk is read. A chain far ahead of the checkpoint therefore syncs in
+/// one command, with the headers resident bounded by this number rather than
+/// by the distance.
+///
+/// 1024 blocks is about 140 KiB of `VerifiedBlock` and 1024 `chain_getHeader`
+/// round trips, which is one page of work either way. `docs/BENCH.md` carries
+/// the per-block cost and this size. `wallet-web` holds the same bound in
+/// `src/wallet/sync.ts`.
+pub const HEADER_WALK_LIMIT: u32 = 1024;
 
 pub struct Wallet {
     pub seed_path: PathBuf,
@@ -386,278 +405,367 @@ impl Wallet {
         // whose block was orphaned and never re-included.
         let mut seen_again: BTreeSet<String> = BTreeSet::new();
 
-        if leaf_count > start {
-            let ivk = self.ivk();
-            let nk = self.key.nk();
-            // Read once, outside the loop. The entry counter is chain wide and
-            // the whole scan is pinned to one block, so it is the same value
-            // for every leaf; asking per received note was one round trip each
-            // for a field that is only a label.
-            let entry_count = chain.entry_count_at(&head.hash)?;
-            // Said out loud when the walk cannot cover the counter. The bound
-            // is what keeps one storage answer from deciding how long this
-            // scan runs; what it costs is a label, and a label nobody is told
-            // about is a label an operator reads as a fact.
-            if entry_count > ENTRY_WALK_LIMIT {
-                report.entry_walk_truncated = Some(entry_count);
-            }
-            let miner_key = self.key.miner_key();
-            let records = chain.leaves(start..leaf_count, &head.hash, leaf_count)?;
-            // A gap in what the node answered, which the chain never leaves.
-            // Every leaf below the count this pass read at this same block
-            // hash was appended by one of `pallet-shielded`'s three writers,
-            // and each writes `ZkTree::Leaves` and `Shielded::LeafBlocks` in
-            // the call that appends the leaf. Nothing removes either, so an
-            // absent answer below the count is one this node withheld, and
-            // stepping over it is silent and permanent: the leaf would be
-            // counted as scanned, `next_leaf` and a checkpoint would be
-            // written above it, and every later sync starts above it. The pass
-            // is refused instead, before anything is saved. `Chain::leaves`
-            // refuses the same pair one layer down, and `wallet-web` refuses
-            // it in `chain/reads.ts` and again in `runSync`.
-            //
-            // The third key, `Shielded::Ciphertexts`, is not a flat
-            // requirement any more: whether a leaf owes one is decided by
-            // where the headers put it, in `crate::typing`, which is also what
-            // refuses an invented `Shielded::CoinbaseValues`.
-            for record in &records {
-                if record.commitment.is_none() {
-                    return Err(withheld_key(
-                        record.index,
-                        leaf_count,
-                        &head.hash,
-                        "ZkTree::Leaves",
-                    ));
-                }
-                if record.block_number.is_none() {
-                    return Err(withheld_key(
-                        record.index,
-                        leaf_count,
-                        &head.hash,
-                        "Shielded::LeafBlocks",
-                    ));
-                }
-            }
+        // The trusted bottom of the header walk, resolved on every pass and
+        // not only on one with leaves to scan.
+        //
+        // The walk stands on a block hash this wallet already trusts: the
+        // genesis it is bound to when the scan starts at leaf zero, and
+        // otherwise the checkpoint an earlier pass recorded at the watermark,
+        // whose hash `read_node_stance` has just confirmed still stands on
+        // this node's own branch. From there every header up to the head is
+        // fetched by the hash its child names and rehashed from its own
+        // preimage, so the `zkTreeRoot` each block published and the author
+        // label in its digest are authenticated by the same recomputation.
+        // See `crate::typing`.
+        let (anchor_block, anchor_hash) = if start == 0 {
+            (0u32, genesis_hash)
+        } else {
+            let checkpoint = self
+                .store
+                .newest_checkpoint()
+                .filter(|checkpoint| checkpoint.next_leaf == start)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "this store has read {start} leaves and carries no checkpoint that ends \
+                         on them, so there is no block hash this wallet already trusts for the \
+                         header walk to stand on. A store written before checkpoints existed is \
+                         the one shape that reaches this. Run `sync --rescan`, which starts the \
+                         walk at the genesis this store is bound to and keeps every note. \
+                         Nothing has been changed."
+                    )
+                })?;
+            let bytes = hex::decode(&checkpoint.block_hash)
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "the checkpoint at block {} carries a block hash that is not 32 bytes of \
+                         hex",
+                        checkpoint.block_number
+                    )
+                })?;
+            (checkpoint.block_number, bytes)
+        };
 
-            // What kind of note each leaf holds, decided from the headers
-            // rather than from which keys this node chose to answer.
-            //
-            // The walk stands on a block hash this wallet already trusts: the
-            // genesis it is bound to when the scan starts at leaf zero, and
-            // otherwise the checkpoint an earlier pass recorded at the
-            // watermark, whose hash `read_node_stance` has just confirmed
-            // still stands on this node's own branch. From there every header
-            // up to the head is fetched by the hash its child names and
-            // rehashed from its own preimage, so the `zkTreeRoot` each block
-            // published and the author label in its digest are authenticated
-            // by the same recomputation. See `crate::typing`.
-            let (anchor_block, anchor_hash) = if start == 0 {
-                (0u32, genesis_hash)
+        let ivk = self.ivk();
+        let nk = self.key.nk();
+        let miner_key = self.key.miner_key();
+        let miner = MinerView {
+            key: &miner_key,
+            genesis_hash: &genesis_hash,
+        };
+        // Read once, outside the loop. The entry counter is chain wide and the
+        // whole scan is pinned to one block, so it is the same value for every
+        // leaf; asking per received note was one round trip each for a field
+        // that is only a label.
+        let entry_count = chain.entry_count_at(&head.hash)?;
+        // Said out loud when the walk cannot cover the counter. The bound is
+        // what keeps one storage answer from deciding how long this scan runs;
+        // what it costs is a label, and a label nobody is told about is a label
+        // an operator reads as a fact.
+        if entry_count > ENTRY_WALK_LIMIT {
+            report.entry_walk_truncated = Some(entry_count);
+        }
+
+        // The walk, climbed in chunks of at most `HEADER_WALK_LIMIT` blocks.
+        //
+        // The head is a number this node answers with, so a single walk over
+        // the whole distance let one answer decide how much this wallet
+        // allocates. Each chunk is fetched downward by `parentHash` from its
+        // own top to the block below its bottom, every header rehashed, the
+        // leaves the node dates into it folded and checked against the roots
+        // those headers carry, and its top then becomes the bottom the next
+        // chunk is authenticated against. Only the top of the last chunk is
+        // the head itself, so every chunk below it learns its top's hash from
+        // `chain_getBlockHash` and then proves it by walking down to a hash
+        // already trusted.
+        //
+        // Checkpoints are collected here and written with the watermark at the
+        // end of the pass, so the store never carries a checkpoint for a range
+        // whose scan was refused.
+        let mut checkpoints: Vec<(u32, String, u64)> = Vec::new();
+        let mut frontier: Option<TreeFrontier> = None;
+        let mut cursor_leaf = start;
+        let mut trusted_block = anchor_block;
+        let mut trusted_hash = anchor_hash;
+        loop {
+            let top = trusted_block
+                .saturating_add(HEADER_WALK_LIMIT)
+                .min(head.number);
+            let top_hash = if top == head.number {
+                head.hash
             } else {
-                let checkpoint = self
-                    .store
-                    .newest_checkpoint()
-                    .filter(|checkpoint| checkpoint.next_leaf == start)
-                    .cloned()
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "this store has read {start} leaves and carries no checkpoint that \
-                             ends on them, so there is no block hash this wallet already trusts \
-                             for the header walk to stand on. A store written before checkpoints \
-                             existed is the one shape that reaches this. Run `sync --rescan`, \
-                             which starts the walk at the genesis this store is bound to and \
-                             keeps every note. Nothing has been changed."
-                        )
-                    })?;
-                let bytes = hex::decode(&checkpoint.block_hash)
-                    .ok()
-                    .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "the checkpoint at block {} carries a block hash that is not 32 bytes \
-                             of hex",
-                            checkpoint.block_number
-                        )
-                    })?;
-                (checkpoint.block_number, bytes)
+                chain.block_hash(top)?
             };
-            let blocks = chain.header_chain(&head, anchor_block)?;
+            let blocks = chain.header_chain(
+                &ChainHead {
+                    number: top,
+                    hash: top_hash,
+                },
+                trusted_block,
+            )?;
             let anchor = blocks
                 .first()
                 .ok_or_else(|| anyhow!("the header walk returned no blocks"))?;
-            if anchor.hash != anchor_hash {
+            if anchor.hash != trusted_hash {
                 bail!(
-                    "the header walk reached block {anchor_block} at {}, and this wallet trusts \
+                    "the header walk reached block {trusted_block} at {}, and this wallet trusts \
                      {} there. Every header above it is authenticated by chaining down to this \
                      one, so a walk that lands somewhere else authenticates nothing. Nothing has \
                      been changed.",
                     hex::encode(anchor.hash),
-                    hex::encode(anchor_hash)
+                    hex::encode(trusted_hash)
                 );
             }
-            // The leaves below the watermark, which the anchor block's own
-            // `zkTreeRoot` is what checks. Read at one key per leaf, which is
-            // the same wide read a spend already makes to rebuild its paths.
-            let prefix = chain.leaf_hashes(0..start, &head.hash)?;
-            let typed = type_leaves(
-                &blocks,
-                start,
-                &prefix,
-                &records,
-                leaf_count,
-                &MinerView {
-                    key: &miner_key,
-                    genesis_hash: &genesis_hash,
-                },
-            )?;
 
-            for (record, leaf) in records.iter().zip(typed.iter()) {
-                report.leaves_scanned += 1;
-                let commitment = leaf.commitment;
-                let block_number = leaf.block_number;
+            if leaf_count > start {
+                if frontier.is_none() {
+                    // The leaves below the watermark, which the walk's bottom
+                    // block is what checks. Read at one key per leaf, which is
+                    // the same wide read a spend already makes to rebuild its
+                    // paths, and read once for the whole pass: the fold climbs
+                    // with the chunks.
+                    let prefix = chain.leaf_hashes(0..start, &head.hash)?;
+                    frontier = Some(seed_frontier(anchor, start, &prefix)?);
+                }
+                let fold = frontier
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("the leaf fold was not seeded"))?;
+                let records = chain.leaves_up_to_block(cursor_leaf, leaf_count, top, &head.hash)?;
+                // A gap in what the node answered, which the chain never
+                // leaves. Every leaf below the count this pass read at this
+                // same block hash was appended by one of `pallet-shielded`'s
+                // three writers, and each writes `ZkTree::Leaves` and
+                // `Shielded::LeafBlocks` in the call that appends the leaf.
+                // Nothing removes either, so an absent answer below the count
+                // is one this node withheld, and stepping over it is silent
+                // and permanent: the leaf would be counted as scanned,
+                // `next_leaf` and a checkpoint would be written above it, and
+                // every later sync starts above it. The pass is refused
+                // instead, before anything is saved. `Chain::leaf_window`
+                // refuses the same pair one layer down, and `wallet-web`
+                // refuses it in `chain/reads.ts` and again in `runSync`.
+                //
+                // The third key, `Shielded::Ciphertexts`, is not a flat
+                // requirement: whether a leaf owes one is decided by where the
+                // headers put it, in `crate::typing`, which is also what
+                // refuses an invented `Shielded::CoinbaseValues` and what
+                // requires one at every coinbase position.
+                for record in &records {
+                    if record.commitment.is_none() {
+                        return Err(withheld_key(
+                            record.index,
+                            leaf_count,
+                            &head.hash,
+                            "ZkTree::Leaves",
+                        ));
+                    }
+                    if record.block_number.is_none() {
+                        return Err(withheld_key(
+                            record.index,
+                            leaf_count,
+                            &head.hash,
+                            "Shielded::LeafBlocks",
+                        ));
+                    }
+                }
+                let typed = type_chunk(fold, &blocks, &records, &miner)?;
+                cursor_leaf += typed.len() as u64;
+                for (record, leaf) in records.iter().zip(typed.iter()) {
+                    report.leaves_scanned += 1;
+                    let commitment = leaf.commitment;
+                    let block_number = leaf.block_number;
 
-                // Whether the note came out of the coinbase rule, which is
-                // what `NoteOrigin::Coinbase` records and what the report
-                // counts. A leaf at a coinbase position that no coinbase rule
-                // opens is still offered to the transfer rule when it carries
-                // a ciphertext: under v1 a coinbase carries none, so a
-                // ciphertext there is either an encrypted coinbase or a leaf
-                // that is not a coinbase at all, and skipping it would be the
-                // silent step-over this whole pass exists to close.
-                let mut from_coinbase = false;
-                let received = match leaf.kind {
-                    LeafKind::Coinbase { value, .. } => {
-                        report.coinbase_leaves += 1;
-                        match receive_coinbase(
-                            &miner_key,
-                            &ivk,
-                            &genesis_hash,
-                            block_number,
+                    // Whether the note came out of the coinbase rule, which is
+                    // what `NoteOrigin::Coinbase` records and what the report
+                    // counts. A leaf at a coinbase position that no coinbase rule
+                    // opens is still offered to the transfer rule when it carries
+                    // a ciphertext: under v1 a coinbase carries none, so a
+                    // ciphertext there is either an encrypted coinbase or a leaf
+                    // that is not a coinbase at all, and skipping it would be the
+                    // silent step-over this whole pass exists to close.
+                    let mut from_coinbase = false;
+                    let received = match leaf.kind {
+                        LeafKind::Coinbase {
+                            ours,
                             value,
-                            &commitment,
-                            record.ciphertext.as_deref(),
-                        ) {
-                            Some(received) => {
-                                from_coinbase = true;
-                                received
+                            label_disagrees,
+                        } => {
+                            report.coinbase_leaves += 1;
+                            if label_disagrees {
+                                report.coinbase_label_disagreed += 1;
                             }
-                            None => match record
-                                .ciphertext
-                                .as_deref()
-                                .and_then(|bytes| try_transfer(&ivk, bytes, &commitment))
-                            {
+                            match receive_coinbase(
+                                &miner_key,
+                                &ivk,
+                                &genesis_hash,
+                                block_number,
+                                value,
+                                &commitment,
+                                record.ciphertext.as_deref(),
+                            ) {
+                                Some(received) => {
+                                    from_coinbase = true;
+                                    received
+                                }
+                                // `ours` is the typing pass's own rebuild of
+                                // this wallet's coinbase note against the
+                                // tree-authenticated commitment, so the opener
+                                // above rebuilds the identical note and cannot
+                                // miss. Saying so out loud rather than falling
+                                // through to the transfer arm is what keeps a
+                                // later change to either rule from turning a
+                                // mined reward back into a silent skip.
+                                None if ours => bail!(
+                                    "leaf {} was typed as this wallet's own coinbase for block                                      {block_number} at {value} quanta and the same rebuild does                                      not open it. The two rebuilds are one rule, so this is a                                      build whose halves disagree. Nothing has been changed.",
+                                    record.index
+                                ),
+                                None => match record
+                                    .ciphertext
+                                    .as_deref()
+                                    .and_then(|bytes| try_transfer(&ivk, bytes, &commitment))
+                                {
+                                    Some(received) => received,
+                                    None => continue,
+                                },
+                            }
+                        }
+                        LeafKind::Transfer => {
+                            let Some(ciphertext) = record.ciphertext.as_deref() else {
+                                // Unreachable: `type_chunk` refuses a transfer
+                                // leaf with no ciphertext by name.
+                                continue;
+                            };
+                            match try_transfer(&ivk, ciphertext, &commitment) {
                                 Some(received) => received,
                                 None => continue,
-                            },
+                            }
                         }
-                    }
-                    LeafKind::Transfer => {
-                        let Some(ciphertext) = record.ciphertext.as_deref() else {
-                            // Unreachable: `type_leaves` refuses a transfer
-                            // leaf with no ciphertext by name.
-                            continue;
-                        };
-                        match try_transfer(&ivk, ciphertext, &commitment) {
-                            Some(received) => received,
-                            None => continue,
-                        }
-                    }
-                };
+                    };
 
-                let commitment_hex = commitment.to_hex();
-                if self.store.has_commitment(&commitment_hex) {
-                    // Already held, and possibly not where it was. A rescan
-                    // reaches this line when the fork check rewound the
-                    // watermark and the leaf range was walked again, which is
-                    // what an orphaned block and a re-included extrinsic look
-                    // like from here. See `WalletStore::relocate_note`.
+                    let commitment_hex = commitment.to_hex();
+                    if self.store.has_commitment(&commitment_hex) {
+                        // Already held, and possibly not where it was. A rescan
+                        // reaches this line when the fork check rewound the
+                        // watermark and the leaf range was walked again, which is
+                        // what an orphaned block and a re-included extrinsic look
+                        // like from here. See `WalletStore::relocate_note`.
+                        if rewind.is_some() && reconciles {
+                            seen_again.insert(commitment_hex.clone());
+                        }
+                        // Unconditional, the rescan included: a commitment the
+                        // chain carries at another index is a note whose stored
+                        // index is stale, and leaving it stale is what makes a
+                        // note unspendable. This only ever adds, since it moves a
+                        // note to where the chain has it and marks it on chain.
+                        if self.store.relocate_note(
+                            &commitment_hex,
+                            record.index,
+                            Some(block_number),
+                        ) {
+                            report.relocated += 1;
+                        }
+                        continue;
+                    }
+                    let nullifier = received.note.nullifier(&nk);
+                    let nullifier_hex = nullifier.to_hex();
+
+                    // A note whose nullifier duplicates one this wallet already
+                    // holds is kept.
+                    //
+                    // `docs/CIRCUIT.md` section 9.8: a sender picks `rho` and `r`
+                    // for a note it creates, so a sender that repeats a pair hands
+                    // over two notes sharing one nullifier, of which at most one
+                    // can ever settle. Which one is not the sender's choice and
+                    // not the scan's: it is whichever one this wallet spends
+                    // first. The scan used to refuse the second note it met, which
+                    // decided that by arrival order and decided it permanently, so
+                    // a sender who put the large note second had the wallet keep
+                    // the small one with no way back. Both are held now and
+                    // `WalletStore::spendable` picks the larger, on every command.
+                    if self.store.nullifier_settled(&nullifier_hex) {
+                        if self.store.record_rejected(RejectedNote {
+                            leaf_index: record.index,
+                            commitment: commitment_hex,
+                            nullifier: nullifier_hex.into(),
+                            value: received.note.value,
+                            reason: "its nullifier is already settled on chain".into(),
+                        }) {
+                            report.rejected += 1;
+                        }
+                        continue;
+                    }
+
+                    let origin = if from_coinbase {
+                        // The coinbase rule is its own, and it is checked above:
+                        // this note's commitment is the one the miner key and the
+                        // chain's value produce. `entry_rho_matches` would walk the
+                        // shield counter for a `rho` that never came from it.
+                        NoteOrigin::Coinbase
+                    } else if entry_rho_matches(block_number, &received.note.rho, entry_count) {
+                        NoteOrigin::Shield
+                    } else {
+                        NoteOrigin::Spend
+                    };
+                    report.received += 1;
+                    if origin == NoteOrigin::Coinbase {
+                        report.coinbase_received += 1;
+                    }
+                    report.received_value += received.note.value;
                     if rewind.is_some() && reconciles {
+                        // A note first recorded by this very scan is on the chain
+                        // by construction, and the vanished count below walks
+                        // every note inside the rescanned range.
                         seen_again.insert(commitment_hex.clone());
                     }
-                    // Unconditional, the rescan included: a commitment the
-                    // chain carries at another index is a note whose stored
-                    // index is stale, and leaving it stale is what makes a
-                    // note unspendable. This only ever adds, since it moves a
-                    // note to where the chain has it and marks it on chain.
-                    if self
-                        .store
-                        .relocate_note(&commitment_hex, record.index, Some(block_number))
-                    {
-                        report.relocated += 1;
-                    }
-                    continue;
-                }
-                let nullifier = received.note.nullifier(&nk);
-                let nullifier_hex = nullifier.to_hex();
-
-                // A note whose nullifier duplicates one this wallet already
-                // holds is kept.
-                //
-                // `docs/CIRCUIT.md` section 9.8: a sender picks `rho` and `r`
-                // for a note it creates, so a sender that repeats a pair hands
-                // over two notes sharing one nullifier, of which at most one
-                // can ever settle. Which one is not the sender's choice and
-                // not the scan's: it is whichever one this wallet spends
-                // first. The scan used to refuse the second note it met, which
-                // decided that by arrival order and decided it permanently, so
-                // a sender who put the large note second had the wallet keep
-                // the small one with no way back. Both are held now and
-                // `WalletStore::spendable` picks the larger, on every command.
-                if self.store.nullifier_settled(&nullifier_hex) {
-                    if self.store.record_rejected(RejectedNote {
+                    self.store.notes.push(StoredNote {
                         leaf_index: record.index,
-                        commitment: commitment_hex,
-                        nullifier: nullifier_hex.into(),
+                        block_number: Some(block_number),
                         value: received.note.value,
-                        reason: "its nullifier is already settled on chain".into(),
-                    }) {
-                        report.rejected += 1;
-                    }
-                    continue;
+                        commitment: commitment_hex.clone(),
+                        nullifier: nullifier_hex.into(),
+                        rho: received.note.rho.to_hex().into(),
+                        r: received.note.r.to_hex().into(),
+                        memo: String::from_utf8_lossy(unpad_memo(&received.memo)).into_owned(),
+                        origin,
+                        spent: false,
+                        spent_seen_at_block: None,
+                        // Recorded by this scan, from the chain the scan is
+                        // pinned to.
+                        on_chain: true,
+                    });
+                    self.store
+                        .pending
+                        .retain(|pending| pending.commitment != commitment_hex);
                 }
-
-                let origin = if from_coinbase {
-                    // The coinbase rule is its own, and it is checked above:
-                    // this note's commitment is the one the miner key and the
-                    // chain's value produce. `entry_rho_matches` would walk the
-                    // shield counter for a `rho` that never came from it.
-                    NoteOrigin::Coinbase
-                } else if entry_rho_matches(block_number, &received.note.rho, entry_count) {
-                    NoteOrigin::Shield
-                } else {
-                    NoteOrigin::Spend
-                };
-                report.received += 1;
-                if origin == NoteOrigin::Coinbase {
-                    report.coinbase_received += 1;
-                }
-                report.received_value += received.note.value;
-                if rewind.is_some() && reconciles {
-                    // A note first recorded by this very scan is on the chain
-                    // by construction, and the vanished count below walks
-                    // every note inside the rescanned range.
-                    seen_again.insert(commitment_hex.clone());
-                }
-                self.store.notes.push(StoredNote {
-                    leaf_index: record.index,
-                    block_number: Some(block_number),
-                    value: received.note.value,
-                    commitment: commitment_hex.clone(),
-                    nullifier: nullifier_hex.into(),
-                    rho: received.note.rho.to_hex().into(),
-                    r: received.note.r.to_hex().into(),
-                    memo: String::from_utf8_lossy(unpad_memo(&received.memo)).into_owned(),
-                    origin,
-                    spent: false,
-                    spent_seen_at_block: None,
-                    // Recorded by this scan, from the chain the scan is
-                    // pinned to.
-                    on_chain: true,
-                });
-                self.store
-                    .pending
-                    .retain(|pending| pending.commitment != commitment_hex);
+            } else {
+                // Nothing was appended between the bottom of this walk and its
+                // top, so there is no fold to seed and no leaf to check
+                // against the roots. The headers are still fetched and
+                // rehashed, because the checkpoint this pass records has to
+                // name a head it authenticated, and every block in the chunk
+                // has to carry the bottom block's own root: a moved root over
+                // an unchanged leaf count is a node answering a count its own
+                // headers do not carry.
+                check_chunk_appended_nothing(&blocks)?;
             }
+
+            checkpoints.push((top, hex::encode(top_hash), cursor_leaf));
+            trusted_block = top;
+            trusted_hash = top_hash;
+            if top == head.number {
+                break;
+            }
+        }
+
+        if cursor_leaf != leaf_count {
+            bail!(
+                "the blocks this pass walked account for {cursor_leaf} leaves where this node                  reports {leaf_count} at the same block. Nothing has been changed."
+            );
+        }
+
+        if leaf_count > start {
             // A leaf this scan accepted cannot still be a refusal. The one
             // refusal left is a settled nullifier, and a reorg that orphans
             // the settlement makes the same leaf acceptable on the rescan,
@@ -728,8 +836,16 @@ impl Wallet {
 
         self.store.next_leaf = leaf_count;
         self.store.last_synced_block = head.number;
-        self.store
-            .record_checkpoint(head.number, hex::encode(head.hash), leaf_count);
+        // One per chunk of the walk, in ascending order, and every one of them
+        // names a block whose header this pass fetched and rehashed down to a
+        // hash it already trusted. A pass that scanned no leaf walked the
+        // headers anyway, which is what keeps an idle pass from planting a
+        // checkpoint on a hash nothing was fetched for: the next pass's walk
+        // stands on that hash.
+        for (block_number, block_hash, next_leaf) in checkpoints {
+            self.store
+                .record_checkpoint(block_number, block_hash, next_leaf);
+        }
         // The binding, written by the save that commits this sync and by no
         // earlier one. A store with no genesis yet takes the chain of the
         // first node whose answers it actually kept, so a refusal above never
@@ -1898,6 +2014,17 @@ pub struct SyncReport {
     /// as a warning on its own pass, and `docs/WALLET.md` open issue 3 is the
     /// rule.
     pub entry_walk_truncated: Option<u64>,
+    /// Coinbase notes this pass rebuilt as its own at a coinbase position
+    /// whose header carries another author's label.
+    ///
+    /// The rebuild decides ownership and the label decides nothing, so the
+    /// reward is taken. It cannot happen on a block a Qnero node built: the
+    /// label and the note's `r` come out of the same coinbase viewing key. So
+    /// a non-zero count here is a header this wallet is being handed for a
+    /// block it did not come from, and the checkpoint fork walk is what finds
+    /// out on the next pass against another node. `docs/WALLET.md`, under
+    /// "What a lying node can and cannot do", is the bound.
+    pub coinbase_label_disagreed: u64,
     /// The node gate this sync bypassed, as the refusal it would have been.
     ///
     /// Only `--rescan` produces one, and only for the checkpoint walk: a node

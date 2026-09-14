@@ -298,13 +298,49 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
             after - 1,
             "this wallet's coinbase for block {block} is that block's last leaf"
         );
+
+        // The cross-check, on a real header. The author label a node publishes
+        // is `H("qnero/author-label", cvk, parent_hash)` and the note's own
+        // randomness comes out of the same `cvk`, so on a block this chain
+        // produced the two agree. Nothing in the wallet's rules rests on the
+        // label, which is why this is worth asserting here: the rule fails
+        // open, so a regression that left the comparison permanently false
+        // would cost nothing on this chain and would be invisible in every
+        // fake-node test, where the label is whatever the fixture wrote.
+        let header = chain.header_at(&at).expect("the block's header");
+        let published = header
+            .author_label()
+            .expect("the digest logs are hex")
+            .expect("a Qnero block carries a pre-runtime author label");
+        let derived = miner.miner_key().author_label(&parent).to_bytes();
+        assert_eq!(
+            hex::encode(published),
+            hex::encode(derived),
+            "block {block} is this wallet's, so the label it publishes is the one this wallet              derives from its own coinbase viewing key"
+        );
+
+        // And the value the wallet rebuilt the note at is the one the node
+        // published for that leaf, which is what makes the rebuild a check on
+        // the chain's arithmetic rather than on the wallet's own.
+        let coinbase = records
+            .iter()
+            .find(|record| record.index == note.leaf_index)
+            .expect("the coinbase leaf is in the block's range");
+        assert_eq!(
+            coinbase.coinbase_value,
+            Some(note.value),
+            "the note this wallet holds for block {block} is rebuilt at the value the chain              published"
+        );
         checked_blocks += 1;
     }
     assert!(
         checked_blocks > 0,
         "no block with a coinbase leaf to check the position rule on"
     );
-    println!("the coinbase is the last leaf of its block, on {checked_blocks} real blocks");
+    println!(
+        "the coinbase is the last leaf of its block, the label is this wallet's own derivation \
+         and the value is the chain's, on {checked_blocks} real blocks"
+    );
     // The emission is flat over a few blocks, to within the one quantum the
     // sub-quantum carry adds: a block's credit is not a whole number of pool
     // quanta, so the remainder waits and occasionally completes one.

@@ -965,6 +965,42 @@ Three things set that shape.
   is the same wide read a spend already makes to rebuild its paths. A first
   sync pays nothing for it, because the watermark is zero.
 
+### The chunked walk (2026-09-14)
+
+The header walk is climbed in chunks of `HEADER_WALK_LIMIT = 1024` blocks, the
+same number in both wallets (`crates/qnero-wallet/src/wallet.rs` and
+`wallet-web/src/wallet/sync.ts`). The head is a number the node answers with
+and an unchunked walk fetched, rehashed and held one header per block between
+the trusted checkpoint and it, so one storage answer decided how much a wallet
+allocated before a leaf was read.
+
+The per-block cost is unchanged by the chunking, because the work per block is
+the same work: one `chain_getHeader`, one Poseidon2 header rehash, one author
+label, and one root comparison. What the chunk size sets is how much is
+resident and what a chunk costs to enter:
+
+| Term | Per chunk at 1024 | Why |
+|---|---|---|
+| headers resident, command line | ~140 KiB | a `VerifiedBlock` is four 32-byte fields and a number |
+| headers resident, browser | ~700 KiB | a `RawChainHeader` is five `0x` hex strings the page holds as `String`s |
+| extra requests | 1 | `chain_getBlockHash` at the chunk's top, for every chunk but the last |
+| leaves read, command line | the chunk's own | `Chain::leaves_up_to_block` stops at the first leaf dated above the chunk's top, so a chunk never holds the whole range's ciphertexts |
+
+The extra request buys the bound and no guarantee: the chunk's top hash comes
+from the node, and the walk down from it to a hash already trusted is what
+proves it, exactly as the single walk proved the head. Only the last chunk's
+top is the head itself.
+
+Two terms are still per block of the whole range rather than per chunk, in the
+browser alone, and both are small beside a header: the leaf count each block
+ended on, and the `zkTreeRoot` it published. They are accumulated across the
+chunks and checked in one fold at the end of the walk, before any leaf is
+scanned and before any checkpoint is committed. The fold is a single crossing
+into the module that owns Poseidon2 and it starts from an empty tree, so
+calling it once per chunk would re-push every leaf below that chunk and turn a
+linear check into a quadratic one. The command-line wallet carries its
+`TreeFrontier` across the chunks and checks each chunk's roots as it climbs.
+
 What this does not measure is a chain deep enough for the per-block term to
 matter. At a twelve-second target a year is about 2.6 million blocks, so a
 first sync on such a chain is 2.6 million header requests, against the 2.6

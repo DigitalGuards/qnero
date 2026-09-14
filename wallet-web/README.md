@@ -137,25 +137,38 @@ has the bug too.
   on that leaf behind a watermark written above it.
 - **Which rule opens a leaf.** A coinbase is rebuilt from the miner key and the
   public value the chain hashed into its commitment; everything else is
-  trial-decrypted. **The kind is derived only from data the headers
-  authenticate, never from which storage keys a node chose to answer.**
+  trial-decrypted. **The kind is derived only from position, and position is
+  what the headers authenticate, never from which storage keys a node chose to
+  answer.**
   Presence of `Shielded::CoinbaseValues` used to decide it and presence is the
   node's to write, so eight invented bytes on an incoming payment routed it
   onto the coinbase rebuild, which cannot open it, and an invented
   `Shielded::Ciphertexts` beside a withheld coinbase value hid a mined reward
   the other way round. What decides now is the header chain, walked down from
   the head by `parentHash` to a hash this wallet already trusts and rehashed
-  from each header's own preimage; each block's leaf range, folded and compared
-  against the `zkTreeRoot` its header carries, which makes
-  `Shielded::LeafBlocks` advisory; the coinbase position, which is a block's
-  last leaf because the pallet mints it in `on_finalize`; and the author label
-  in the block's pre-runtime digest item, which no node can compute for this
-  wallet. So a coinbase value below a block's last leaf is refused, a withheld
-  one at the coinbase position of a block this wallet mined is refused, a
-  ciphertext is required at every other position, and a coinbase value at
-  another author's coinbase position decides nothing because a ciphertext there
-  is still tried. `docs/WALLET.md` carries the table of per-position
-  expectations, and the same rules are in the command-line wallet's
+  from each header's own preimage, in chunks of `HEADER_WALK_LIMIT` blocks so a
+  chain far ahead of the checkpoint syncs in one pass with one chunk resident;
+  each block's leaf range, folded and compared against the `zkTreeRoot` its
+  header carries, which makes `Shielded::LeafBlocks` advisory; and the coinbase
+  position, which is a block's last leaf because the pallet mints it in
+  `on_finalize`. So a coinbase value below a block's last leaf is refused, a
+  withheld one at any coinbase position is refused, and a ciphertext is
+  required at every other position.
+- **No rule rests on the author label.** This wallet verifies no proof of work
+  and will not in v1, so above its newest checkpoint a node picks every header
+  field, the label included, and a rule gated on the label is one the node
+  switches off by publishing another. The coinbase value is required at every
+  coinbase position whatever the label says, this wallet's own coinbase note is
+  rebuilt at every one of them whatever the label says, and the label is read
+  afterwards as a cross-check: a label claiming this wallet's block over a
+  rebuild that does not match refuses the pass, and a rebuild that matches
+  under another author's label takes the reward and reports the disagreement.
+  What no per-leaf rule reaches is a node that rebuilds the headers themselves,
+  and the defence there is the checkpoint fork walk: the forged head is
+  recorded only as a checkpoint, and the first honest node disagrees with it,
+  rewinds to the newest checkpoint both stand on and rescans.
+  `docs/WALLET.md` carries the per-position table and the section "What a lying
+  node can and cannot do", and the same rules are in the command-line wallet's
   `crates/qnero-wallet/src/typing.rs`.
 - **One scan at a time with a payment**, in both directions: a scan reads every note before it starts and
   commits them at the end, and a payment writes `spent` on those same rows the
