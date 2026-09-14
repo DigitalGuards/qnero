@@ -145,11 +145,11 @@ Each of these is a decision.
   to whoever runs the node, which is the correlation a wallet's local tree
   rebuild exists to avoid. An explorer making that call for a viewer would hand
   the node a per-viewer leaf-interest log. Leaves and the root are read as
-  public ranges, and `npm run lint` fails on every spelling of the call: the
+  public ranges, and `npm run lint` fails on the spellings of the call it knows (the
   `zkTree_getMerkleProof` method, the `ZkTreeApi_get_merkle_proof` runtime call
   behind `state_call`, `state_callAt` and `archive_v1_call` at whichever
   parameter position that method's layout puts the name in, and the polkadot-js
-  sugar `api.call.<api>.getMerkleProof` with its snake-case and computed-key
+  sugar `api). A template literal or an aliased reference would pass the fence, which is a reviewer's aid for this codebase and never a security boundary; the privacy property rests on the reads the code makes.call.<api>.getMerkleProof` with its snake-case and computed-key
   spellings. A syntax fence fails open, so `tests/lint-fence.test.ts` runs each
   spelling through the shipped selectors and fails if one of them lints clean.
 - **It does not read a settled nullifier as a note that was spent.** A leaf
@@ -331,3 +331,8 @@ scripts/        the fixture capture
 ```
 
 `src/styles/` follows MyMonero's stylesheet, rebranded. See `NOTICE`.
+
+Known limit: the settled-nullifier baseline walk on the home page is keyed on
+the baseline height, so a reorg that replaces the block at that height keeps
+the walk from the abandoned branch until the page reloads or the baseline
+moves.
