@@ -36,7 +36,13 @@ export function Field({
       </LabelPrimitive.Root>
       {children}
       {error !== undefined ? (
-        <p className="mt-1 text-meta text-destructive">{error}</p>
+        // Announced, because a field failure is the one thing on a form that
+        // happens after the reader has stopped looking at it. This is where
+        // the unlock screen's wrong-passphrase message lands too, so it is
+        // the one treatment for the one event.
+        <p className="mt-1 text-meta text-destructive" role="alert">
+          {error}
+        </p>
       ) : (
         hint !== undefined && <p className="mt-1 text-meta text-muted">{hint}</p>
       )}

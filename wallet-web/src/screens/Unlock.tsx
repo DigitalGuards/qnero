@@ -9,11 +9,10 @@
 
 import { useState, type ReactNode } from 'react';
 
-import { Address } from '../components/UI/Address';
+import { Hash } from '../components/UI/Address';
 import { Button } from '../components/UI/Button';
 import { Dialog, DialogContent, DialogTrigger } from '../components/UI/Dialog';
 import { Field, Input } from '../components/UI/Field';
-import { Notice } from '../components/UI/Notice';
 import { Panel, Prose } from '../components/UI/Panel';
 
 export function Unlock({
@@ -35,19 +34,29 @@ export function Unlock({
     <Panel title="Unlock">
       <Prose>
         <p>
-          This browser holds a wallet. Its balance and its notes are readable without the
-          passphrase; spending needs it, because the spend key and every note&apos;s randomness are
-          encrypted with it.
+          This browser holds a wallet. Its balance, its note list and the leaf each note sits on
+          are readable without the passphrase, which is what lets a locked wallet still show a
+          balance; the spend key, every note&apos;s randomness and every memo are encrypted with
+          it, and spending needs it.
         </p>
       </Prose>
-      <Address value={address} testId="locked-address" />
+      {/* Shortened here, where the address identifies which wallet this
+          browser holds. `Address` shows one whole on the receive screen and
+          the send result, where the value is being used rather than
+          recognised; 176 px of 2,600 characters above the field this screen
+          exists to collect is 38% of the panel for something nobody reads. */}
+      <p className="my-2 text-meta text-muted" data-testid="locked-address">
+        <Hash value={address} head={12} tail={8} />
+      </p>
       <form
         onSubmit={(event) => {
           event.preventDefault();
           onUnlock(passphrase);
         }}
       >
-        <Field label="Passphrase" htmlFor="unlock-passphrase">
+        {/* Under the field, like every other field failure in this wallet.
+            The Notice box is for a refusal that is not about one field. */}
+        <Field label="Passphrase" htmlFor="unlock-passphrase" error={error ?? undefined}>
           <Input
             id="unlock-passphrase"
             type="password"
@@ -60,7 +69,6 @@ export function Unlock({
             }}
           />
         </Field>
-        {error !== null && <Notice tone="error">{error}</Notice>}
         <div className="mt-4 flex gap-2">
           <Dialog>
             <DialogTrigger asChild>
@@ -74,15 +82,14 @@ export function Unlock({
               title="Remove this wallet?"
               description={
                 <p>
-                  This erases the encrypted seed and every note from this browser. Without the 32
-                  bytes you wrote down there is no way back, and nothing anywhere else holds a
-                  copy.
+                  This clears every record and deletes the database. Without the 32 bytes you
+                  wrote down there is no way back into this wallet. A browser may keep the freed
+                  pages on disk until it compacts.
                 </p>
               }
             >
               <Button
                 variant="destructive"
-                className="flex-1"
                 data-testid="confirm-forget"
                 onClick={onForget}
               >

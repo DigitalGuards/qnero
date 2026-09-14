@@ -17,10 +17,14 @@ import { Button } from './Button';
  *
  * Both of those dialogs get an explicit Cancel beside the destructive action,
  * because the way out of a question like this cannot be a 14 px muted X in a
- * corner. On the lock screen the path is two clicks from a mistyped
- * passphrase to an unrecoverable wipe of the only copy of every note's
- * randomness, so the second click has something to land on that is not the
- * red one.
+ * corner. On the lock screen the path is two clicks from a mistyped passphrase
+ * to a wipe that only a seed written down recovers from, so the second click
+ * has something to land on that is not the red one.
+ *
+ * The two halves are the same width, which is MyMonero's own action box. They
+ * were not: Cancel sat at its intrinsic 72 px beside a 215 px destructive
+ * button, so on the one action in this wallet that destroys something the
+ * dangerous target was three times the size of the way out.
  */
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
@@ -56,7 +60,7 @@ export function DialogContent({
             <div className="mb-3 space-y-2 text-meta text-ink-2">{description}</div>
           </DialogPrimitive.Description>
         )}
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2 [&>*]:flex-1">
           <DialogPrimitive.Close asChild>
             <Button data-testid="dialog-cancel">Cancel</Button>
           </DialogPrimitive.Close>

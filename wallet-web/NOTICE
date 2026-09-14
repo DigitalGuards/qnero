@@ -15,7 +15,7 @@ Files carrying that work
                           with its fraction dimmed, the two-part elevation
   src/components/UI/      the shapes those recipes are used in: the three
                           button colours and their geometry, the panel, the
-                          label-over-value field row, the yellow notice box
+                          label-over-value field row, the notice box
   src/components/TabBar.tsx
                           the four-destination tab bar along the bottom
 
@@ -33,10 +33,13 @@ property in `tokens.css`, which the original does not have, and the components
 are written against those properties rather than against inline styles.
 
 What is not carried over: the accent colour, which is the one value in that
-palette carrying MyMonero's identity, replaced by Qnero's own; the light
-palette, which is this project's; and the `Native-*` typefaces, which are a
-licensed retail family outside the BSD grant on the source, whose roles are
-filled by system stacks instead.
+palette carrying MyMonero's identity, replaced by Qnero's own; the yellow
+notice fill that goes with it, because that yellow is eleven degrees of hue
+from Qnero's amber where it is a hundred and forty-one from MyMonero's cyan,
+so the notice here is a border and the secondary ink; the light palette, which
+is this project's; and the `Native-*` typefaces, which are a licensed retail
+family outside the BSD grant on the source, whose roles are filled by system
+stacks instead.
 
 BSD-3-Clause clause 3 forbids using the copyright holder's or contributors'
 names to endorse or promote products derived from this software. The MyMonero

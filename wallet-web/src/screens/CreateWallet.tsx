@@ -22,7 +22,6 @@ import { Field, Input } from '../components/UI/Field';
 import { Notice } from '../components/UI/Notice';
 import { Panel, Prose } from '../components/UI/Panel';
 import { MIN_PASSPHRASE } from '../wallet/crypto';
-import { Qr } from '../components/UI/Qr';
 import { newSeed, bytesToHex } from '../wallet/crypto';
 
 const GROUPS = 8;
@@ -93,15 +92,24 @@ export function CreateWallet({
             once. It is the only thing that recovers this wallet, and nobody else has a copy: not a
             server, not this page after you leave it, not the node you connect to.
           </p>
+          <p>
+            Proving a payment happens in this browser too, in a background worker, and it takes
+            tens of seconds. Nothing is contacted except the node you configure.
+          </p>
         </Prose>
+        {/* Hex, and no code beside it. A QR of the spend key is harvested by
+            any camera, screen share or shoulder in the room in one frame,
+            where reading the hex takes deliberate transcription, and nothing
+            in this wallet scans one: the restore screen takes pasted hex. A
+            scannable backup belongs with a camera import path, behind the
+            same explicit reveal the miner key uses. */}
         <p
-          className="mm-secret elev-inset my-3 rounded-field border border-notice-edge bg-notice-bg
-            p-3 text-body leading-6 tracking-wide text-notice"
+          className="mm-secret elev-inset my-3 rounded-field border border-edge-strong bg-field
+            p-3 text-body leading-6 tracking-wide text-ink"
           data-testid="seed-hex"
         >
           {groups.join(' ')}
         </p>
-        <Qr value={seedHex} caption="the same 32 bytes, as a code" size={180} />
         <div className="mt-4 flex gap-2">
           <Button onClick={onCancel}>Cancel</Button>
           <Button

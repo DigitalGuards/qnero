@@ -91,7 +91,6 @@ export function ReceiveScreen({
             >
               <Button
                 variant="action"
-                className="flex-1"
                 data-testid="confirm-miner-key"
                 onClick={onRevealMinerKey}
               >

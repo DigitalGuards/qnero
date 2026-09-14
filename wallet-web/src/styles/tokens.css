@@ -52,9 +52,28 @@
   --destructive-fill: #a32020;
   --destructive-on-fill: #ffffff;
   --positive: #1f6b3a;
-  --notice: #6b4a00;
-  --notice-bg: rgba(184, 134, 11, 0.1);
-  --notice-border: rgba(138, 100, 8, 0.45);
+
+  /*
+   * The notice role, unsaturated on purpose.
+   *
+   * MyMonero can afford a yellow notice because its action is cyan: 141
+   * degrees of hue between "do this" and "be careful". Qnero's accent is
+   * amber, and a yellow notice beside it left 11 to 16 degrees between the
+   * two, so the storage warning over "Create new wallet" and the circuits
+   * notice over "Send" read as one warm block, and four roles (the action, a
+   * warning, a secret-bearing value, a pending note) shared one band.
+   *
+   * So the warm hue is the accent's alone, and it appears on exactly one
+   * thing per screen: the action that screen is for. A notice is a strong
+   * border and the secondary ink, with the icon carrying "be careful" and the
+   * sentence carrying the rest. `tests/policy.test.ts` holds the separation.
+   *
+   * Through `var()` rather than repeated in the two dark blocks: the values
+   * are the ramp's own, so they follow it wherever the ramp is redefined.
+   */
+  --notice: var(--text-secondary);
+  --notice-bg: transparent;
+  --notice-border: var(--border-strong);
 
   /* The elevation recipe: a shadow below, a highlight at the top edge. */
   --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
@@ -122,9 +141,6 @@
     --destructive-fill: #f97777;
     --destructive-on-fill: #161416;
     --positive: #7fd4a0;
-    --notice: #f5e67e;
-    --notice-bg: rgba(245, 230, 125, 0.05);
-    --notice-border: rgba(245, 230, 125, 0.3);
 
     --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
     --shadow-inset: 0 0.5px 0 0 rgba(56, 54, 56, 0.5), inset 0 0.5px 0 0 #161416;
@@ -159,9 +175,6 @@
   --destructive-fill: #f97777;
   --destructive-on-fill: #161416;
   --positive: #7fd4a0;
-  --notice: #f5e67e;
-  --notice-bg: rgba(245, 230, 125, 0.05);
-  --notice-border: rgba(245, 230, 125, 0.3);
 
   --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
   --shadow-inset: 0 0.5px 0 0 rgba(56, 54, 56, 0.5), inset 0 0.5px 0 0 #161416;

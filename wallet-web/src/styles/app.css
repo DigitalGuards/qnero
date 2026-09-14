@@ -150,9 +150,15 @@
   }
 
   /*
-   * The balance: 32 px at weight 100, with the fractional part dimmed. Both
-   * come from that wallet's balance label, and the dimming is what keeps a
-   * long number readable at a glance without rounding away what is held.
+   * The balance: 32 px at weight 100, with the padding dimmed.
+   *
+   * MyMonero dims the trailing zeros of a twelve-decimal amount, so "10.37"
+   * stays bright and the eleven zeros after it recede. The rule is
+   * significance, not the decimal point: a pool quantum is a hundredth of a
+   * QNR, so every Qnero balance carries exactly two significant decimals, and
+   * dimming everything after the point dimmed 100% of the fractional
+   * information. 6.92 QNR read as a bright 6 with the 0.92 as the faintest
+   * thing on the panel, at 3.18:1. See `lib/units.ts`.
    */
   .mm-balance {
     font-size: 32px;
@@ -161,8 +167,36 @@
     letter-spacing: -0.5px;
   }
 
+  /* Trailing pad zeros alone. Never a digit that carries value. */
   .mm-balance-fraction {
     opacity: 0.35;
+  }
+
+  /*
+   * The sideways scroll, from the explorer's stylesheet.
+   *
+   * An overlay scrollbar is invisible until it is dragged, so a table wider
+   * than its box hides columns with nothing to say so: at 400 px the notes
+   * table ends at STATE and the memo, the only human-readable thing on a
+   * payment, is off screen. The two panel gradients are pinned to the content
+   * box and the two radial shadows to the scrollport, so an edge shadow
+   * appears exactly while content is off screen on that side.
+   */
+  .mm-scroll-x {
+    overflow-x: auto;
+    scrollbar-width: thin;
+    background:
+      linear-gradient(to right, var(--bg-panel) 30%, rgba(0, 0, 0, 0)),
+      linear-gradient(to left, var(--bg-panel) 30%, rgba(0, 0, 0, 0)) 100% 0,
+      radial-gradient(farthest-side at 0 50%, var(--shadow-edge), var(--shadow-edge-fade)),
+      radial-gradient(farthest-side at 100% 50%, var(--shadow-edge), var(--shadow-edge-fade)) 100% 0;
+    background-repeat: no-repeat;
+    background-size:
+      32px 100%,
+      32px 100%,
+      12px 100%,
+      12px 100%;
+    background-attachment: local, local, scroll, scroll;
   }
 
   /* A long secret or address, wrapped to the box and selectable in one drag. */

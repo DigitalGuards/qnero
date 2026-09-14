@@ -25,18 +25,27 @@ import { Panel } from '../components/UI/Panel';
 import { Pill } from '../components/UI/Address';
 import { Tooltip } from '../components/UI/Tooltip';
 import { Num, Table, TableScroll } from '../components/UI/Table';
-import { formatCount, formatQuantaAsQnr } from '../lib/units';
+import { formatCount, formatQuantaAsQnr, splitAmountForDisplay } from '../lib/units';
 import { renderMemo } from '../lib/memo';
 import type { Balances, NoteRow, RejectedNote } from '../wallet/model';
 import type { SyncReport } from '../wallet/sync';
 
-/** The amount, split so the fractional part can be dimmed. */
+/**
+ * The amount, split so the padding can be dimmed and nothing else.
+ *
+ * A pool quantum is a hundredth of a QNR, so a quanta balance carries exactly
+ * two significant decimals and no padding at all: in practice this renders at
+ * one weight, which is what MyMonero does for an amount with nothing to pad.
+ * See [`splitAmountForDisplay`].
+ */
 function Amount({ quanta, testId }: { quanta: bigint; testId?: string }): ReactNode {
-  const [whole, fraction] = formatQuantaAsQnr(quanta).replace(' QNR', '').split('.');
+  const { significant, pad } = splitAmountForDisplay(
+    formatQuantaAsQnr(quanta).replace(' QNR', ''),
+  );
   return (
     <div className="mm-balance text-ink" data-testid={testId}>
-      {whole}
-      <span className="mm-balance-fraction">.{fraction ?? '00'}</span>
+      {significant}
+      {pad !== '' && <span className="mm-balance-fraction">{pad}</span>}
       <span className="ml-2 text-ui font-normal text-muted">QNR</span>
     </div>
   );
@@ -99,6 +108,16 @@ export function BalanceScreen({
   onSync: () => void;
 }): ReactNode {
   const conflicted = notes.filter((row) => row.conflictMembers > 1);
+  // Three of these four figures are about something having gone wrong, and a
+  // figure that is only interesting when it is not zero is noise when it is.
+  // A new wallet showed four dotted-underlined terms over four zeros on a
+  // screen whose whole job is one number; MyMonero hides its own secondary
+  // balances line outright when there is nothing in it.
+  const showReachable = balances.reachable !== balances.unspent;
+  const showPending = balances.pending > 0n;
+  const showOffChain = balances.offChain > 0n;
+  const showCount = balances.noteCount > 0;
+  const showStats = showReachable || showPending || showOffChain || showCount;
   return (
     <div className="space-y-3">
       <Panel>
@@ -106,36 +125,46 @@ export function BalanceScreen({
         <p className="mt-1 text-meta text-muted">
           <span data-testid="balance-unspent">{formatCount(balances.unspent)}</span> quanta unspent
         </p>
-        <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 border-t border-edge pt-3 text-meta">
-          <Stat
-            term="reachable in one payment"
-            explains="A leaf has two input slots, so one payment can spend at most two notes. A
-              balance spread over more than two is held and not reachable until it is merged."
-            value={formatCount(balances.reachable)}
-            testId="balance-reachable"
-          />
-          <Stat
-            term="pending"
-            explains="Written by this wallet and not yet met in the tree: a change note whose
-              settlement has been submitted."
-            value={formatCount(balances.pending)}
-            testId="balance-pending"
-          />
-          <Stat
-            term="off chain"
-            explains="Held with its secrets, and its leaf is gone: a reorg took the block that
-              carried it and no later block has re-included it. It counts in no balance until it
-              comes back."
-            value={formatCount(balances.offChain)}
-            testId="balance-offchain"
-          />
-          <Stat
-            term="notes held"
-            explains="Every note in this store, spent and unspent, on chain and off. The table
-              below is the same set."
-            value={formatCount(balances.noteCount)}
-          />
-        </dl>
+        {showStats && (
+          <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 border-t border-edge pt-3 text-meta">
+            {showReachable && (
+              <Stat
+                term="reachable in one payment"
+                explains="A leaf has two input slots, so one payment can spend at most two notes. A
+                  balance spread over more than two is held and not reachable until it is merged."
+                value={formatCount(balances.reachable)}
+                testId="balance-reachable"
+              />
+            )}
+            {showPending && (
+              <Stat
+                term="pending"
+                explains="Written by this wallet and not yet met in the tree: a change note whose
+                  settlement has been submitted."
+                value={formatCount(balances.pending)}
+                testId="balance-pending"
+              />
+            )}
+            {showOffChain && (
+              <Stat
+                term="off chain"
+                explains="Held with its secrets, and its leaf is gone: a reorg took the block that
+                  carried it and no later block has re-included it. It counts in no balance until it
+                  comes back."
+                value={formatCount(balances.offChain)}
+                testId="balance-offchain"
+              />
+            )}
+            {showCount && (
+              <Stat
+                term="notes held"
+                explains="Every note in this store, spent and unspent, on chain and off. The table
+                  below is the same set."
+                value={formatCount(balances.noteCount)}
+              />
+            )}
+          </dl>
+        )}
         <div className="mt-3 flex items-center justify-between gap-2 border-t border-edge pt-3">
           <span className="text-meta text-muted">
             {report === null
@@ -192,7 +221,22 @@ export function BalanceScreen({
                   <th>Leaf</th>
                   <th>Block</th>
                   <th className="text-right">Quanta</th>
-                  <th>Origin</th>
+                  <th>
+                    <Tooltip
+                      label="A shield this wallet made is labelled by matching the chain's own
+                        entry counter, and the match is looked for over the newest 64 entries. On a
+                        chain with more shields than that, one restored from its seed reads as a
+                        transfer. The label moves no value and nothing selects on it."
+                    >
+                      <button
+                        type="button"
+                        className="cursor-help text-left uppercase tracking-label underline
+                          decoration-dotted underline-offset-2"
+                      >
+                        Origin
+                      </button>
+                    </Tooltip>
+                  </th>
                   <th>State</th>
                   <th className="w-full">Memo</th>
                 </tr>
@@ -266,42 +310,53 @@ export function BalanceScreen({
 
       {report !== null && (
         <Panel title="Last sync" flush>
-          <TableScroll>
-            <Table>
-              <tbody>
-                <tr>
-                  <td>head</td>
-                  <Num>{formatCount(report.head)}</Num>
-                  <td>leaves read</td>
-                  <Num>{formatCount(report.leavesScanned)}</Num>
-                </tr>
-                <tr>
-                  <td>notes received</td>
-                  <Num>{formatCount(report.received)}</Num>
-                  <td>settled nullifiers</td>
-                  <Num>{formatCount(report.nullifierSetSize)}</Num>
-                </tr>
-                <tr>
-                  <td>coinbase leaves</td>
-                  <Num>{formatCount(report.coinbaseLeaves)}</Num>
-                  <td>of them this wallet&apos;s</td>
-                  <Num>{formatCount(report.coinbaseReceived)}</Num>
-                </tr>
-                <tr>
-                  <td>newly spent</td>
-                  <Num>{formatCount(report.newlySpent)}</Num>
-                  <td>newly unspent</td>
-                  <Num>{formatCount(report.newlyUnspent)}</Num>
-                </tr>
-                <tr>
-                  <td>relocated</td>
-                  <Num>{formatCount(report.relocated)}</Num>
-                  <td>marked off chain</td>
-                  <Num>{formatCount(report.vanished)}</Num>
-                </tr>
-              </tbody>
-            </Table>
-          </TableScroll>
+          {/* Ten figures of instrumentation was the biggest thing under the
+              balance, larger than the notes table. It is worth keeping and it
+              is not what this screen is for, so it reads on request, the way
+              the send screen's prover figures do. The two warning paragraphs
+              stay outside the disclosure: an anomaly has to be visible
+              without a click. */}
+          <details>
+            <summary className="cursor-pointer px-4 pt-2 text-meta text-muted">
+              What the last sync read
+            </summary>
+            <TableScroll>
+              <Table>
+                <tbody>
+                  <tr>
+                    <td>head</td>
+                    <Num>{formatCount(report.head)}</Num>
+                    <td>leaves read</td>
+                    <Num>{formatCount(report.leavesScanned)}</Num>
+                  </tr>
+                  <tr>
+                    <td>notes received</td>
+                    <Num>{formatCount(report.received)}</Num>
+                    <td>settled nullifiers</td>
+                    <Num>{formatCount(report.nullifierSetSize)}</Num>
+                  </tr>
+                  <tr>
+                    <td>coinbase leaves</td>
+                    <Num>{formatCount(report.coinbaseLeaves)}</Num>
+                    <td>of them this wallet&apos;s</td>
+                    <Num>{formatCount(report.coinbaseReceived)}</Num>
+                  </tr>
+                  <tr>
+                    <td>newly spent</td>
+                    <Num>{formatCount(report.newlySpent)}</Num>
+                    <td>newly unspent</td>
+                    <Num>{formatCount(report.newlyUnspent)}</Num>
+                  </tr>
+                  <tr>
+                    <td>relocated</td>
+                    <Num>{formatCount(report.relocated)}</Num>
+                    <td>marked off chain</td>
+                    <Num>{formatCount(report.vanished)}</Num>
+                  </tr>
+                </tbody>
+              </Table>
+            </TableScroll>
+          </details>
           {report.heldSpent > 0 && (
             <p className="px-4 pt-2 text-meta text-muted">
               {report.heldSpent} note{report.heldSpent === 1 ? '' : 's'} kept marked spent: their

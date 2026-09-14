@@ -6,10 +6,16 @@ import { cn } from '../../utils/cn';
 /**
  * A claim the wallet is making, set apart from the reading it is about.
  *
- * The yellow box is MyMonero's (see `NOTICE`), and it is used for the same
- * thing: something true about this wallet that is not an error and does not
- * stop anything. `tone="error"` is a refusal, and it is the only one that
- * carries `role="alert"`.
+ * The box is MyMonero's (see `NOTICE`) and it is used for the same thing:
+ * something true about this wallet that is not an error and does not stop
+ * anything. `tone="error"` is a refusal, and it is the only one that carries
+ * `role="alert"`.
+ *
+ * What is not carried is that wallet's yellow. Its action is cyan, so a yellow
+ * notice sits 141 degrees away from it; Qnero's accent is amber, and a yellow
+ * notice beside an amber button is one warm block. So the notice is a strong
+ * border, the secondary ink and the icon, and the saturated warm thing on any
+ * screen is the one action that screen is for. See `styles/tokens.css`.
  *
  * `sensitive` marks a notice whose text came from the prover module rather
  * than from this wallet. The module's own errors are forwarded as they are,
@@ -41,6 +47,8 @@ export function Notice({
         tone === 'error'
           ? 'border-destructive/45 bg-destructive/8 text-destructive'
           : 'border-notice-edge bg-notice-bg text-notice',
+        // `bg-notice-bg` is `transparent` in both themes: the token is kept so
+        // the role has one place to change, and the fill is what was dropped.
         className,
       )}
     >

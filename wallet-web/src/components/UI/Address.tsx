@@ -10,6 +10,14 @@ import { cn } from '../../utils/cn';
  * there is no checksummed prefix that means anything on its own: showing the
  * first and last few characters would invite comparing two addresses by their
  * ends, which is exactly the comparison an attacker can win.
+ *
+ * That argument is about a value being used: an address being paid, a key
+ * being copied into a node's environment. A value being recognised is
+ * [`Hash`]'s job, and the lock screen uses that one: nobody compares
+ * addresses to work out which wallet this browser holds.
+ *
+ * `tone="secret"` is the stronger border and nothing warmer. The warm hue in
+ * this palette belongs to the one action a screen is for: see `tokens.css`.
  */
 export function Address({
   value,
@@ -29,9 +37,16 @@ export function Address({
         // Capped and scrollable rather than 2600 characters tall. The whole
         // value stays in the box and `user-select: all` still takes all of it
         // in one gesture, so nothing is hidden from a copy or from a reader.
-        'mm-secret elev-inset my-2 max-h-44 overflow-y-auto rounded-field border p-2 text-meta leading-4',
+        //
+        // The cap is a whole number of line boxes: ten 16 px lines plus the
+        // 8 px padding on each side plus the two borders. `max-h-44` is 176 px,
+        // which leaves 158 px of content box, which is 9.875 lines, so every
+        // long value ended on a row of glyphs sliced at 87.5% of its height
+        // and read as a rendering fault rather than as a box that scrolls.
+        'mm-secret elev-inset my-2 max-h-[calc(10*16px+16px+2px)] overflow-y-auto rounded-field',
+        'border p-2 text-meta leading-4',
         tone === 'secret'
-          ? 'border-notice-edge bg-notice-bg text-notice'
+          ? 'border-edge-strong bg-field text-ink'
           : 'border-edge bg-field text-ink',
         className,
       )}
@@ -79,7 +94,8 @@ export function Pill({
       : state === 'spent'
         ? 'border-edge text-muted'
         : state === 'pending'
-          ? 'border-notice-edge text-notice'
+          // Brightness rather than hue: the warm band is the accent's.
+          ? 'border-edge-strong text-ink'
           : 'border-destructive/45 text-destructive';
   return (
     <span

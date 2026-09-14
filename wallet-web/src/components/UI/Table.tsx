@@ -4,7 +4,14 @@ import { cn } from '../../utils/cn';
 
 /**
  * A table that scrolls sideways inside its panel rather than widening the
- * page.
+ * page, with an edge shadow while a column is off screen.
+ *
+ * The shadow is not decoration. At 400 px the notes table ends at STATE and
+ * the memo column is off screen with nothing to say so, and an overlay
+ * scrollbar stays invisible until it is dragged, so a phone reader has no way
+ * to know the column is there. `.mm-scroll-x` in `styles/app.css` is the
+ * explorer's recipe for exactly this, and it spends the `--shadow-edge` pair
+ * the token file already defines.
  *
  * The hover rule is the one from the explorer's stylesheet: a hovered row
  * lifts its muted cells to the primary ink rather than inverting the ramp,
@@ -16,7 +23,7 @@ import { cn } from '../../utils/cn';
  * four pixels the moment the list stops being empty.
  */
 export function TableScroll({ children }: { children: ReactNode }): ReactNode {
-  return <div className="w-full overflow-x-auto">{children}</div>;
+  return <div className="mm-scroll-x w-full">{children}</div>;
 }
 
 export function Table({

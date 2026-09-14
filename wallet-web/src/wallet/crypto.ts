@@ -74,7 +74,7 @@ export const ENVELOPE_VERSION = 1;
 
 /** Thrown when the passphrase is wrong, which GCM makes distinguishable. */
 export class WrongPassphraseError extends Error {
-  constructor(message = 'that passphrase does not open this wallet') {
+  constructor(message = 'That passphrase does not open this wallet.') {
     super(message);
     this.name = 'WrongPassphraseError';
   }
