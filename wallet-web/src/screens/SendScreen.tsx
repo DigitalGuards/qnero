@@ -21,10 +21,11 @@ import { useForm, useWatch } from 'react-hook-form';
 import { Button } from '../components/UI/Button';
 import { Field, Input, Textarea } from '../components/UI/Field';
 import { Notice } from '../components/UI/Notice';
+import { Address } from '../components/UI/Address';
 import { Panel, Prose } from '../components/UI/Panel';
 import { Num, Table, TableScroll } from '../components/UI/Table';
 import { formatBytes, formatDuration, parseQuanta } from '../lib/format';
-import { memoIsPlainAscii } from '../lib/memo';
+import { memoByteLength, memoIsPlainAscii, memoRefusal } from '../lib/memo';
 import { formatCount } from '../lib/units';
 import type { SpendProgress, SpendResult } from '../wallet/send';
 
@@ -132,7 +133,7 @@ export function SendScreen({
                   ? 'flex justify-between text-muted'
                   : index === current
                     ? 'flex justify-between text-ink'
-                    : 'flex justify-between text-dim'
+                    : 'flex justify-between text-muted opacity-70'
               }
               data-state={index < current ? 'done' : index === current ? 'running' : 'waiting'}
             >
@@ -149,7 +150,7 @@ export function SendScreen({
     );
   }
 
-  const memoLength = new TextEncoder().encode(memo).length;
+  const memoLength = memoByteLength(memo);
 
   return (
     <Panel title="Send Qnero">
@@ -224,15 +225,20 @@ export function SendScreen({
               ? `${memoLength} of ${memoBytes} bytes, padded to ${memoBytes}`
               : 'anything outside printable ASCII will be shown escaped at the other end'
           }
-          error={
-            memoLength > memoBytes ? `a memo is at most ${memoBytes} bytes` : undefined
-          }
+          error={form.formState.errors.memo?.message}
         >
           <Input
             id="send-memo"
             data-testid="send-memo"
             autoComplete="off"
-            {...form.register('memo')}
+            {...form.register('memo', {
+              // A rule rather than a decoration. Drawn under the field with
+              // the button still live, this refusal arrived after the circuit
+              // build and the tree rebuild, for something the form knew before
+              // the click. `wallet/send.ts` refuses the same bound from the
+              // same function.
+              validate: (value) => memoRefusal(value, memoBytes) ?? true,
+            })}
           />
         </Field>
 
@@ -270,6 +276,7 @@ function SendResultView({
   onDismiss: () => void;
 }): ReactNode {
   const settled = result.inclusion?.settled === true;
+  const included = result.inclusion !== null;
   return (
     <Panel title={settled ? 'Sent' : 'Submitted'}>
       {result.warnings.map((warning) => (
@@ -298,8 +305,8 @@ function SendResultView({
         <Table testId="send-result">
           <tbody>
             <tr>
-              <td>settled in block</td>
-              <Num testId="send-block">{result.inclusion?.blockNumber ?? '-'}</Num>
+              <td>amount</td>
+              <Num testId="send-amount-paid">{formatCount(result.amount)} quanta</Num>
             </tr>
             <tr>
               <td>fee</td>
@@ -310,24 +317,41 @@ function SendResultView({
               <Num testId="send-change">{formatCount(result.change)} quanta</Num>
             </tr>
             <tr>
+              <td>{settled ? 'settled in block' : included ? 'included in block' : 'not included'}</td>
+              <Num testId="send-block">{result.inclusion?.blockNumber ?? '-'}</Num>
+            </tr>
+            <tr>
               <td>inputs spent</td>
               <Num>{result.inputs.length}</Num>
-            </tr>
-            <tr>
-              <td>proof</td>
-              <Num>{formatBytes(result.proofBytes)}</Num>
-            </tr>
-            <tr>
-              <td>proving time</td>
-              <Num testId="prove-millis">{formatDuration(result.proveMillis)}</Num>
-            </tr>
-            <tr>
-              <td>peak linear memory</td>
-              <Num>{(result.peakLinearMemoryBytes / (1024 * 1024)).toFixed(1)} MiB</Num>
             </tr>
           </tbody>
         </Table>
       </TableScroll>
+      <div className="mt-3">
+        <div className="mm-label">To</div>
+        <Address value={result.to} testId="send-recipient" />
+      </div>
+      <details className="mt-3">
+        <summary className="cursor-pointer text-meta text-muted">What the proof cost</summary>
+        <TableScroll>
+          <Table testId="send-prover">
+            <tbody>
+              <tr>
+                <td>proof</td>
+                <Num>{formatBytes(result.proofBytes)}</Num>
+              </tr>
+              <tr>
+                <td>proving time</td>
+                <Num testId="prove-millis">{formatDuration(result.proveMillis)}</Num>
+              </tr>
+              <tr>
+                <td>peak linear memory</td>
+                <Num>{(result.peakLinearMemoryBytes / (1024 * 1024)).toFixed(1)} MiB</Num>
+              </tr>
+            </tbody>
+          </Table>
+        </TableScroll>
+      </details>
       <p className="mt-3 text-meta text-muted">
         The payment landed in output slot {result.paymentSlot}, drawn for this spend. The circuit
         derives each output&apos;s randomness from its slot, so either assignment settles the same

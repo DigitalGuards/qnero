@@ -12,7 +12,7 @@ import { defineConfig, devices } from '@playwright/test';
  *
  * The preview server sends COOP `same-origin` and COEP `require-corp`
  * (`vite.config.ts`), so the page is cross-origin isolated and the threaded
- * module is the one under test. `QNERO_FORCE_SINGLE_THREAD=1` makes the page
+ * module is the one under test. `QNERO_PROVER=single` makes the page
  * take the single-threaded path instead, which is how both rows in
  * `docs/BENCH.md` are measured with one suite.
  */

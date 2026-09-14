@@ -21,8 +21,10 @@
  * Every text token is measured against the surface it actually lands on.
  * `--text-muted` carries the field labels, the table headers and every
  * provenance note at 10 to 11 px, and clears 4.5:1 on the panel and on the
- * body in both themes. `--text-dim` is for a disabled control and a strip dot
- * and must be lifted before it is given prose. `--border-strong` is the edge
+ * body in both themes. `--text-dim` measures 2.8:1 to 3.3:1 on the surfaces it
+ * lands on, in both themes, so it carries no prose anywhere in this app: it is
+ * a placeholder, a disabled control and a strip dot, and it is lifted to
+ * `--text-muted` wherever a reader has to read it. `--border-strong` is the edge
  * that makes a control a control and clears 3:1 against the panel.
  */
 

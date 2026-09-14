@@ -18,14 +18,24 @@ export interface WalletConfig {
   wasmBase: string;
   /** Leaf slots per private batch. Checked against the module before proving. */
   numLeaves: number;
-  /** What one payment is expected to cost in this browser, in seconds. */
-  expectedProveSeconds: number;
+  /**
+   * What one payment is expected to cost in this browser, in seconds, per
+   * module.
+   *
+   * Two numbers rather than one. The threaded module proves in about a third
+   * of the single-threaded one's time (`docs/BENCH.md`, M10), and a page that
+   * quoted one figure beside the live thread count told a reader on four
+   * threads to expect three times the wait they were about to have. A single
+   * number in `config.json` is still read, as both.
+   */
+  expectedProveSeconds: { threaded: number; single: number };
 }
 
 const DEFAULTS = {
   wasmBase: 'wasm/',
   numLeaves: 6,
-  expectedProveSeconds: 34,
+  // The M10 table's `proveTransfer` rows, rounded.
+  expectedProveSeconds: { threaded: 11, single: 38 },
 } as const;
 
 function readNumber(source: Record<string, unknown>, key: string, fallback: number): number {
@@ -64,7 +74,30 @@ export function parseConfig(raw: unknown): WalletConfig {
     chainName,
     wasmBase: wasmBase ?? DEFAULTS.wasmBase,
     numLeaves: readNumber(source, 'numLeaves', DEFAULTS.numLeaves),
-    expectedProveSeconds: readNumber(source, 'expectedProveSeconds', DEFAULTS.expectedProveSeconds),
+    expectedProveSeconds: readExpectation(source['expectedProveSeconds']),
+  };
+}
+
+/** One number for both modules, or one per module, or neither. */
+function readExpectation(value: unknown): { threaded: number; single: number } {
+  if (value === undefined) {
+    return DEFAULTS.expectedProveSeconds;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error('config.json: expectedProveSeconds must be a positive number');
+    }
+    return { threaded: value, single: value };
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(
+      'config.json: expectedProveSeconds must be a number or {threaded, single} in seconds',
+    );
+  }
+  const source = value as Record<string, unknown>;
+  return {
+    threaded: readNumber(source, 'threaded', DEFAULTS.expectedProveSeconds.threaded),
+    single: readNumber(source, 'single', DEFAULTS.expectedProveSeconds.single),
   };
 }
 

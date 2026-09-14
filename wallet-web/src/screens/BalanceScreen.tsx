@@ -208,7 +208,7 @@ export function BalanceScreen({
                       <td>
                         {row.note.origin}
                         {row.conflictMembers > 1 && (
-                          <span className="text-dim"> conflict, {row.conflictMembers} members</span>
+                          <span className="text-muted"> conflict, {row.conflictMembers} members</span>
                         )}
                       </td>
                       <td>

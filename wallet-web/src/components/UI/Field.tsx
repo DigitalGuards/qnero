@@ -32,7 +32,7 @@ export function Field({
     <div className="mb-3">
       <LabelPrimitive.Root className="mm-label flex justify-between gap-2" htmlFor={htmlFor}>
         <span>{label}</span>
-        {note !== undefined && <span className="normal-case text-dim">{note}</span>}
+        {note !== undefined && <span className="normal-case text-muted">{note}</span>}
       </LabelPrimitive.Root>
       {children}
       {error !== undefined ? (

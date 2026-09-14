@@ -70,3 +70,23 @@ export function renderMemo(memo: string, budget = 120): string {
 export function memoIsPlainAscii(memo: string): boolean {
   return escapeMemo(memo) === memo;
 }
+
+/** A memo's length as the pad counts it: bytes of UTF-8, not characters. */
+export function memoByteLength(memo: string): number {
+  return new TextEncoder().encode(memo).length;
+}
+
+/**
+ * The memo against the pad, refused where it is typed and again where it is
+ * spent.
+ *
+ * The pad is `walletLimits().memo_bytes`, read from the module every run. An
+ * over-long memo used to be drawn in red under the field with the Send button
+ * still enabled, so the refusal arrived after the fee floor, the selection,
+ * the circuit build, the anchor read and a whole tree rebuild, for something
+ * the form already knew before the click.
+ */
+export function memoRefusal(memo: string, memoBytes: number): string | null {
+  const length = memoByteLength(memo);
+  return length > memoBytes ? `a memo is at most ${memoBytes} bytes and this one is ${length}` : null;
+}

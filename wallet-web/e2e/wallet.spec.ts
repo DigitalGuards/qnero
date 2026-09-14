@@ -143,8 +143,8 @@ test.describe('the browser wallet against a dev chain', () => {
     // labelled wrong.
     await page.getByTestId('tab-settings').click();
     await expect(page.getByText('Proving runs in a background worker.')).toBeVisible();
-    const proverText = await page.getByText('Proving runs in a background worker.').innerText();
-    expect(proverText).toContain(
+    const proverMode = await page.getByText('Proving runs in a background worker.').innerText();
+    expect(proverMode).toContain(
       MODE === 'threaded' ? 'threaded module is in use' : 'single-threaded module',
     );
 
@@ -189,13 +189,18 @@ test.describe('the browser wallet against a dev chain', () => {
     const settledBlock = (await page.getByTestId('send-block').innerText()).trim();
     expect(settledBlock).not.toBe('-');
 
-    const resultText = await page.getByTestId('send-result').innerText();
+    // The result leads with what the payment was. The prover's own figures are
+    // behind a disclosure, which this opens to read them.
+    await expect(page.getByTestId('send-amount-paid')).toContainText(String(PAYMENT));
+    await expect(page.getByTestId('send-recipient')).toContainText(facts.recipientAddress);
+    await page.getByText('What the proof cost').click();
+    const proverText = await page.getByTestId('send-prover').innerText();
     measurements.push({
       mode: MODE,
       proveMillis: millisFrom(await page.getByTestId('prove-millis').innerText()),
       wholeSendMillis,
-      peakMiB: Number(/([0-9.]+) MiB/.exec(resultText)?.[1] ?? '0'),
-      proofBytes: Number((/([0-9,]+) bytes/.exec(resultText)?.[1] ?? '0').replace(/,/g, '')),
+      peakMiB: Number(/([0-9.]+) MiB/.exec(proverText)?.[1] ?? '0'),
+      proofBytes: Number((/([0-9,]+) bytes/.exec(proverText)?.[1] ?? '0').replace(/,/g, '')),
       settledBlock: Number(settledBlock.replace(/,/g, '')),
     });
 

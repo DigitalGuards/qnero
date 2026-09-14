@@ -49,6 +49,7 @@ import {
   memoPadSeparationWarning,
   slotFeeFloor,
 } from './fee';
+import { memoRefusal } from '../lib/memo';
 import type { NoteSecret, PendingNote, StoredNote } from './model';
 import { selectNotes } from './select';
 import type { WalletStore } from './store';
@@ -81,6 +82,9 @@ export interface SpendProgress {
 }
 
 export interface SpendResult {
+  /** What was paid, and to whom. The two facts the payment was about. */
+  to: string;
+  amount: bigint;
   fee: bigint;
   change: bigint;
   inputs: { commitment: string; value: bigint }[];
@@ -118,6 +122,12 @@ export async function spend(
   const warnings: string[] = [];
 
   report({ stage: 'fee' });
+  // The memo against the pad, before anything is measured. The send screen
+  // refuses the same bound where it is typed, from the same function.
+  const refusal = memoRefusal(request.memo, limits.memo_bytes);
+  if (refusal !== null) {
+    throw new Error(`${refusal}. Nothing has been built.`);
+  }
   // The pad against both of the runtime's bounds. The cap is a refusal, the
   // divisor is a warning: see `fee.ts`.
   ensureMemoPadFits(
@@ -366,6 +376,8 @@ export async function spend(
 
   report({ stage: 'done' });
   return {
+    to: request.to,
+    amount: request.amount,
     fee,
     change,
     inputs: chosen.map((held) => ({

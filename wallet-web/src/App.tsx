@@ -800,7 +800,13 @@ export function App(): ReactNode {
                     feeFloor={feeFloor}
                     memoBytes={session.limits?.memo_bytes ?? 61}
                     reachable={balances.reachable}
-                    expectedSeconds={config?.expectedProveSeconds ?? 34}
+                    expectedSeconds={
+                      // The figure and the mode it names come from the same
+                      // row: see `chain/config.ts`.
+                      proverThreads > 1
+                        ? (config?.expectedProveSeconds.threaded ?? 11)
+                        : (config?.expectedProveSeconds.single ?? 38)
+                    }
                     circuitsBuilt={circuitsBuilt}
                     proverThreads={proverThreads}
                     progress={spendProgress}

@@ -12,7 +12,13 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { escapeMemo, memoIsPlainAscii, renderMemo } from '../src/lib/memo';
+import {
+  escapeMemo,
+  memoByteLength,
+  memoIsPlainAscii,
+  memoRefusal,
+  renderMemo,
+} from '../src/lib/memo';
 
 describe('escaping a memo', () => {
   it('leaves printable ASCII alone', () => {
@@ -65,5 +71,35 @@ describe('rendering a memo into a cell', () => {
   it('does not cut a memo that only looks long before escaping', () => {
     const memo = 'x'.repeat(120);
     expect(renderMemo(memo, 120)).toBe(memo);
+  });
+});
+
+describe('the memo pad', () => {
+  const PAD = 61;
+
+  it('measures a memo in bytes, which is what the pad counts', () => {
+    // Three characters, six bytes: a pad is not a character count.
+    expect(memoByteLength('日本')).toBe(6);
+    expect(memoByteLength('lunch')).toBe(5);
+  });
+
+  it('allows a memo that fills the pad exactly', () => {
+    expect(memoRefusal('x'.repeat(PAD), PAD)).toBeNull();
+    expect(memoRefusal('', PAD)).toBeNull();
+  });
+
+  it('refuses one byte over, and says both numbers', () => {
+    // The refusal used to be drawn under the field with the Send button still
+    // live, so it arrived after the circuit build and the tree rebuild.
+    const refusal = memoRefusal('x'.repeat(PAD + 1), PAD);
+    expect(refusal).toContain(String(PAD));
+    expect(refusal).toContain(String(PAD + 1));
+  });
+
+  it('counts a multi-byte memo by its bytes rather than its characters', () => {
+    // Thirty-one characters, 62 bytes: a character count would let this pass.
+    const memo = 'é'.repeat(31);
+    expect(memo.length).toBeLessThan(PAD);
+    expect(memoRefusal(memo, PAD)).not.toBeNull();
   });
 });
