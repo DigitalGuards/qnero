@@ -12,9 +12,15 @@
  * Every text token carries small text at 10 to 11 px, so each is measured
  * against the surface it actually lands on: `--text-muted` holds the field
  * labels, the panel titles, the table headers and every provenance note, and
- * it clears 4.5:1 on the panel, the body and the hovered row in both themes.
- * `--text-dim` is a strip dot and a placeholder cell and must be lifted before
- * it is given prose.
+ * it clears 4.5:1 on the panel and on the body in both themes. On the hovered
+ * row it is 3.34:1 in dark, which is why `app.css` lifts a hovered row's muted
+ * cells to `--text-primary` rather than lifting the token past
+ * `--text-secondary` and inverting the ramp. `--text-dim` is a strip dot and
+ * must be lifted before it is given prose.
+ *
+ * `--border-strong` is the edge that makes a control a control, so it clears
+ * 3:1 against the panel in both themes; `--border` is a hairline between
+ * surfaces and is held to no such bar.
  */
 
 :root {
@@ -24,7 +30,7 @@
   --bg-raised: #f0eeec;
   --bg-hover: #e9e6e3;
   --border: #d8d4d0;
-  --border-strong: #b9b3ae;
+  --border-strong: #8f8a86;
 
   --text-primary: #1b1a19;
   --text-bright: #000000;
@@ -43,6 +49,11 @@
 
   --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
   --shadow-float: 0 1px 4px 0 rgba(27, 26, 25, 0.16);
+  /* The cue that a table is cut off. It is a shadow over a light surface and a
+     highlight over a dark one, so it inverts with the ground rather than
+     vanishing into it. */
+  --shadow-edge: rgba(27, 26, 25, 0.25);
+  --shadow-edge-fade: rgba(27, 26, 25, 0);
 
   --fs-body: 13px;
   --fs-ui: 12px;
@@ -81,7 +92,7 @@
     --bg-raised: #383638;
     --bg-hover: #3f3e3f;
     --border: #494749;
-    --border-strong: #5f5d5f;
+    --border-strong: #6d6b6d;
 
     --text-primary: #fcfbfc;
     --text-bright: #ffffff;
@@ -100,6 +111,8 @@
 
     --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
     --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
+    --shadow-edge: rgba(255, 255, 255, 0.22);
+    --shadow-edge-fade: rgba(255, 255, 255, 0);
   }
 }
 
@@ -110,7 +123,7 @@
   --bg-raised: #383638;
   --bg-hover: #3f3e3f;
   --border: #494749;
-  --border-strong: #5f5d5f;
+  --border-strong: #6d6b6d;
 
   --text-primary: #fcfbfc;
   --text-bright: #ffffff;
@@ -129,4 +142,6 @@
 
   --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
   --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
+  --shadow-edge: rgba(255, 255, 255, 0.22);
+  --shadow-edge-fade: rgba(255, 255, 255, 0);
 }

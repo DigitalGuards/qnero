@@ -32,6 +32,18 @@ a:hover {
   text-decoration: underline;
 }
 
+/* A link inside prose is otherwise told apart from the text around it by hue
+   alone, at about 1.2:1 against the paragraph colour. The rail, the table cells
+   and the pager buttons carry their own affordance and keep the clean line. */
+p a,
+li a,
+.field__note a,
+.empty a,
+.notice a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -394,8 +406,8 @@ p {
   background:
     linear-gradient(to right, var(--bg-panel) 30%, rgba(0, 0, 0, 0)),
     linear-gradient(to left, var(--bg-panel) 30%, rgba(0, 0, 0, 0)) 100% 0,
-    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0)),
-    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.25), rgba(0, 0, 0, 0)) 100% 0;
+    radial-gradient(farthest-side at 0 50%, var(--shadow-edge), var(--shadow-edge-fade)),
+    radial-gradient(farthest-side at 100% 50%, var(--shadow-edge), var(--shadow-edge-fade)) 100% 0;
   background-repeat: no-repeat;
   background-size:
     32px 100%,
@@ -409,6 +421,21 @@ table {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--fs-ui);
+}
+
+/* A table in a scrolling wrapper takes the width its content needs and the
+   wrapper scrolls. Without this, `word-break: break-word` on a mono cell drops
+   its minimum width to one character, and a 100%-wide table shrinks to the box
+   instead of overflowing it: a hash column becomes a vertical stack of
+   six-character fragments and an amount is truncated into a smaller amount. */
+.table-wrap table {
+  min-width: max-content;
+}
+
+.table-wrap th,
+.table-wrap td.mono {
+  word-break: normal;
+  white-space: nowrap;
 }
 
 th {
@@ -437,6 +464,13 @@ tbody tr:hover {
   background: var(--bg-hover);
 }
 
+/* Muted on the hovered row is 3.34:1 in dark, and the hovered row is the one
+   state in which someone is reading that cell. Lifting the token instead would
+   take it past --text-secondary and invert the ramp. */
+tbody tr:hover .dim {
+  color: var(--text-primary);
+}
+
 .num {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -453,7 +487,7 @@ tbody tr:hover {
   letter-spacing: var(--ls-wide);
   color: var(--text-primary);
   background: var(--bg-raised);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-raised);
   cursor: pointer;
@@ -535,6 +569,36 @@ tbody tr:hover {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: var(--space-2) var(--space-4);
+}
+
+/* Two 64-character hashes under one label. Each of them wraps at every width
+   this site is used at, so 4 px between them is less separation than the line
+   spacing inside one of them and the pair reads as four lines of hex. The
+   number carries the grouping. */
+.hashlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  counter-reset: hashlist;
+}
+
+.hashlist__item {
+  counter-increment: hashlist;
+  display: grid;
+  grid-template-columns: 1.5em 1fr;
+  gap: var(--space-1);
+}
+
+.hashlist__item::before {
+  content: counter(hashlist);
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+
+.hashlist__item + .hashlist__item {
+  margin-top: var(--space-2);
 }
 
 .loading {

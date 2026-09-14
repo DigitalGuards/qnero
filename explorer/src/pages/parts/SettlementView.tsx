@@ -54,12 +54,16 @@ export function SettlementView({
           <div className="pair">
             <div>
               <span className="field__label">Nullifiers spent</span>
-              <div className="field__value">
-                <Hash value={slot.nullifiers[0]} full />
-              </div>
-              <div className="field__value">
-                <Hash value={slot.nullifiers[1]} full />
-              </div>
+              {/* Numbered rather than stacked: each of these wraps, so flush
+                  against each other the two of them read as four lines of hex
+                  and a reader cannot tell where the first one ends. */}
+              <ol className="hashlist">
+                {slot.nullifiers.map((nullifier) => (
+                  <li className="field__value hashlist__item" key={nullifier}>
+                    <Hash value={nullifier} full />
+                  </li>
+                ))}
+              </ol>
               <span className="field__note">
                 Membership proves some note was spent and says nothing about which note it was:
                 nothing on chain joins a nullifier to the leaf it spent. The two leaves beside it

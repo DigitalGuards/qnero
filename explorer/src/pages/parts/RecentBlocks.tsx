@@ -28,7 +28,14 @@ function age(timestampMs: number | null): ReactNode {
  * reader clicked.
  *
  * A row whose state the node no longer keeps shows dashes rather than zeros:
- * an unread block and an empty block are not the same block.
+ * an unread block and an empty block are not the same block. It fills the same
+ * cells as every other row, because a spanning cell leaves the table two
+ * columns short of its header once the narrow layout drops the wide ones.
+ *
+ * At phone width the columns that carry the block's answer stay and the author
+ * label goes. It is the widest cell in the row and, by its own note, groups
+ * nothing across blocks, so clipping the coinbase amount to keep it would be
+ * trading a number for a label.
  */
 export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): ReactNode {
   return (
@@ -38,7 +45,9 @@ export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): R
           <tr>
             <th scope="col">Height</th>
             <th scope="col">Age</th>
-            <th scope="col">Author label</th>
+            <th className="col--wide" scope="col">
+              Author label
+            </th>
             <th className="col--wide" scope="col">
               Leaves
             </th>
@@ -58,7 +67,7 @@ export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): R
                 </a>
               </td>
               <td className="num">{age(block.timestampMs)}</td>
-              <td>
+              <td className="col--wide">
                 {block.header.authorLabel === null ? (
                   <span className="dim">none</span>
                 ) : (
@@ -79,9 +88,14 @@ export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): R
                   </td>
                 </>
               ) : (
-                <td className="dim" colSpan={4} title={block.stateError}>
-                  state not kept at this block
-                </td>
+                <>
+                  <td className="num col--wide dim">-</td>
+                  <td className="dim" title={block.stateError}>
+                    state not kept
+                  </td>
+                  <td className="num col--wide dim">-</td>
+                  <td className="num dim">-</td>
+                </>
               )}
             </tr>
           ))}
