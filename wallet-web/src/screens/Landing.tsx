@@ -22,7 +22,7 @@ export function Landing({ storageWarning }: { storageWarning: string | null }): 
           `text-display` is 32 px, which in this design is the balance. The
           first screen a reader sees should not invert the type hierarchy the
           rest of the app is built on. */}
-      <h1 className="mb-3 text-body font-normal text-ink">
+      <h1 className="mb-3 text-body font-semibold text-ink">
         How would you like to
         <br />
         add a wallet?

@@ -89,7 +89,12 @@ export function ReceiveScreen({
                 </p>
               }
             >
-              <Button variant="action" size="block" data-testid="confirm-miner-key" onClick={onRevealMinerKey}>
+              <Button
+                variant="action"
+                className="flex-1"
+                data-testid="confirm-miner-key"
+                onClick={onRevealMinerKey}
+              >
                 Show it
               </Button>
             </DialogContent>
