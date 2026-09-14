@@ -17,6 +17,21 @@ export type Route =
   | { name: 'reveals' }
   | { name: 'notFound'; path: string };
 
+/**
+ * A height out of a query string, or null.
+ *
+ * Anything that is not a whole non-negative number falls back to the head, the
+ * way an unparseable path falls back to `notFound`. A `NaN` threaded into a
+ * page heading and a pager is worse than a link that quietly means "newest".
+ */
+function parseHeight(raw: string | null): number | null {
+  if (raw === null || !/^[0-9]+$/.test(raw)) {
+    return null;
+  }
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
 export function parseRoute(fragment: string): Route {
   const raw = fragment.replace(/^#/, '');
   const [path = '', queryString = ''] = raw.split('?');
@@ -27,8 +42,7 @@ export function parseRoute(fragment: string): Route {
     return { name: 'home' };
   }
   if (head === 'blocks') {
-    const before = params.get('before');
-    return { name: 'blocks', before: before === null ? null : Number(before) };
+    return { name: 'blocks', before: parseHeight(params.get('before')) };
   }
   if (head === 'block' && second !== undefined) {
     return { name: 'block', id: second };

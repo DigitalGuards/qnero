@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  announcedSeedHeight,
   blocksToNextSeed,
   DEFAULT_SEED_EPOCH_BLOCKS,
   DEFAULT_SEED_EPOCH_LAG,
@@ -42,12 +43,32 @@ describe('seed height', () => {
     expect(seedHeight(start + EPOCH, EPOCH, LAG)).toBe(2 * EPOCH);
   });
 
-  it('announces the next rotation a lag ahead', () => {
-    expect(nextSeedHeight(4096, EPOCH, LAG)).toBe(seedHeight(4096 + LAG, EPOCH, LAG));
-    expect(nextSeedHeight(4160, EPOCH, LAG)).toBe(4096);
-    // At 4097 the seed in use is still 2048 and the next one is already named.
-    expect(seedHeight(4097, EPOCH, LAG)).toBe(2048);
-    expect(nextSeedHeight(4097, EPOCH, LAG)).toBe(4096);
+  it('names the seed the next rotation installs, one epoch above the one in use', () => {
+    // Mid-epoch is where the node-parity announcement and the rotation part
+    // company, and mid-epoch is almost the whole chain.
+    expect(seedHeight(5000, EPOCH, LAG)).toBe(4096);
+    expect(nextSeedHeight(5000, EPOCH, LAG)).toBe(6144);
+    expect(nextSeedHeight(5000, EPOCH, LAG)).not.toBe(seedHeight(5000, EPOCH, LAG));
+
+    // On a chain below one epoch the seed in use is genesis and the first
+    // rotation installs the epoch boundary.
+    expect(seedHeight(44, EPOCH, LAG)).toBe(0);
+    expect(nextSeedHeight(44, EPOCH, LAG)).toBe(EPOCH);
+
+    // The rotation always lands exactly where the countdown says it will.
+    for (const height of [0, 1, 2112, 2113, 4097, 4160, 5000, 9999]) {
+      const left = blocksToNextSeed(height, EPOCH, LAG);
+      expect(nextSeedHeight(height, EPOCH, LAG)).toBe(seedHeight(height + left, EPOCH, LAG));
+      expect(nextSeedHeight(height, EPOCH, LAG)).toBe(seedHeight(height, EPOCH, LAG) + EPOCH);
+    }
+  });
+
+  it('keeps the node-parity announcement as its own function', () => {
+    // `next_seed_height` names the seed a rig should already be building for,
+    // so it holds at the current seed until the lag window opens.
+    expect(announcedSeedHeight(5000, EPOCH, LAG)).toBe(seedHeight(5000, EPOCH, LAG));
+    expect(announcedSeedHeight(4097, EPOCH, LAG)).toBe(4096);
+    expect(announcedSeedHeight(4160, EPOCH, LAG)).toBe(4096);
   });
 
   it('counts the blocks left before the seed changes', () => {

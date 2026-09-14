@@ -31,12 +31,23 @@ export function seedHeight(height: number, epochBlocks: number, lag: number): nu
 }
 
 /**
- * The seed the next epoch will use, which is what tells a viewer when the next
- * dataset rotation lands. Equal to `seedHeight` while the epoch is not about
- * to turn.
+ * The seed the node announces ahead of a rotation, which is node parity with
+ * `next_seed_height`: it names the seed a rig should already be building for,
+ * so it equals `seedHeight` everywhere except the last `lag` blocks of an
+ * epoch. It is the stratum announcement, and it is the wrong number to print
+ * beside a countdown.
+ */
+export function announcedSeedHeight(height: number, epochBlocks: number, lag: number): number {
+  return seedHeight(height + lag, epochBlocks, lag);
+}
+
+/**
+ * The seed the next rotation installs, which is what a countdown is counting
+ * down to. Always one epoch above the seed in use, so it never reads back the
+ * height the chain is already mining against.
  */
 export function nextSeedHeight(height: number, epochBlocks: number, lag: number): number {
-  return seedHeight(height + lag, epochBlocks, lag);
+  return seedHeight(height + blocksToNextSeed(height, epochBlocks, lag), epochBlocks, lag);
 }
 
 /**

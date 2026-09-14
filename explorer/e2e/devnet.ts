@@ -205,8 +205,9 @@ export async function startDevnet(): Promise<DevnetFacts> {
     rpc: `ws://127.0.0.1:${RPC_PORT}`,
     shieldHeight,
     shieldLeaf,
-    // 1000 pool quanta, at 10^10 planck each and 12 decimals.
-    shieldQnr: '10 QNR',
+    // 1000 pool quanta, at 10^10 planck each and 12 decimals, rendered with the
+    // two decimals every amount on the site carries.
+    shieldQnr: '10.00 QNR',
     settlementHeight,
   };
   writeFileSync(FACTS_PATH, `${JSON.stringify(facts, null, 2)}\n`);

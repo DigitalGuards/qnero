@@ -37,7 +37,7 @@ describe('shield entries', () => {
 
   it('is the only place a value and an account meet, so the amount is exact', () => {
     const entry = decodeShieldEntries(shield)[0];
-    expect(formatQnr(entry?.valuePlanck ?? 0n)).toBe('10 QNR');
+    expect(formatQnr(entry?.valuePlanck ?? 0n)).toBe('10.00 QNR');
     expect((entry?.valuePlanck ?? 0n) / POOL_QUANTUM_PLANCK).toBe(1000n);
   });
 

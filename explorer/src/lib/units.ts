@@ -26,17 +26,23 @@ export function quantaToPlanck(quanta: bigint): bigint {
   return quanta * POOL_QUANTUM_PLANCK;
 }
 
-/** A planck amount as a decimal QNR string, trailing zeros trimmed. */
+/**
+ * A planck amount as a decimal QNR string.
+ *
+ * Always at least two decimals, so a column of amounts lines its decimal
+ * points up: these are rendered in a tabular-figures column and a variable
+ * number of decimals defeats the point of one. Below a hundredth the trim
+ * keeps going, because a pool quantum is a hundredth and anything finer is a
+ * fee remainder worth seeing in full.
+ */
 export function formatPlanck(planck: bigint): string {
   const negative = planck < 0n;
   const magnitude = negative ? -planck : planck;
   const whole = magnitude / PLANCK_PER_QNR;
   const fraction = magnitude % PLANCK_PER_QNR;
   const sign = negative ? '-' : '';
-  if (fraction === 0n) {
-    return `${sign}${whole.toString()}`;
-  }
-  const digits = fraction.toString().padStart(12, '0').replace(/0+$/, '');
+  const trimmed = fraction.toString().padStart(12, '0').replace(/0+$/, '');
+  const digits = trimmed.length >= 2 ? trimmed : trimmed.padEnd(2, '0');
   return `${sign}${whole.toString()}.${digits}`;
 }
 

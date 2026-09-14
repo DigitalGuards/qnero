@@ -12,7 +12,10 @@ const PAGE_SIZE = 20;
 
 export function Blocks({ before }: { before: number | null }): ReactNode {
   const { bundle, head } = useChain();
-  const top = before ?? head?.header.number ?? null;
+  const headNumber = head?.header.number ?? null;
+  // A height above the head is a link someone typed, so it reads as the head
+  // rather than as an empty range.
+  const top = before === null ? headNumber : headNumber === null ? before : Math.min(before, headNumber);
   const blocks = useAsync(
     bundle === null || top === null ? null : `blocks:${top}`,
     bundle === null || top === null
