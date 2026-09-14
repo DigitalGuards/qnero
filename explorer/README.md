@@ -1,0 +1,273 @@
+# Qnero explorer
+
+A block explorer for a Qnero chain. One static directory, one WebSocket to a
+node, no server-side indexer and no third party: every number on every page is
+read live from the node the page is configured with, and nothing else is
+contacted.
+
+It is built for a chain where value is private by default, so it is as careful
+about what it declines to show as about what it shows. The "What this chain
+reveals" page states both halves in plain words, and the presentation rules
+behind it are in [What it will not do](#what-it-will-not-do).
+
+## Pages
+
+| Route | What it holds |
+|---|---|
+| `#/` | Head and finalized height, rolling block time, difficulty and an estimated hash rate, the RandomX seed height and its next rotation, tree leaves and depth, the settled nullifier count, pool value, the newest block's coinbase, and a live list of recent blocks |
+| `#/blocks` | A paged list, newest first |
+| `#/block/<height or hash>` | Header fields, the coinbase note, every settlement in full, every shield entry, refused calls, and every extrinsic summarised |
+| `#/settlement/<extrinsic hash>` | One settlement: its slots, the anchor window, and what it publishes and does not |
+| `#/search?q=` | A height, a block hash, an extrinsic hash, a nullifier or a commitment |
+| `#/reveals` | What an observer learns per block, and what stays hidden |
+
+Routing is in the fragment, so any static host serves it with no rewrite rule
+and a pasted link survives a refresh.
+
+## Run it
+
+The explorer needs a node to read. For a local one, from the repository root:
+
+```
+./target/release/qnero-wallet keygen
+export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address | grep -o 'qnm1[a-z0-9]*')
+nice -n 19 ./chain/target/release/qnero-node --dev --tmp --mining-threads 1
+```
+
+Then, in `explorer/`:
+
+```
+nice -n 19 npm ci
+nice -n 19 npm run dev
+```
+
+`npm run dev` serves on `http://127.0.0.1:5173` and reads `public/config.json`,
+which points at `ws://127.0.0.1:9944` out of the box.
+
+## Build it
+
+```
+nice -n 19 npm run build
+```
+
+The result is `dist/`: an `index.html`, one JS bundle, one stylesheet and
+`config.json`. Asset URLs are relative, so the directory works at a domain root
+and in a subdirectory without a rebuild.
+
+The bundle is about 1.2 MB, 440 kB compressed, and almost all of it is
+`@polkadot/api`, which carries the SCALE codec and the type registry the event
+decoding needs.
+
+## Configure it
+
+`config.json` sits beside the built assets and is read at startup, so one build
+serves a devnet and a testnet. Edit the file in `dist/`, or replace it at
+deploy time; nothing about a chain is compiled in.
+
+```json
+{
+  "rpcEndpoint": "wss://rpc.example.invalid",
+  "chainName": "Qnero testnet",
+  "recentBlocks": 12,
+  "searchWindowBlocks": 512,
+  "nullifierPageLimit": 25
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `rpcEndpoint` | Required. Must be `ws://` or `wss://`: the live head is a subscription and subscriptions are WebSocket only |
+| `chainName` | Required. The name in the rail and the home page heading |
+| `recentBlocks` | Blocks in the home list and in the rolling block-time window. Default 12 |
+| `searchWindowBlocks` | How far back a search by extrinsic hash or nullifier walks before giving up. Default 512 |
+| `nullifierPageLimit` | Pages of 1000 keys the nullifier count reads before reporting a floor instead of a total. Default 25 |
+
+A page served over `https` cannot open a `ws://` socket. Put the node behind
+the same TLS the site uses and configure `wss://`.
+
+## Deploy it
+
+Copy `dist/` to a webroot and serve it as files. The site needs no rewrite rule
+of its own, because every route lives in the fragment.
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name explorer.example.invalid;
+
+    ssl_certificate     /etc/ssl/example/cert.pem;
+    ssl_certificate_key /etc/ssl/example/key.pem;
+
+    root /srv/qnero-explorer;
+    index index.html;
+
+    # The runtime config, never cached: it is how one build serves two chains.
+    location = /config.json {
+        add_header Cache-Control "no-store" always;
+    }
+
+    # Hashed assets, cached hard.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # The page talks to the node and to nothing else.
+    add_header Content-Security-Policy
+        "default-src 'self'; connect-src 'self' wss://rpc.example.invalid; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Content-Type-Options "nosniff" always;
+}
+
+# The node's WebSocket under the same origin, if it is served here too.
+# map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+#
+# location /rpc {
+#     proxy_pass http://127.0.0.1:9944;
+#     proxy_http_version 1.1;
+#     proxy_set_header Upgrade $http_upgrade;
+#     proxy_set_header Connection $connection_upgrade;
+#     proxy_read_timeout 600s;
+# }
+```
+
+Every host, path and certificate above is a placeholder.
+
+## What it will not do
+
+Each of these is a decision.
+
+- **It never asks for a Merkle proof.** `zkTree_getMerkleProof` names one leaf
+  to whoever runs the node, which is the correlation a wallet's local tree
+  rebuild exists to avoid. An explorer making that call for a viewer would hand
+  the node a per-viewer leaf-interest log. Leaves and the root are read as
+  public ranges instead, and a lint rule fails the build if that call reappears.
+- **It renders a slot's two outputs unordered.** Which one is the sender's
+  change is hidden only because the wallet draws the payment's output slot per
+  spend. Ordering them, or labelling one "to" and one "change", would
+  reintroduce by presentation what the protocol pays to hide.
+- **It has no miner table.** The author label is `H(cvk, parent_hash)` and
+  changes every block, so grouping by it groups nothing and any heuristic that
+  looked like it worked would be a privacy regression shipped as a feature.
+- **It does not reprint a refused call's arguments.** A transparent transfer
+  the runtime's filter refuses still enters a block and its arguments stay in
+  the body forever. The block page names the call, says why the arguments are
+  public, and leaves them where the chain put them.
+- **It does not sort by ciphertext size or by anchor gap.** Both are documented
+  open leaks. The size is shown per leaf, and a size other than 1792 bytes is
+  marked, because that is worth knowing; neither is a sortable column.
+- **It does not decode a settlement's anchor height.** The anchor is a public
+  input inside the proof. The settlement page states the window the chain
+  enforced, which is what the site can establish from chain state alone.
+- **No analytics, no fonts, no images, no CDN.** The only request the page makes
+  is to the configured node.
+
+## What it reads, and what that costs
+
+There is no index behind the site, so anything the chain does not key directly
+is a bounded walk that says how far it looked.
+
+| Page | Reads |
+|---|---|
+| Home | One header, one runtime call per consensus constant, four storage values, and header, events and timestamp per recent block. Blocks are cached by hash, so a poll fetches only what is new |
+| Block | One body, one events blob, one timestamp |
+| Settlement from a block link | One body. From a bare hash, one body per block walked backwards, capped at `searchWindowBlocks` |
+| Search, nullifier | One point lookup on a constructed key, which names that nullifier to the node. The page says so before it runs one |
+| Search, commitment | `ZkTree::Leaves` newest first, 256 keys per request, capped |
+| Nullifier count | `state_getKeysPaged` at 1000 keys a page, capped by `nullifierPageLimit`, and reported as a floor when it hits the cap |
+
+Every one of these degrades rather than failing a page: a refused unsafe method
+or a missing runtime call empties a panel and leaves the rest readable.
+
+## Two decoder seams worth knowing about
+
+A generic Substrate client gets both of these wrong silently.
+
+**The header.** `qp_header::Header` carries `zkTreeRoot` between
+`extrinsicsRoot` and `digest`. Without the custom type this application
+registers, polkadot-js decodes the digest out of the `zkTreeRoot` bytes and
+every header comes back as plausible garbage and nothing throws. Block hashes
+are Poseidon2 over a felt encoding, and Blake2 of the SCALE header is a
+different number that looks exactly as plausible, so no hash here is ever
+recomputed locally. They come from the node.
+
+**The body.** The ML-DSA-87 signature is a fixed 7219-byte array and polkadot-js
+refuses any fixed array above 2048, so the typed `chain_getBlock` throws on
+every block carrying a signed extrinsic. `src/lib/extrinsics.ts` walks the
+envelope itself, using the signature lengths and the extension list out of the
+runtime's own metadata, and leaves a call unresolved rather than guessing a
+width it does not know.
+
+Nothing else is hand-decoded. Storage, events, constants and call names all come
+from metadata, which is read on every start: this runtime has changed event
+layouts inside one `spec_version`, so a compiled-in position is a decoder that
+goes quietly wrong. The storage items the site builds keys for are checked
+against metadata with the hashers they assume, because an absent key and an
+empty map are indistinguishable and the difference is a site that reads "0
+leaves, 0 nullifiers" with no error anywhere.
+
+## Tests
+
+```
+nice -n 19 npm run lint
+nice -n 19 npm run typecheck
+nice -n 19 npm test
+nice -n 19 npm run build
+```
+
+`npm test` is vitest over the decoders: the settlement, coinbase and shield
+event shapes, the header and its digest, the extrinsic envelope, the `U512`
+difficulty, the units, and the seed-height rule. The fixtures in
+`tests/fixtures/` were captured from a `--dev --tmp` node that had shielded once
+and sent once, by:
+
+```
+nice -n 19 npx vite-node scripts/capture-fixtures.ts -- ws://127.0.0.1:9944
+```
+
+Nothing in them is hand-written and nothing in them names the machine they came
+from.
+
+### The end-to-end smoke
+
+```
+nice -n 19 npm run e2e
+```
+
+It starts its own dev node at one mining thread, shields once so an entry
+exists, sends once so a settlement exists, builds the site, serves the build,
+and drives a headless Chromium over the home, block, settlement, search and
+reveals pages asserting the values the wallet reported. It stops the node by its
+pidfile and does not finish until the RPC port is free again.
+
+It needs release builds of both binaries and it needs port 9944 to itself:
+
+```
+cd chain && LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
+nice -n 19 cargo build -j 2 --release -p qnero-wallet --features parallel
+```
+
+Proving runs at `RAYON_NUM_THREADS=4`. The whole run is about a minute on top of
+the builds.
+
+## Layout
+
+```
+src/lib/        pure decoders, no network and no framework: hex and SCALE,
+                units, seed height, difficulty, digest, header, events,
+                extrinsic envelopes
+src/chain/      the connection and the reads: metadata, blocks, state, leaves,
+                bounded searches
+src/app/        the hash router, the connection context, one async hook
+src/pages/      one file per route
+src/components/ the shared shell and the field, panel and notice primitives
+src/styles/     tokens.css is the family resemblance, app.css is this app
+tests/          vitest over src/lib and src/chain/config, with captured fixtures
+e2e/            the dev-node lifecycle and the Playwright smoke
+scripts/        the fixture capture
+```
+
+`src/styles/` follows MyMonero's stylesheet, rebranded. See `NOTICE`.
