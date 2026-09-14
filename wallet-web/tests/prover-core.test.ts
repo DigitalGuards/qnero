@@ -201,7 +201,8 @@ describe('the shield walk', () => {
       { kind: 'entryRhoMatches', blockNumber: 2, rho: '0xENTRY-2-9', entryCount: '10' },
       () => undefined,
     );
-    // And the comparison is on one spelling of a digest, not on two.
+    // And the comparison is on one spelling of a digest, whatever spelling
+    // each side wrote it in.
     expect(answer.value).toBe(true);
   });
 });

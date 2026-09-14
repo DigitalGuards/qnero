@@ -30,7 +30,7 @@ export function Field({
 }): ReactNode {
   const errorId = `${htmlFor}-error`;
   /*
-   * The control carries the failure, not only the sentence under it.
+   * The control carries the failure as well as the sentence under it.
    *
    * A field whose value was refused was drawn in the accent, which is the
    * colour this palette reserves for the one action a screen is for: the

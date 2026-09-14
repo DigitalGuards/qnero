@@ -882,6 +882,31 @@ resident during a sync of a chain that does not: a leaf record carries that
 leaf's 1,792-byte ciphertext, and the range used to be materialised whole
 before anything was decrypted.
 
+## After the second review pass (2026-09-14)
+
+The same suite once more, on the same workstation, against the code the second
+round of review fixes landed:
+
+| run | `proveTransfer` | Send to settled | peak |
+|---|---|---|---|
+| threaded | 12.4 s | 24.1 s | 918.4 MiB |
+| threaded, re-run on the committed tree | 11.7 s | 19.6 s | 917.8 MiB |
+| single threaded | 37.8 s | 56.0 s | 910.2 MiB |
+
+**The module facts reproduce for a fifth sitting.** Peak is within 0.6 MiB of
+every figure above it and the proof is 150,908 bytes in all three runs. The
+ratio against the 12.1 s threaded mean is 3.14x, inside the 2.66x to 3.36x the
+four sittings before it measured.
+
+**These two rows are what the sending screen now quotes.** It used to print
+`proveTransfer`'s milliseconds beside a clock that starts at the send button,
+so the "longer than this browser expected" admission fired about halfway
+through every correct payment and the figure it withdrew was out by roughly a
+factor of two. The published defaults are the "Send to settled" column,
+rounded: 23 s threaded and 55 s single, which these runs came in at 24.1 s,
+19.6 s and 56.0 s. After the first payment the screen quotes what this machine actually
+took over the same interval.
+
 ## `wasm-opt -O`, both modules
 
 Measured by running `wasm-bindgen` into a scratch directory and optimising a

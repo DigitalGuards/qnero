@@ -1061,7 +1061,15 @@ settlement that lands at a height a reorg briefly hid is still found.
 The chain gate belongs to that list too. `prepare_spend` opens with
 `ensure_genesis`, and so does the browser's `spend`: a store bound to one chain
 meeting a node on another rebuilds that node's tree, passes the root gate over
-it, and writes a real note off as one this chain does not carry. And every
+it, and writes a real note off as one this chain does not carry. Read live off
+the node on both sides, for a reason that is the browser's own: a `WsProvider`
+reconnects by itself, so a tab left open across a chain relaunch at the same
+URL holds a genesis hash naming a chain that is no longer there, and a gate
+compared against it passes. The storage-drift refusal is in `runSync` and
+`spend` as well as on the screens that call them, the way this CLI opens
+`sync_with`, `shield` and `prepare_spend` with `ensure_known_storage`: a rule
+that lives in the page is skipped by every caller that is not the page. And
+every
 storage value a scan reads is decoded by its declared type and refused by name
 at any other width, the way `Chain::leaves` and `Chain::ciphertext` do, because
 `REQUIRED_STORAGE` compares hashers and a changed value type would otherwise
@@ -1094,7 +1102,15 @@ at the cost of needing a rebuild to point the wallet elsewhere.
 
 What stays in the clear is deliberate and stated on the page: commitment, leaf
 index, block, value, origin, spent and the checkpoints, which is what lets a
-locked wallet still show a balance and still sync. It is a choice rather than
+locked wallet still show a balance and still sync. A settlement's own bytes are
+not on that list and were: the pallet reads a settlement's nullifiers out of
+the proof before it verifies anything, so a plaintext copy in the pending row
+published, for every payment that did not land, exactly what the sealed
+`nullifier` holds back. That row is also dropped when its settlement can no
+longer be admitted, by the spend when the pool refuses it and by a sync once
+its anchor is more than `BlockHashWindow` blocks below the head: a change
+commitment that is never appended is one no scan can ever meet, and the balance
+carried it forever. It is a choice rather than
 an oversight, and the cost of it is in the README's threat model: a copied
 browser profile gives up this wallet's receive history mapped onto public leaf
 indices without a passphrase guess. A threat model that wants the value graph

@@ -356,6 +356,18 @@ export function App(): ReactNode {
       setError(null);
       try {
         const db = await current.openDatabase();
+        // A prover somebody switched off before erasing the last wallet is
+        // started again here, for the reason the unlock path does it: the
+        // screens that can switch it back on are the open wallet's, and this
+        // is the path to having one.
+        if (!current.prover.isRunning) {
+          if (config === null) {
+            throw new Error('this wallet has not finished loading its configuration');
+          }
+          setProverThreads(await current.startProver(config));
+          setProverRunning(current.prover.isRunning);
+          setCircuitsBuilt(current.circuitsBuilt);
+        }
         // One crossing. The seed goes to the worker as a transferred buffer,
         // the page's copy is detached by the transfer, and the answer carries
         // the address the store binds its records to. It used to cross twice:
@@ -390,7 +402,7 @@ export function App(): ReactNode {
         setBusy(false);
       }
     },
-    [refresh],
+    [config, refresh],
   );
 
   const unlock = useCallback(
