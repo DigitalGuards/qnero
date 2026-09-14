@@ -717,6 +717,15 @@ describe('a rescan', () => {
     expect(result.report.addOnly).toBe(true);
     expect(result.report.vanished).toBe(0);
     expect(result.report.warnings.join(' ')).toMatch(/add-only/);
+    // The two lists stay apart, and this pass raises one of each. A warning is
+    // what the pass gave up or could not verify, and the add-only notice is
+    // the whole of it here. The hint is what the pass may also be: this rescan
+    // re-read a note it already held, so it received nothing new, which is the
+    // ordinary reading and also what a substituted or moved leaf looks like.
+    // Both on `warnings` the rare entry read like the constant one.
+    expect(result.report.warnings).toHaveLength(1);
+    expect(result.report.hints).toHaveLength(1);
+    expect(result.report.hints.join(' ')).toMatch(/aligned group of four/);
   });
 
   it('is never a bypass of the chain check', async () => {

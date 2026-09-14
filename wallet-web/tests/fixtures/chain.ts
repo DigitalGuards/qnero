@@ -78,6 +78,55 @@ export function rootOver(leafHashes: Uint8Array, count: number): string {
   return fold(tagged);
 }
 
+/** One leaf of a leaf-hash buffer, as hex with no `0x`. */
+function leafHexAt(leafHashes: Uint8Array, index: number): string {
+  let out = '';
+  for (let byte = 0; byte < 32; byte += 1) {
+    out += (leafHashes[index * 32 + byte] ?? 0).toString(16).padStart(2, '0');
+  }
+  return out;
+}
+
+/**
+ * The same root, folded the way the chain folds: four children at a time, and
+ * **sorted** before they are hashed.
+ *
+ * `qnero_circuit::merkle::hash_node` and `pallet-zk-tree`'s `tree::hash_node`
+ * both sort a node's four children before hashing them, which is what lets a
+ * Merkle path carry siblings with no position beside them. The consequence a
+ * wallet has to live with is that a parent is a function of its children's
+ * multiset, so two orderings of one aligned group of four reach the same root
+ * and a published `zkTreeRoot` commits to no order inside a group.
+ *
+ * [`rootOver`] is order sensitive and stays the default, because every other
+ * test here wants two different leaf sets to reach two different roots and
+ * nothing else in this file permutes one. A test about that bound sets
+ * [`ChainShape.rootRule`] to this, and then the honest node and the lying node
+ * serve one set of headers, which is what makes it bound A.
+ */
+export function sortedRootOver(leafHashes: Uint8Array, count: number): string {
+  if (count === 0) {
+    return fold(new TextEncoder().encode('an empty tree'));
+  }
+  const pad = '00'.repeat(32);
+  let level: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    level.push(leafHexAt(leafHashes, index));
+  }
+  while (level.length > 1) {
+    while (level.length % 4 !== 0) {
+      level.push(pad);
+    }
+    const next: string[] = [];
+    for (let group = 0; group < level.length; group += 4) {
+      const children = level.slice(group, group + 4).sort();
+      next.push(fold(new TextEncoder().encode(children.join(''))));
+    }
+    level = next;
+  }
+  return level[0] ?? pad;
+}
+
 /** What a fixture says about the chain behind its leaves. */
 export interface ChainShape {
   head: number;
@@ -109,6 +158,14 @@ export interface ChainShape {
   forkTag?: string;
   /** The lowest height `forkTag` applies to. */
   forkFrom?: number;
+  /**
+   * How this fixture's chain folds its leaves into a root, where the default
+   * order-sensitive fold is the wrong model.
+   *
+   * Both sides of every root comparison use it: the header a block publishes
+   * and the recomputation the wallet checks it with. See [`sortedRootOver`].
+   */
+  rootRule?: (leafHashes: Uint8Array, count: number) => string;
 }
 
 /** Every leaf hash of the chain, `32 * n` bytes. */
@@ -141,7 +198,7 @@ function headerAt(shape: ChainShape, bytes: Uint8Array, number: number): RawChai
     number: `0x${number.toString(16)}`,
     stateRoot: shape.lyingHeaders?.has(number) === true ? `0x${'ee'.repeat(32)}` : `0x${'22'.repeat(32)}`,
     extrinsicsRoot: `0x${'33'.repeat(32)}`,
-    zkTreeRoot: `0x${rootOver(bytes, countAt(shape, number))}`,
+    zkTreeRoot: `0x${(shape.rootRule ?? rootOver)(bytes, countAt(shape, number))}`,
     digest: { logs: shape.unlabelled?.has(number) === true ? [] : [item] },
   };
 }
@@ -195,6 +252,6 @@ export function cryptoParts(
       ),
     authorLabels: (parentHashes) => Promise.resolve(parentHashes.map((hash) => ourLabel(hash))),
     blockRoots: (leafHashes, counts) =>
-      Promise.resolve(counts.map((count) => rootOver(leafHashes, count))),
+      Promise.resolve(counts.map((count) => (shape.rootRule ?? rootOver)(leafHashes, count))),
   };
 }

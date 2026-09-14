@@ -21,7 +21,7 @@
  * by the next.
  */
 
-import { hexByteLength, hexToBytes, leBytesToBigInt, readCompact } from '../lib/hex';
+import { hexByteLength, hexToBytes, leBytesToBigInt, normaliseHash, readCompact } from '../lib/hex';
 import { parseRawHeader, type RawChainHeader } from './anchor';
 import { storage, type ChainContext } from './api';
 
@@ -289,8 +289,18 @@ export async function fetchTreeTotals(
   };
 }
 
-/** The pallet's `empty_hash()`: 32 zero bytes, in the hex a node answers. */
-const PADDING_SENTINEL = `0x${'00'.repeat(32)}`;
+/**
+ * The pallet's `empty_hash()`: 32 zero bytes, in the one spelling this
+ * compares.
+ *
+ * No `0x`, lower case, because that is what [`normaliseHash`] produces and a
+ * node answers this value in whichever spelling it likes. The comparison used
+ * to be against the prefixed form, so a node that answered the pad as 64 zero
+ * hex digits with no prefix walked past the refusal below: `hexToBytes` and
+ * `hexByteLength` both strip the prefix, so the unprefixed pad decoded to the
+ * same 32 zero bytes and was written into the rebuild as a leaf.
+ */
+const PADDING_SENTINEL = '00'.repeat(32);
 
 /**
  * The tree's own pad, answered as a leaf below the count the node reports at
@@ -362,7 +372,7 @@ export async function fetchLeafHashes(
           throw withheld('ZkTree::Leaves', index, leafCount, at);
         }
       } else {
-        if (index < leafCount && value.toLowerCase() === PADDING_SENTINEL) {
+        if (index < leafCount && normaliseHash(value) === PADDING_SENTINEL) {
           throw paddingSentinel(index, leafCount, at);
         }
         // Checked before the write, not after. A longer value would overwrite
@@ -582,7 +592,7 @@ export async function fetchLeaves(
       if (belowCount && rawCiphertext === undefined && coinbase === undefined) {
         throw withheld('Shielded::Ciphertexts', row.index, leafCount, at);
       }
-      if (belowCount && rawCommitment?.toLowerCase() === PADDING_SENTINEL) {
+      if (belowCount && rawCommitment !== undefined && normaliseHash(rawCommitment) === PADDING_SENTINEL) {
         throw paddingSentinel(row.index, leafCount, at);
       }
       const height = decodeInteger(block, `Shielded::LeafBlocks(${row.index})`, 4);

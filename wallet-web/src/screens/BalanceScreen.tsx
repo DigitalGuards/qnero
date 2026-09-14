@@ -215,6 +215,22 @@ export function BalanceScreen({
       {report !== null &&
         report.warnings.map((warning) => <Notice key={warning}>{warning}</Notice>)}
 
+      {/*
+        Hints, under the warnings and at less weight. A warning is something
+        this pass gave up or could not verify, and each one is rare. The
+        ciphertext hint fires on nearly every sync, because almost every leaf
+        on the chain is somebody else's, so rendering it as a warning made the
+        rare signal beside it look like the constant one. It is a prompt for
+        an operator waiting on a payment, and it reads as one here.
+      */}
+      {report !== null && report.hints.length > 0 && (
+        <div className="space-y-1 px-1 text-meta text-muted" data-testid="sync-hints">
+          {report.hints.map((hint) => (
+            <p key={hint}>{hint}</p>
+          ))}
+        </div>
+      )}
+
       <Panel title="Notes" flush>
         {notes.length === 0 ? (
           <Empty>

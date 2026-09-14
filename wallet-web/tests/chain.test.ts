@@ -220,6 +220,19 @@ describe('a key the node withholds below its own leaf count', () => {
     );
   });
 
+  it("refuses the pad spelled without the 0x prefix", async () => {
+    // The spelling is the node's to pick. `hexToBytes` and `hexByteLength`
+    // both strip the prefix, so an unprefixed pad decoded to the same 32 zero
+    // bytes and every check below this one passed it: the comparison was
+    // against the prefixed form alone, and in the spend path nothing else
+    // catches the pad.
+    const values = leafRow(leafRow(new Map<string, string>(), 0), 2);
+    leafRow(values, 1, { commitment: '00'.repeat(32) });
+    await expect(fetchLeaves(nodeWith(values), 0, 3, AT, 3)).rejects.toThrow(
+      new RegExp(`ZkTree::Leaves\\(1\\) with the all-zero digest at block ${AT}`),
+    );
+  });
+
   it('refuses an absent ciphertext on a leaf that is not a coinbase', async () => {
     // A settled output's ciphertext is written by the call that appends its
     // leaf. Without it the leaf reads as one nobody can open, which is the
@@ -405,6 +418,19 @@ describe('the leaf range a tree is rebuilt from', () => {
     const values = new Map<string, string>([
       [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
       [`${KEYS.leaves}1`, `0x${'00'.repeat(32)}`],
+    ]);
+    await expect(fetchLeafHashes(nodeWith(values), 0, 2, AT, 2)).rejects.toThrow(
+      /ZkTree::Leaves\(1\) with the all-zero digest/,
+    );
+  });
+
+  it('refuses the pad spelled without the 0x prefix', async () => {
+    // The same evasion on the read the spend path makes. This is the buffer
+    // the tree is rebuilt from, so a pad accepted here is a pad folded into a
+    // path that then roots correctly against a count the chain never reached.
+    const values = new Map<string, string>([
+      [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
+      [`${KEYS.leaves}1`, '00'.repeat(32)],
     ]);
     await expect(fetchLeafHashes(nodeWith(values), 0, 2, AT, 2)).rejects.toThrow(
       /ZkTree::Leaves\(1\) with the all-zero digest/,

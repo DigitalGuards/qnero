@@ -434,10 +434,31 @@ impl<'a> Chain<'a> {
 
     /// Every leaf hash in `range`, at one block, in index order.
     ///
-    /// A missing entry is the pallet's `empty_hash()`, which is what
-    /// `tree::get_leaf_hash` substitutes, so a local rebuild pads the same way
+    /// `leaf_count` is `ZkTree::LeafCount` read at this same block hash, and
+    /// it is what an answer is measured against. Below it every index was
+    /// appended by one of `pallet-shielded`'s three writers and carries a
+    /// commitment, so an absent answer there is one the node withheld, and the
+    /// all-zero digest there is the tree's own pad standing in for a leaf the
+    /// chain never wrote: `insert_commitment` refuses an append of it by name.
+    /// Both are refused here, by [`withheld_key`] and [`padding_sentinel`].
+    ///
+    /// This is the read the spend path rebuilds its paths from, and it used to
+    /// substitute `empty_digest()` for an absent answer at any index at all.
+    /// A node could therefore pad below the count on the spend path and the
+    /// wallet would build a path over a pad, which is the answer `fetchLeaves`
+    /// and `fetchLeafHashes` in `wallet-web/src/chain/reads.ts` already
+    /// refused: the two wallets disagreed about the same lie.
+    ///
+    /// At or above the count the padding is the pallet's own rule, which is
+    /// what `tree::get_leaf_hash` substitutes, so a local rebuild pads the way
     /// the chain does.
-    pub fn leaf_hashes(&self, range: std::ops::Range<u64>, at: &[u8; 32]) -> Result<Vec<Digest>> {
+    pub fn leaf_hashes(
+        &self,
+        range: std::ops::Range<u64>,
+        leaf_count: u64,
+        at: &[u8; 32],
+    ) -> Result<Vec<Digest>> {
+        let at_bytes = *at;
         let at = hex_0x(at);
         let mut out = Vec::with_capacity((range.end.saturating_sub(range.start)) as usize);
         for chunk_start in range.clone().step_by(LEAF_HASH_BATCH) {
@@ -453,16 +474,30 @@ impl<'a> Chain<'a> {
                             .as_slice()
                             .try_into()
                             .map_err(|_| anyhow!("ZkTree::Leaves({index}) is not 32 bytes"))?;
-                        Digest::from_bytes(&bytes).map_err(|_| {
+                        let digest = Digest::from_bytes(&bytes).map_err(|_| {
                             anyhow!(
                                 "ZkTree::Leaves({index}) is {} and is not a canonical digest, so \
                                  this wallet cannot rebuild the tree over it. Pass \
                                  `--merkle-rpc` to ask the node for the path.",
                                 hex::encode(bytes)
                             )
-                        })?
+                        })?;
+                        if index < leaf_count && digest == qnero_circuit::merkle::empty_digest() {
+                            return Err(padding_sentinel(index, leaf_count, &at_bytes));
+                        }
+                        digest
                     }
-                    None => qnero_circuit::merkle::empty_digest(),
+                    None => {
+                        if index < leaf_count {
+                            return Err(withheld_key(
+                                index,
+                                leaf_count,
+                                &at_bytes,
+                                "ZkTree::Leaves",
+                            ));
+                        }
+                        qnero_circuit::merkle::empty_digest()
+                    }
                 };
                 out.push(digest);
             }
@@ -486,7 +521,7 @@ impl<'a> Chain<'a> {
     pub fn rebuild_tree(&self, at: &[u8; 32]) -> Result<LocalTree> {
         let leaf_count = self.leaf_count_at(at)?;
         let depth = usize::from(self.tree_depth_at(at)?);
-        let leaves = self.leaf_hashes(0..leaf_count, at)?;
+        let leaves = self.leaf_hashes(0..leaf_count, leaf_count, at)?;
         let tree = CommitmentTree::new(&leaves, depth).with_context(|| {
             format!(
                 "failed to rebuild the commitment tree over {leaf_count} leaves at depth {depth}"
@@ -774,7 +809,9 @@ impl<'a> Chain<'a> {
         if raw.leaf_hash != leaf.to_bytes() {
             bail!(
                 "leaf {leaf_index} hashes to {} on chain, this wallet holds a note committing to \
-                 {}",
+                 {}. Run `sync --rescan`, against a second node where there is one: this leaf is \
+                 below the watermark, so an ordinary sync starts above it and never reads it \
+                 again.",
                 hex::encode(raw.leaf_hash),
                 leaf.to_hex()
             );

@@ -1129,3 +1129,338 @@ fn a_pass_that_receives_nothing_carries_the_ciphertext_hint() {
     assert!(!idle.scanned_and_received_nothing);
     assert!(idle.ciphertext_hint().is_none());
 }
+
+/// The two answers above, on the read the spend path makes.
+///
+/// `Chain::leaf_hashes` is what `Chain::rebuild_tree` reads a whole leaf range
+/// with, and it used to turn an absent answer into `empty_digest()` at every
+/// index, below the reported count as well as above it. So a node that padded
+/// under its own count on the spend path handed this wallet a tree rebuilt
+/// over pads, and the browser wallet refused that same answer in `fetchLeaves`
+/// and `fetchLeafHashes`: the two wallets disagreed about one lie. Below the
+/// count the count is what gives an answer meaning, so both are refused by
+/// name here too, and above it the padding stays the pallet's own rule.
+#[test]
+fn the_spend_paths_leaf_read_refuses_a_pad_and_a_withheld_leaf_below_the_count() {
+    let leaves = [
+        Digest::hash_bytes(&[b"leaf zero"]),
+        Digest::hash_bytes(&[b"leaf one"]),
+        Digest::hash_bytes(&[b"leaf two"]),
+    ];
+    let honest = || {
+        let mut state = NodeState {
+            head_number: 7,
+            ..Default::default()
+        };
+        for (index, leaf) in leaves.iter().enumerate() {
+            state.put_storage(
+                &identity_map_key("ZkTree", "Leaves", index as u64),
+                &leaf.to_bytes(),
+            );
+        }
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+        state.put_storage(&storage_prefix("ZkTree", "Depth"), &[1u8]);
+        state
+    };
+    let at = support::block_hash(7);
+
+    // The control: three real leaves, and the tree rebuilds.
+    let node = FakeNode::start(honest());
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let tree = chain.rebuild_tree(&at).expect("the honest tree rebuilds");
+    assert_eq!(tree.leaf_count(), 3);
+
+    // Above the count an absent answer is the pallet's own padding, which is
+    // what `tree::get_leaf_hash` substitutes for an unfilled slot.
+    let window = chain
+        .leaf_hashes(0..4, 3, &at)
+        .expect("a window past the end of the tree pads");
+    assert_eq!(window.len(), 4);
+    assert_eq!(window[3], qnero_circuit::merkle::empty_digest());
+
+    // The pad, below the count.
+    let mut padded = honest();
+    padded.put_storage(
+        &identity_map_key("ZkTree", "Leaves", 1),
+        &qnero_circuit::merkle::empty_digest().to_bytes(),
+    );
+    let node = FakeNode::start(padded);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let refused = chain
+        .rebuild_tree(&at)
+        .expect_err("the tree's own pad is not a leaf below the count");
+    let message = format!("{refused:#}");
+    assert!(message.contains("ZkTree::Leaves(1)"), "{message}");
+    assert!(message.contains("all-zero digest"), "{message}");
+
+    // The withheld answer, below the count.
+    let mut withheld = honest();
+    withheld.withheld_leaves = [1u64].into_iter().collect();
+    let node = FakeNode::start(withheld);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let refused = chain
+        .rebuild_tree(&at)
+        .expect_err("a leaf below the count is an answer withheld");
+    let message = format!("{refused:#}");
+    assert!(message.contains("no ZkTree::Leaves(1)"), "{message}");
+}
+
+/// The premise of the two tests below, at the layer it comes from.
+///
+/// `qnero_circuit::merkle::hash_node` sorts a node's four children before
+/// hashing them, and `pallet-zk-tree`'s `tree::hash_node` does the same: it is
+/// what lets a Merkle path carry siblings with no position beside them. The
+/// consequence is that the parent of an aligned group of four leaves is a
+/// function of the multiset alone, so two orderings of one group reach the
+/// same root and a published `zkTreeRoot` commits to no order inside a group.
+#[test]
+fn a_swap_inside_one_group_of_four_moves_no_root() {
+    use qnero_circuit::merkle::TreeFrontier;
+
+    let leaves: Vec<Digest> = (0..3u8)
+        .map(|index| Digest::hash_bytes(&[b"leaf", &[index]]))
+        .collect();
+    let mut straight = TreeFrontier::new();
+    for leaf in &leaves {
+        straight.push(*leaf);
+    }
+    let mut swapped = TreeFrontier::new();
+    for leaf in [leaves[1], leaves[0], leaves[2]] {
+        swapped.push(leaf);
+    }
+    assert_eq!(
+        straight.root().expect("a root"),
+        swapped.root().expect("a root"),
+        "sorted children make the fold permutation invariant inside a group"
+    );
+}
+
+/// A leaf moved inside its own group of four hides an incoming payment, and a
+/// rescan against a second node is what brings it back.
+///
+/// This is a bound rather than a refusal, and it is open. It is the second
+/// half of the one above it: the root a block's header carries commits to
+/// which leaves that block appended and never to which index each one landed
+/// at, because the node rule sorts. So a node with honest headers can exchange
+/// this wallet's payment with the block's coinbase, keep every ciphertext the
+/// chain published where it published it, and answer nothing at the coinbase
+/// position. Every root, every position rule and every header still check out.
+/// The payment is typed a coinbase, the rebuild does not open it, there is no
+/// ciphertext to try, and the watermark commits above it.
+///
+/// The checkpoint fork walk does not reach it: the headers agree, so a later
+/// honest node confirms every checkpoint and the ordinary pass scans nothing.
+/// `--rescan` is the recovery, and this test drives it end to end.
+/// `docs/WALLET.md` states the bound under "What bound A does not cover" and
+/// `docs/DESIGN.md` section 9 carries both closures.
+#[test]
+fn a_within_group_swap_onto_the_coinbase_position_hides_a_payment_until_a_rescan() {
+    let (_seed, mut wallet) = fresh("permuted-coinbase");
+    let address = wallet.address();
+    let mine = note_for(address.pk, 1_000, "permuted-hidden");
+    let mine_ct = ct_for(&address, &mine, 7);
+    let stranger = Digest::hash_bytes(&[b"somebody else's leaf"]);
+    let stranger_ct = vec![9u8; 32];
+    let coinbase = Digest::hash_bytes(&[b"block 8 coinbase"]);
+
+    // The chain: leaf 1 is the payment, leaf 2 is the block's coinbase.
+    let mut honest = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_leaf(&mut honest, 0, 8, stranger, &stranger_ct);
+    put_leaf(&mut honest, 1, 8, mine.commitment(), &mine_ct);
+    put_coinbase(&mut honest, 2, 8, coinbase, 42);
+    honest.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+
+    // The liar: the payment's commitment and the coinbase's are exchanged.
+    // Every ciphertext is untouched, so `Shielded::Ciphertexts(1)` is still
+    // exactly the bytes the chain published, and the coinbase position carries
+    // no ciphertext because under v1 a coinbase never does.
+    let mut liar = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_leaf(&mut liar, 0, 8, stranger, &stranger_ct);
+    put_leaf(&mut liar, 1, 8, coinbase, &mine_ct);
+    put_coinbase(&mut liar, 2, 8, mine.commitment(), 42);
+    liar.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+
+    assert_eq!(liar.genesis_hash(), honest.genesis_hash());
+    assert_eq!(
+        liar.hash_at(9),
+        honest.hash_at(9),
+        "the swap moves no header, so this is bound A: honest headers"
+    );
+
+    let node = FakeNode::start(liar);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the permuted order is not refused, which is the bound");
+    assert_eq!(report.received, 0, "the payment is gone");
+    assert_eq!(report.rejected, 0, "and nothing is counted");
+    assert_eq!(wallet.store.unspent_total(), 0);
+    assert_eq!(wallet.store.next_leaf, 3, "the watermark is above it");
+
+    // What the operator is given instead: the hint, which names the index
+    // beside the ciphertext because one rescan is the recovery for either.
+    assert!(report.scanned_and_received_nothing);
+    let hint = report.ciphertext_hint().expect("the hint is carried");
+    assert!(hint.contains("aligned group"), "{hint}");
+    assert!(hint.contains("Shielded::Ciphertexts"), "{hint}");
+    assert!(hint.contains("--rescan"), "{hint}");
+
+    // An ordinary pass against the honest node recovers nothing: its headers
+    // are the ones this wallet already checkpointed, so no fork is found and
+    // the scan starts above the leaf that was skipped.
+    let honest_node = FakeNode::start(honest);
+    let rpc = RpcClient::new(&honest_node.url);
+    let chain = Chain::new(&rpc);
+    let ordinary = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the honest node agrees with every checkpoint");
+    assert_eq!(ordinary.received, 0);
+    assert_eq!(wallet.store.unspent_total(), 0, "still hidden");
+
+    // The recovery, end to end.
+    let recovered = wallet
+        .sync_with(&chain, &test_metadata(), SyncOptions { rescan: true })
+        .expect("a rescan reads the range again");
+    assert_eq!(recovered.received, 1, "the payment is back");
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+}
+
+/// The same swap between two ordinary leaves: the payment arrives, at an index
+/// the chain does not hold it at, and the spend path is where that shows.
+///
+/// A note's leaf index is what a Merkle path is rebuilt for, so a note stored
+/// at the wrong index reaches a root no header carries and cannot be spent.
+/// Nothing refuses at scan time, because the root the pass folds is the root
+/// the header published either way. A rescan is what moves the note to the
+/// index the chain actually holds it at.
+#[test]
+fn a_within_group_swap_records_a_note_at_a_leaf_the_chain_does_not_hold() {
+    let (_seed, mut wallet) = fresh("permuted-index");
+    let address = wallet.address();
+    let mine = note_for(address.pk, 1_000, "permuted");
+    let mine_ct = ct_for(&address, &mine, 7);
+    let stranger = Digest::hash_bytes(&[b"somebody else's leaf"]);
+    let stranger_ct = vec![9u8; 32];
+    let coinbase = Digest::hash_bytes(&[b"block 8 coinbase"]);
+
+    let mut honest = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_leaf(&mut honest, 0, 8, stranger, &stranger_ct);
+    put_leaf(&mut honest, 1, 8, mine.commitment(), &mine_ct);
+    put_coinbase(&mut honest, 2, 8, coinbase, 42);
+    honest.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+    // The depth the chain folded three leaves at, which a rebuild reads.
+    honest.put_storage(&storage_prefix("ZkTree", "Depth"), &[1u8]);
+
+    // Leaf 0 and leaf 1 exchanged, each keeping the ciphertext the chain
+    // published beside it.
+    let mut liar = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_leaf(&mut liar, 0, 8, mine.commitment(), &mine_ct);
+    put_leaf(&mut liar, 1, 8, stranger, &stranger_ct);
+    put_coinbase(&mut liar, 2, 8, coinbase, 42);
+    liar.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+    liar.put_storage(&storage_prefix("ZkTree", "Depth"), &[1u8]);
+
+    assert_eq!(
+        liar.hash_at(9),
+        honest.hash_at(9),
+        "the swap moves no header, so this is bound A: honest headers"
+    );
+
+    let node = FakeNode::start(liar);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the permuted order is not refused");
+    assert_eq!(report.received, 1);
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+    assert_eq!(
+        wallet
+            .store
+            .notes
+            .first()
+            .expect("the note is stored")
+            .leaf_index,
+        0,
+        "the index the lying node dictated"
+    );
+
+    // The honest node confirms every checkpoint, so nothing rewinds and the
+    // wrong index stands.
+    let honest_node = FakeNode::start(honest);
+    let rpc = RpcClient::new(&honest_node.url);
+    let chain = Chain::new(&rpc);
+    let again = wallet
+        .sync(&chain, &test_metadata())
+        .expect("an honest pass");
+    assert_eq!(again.received, 0);
+    assert_eq!(
+        wallet
+            .store
+            .notes
+            .first()
+            .expect("still one note")
+            .leaf_index,
+        0,
+        "no ordinary pass revisits it"
+    );
+
+    // Where it shows: the spend path rebuilds the tree at the anchor, checks
+    // its root against the header, and then reads the leaf at the note's own
+    // index.
+    let at = honest_node.state().hash_at(9);
+    let tree = chain.rebuild_tree(&at).expect("the honest tree rebuilds");
+    assert_eq!(
+        tree.leaf(1).expect("a leaf"),
+        mine.commitment(),
+        "the chain holds the payment at leaf 1"
+    );
+    assert_ne!(
+        tree.leaf(0).expect("a leaf"),
+        mine.commitment(),
+        "and not where this wallet recorded it"
+    );
+    let path = tree.path(0).expect("a path");
+    assert_ne!(
+        path.root(mine.commitment()).expect("a root"),
+        tree.root(),
+        "a path rebuilt at the recorded index reaches no root this chain published"
+    );
+
+    // The recovery: a rescan reads the range again and moves the note to the
+    // leaf the chain holds it at.
+    let recovered = wallet
+        .sync_with(&chain, &test_metadata(), SyncOptions { rescan: true })
+        .expect("a rescan reads the range again");
+    assert_eq!(
+        recovered.relocated, 1,
+        "one note moved, and the store still holds one"
+    );
+    assert_eq!(
+        wallet
+            .store
+            .notes
+            .first()
+            .expect("still one note")
+            .leaf_index,
+        1,
+        "the index the chain actually holds it at"
+    );
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+}

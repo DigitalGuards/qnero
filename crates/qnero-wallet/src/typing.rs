@@ -39,6 +39,24 @@
 //!    all-zero digest by name and reads it as an unfilled slot everywhere
 //!    else, so a leaf equal to it below the reported count is refused here and
 //!    in `crate::chain::Chain::leaf_window`, and the count is a fact again.
+//!
+//!    **What the fold pins is a set, and inside an aligned group of four it
+//!    is a multiset.** `qnero_circuit::merkle::hash_node` and
+//!    `pallet-zk-tree`'s `tree::hash_node` both sort a node's four children
+//!    before hashing them, which is what lets a path carry siblings with no
+//!    position. So two orderings of one group of four leaves reach the same
+//!    parent and the same root, and a published `zkTreeRoot` commits to which
+//!    leaves a block appended and never to which index each one landed at.
+//!    The leaf range, the leaf count and the index the coinbase occupies are
+//!    header-authenticated; the assignment of commitments to indices inside a
+//!    group is not, and no rule below recovers it. A node with honest headers
+//!    can therefore permute a group, put an incoming payment at the coinbase
+//!    position, answer no ciphertext there, and hide the payment: the rules
+//!    below type that leaf a coinbase, the rebuild does not open it, there is
+//!    no ciphertext to try, the leaf is skipped and the watermark commits past
+//!    it. `docs/WALLET.md`, under "What bound A does not cover", carries that
+//!    bound and the rescan against a second node that recovers such a payment,
+//!    and `docs/DESIGN.md` section 9 carries both closures.
 //! 3. The coinbase position. `pallet-mining-rewards`' `on_finalize` mints the
 //!    coinbase through `CoinbaseSink`, at pallet index 6, where every shield
 //!    and every settled output was appended during extrinsic execution and
@@ -87,8 +105,9 @@
 //!   trial-decrypted, and a `Shielded::CoinbaseValues` there refuses by name.
 //!
 //! `docs/WALLET.md`, under "What a lying node can and cannot do", carries the
-//! bound these rules actually hold to and the fork walk that is the defence
-//! above the newest checkpoint.
+//! bound these rules actually hold to, the two per-leaf values nothing on
+//! chain binds to a leaf, and the fork walk that is the defence above the
+//! newest checkpoint.
 //!
 //! The one thing a block can do that this does not pin is mint no coinbase at
 //! all. `pallet-shielded::mint_coinbase` refuses a credit below one pool

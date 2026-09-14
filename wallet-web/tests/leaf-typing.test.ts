@@ -37,6 +37,8 @@ import {
   cryptoParts,
   GENESIS,
   hashOf,
+  leafBytes,
+  sortedRootOver,
   type ChainShape,
 } from './fixtures/chain';
 
@@ -354,9 +356,12 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.report.received).toBe(0);
     expect(hidden.meta.nextLeaf).toBe(3);
     expect(hidden.notes).toHaveLength(0);
-    expect(
-      hidden.report.warnings.some((warning) => warning.includes('Shielded::Ciphertexts')),
-    ).toBe(true);
+    // On `hints` rather than on `warnings`: it fires on nearly every pass, so
+    // beside the rare coinbase-label warning it was the constant entry that
+    // made the list stop being read. The balance screen renders it under the
+    // warnings and at less weight.
+    expect(hidden.report.warnings).toEqual([]);
+    expect(hidden.report.hints.some((hint) => hint.includes('Shielded::Ciphertexts'))).toBe(true);
 
     // An honest node serving the same headers recovers nothing on an ordinary
     // pass: no checkpoint moves, so the scan starts above the leaf.
@@ -390,6 +395,123 @@ describe('a leaf whose kind the headers decide', () => {
     );
     expect(rescanned.report.received).toBe(1);
     expect(rescanned.notes).toHaveLength(1);
+  });
+
+  /**
+   * The second bound the per-leaf rules do not close, and the same recovery.
+   *
+   * `hash_node` sorts a node's four children before hashing them, in the
+   * circuit and in `pallet-zk-tree` alike, which is what lets a Merkle path
+   * carry siblings with no position. So the parent of an aligned group of four
+   * leaves is a function of the multiset alone: a published `zkTreeRoot`
+   * commits to which leaves a block appended and never to which index each one
+   * landed at.
+   *
+   * A node with honest headers can therefore exchange this wallet's payment
+   * with its block's coinbase, keep every ciphertext where the chain published
+   * it, and answer no ciphertext at the coinbase position. Every root, every
+   * position rule and every header still check out. The payment is typed a
+   * coinbase, the rebuild does not open it, there is nothing to decrypt, and
+   * the watermark goes above it.
+   *
+   * The checkpoint fork walk finds nothing, because the headers agree. The
+   * recovery is a rescan against a second node, which this drives end to end,
+   * and `crates/qnero-wallet/tests/leaf_typing.rs` drives the same attack
+   * against the command-line wallet.
+   */
+  it('hides a payment moved onto the coinbase position until a rescan reads the leaf again', async () => {
+    const STRANGER = 'a0'.repeat(32);
+    const COINBASE = 'c0'.repeat(32);
+    const STRANGER_CT = new Uint8Array([4, 5, 6]);
+
+    // The chain: leaf 1 is the payment, leaf 2 is block 8's coinbase.
+    const honestRows: Leaf[] = [
+      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseQuanta: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: null },
+      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseQuanta: 7n },
+    ];
+    // The liar: the payment's commitment and the coinbase's exchanged. The
+    // ciphertexts are untouched, so `Shielded::Ciphertexts(1)` is still
+    // exactly the bytes the chain published, and the coinbase position carries
+    // none because under v1 a coinbase never does.
+    const lyingRows: Leaf[] = [
+      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseQuanta: null },
+      { commitment: COINBASE, block: 8, ciphertext: CT, coinbaseQuanta: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseQuanta: 7n },
+    ];
+    const shapeFor = (rows: readonly Leaf[]): ChainShape => ({
+      ...shapeOf(9, rows),
+      rootRule: sortedRootOver,
+    });
+    const honestShape = shapeFor(honestRows);
+    const lyingShape = shapeFor(lyingRows);
+
+    // The premise, at the layer it comes from: one group, two orderings, one
+    // root. Both nodes therefore serve one set of headers, which is what makes
+    // this bound A rather than a fork.
+    expect(sortedRootOver(leafBytes(lyingShape), 3)).toBe(
+      sortedRootOver(leafBytes(honestShape), 3),
+    );
+
+    // An AEAD: the bytes open only beside the commitment their sender
+    // encrypted them against, which is what `try_receive` checks.
+    const opener = (shape: ChainShape): SyncCrypto => ({
+      ...cryptoParts(shape),
+      decryptBatch: (items) =>
+        Promise.resolve(
+          items.map((item) =>
+            item.ciphertext[0] === CT[0] && item.commitment === MINE.commitment ? MINE : null,
+          ),
+        ),
+      // Nothing this wallet mined.
+      coinbaseBatch: (items) => Promise.resolve(items.map(() => null)),
+      entryRhoMatches: () => Promise.resolve(false),
+    });
+
+    const hidden = await runSync(
+      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
+      chainOf(lyingShape, lyingRows),
+      opener(lyingShape),
+    );
+    expect(hidden.report.received).toBe(0);
+    expect(hidden.notes).toHaveLength(0);
+    expect(hidden.report.warnings).toEqual([]);
+    expect(hidden.meta.nextLeaf).toBe(3);
+    // What the operator is given instead: the hint, which names the index
+    // beside the ciphertext because one rescan is the recovery for either.
+    expect(hidden.report.hints.some((hint) => hint.includes('aligned group of four'))).toBe(true);
+
+    // An honest node serving the same headers recovers nothing on an ordinary
+    // pass: no checkpoint moves, so the scan starts above the leaf.
+    const ordinary = await runSync(
+      {
+        meta: metaAfter(hidden),
+        held: [],
+        rejected: [],
+        pending: [],
+        checkpoints: hidden.checkpoints,
+      },
+      chainOf(honestShape, honestRows),
+      opener(honestShape),
+    );
+    expect(ordinary.report.received).toBe(0);
+
+    // The recovery, end to end.
+    const rescanned = await runSync(
+      {
+        meta: metaAfter(ordinary),
+        held: [],
+        rejected: [],
+        pending: [],
+        checkpoints: ordinary.checkpoints,
+      },
+      chainOf(honestShape, honestRows),
+      opener(honestShape),
+      { rescan: true },
+    );
+    expect(rescanned.report.received).toBe(1);
+    expect(rescanned.notes).toHaveLength(1);
+    expect(rescanned.notes[0]?.note.leafIndex).toBe(1);
   });
 
   /** A value that does not rebuild this wallet's own coinbase commitment. */

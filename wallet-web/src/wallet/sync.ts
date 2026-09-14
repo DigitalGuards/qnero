@@ -301,18 +301,29 @@ export interface SyncReport {
   recordedGenesis: boolean;
   forkedAt: number | null;
   /**
-   * What the pass gave up or could not decide, in sentences the balance screen
+   * What the pass gave up or could not verify, in sentences the balance screen
    * renders.
    *
    * A bypassed node gate, the add-only notice a rescan owes, a truncated
    * origin walk, abandoned pending rows, a coinbase rebuilt under a foreign
-   * label, and the one bound the per-leaf rules do not close: a pass that read
-   * leaves and received nothing is also what a substituted ciphertext looks
-   * like, so the sentence naming the rescan that recovers such a payment goes
-   * here. `docs/WALLET.md`, under "What a lying node can and cannot do",
-   * carries that bound.
+   * label. Each of those is rare and each says something happened, which is
+   * what keeps the list worth reading.
    */
   warnings: string[];
+  /**
+   * What a pass may also be, rendered below the warnings and at less weight.
+   *
+   * The ciphertext hint is the whole list today, and it fires on nearly every
+   * pass: a pass that read leaves and received nothing is the ordinary case,
+   * because almost every leaf on the chain is somebody else's. On `warnings`
+   * it drowned the one rare signal beside it, the coinbase rebuilt under a
+   * foreign label, by rendering at the same weight on every sync. It is a
+   * prompt for an operator waiting on a payment rather than a detection, and
+   * that is what the separate list says. `docs/WALLET.md`, under "What bound A
+   * does not cover", carries the bound behind it, and the command-line wallet
+   * prints the same sentence on a `hint` line.
+   */
+  hints: string[];
   addOnly: boolean;
 }
 
@@ -832,6 +843,7 @@ export async function runSync(
   const reconciles = !rescan;
   const progress = options.onProgress ?? ((): void => undefined);
   const warnings: string[] = [];
+  const hints: string[] = [];
 
   if (chain.storageDrift.length > 0) {
     // Before the first read. An absent key and an empty map are the same
@@ -947,6 +959,7 @@ export async function runSync(
     recordedGenesis: false,
     forkedAt,
     warnings,
+    hints,
     addOnly: rescan,
   };
 
@@ -1442,23 +1455,35 @@ export async function runSync(
   }
   if (report.leavesScanned > 0 && report.received === 0) {
     // The ordinary case on most passes, because almost every leaf on the chain
-    // is somebody else's, and also exactly what one substituted ciphertext
-    // looks like. `Shielded::Ciphertexts(i)` is the one per-leaf value nothing
-    // on chain binds to leaf `i`: the commitment the tree authenticates
-    // carries no ciphertext, and `ct_digest` binds the bytes only inside the
-    // settlement extrinsic at inclusion, which a storage-only reader never
-    // fetches. So a node with honest headers can answer a stranger's bytes at
-    // an incoming payment, the leaf reads as somebody else's and the watermark
-    // is written above it. The checkpoint fork walk does not recover it,
-    // because the headers agree. The sentence is the command-line wallet's
-    // `CIPHERTEXT_SUBSTITUTION_HINT`, and `docs/WALLET.md` carries the bound.
-    warnings.push(
+    // is somebody else's, and also what either of the two unbound per-leaf
+    // values looks like.
+    //
+    // `Shielded::Ciphertexts(i)` is bound to leaf `i` by nothing: the
+    // commitment the tree authenticates carries no ciphertext, and `ct_digest`
+    // binds the bytes only inside the settlement extrinsic at inclusion, which
+    // a storage-only reader never fetches. And the leaf's own index inside its
+    // aligned group of four is bound by nothing either: the tree sorts a
+    // node's four children before hashing, so a published `zkTreeRoot` commits
+    // to each group's multiset and to no order inside it, and a node with
+    // honest headers can move an incoming payment onto its block's coinbase
+    // position, where a ciphertext is not owed. Either way the leaf reads as
+    // somebody else's and the watermark is written above it, and the
+    // checkpoint fork walk does not recover either, because the headers agree.
+    //
+    // A hint rather than a warning: it fires on nearly every pass, and a list
+    // that always has an entry stops being read. The sentence is the
+    // command-line wallet's `CIPHERTEXT_SUBSTITUTION_HINT`, and
+    // `docs/WALLET.md` carries the bound.
+    hints.push(
       'a pass that reads leaves and receives nothing is the ordinary case, and it is also what ' +
-        'one substituted ciphertext looks like: Shielded::Ciphertexts is the only per-leaf value ' +
-        'nothing on chain binds to its leaf, so a node with honest headers can answer a ' +
-        "stranger's bytes at an incoming payment and the leaf reads as somebody else's. If a " +
-        'payment was expected and is not here, rescan against a second node, which is the ' +
-        'recovery.',
+        'a substituted or moved leaf looks like. Two per-leaf values are bound to a leaf by ' +
+        "nothing on chain: the bytes at Shielded::Ciphertexts, and the leaf's own index inside " +
+        "its aligned group of four, because the tree sorts a node's children before hashing and " +
+        "the root therefore commits to each group's multiset rather than to an order. So a node " +
+        "with honest headers can answer a stranger's bytes at an incoming payment, or move that " +
+        "payment onto its block's coinbase position where no ciphertext is owed, and either way " +
+        "the leaf reads as somebody else's. If a payment was expected and is not here, rescan " +
+        'against a second node, which is the recovery for both.',
     );
   }
 

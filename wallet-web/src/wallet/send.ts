@@ -377,7 +377,9 @@ export async function spend(
           `note ${held.note.commitment} is recorded at leaf ${held.note.leafIndex}, which is ` +
             `past the end of a ${shape.leafCount}-leaf tree the anchor confirms, and it was ` +
             `recorded at block ${held.note.blockNumber}, below the anchor. This chain does not ` +
-            'carry it, so it is marked off chain. Send again: the next selection will not offer it.',
+            'carry it, so it is marked off chain. Send again: the next selection will not offer ' +
+            'it. To look for it again, rescan from Settings against a second node: an ordinary ' +
+            'sync starts at the watermark, so a leaf below it is never read again.',
         );
       }
       throw new Error(
@@ -388,9 +390,19 @@ export async function spend(
     }
     const path = await prover.treePath(copyOf(leafHashes), shape.depth, held.note.leafIndex);
     if (path.leaf.toLowerCase() !== held.note.commitment.toLowerCase()) {
+      // The note is at an index this chain holds something else at, and the
+      // tree it was read from roots at the value the anchor header carries, so
+      // the chain is not the thing that is wrong. An ordinary sync cannot
+      // repair it: the leaf is below the watermark and a pass starts above it.
+      // The rescan on the Settings screen reads the range again from leaf
+      // zero and moves the note to the index the chain holds it at, which is
+      // also the recovery for a leaf a node moved inside its own group of
+      // four (`docs/WALLET.md`, "What bound A does not cover").
       throw new Error(
         `leaf ${held.note.leafIndex} carries ${path.leaf} on this chain and this wallet holds a ` +
-          `note committing to ${held.note.commitment}. Sync before sending.`,
+          `note committing to ${held.note.commitment}. Rescan from Settings, against a second ` +
+          'node where there is one: this leaf is below the watermark, so an ordinary sync starts ' +
+          'above it and never reads it again.',
       );
     }
     if (path.root.toLowerCase() !== anchor.zk_tree_root.toLowerCase()) {

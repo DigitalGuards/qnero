@@ -526,7 +526,7 @@ impl Wallet {
                     // the same wide read a spend already makes to rebuild its
                     // paths, and read once for the whole pass: the fold climbs
                     // with the chunks.
-                    let prefix = chain.leaf_hashes(0..start, &head.hash)?;
+                    let prefix = chain.leaf_hashes(0..start, leaf_count, &head.hash)?;
                     frontier = Some(seed_frontier(anchor, start, &prefix)?);
                 }
                 let fold = frontier
@@ -1057,12 +1057,12 @@ impl Wallet {
         // reason: every key below is built from a compiled-in name and a
         // compiled-in hasher, and the node validates none of them. `shield`
         // reads `Shielded::EntryCount` and then `ZkTree::LeafCount` and
-        // `ZkTree::Leaves` to confirm its own leaf, and `Chain::leaf_hashes`
-        // reads an absent key as an empty leaf by design. Under a drifted
-        // layout the confirmation therefore finds no leaf carrying the
-        // commitment and reports a shield that actually settled as a dispatch
-        // that failed, dropping the pending entry that holds the note's `r` on
-        // the way out. The note stays recoverable, since its plaintext is in
+        // `ZkTree::Leaves` to confirm its own leaf. Under a drifted layout
+        // every one of those keys reads as absent, so the count is zero, the
+        // window the confirmation walks is empty, and it finds no leaf
+        // carrying the commitment: a shield that actually settled is reported
+        // as a dispatch that failed, dropping the pending entry that holds the
+        // note's `r` on the way out. The note stays recoverable, since its plaintext is in
         // the ciphertext the chain stored, but the operator is told the value
         // was burned for nothing and sent to look at the dev account instead
         // of at the runtime.
@@ -1154,7 +1154,8 @@ impl Wallet {
         let commitment = note.commitment();
         let leaves_before = chain.leaf_count_at(&parent_hash)?;
         let leaves_after = chain.leaf_count_at(&included_hash)?;
-        let appended = chain.leaf_hashes(leaves_before..leaves_after, &included_hash)?;
+        let appended =
+            chain.leaf_hashes(leaves_before..leaves_after, leaves_after, &included_hash)?;
         let Some(offset) = appended.iter().position(|leaf| *leaf == commitment) else {
             self.store
                 .pending
@@ -1608,8 +1609,19 @@ impl Wallet {
                 .leaf(note.leaf_index)
                 .ok_or_else(|| anyhow!("leaf {} is out of range", note.leaf_index))?;
             if on_chain != stored.commitment() {
+                // The note is at an index this chain holds something else at,
+                // and the tree it was read from roots at the value the anchor
+                // header carries, so the chain is not the thing that is wrong.
+                // A plain `sync` cannot repair it: the leaf is below the
+                // watermark and an ordinary pass starts above it. `--rescan`
+                // reads the range again from leaf zero and moves the note to
+                // the index the chain holds it at, which is also the recovery
+                // for a leaf a node moved inside its own group of four.
                 bail!(
-                    "leaf {} holds {} on chain and this wallet holds a note committing to {}",
+                    "leaf {} holds {} on chain and this wallet holds a note committing to {}. \
+                     Run `sync --rescan`, against a second node where there is one: this leaf is \
+                     below the watermark, so an ordinary sync starts above it and never reads it \
+                     again.",
                     note.leaf_index,
                     on_chain.to_hex(),
                     stored.commitment().to_hex()
@@ -2036,18 +2048,27 @@ pub struct SyncReport {
     /// Whether this pass read leaves and took nothing out of them.
     ///
     /// Ordinary on most passes: almost every leaf on the chain is somebody
-    /// else's. It is also exactly what one substituted ciphertext looks like,
-    /// and that is why the pass says it out loud. `Shielded::Ciphertexts(i)`
-    /// is the one per-leaf value nothing on chain binds to leaf `i`: the
-    /// commitment carries no ciphertext, and `ct_digest` binds the bytes only
-    /// inside the settlement extrinsic at inclusion, which a storage-only
-    /// reader never fetches. So a node with honest headers can answer a
-    /// stranger's bytes at this wallet's incoming payment, the AEAD does not
-    /// open, the leaf reads as somebody else's and the watermark is written
-    /// above it. The checkpoint fork walk does not recover it, because the
-    /// headers agree; a rescan against a second node does.
-    /// `docs/WALLET.md`, under "What a lying node can and cannot do", carries
-    /// the bound and the closure that would end it.
+    /// else's. It is also exactly what the two per-leaf values nothing on
+    /// chain binds look like, and that is why the pass says it out loud.
+    ///
+    /// The first is `Shielded::Ciphertexts(i)`: the commitment carries no
+    /// ciphertext, and `ct_digest` binds the bytes only inside the settlement
+    /// extrinsic at inclusion, which a storage-only reader never fetches. So a
+    /// node with honest headers can answer a stranger's bytes at this wallet's
+    /// incoming payment and the AEAD does not open.
+    ///
+    /// The second is the leaf's own index inside its aligned group of four.
+    /// `hash_node` sorts a node's children before hashing, so a published
+    /// `zkTreeRoot` commits to each group's multiset and to no order inside
+    /// it, and the same node can move that payment onto its block's coinbase
+    /// position, where a ciphertext is not owed and the coinbase rebuild
+    /// cannot open it.
+    ///
+    /// Either way the leaf reads as somebody else's and the watermark is
+    /// written above it. The checkpoint fork walk does not recover either,
+    /// because the headers agree; a rescan against a second node recovers
+    /// both. `docs/WALLET.md`, under "What a lying node can and cannot do",
+    /// carries the bound and the closure that would end it.
     pub scanned_and_received_nothing: bool,
     /// The node gate this sync bypassed, as the refusal it would have been.
     ///
@@ -2064,12 +2085,20 @@ pub struct SyncReport {
 /// See [`SyncReport::scanned_and_received_nothing`] for the bound. The
 /// sentence is here so the command-line wallet and `wallet-web` print one
 /// text, the way [`RESCAN_ADD_ONLY`] is shared.
+///
+/// It names both values the chain leaves unbound, because one rescan is the
+/// recovery for either: a substituted ciphertext and a leaf moved inside its
+/// own group of four produce the same reading, a leaf that opens for nobody.
 pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =
-    "a pass that reads leaves and receives nothing is the ordinary case, and it is also what one \
-     substituted ciphertext looks like: Shielded::Ciphertexts is the only per-leaf value nothing \
-     on chain binds to its leaf, so a node with honest headers can answer a stranger's bytes at \
-     an incoming payment and the leaf reads as somebody else's. If a payment was expected and is \
-     not here, run `sync --rescan` against a second node, which is the recovery.";
+    "a pass that reads leaves and receives nothing is the ordinary case, and it is also what a \
+     substituted or moved leaf looks like. Two per-leaf values are bound to a leaf by nothing on \
+     chain: the bytes at Shielded::Ciphertexts, and the leaf's own index inside its aligned group \
+     of four, because the tree sorts a node's children before hashing and the root therefore \
+     commits to each group's multiset rather than to an order. So a node with honest headers can \
+     answer a stranger's bytes at an incoming payment, or move that payment onto its block's \
+     coinbase position where no ciphertext is owed, and either way the leaf reads as somebody \
+     else's. If a payment was expected and is not here, run `sync --rescan` against a second \
+     node, which is the recovery for both.";
 
 /// What a rescan does not do, in one line, for the report and the CLI.
 ///
@@ -2194,7 +2223,9 @@ impl core::fmt::Display for NoteNotOnChain {
              `send` marks such a note off chain, so it keeps its secrets, leaves the unspent total \
              and is passed over by the next attempt, which spends what the chain does carry. Run \
              `sync` against a node at the current head: a sync that meets the commitment {} again \
-             moves the note to the leaf the chain now holds it at and puts it back.",
+             moves the note to the leaf the chain now holds it at and puts it back. If it does \
+             not, run `sync --rescan` against a second node: an ordinary sync starts at the \
+             watermark, so a leaf below it is never read again.",
             self.leaf_index,
             self.recorded_at_block,
             self.anchor_block,
