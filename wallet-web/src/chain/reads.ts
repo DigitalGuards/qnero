@@ -71,6 +71,28 @@ export async function fetchHead(context: ChainContext): Promise<Head> {
 }
 
 /**
+ * Follow the chain's head for as long as the caller wants it.
+ *
+ * A subscription rather than a poll, and the reason is the request stream
+ * rather than the traffic: a poll asks the node a question every few seconds
+ * for as long as the tab is open, which is a clock on how long this wallet
+ * watched. One subscribe and then pushes says the same thing once.
+ *
+ * It names nothing: every wallet on the chain gets the same headers.
+ */
+export async function watchHead(
+  context: ChainContext,
+  onHead: (height: number) => void,
+): Promise<() => void> {
+  const unsubscribe = await context.api.rpc.chain.subscribeNewHeads((header) => {
+    onHead(header.number.toNumber());
+  });
+  return () => {
+    unsubscribe();
+  };
+}
+
+/**
  * The canonical hash at a height, or `null` when this node has no block there.
  *
  * `null` is an ordinary answer for the checkpoint walk and not an error. It is

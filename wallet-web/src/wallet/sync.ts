@@ -87,10 +87,28 @@ export interface SyncCrypto {
     items: readonly { index: number; ciphertext: Uint8Array; commitment: string }[],
   ): Promise<(ScannedNote | null)[]>;
   /**
-   * The coinbase note this wallet's miner key mints at a height, rebuilt from
-   * the key rather than read out of a ciphertext.
+   * One batch of coinbase leaves, rebuilt.
+   *
+   * Batched for the same reason the decryption is: the chain mints one
+   * coinbase per block, so a scan covering N blocks meets N of these whoever
+   * they belong to, and one crossing per leaf is a cost that grows with the
+   * chain rather than with this wallet.
+   *
+   * `value` is the chain's, out of `Shielded::CoinbaseValues`, and it is the
+   * one the rebuild uses. A coinbase's amount is the chain's own arithmetic,
+   * hashed into a commitment over an `inner` the chain cannot open, and a
+   * payload beside it carries a value of zero.
    */
-  coinbaseNote(blockNumber: number, value: bigint, genesisHash: string): Promise<ScannedNote>;
+  coinbaseBatch(
+    items: readonly {
+      index: number;
+      blockNumber: number;
+      value: bigint;
+      genesisHash: string;
+      commitment: string;
+      ciphertext: Uint8Array | null;
+    }[],
+  ): Promise<(ScannedNote | null)[]>;
   /** `rho = H(RHO_ENTRY, block, index)`, for telling a shield from a spend output. */
   entryRho(blockNumber: number, entryIndex: bigint): Promise<string>;
 }
@@ -429,7 +447,13 @@ export async function runSync(
     // trip per batch rather than one per leaf.
     const BATCH = 64;
     const candidates = records.filter(
-      (record) => record.commitment !== null && record.ciphertext !== null,
+      (record) =>
+        record.commitment !== null &&
+        record.ciphertext !== null &&
+        // A coinbase leaf is rebuilt by the batch below, under the chain's own
+        // value. Sending it through the transfer rule as well would open it
+        // against the payload's value, which for a coinbase is zero.
+        record.coinbaseQuanta === null,
     );
     const decrypted = new Map<number, ScannedNote | null>();
     for (let start = 0; start < candidates.length; start += BATCH) {
@@ -452,6 +476,31 @@ export async function runSync(
       progress('scan', `${Math.min(start + BATCH, candidates.length)} of ${candidates.length} ciphertexts`);
     }
 
+    // The coinbase leaves, in the same shape and for the same reason.
+    const coinbases = records.filter(
+      (record) =>
+        record.commitment !== null && record.coinbaseQuanta !== null && record.blockNumber !== null,
+    );
+    const minted = new Map<number, ScannedNote | null>();
+    for (let start = 0; start < coinbases.length; start += BATCH) {
+      const slice = coinbases.slice(start, start + BATCH);
+      const answers = await crypto.coinbaseBatch(
+        slice.map((record) => ({
+          index: record.index,
+          blockNumber: record.blockNumber as number,
+          value: record.coinbaseQuanta as bigint,
+          genesisHash: genesis,
+          // Normalised: the module parses this as hex and `0x` is not hex.
+          commitment: normaliseHash(record.commitment as string),
+          ciphertext: record.ciphertext,
+        })),
+      );
+      slice.forEach((record, offset) => {
+        minted.set(record.index, answers[offset] ?? null);
+      });
+      progress('scan', `${Math.min(start + BATCH, coinbases.length)} of ${coinbases.length} coinbase leaves`);
+    }
+
     for (const record of records) {
       report.leavesScanned += 1;
       if (record.commitment === null) {
@@ -466,30 +515,21 @@ export async function runSync(
       if (record.coinbaseQuanta !== null) {
         // A block's coinbase note. Its value is public, because the chain
         // hashed it into a commitment over an `inner` it cannot open, and the
-        // rest is rebuilt from this wallet's own miner key. The commitment
-        // check decides, and the value inside any payload is ignored: a
-        // coinbase's amount is the chain's own arithmetic.
+        // rest is rebuilt from this wallet's own miner key, or from a payload
+        // under the chain's published value when somebody else minted it. The
+        // commitment check decides in both cases, and in both cases the value
+        // inside any payload is ignored: a coinbase's amount is the chain's
+        // own arithmetic. The rule is the module's; see `worker/core.ts`.
+        //
+        // Not this wallet's coinbase, or a corrupt miner key, is a `null`. The
+        // gap between `coinbaseLeaves` and `coinbaseReceived` is the only
+        // signal of the second one.
         isCoinbase = true;
         report.coinbaseLeaves += 1;
         if (record.blockNumber === null) {
           continue;
         }
-        const rebuilt = await crypto.coinbaseNote(
-          record.blockNumber,
-          record.coinbaseQuanta,
-          genesis,
-        );
-        if (normaliseHash(rebuilt.commitment) === commitment) {
-          received = rebuilt;
-        } else {
-          // Not this wallet's coinbase, or a corrupt miner key. The gap
-          // between `coinbaseLeaves` and `coinbaseReceived` is the only signal
-          // of the second one.
-          const fallback = decrypted.get(record.index) ?? null;
-          received = fallback !== null && normaliseHash(fallback.commitment) === commitment
-            ? fallback
-            : null;
-        }
+        received = minted.get(record.index) ?? null;
       } else {
         // A leaf with neither ciphertext nor coinbase value is skipped: a
         // pre-v1 wormhole transfer or a transparent reward leaf, and nothing

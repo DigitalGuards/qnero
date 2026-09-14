@@ -10,23 +10,32 @@ import { cn } from '../../utils/cn';
  * thing: something true about this wallet that is not an error and does not
  * stop anything. `tone="error"` is a refusal, and it is the only one that
  * carries `role="alert"`.
+ *
+ * `sensitive` marks a notice whose text came from the prover module rather
+ * than from this wallet. The module's own errors are forwarded as they are,
+ * and a plonky2 witness failure can name a note's amount or its position in
+ * the tree, so the mark is there for a screenshot pass and a bug-report
+ * template to key on: what is inside is for the wallet's owner.
  */
 export function Notice({
   children,
   tone = 'notice',
   className,
   testId,
+  sensitive = false,
 }: {
   children: ReactNode;
   tone?: 'notice' | 'error';
   className?: string;
   testId?: string;
+  sensitive?: boolean;
 }): ReactNode {
   const Icon = tone === 'error' ? AlertTriangle : Info;
   return (
     <div
       role={tone === 'error' ? 'alert' : 'status'}
       data-testid={testId}
+      data-sensitive={sensitive ? 'may name a note' : undefined}
       className={cn(
         'flex gap-2 rounded-panel border p-2 text-meta',
         tone === 'error'

@@ -44,18 +44,40 @@ export interface ProverLimits {
   chain_num_leaves: number;
 }
 
+/**
+ * What an account derivation hands back.
+ *
+ * The address and nothing else. The module derives `pk`, `ak` and `cvk` too,
+ * and `cvk` is viewing-tier secret: its holder picks this wallet's coinbase
+ * notes out of the tree. The page uses none of the three, so none of them
+ * crosses, and the one place a wallet means to show the miner key has its own
+ * request behind a dialog that says what it is.
+ */
 export interface ProverAccount {
   address: string;
-  pk: string;
-  ak: string;
-  /** Secret bearing: it picks this wallet's coinbase notes out of the tree. */
-  cvk: string;
 }
 
 export interface DecryptItem {
   index: number;
   ciphertext: Uint8Array;
   commitment: string;
+}
+
+/**
+ * One coinbase leaf to rebuild.
+ *
+ * `value` is the chain's, out of `Shielded::CoinbaseValues`, and it is the one
+ * that decides: a coinbase payload carries a value of zero, because the chain
+ * hashed its own arithmetic into the commitment. The ciphertext is the second
+ * way in, for a coinbase this wallet's miner key did not mint.
+ */
+export interface CoinbaseItem {
+  index: number;
+  blockNumber: number;
+  value: string;
+  genesisHash: string;
+  commitment: string;
+  ciphertext: Uint8Array | null;
 }
 
 export interface DecryptedNote {
@@ -123,6 +145,12 @@ export interface BuildAnswer {
   /** Whether the threaded module was used, and with how many threads. */
   threads: number;
   millis: number;
+  /**
+   * Whether the circuits were already resident, so `millis` is the first
+   * build's rather than this call's. A rebuild costs a quarter gigabyte of
+   * linear memory that never comes back: see `core.ts`.
+   */
+  cached: boolean;
   peakLinearMemoryBytes: number;
   degreeBits: { leaf: number; privateBatch: number };
 }
@@ -146,7 +174,7 @@ export type WorkerRequest =
   | { kind: 'addressIsValid'; address: string }
   | { kind: 'memoFits'; memo: string }
   | { kind: 'decryptBatch'; items: DecryptItem[] }
-  | { kind: 'coinbaseNote'; blockNumber: number; value: string; genesisHash: string }
+  | { kind: 'coinbaseBatch'; items: CoinbaseItem[] }
   | { kind: 'entryRho'; blockNumber: number; entryIndex: string }
   | { kind: 'noteDigests'; value: string; rho: string; r: string }
   | { kind: 'headerBlockHash'; anchor: Anchor }

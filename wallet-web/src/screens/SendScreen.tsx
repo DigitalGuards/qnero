@@ -249,7 +249,7 @@ export function SendScreen({
         </p>
 
         {error !== null && (
-          <Notice tone="error" className="mt-3" testId="send-error">
+          <Notice tone="error" className="mt-3" testId="send-error" sensitive>
             {error}
           </Notice>
         )}

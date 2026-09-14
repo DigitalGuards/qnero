@@ -11,10 +11,16 @@
  * [`ProverClient.terminate`] exists for exactly that trade and the settings
  * screen offers it by name. It is not automatic: a wallet that dropped its
  * circuits after every payment would charge twelve seconds for the next one.
+ *
+ * The worker is what holds that to one prover: `buildProver` is answered from
+ * cache after the first call, so a send asking for the circuits on every
+ * payment gets the same set rather than a fresh quarter gigabyte. See
+ * `core.ts`.
  */
 
 import type {
   BuildAnswer,
+  CoinbaseItem,
   DecryptItem,
   DecryptedNote,
   InitAnswer,
@@ -144,13 +150,16 @@ export class ProverClient {
     return this.call({ kind: 'decryptBatch', items });
   }
 
-  coinbaseNote(blockNumber: number, value: bigint, genesisHash: string): Promise<DecryptedNote> {
-    return this.call({
-      kind: 'coinbaseNote',
-      blockNumber,
-      value: value.toString(),
-      genesisHash,
-    });
+  /**
+   * A batch of coinbase leaves, in one crossing.
+   *
+   * The chain mints one coinbase per block, so a scan covering N blocks meets
+   * N of these whoever they belong to. One round trip per leaf is the cost the
+   * batched decryption exists to avoid, and it is a function of chain length
+   * rather than of this wallet's note count.
+   */
+  coinbaseBatch(items: CoinbaseItem[]): Promise<(DecryptedNote | null)[]> {
+    return this.call({ kind: 'coinbaseBatch', items });
   }
 
   entryRho(blockNumber: number, entryIndex: bigint): Promise<string> {

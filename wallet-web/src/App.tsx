@@ -182,13 +182,45 @@ export function App(): ReactNode {
     });
   }, []);
 
-  /** Open a connection, and say which of the four states it ended in. */
+  /**
+   * Open a connection, and then follow it.
+   *
+   * The state is not decided once here. The socket's own edges move it between
+   * `live` and `connecting` for the life of the tab, and the head subscription
+   * keeps the block number beside the chain name true: a wallet that read both
+   * at connect time and never again shows a green dot and a twenty-block-old
+   * height over a node that died, with a Sync button that cannot work.
+   */
   const openConnection = useCallback(
     async (endpoint: string): Promise<void> => {
       const current = session;
       setConnection({ kind: 'connecting', endpoint });
       try {
-        const context = await current.connect(endpoint);
+        const context = await current.connect(endpoint, {
+          onStatus: (kind) => {
+            setConnection((held) =>
+              held.endpoint === endpoint && (held.kind === 'live' || held.kind === 'connecting')
+                ? { ...held, kind }
+                : held,
+            );
+            if (kind === 'live') {
+              // The head subscription fires on the next block, and a chain
+              // that has just come back may be a while.
+              void fetchHead(current.context ?? context)
+                .then((head) => {
+                  setConnection((held) =>
+                    held.endpoint === endpoint ? { ...held, head: head.number } : held,
+                  );
+                })
+                .catch(() => undefined);
+            }
+          },
+          onHead: (height) => {
+            setConnection((held) =>
+              held.endpoint === endpoint ? { ...held, head: height } : held,
+            );
+          },
+        });
         const head = await fetchHead(context);
         setConnection({
           kind: 'live',
@@ -625,7 +657,7 @@ export function App(): ReactNode {
 
         <main id="main" className="space-y-3">
           {error !== null && (
-            <Notice tone="error" testId="app-error">
+            <Notice tone="error" testId="app-error" sensitive>
               {error}
             </Notice>
           )}
@@ -802,6 +834,24 @@ export function App(): ReactNode {
                       session.stopProver();
                       setCircuitsBuilt(false);
                       setProverRunning(false);
+                    }}
+                    onStartProver={() => {
+                      void (async (): Promise<void> => {
+                        if (config === null) {
+                          return;
+                        }
+                        setBusy(true);
+                        setError(null);
+                        try {
+                          setProverThreads(await session.restartProver(config));
+                          setProverRunning(session.prover.isRunning);
+                          setCircuitsBuilt(session.circuitsBuilt);
+                        } catch (startError) {
+                          setError((startError as Error).message);
+                        } finally {
+                          setBusy(false);
+                        }
+                      })();
                     }}
                     onForget={() => {
                       void forget();

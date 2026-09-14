@@ -30,6 +30,7 @@ export function SettingsScreen({
   onLock,
   onRescan,
   onStopProver,
+  onStartProver,
   onForget,
   proverThreads,
   proverRunning,
@@ -43,6 +44,7 @@ export function SettingsScreen({
   onLock: () => void;
   onRescan: () => void;
   onStopProver: () => void;
+  onStartProver: () => void;
   onForget: () => void;
   proverThreads: number;
   proverRunning: boolean;
@@ -157,8 +159,9 @@ export function SettingsScreen({
           </p>
           <p>
             The circuits hold most of a gigabyte of linear memory once built, and wasm linear memory
-            never shrinks. Stopping the worker is the only way to give it back, and the next payment
-            then pays the circuit build again.
+            never shrinks. Stopping the worker is the only way to give it back. Nothing can sync or
+            send while it is stopped, and starting it again loads the module afresh, so the next
+            payment pays the circuit build too.
           </p>
         </Prose>
         <div className="mt-3 flex items-center justify-between gap-2">
@@ -168,9 +171,12 @@ export function SettingsScreen({
           <Switch
             id="prover-resident"
             checked={proverRunning}
-            disabled={!proverRunning}
+            disabled={busy}
+            data-testid="prover-resident"
             onCheckedChange={(next) => {
-              if (!next) {
+              if (next) {
+                onStartProver();
+              } else {
                 onStopProver();
               }
             }}

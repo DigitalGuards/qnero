@@ -6,7 +6,8 @@
  * holds is the view of them.
  */
 
-import { connect, type ChainContext } from '../chain/api';
+import { connect, watchConnection, type ChainContext } from '../chain/api';
+import { watchHead } from '../chain/reads';
 import type { WalletConfig } from '../chain/config';
 import { ProverClient } from '../worker/client';
 import type { ProverAccount, ProverLimits } from '../worker/protocol';
@@ -36,6 +37,8 @@ export class Session {
   persisted = false;
   /** Whether the circuits are resident, which is what a payment waits on. */
   circuitsBuilt = false;
+  /** Subscriptions on the current connection, dropped when it is replaced. */
+  private watching: (() => void)[] = [];
 
   async openDatabase(): Promise<IDBDatabase> {
     if (this.db === null) {
@@ -62,13 +65,44 @@ export class Session {
     return answer.threads;
   }
 
-  async connect(endpoint: string): Promise<ChainContext> {
+  /**
+   * Connect, and follow both things that change under a live connection: the
+   * socket and the head.
+   *
+   * The listeners are how the page's status strip stays true. Without them the
+   * connection state is decided once, at the one connect that succeeded, and a
+   * dropped socket reads as a green dot over a block height that stopped
+   * moving twenty blocks ago.
+   */
+  async connect(
+    endpoint: string,
+    listeners: { onStatus: (kind: 'live' | 'connecting') => void; onHead: (height: number) => void },
+  ): Promise<ChainContext> {
     await this.disconnect();
-    this.context = await connect(endpoint);
-    return this.context;
+    const context = await connect(endpoint);
+    this.context = context;
+    this.watching.push(
+      watchConnection(context, {
+        onConnected: () => {
+          listeners.onStatus('live');
+        },
+        onDisconnected: () => {
+          listeners.onStatus('connecting');
+        },
+      }),
+    );
+    this.watching.push(await watchHead(context, listeners.onHead));
+    return context;
   }
 
   async disconnect(): Promise<void> {
+    for (const stop of this.watching.splice(0)) {
+      try {
+        stop();
+      } catch {
+        // A subscription on a socket that has already gone. Nothing to undo.
+      }
+    }
     if (this.context === null) {
       return;
     }
@@ -82,6 +116,25 @@ export class Session {
     this.store?.lock();
     this.account = null;
     await this.prover.lock().catch(() => undefined);
+  }
+
+  /**
+   * Start the worker again after it was stopped, and hand it the seed if this
+   * wallet is open.
+   *
+   * The seed is the part that is easy to forget: stopping the worker takes the
+   * seed with it, so a worker restarted without this one syncs to "this wallet
+   * is locked, so the worker holds no seed" while the page shows an unlocked
+   * wallet.
+   */
+  async restartProver(config: WalletConfig): Promise<number> {
+    const threads = await this.startProver(config);
+    const store = this.store;
+    if (store !== null && store.isUnlocked) {
+      const seed = await store.seed();
+      this.account = await this.prover.unlock(seed as Uint8Array<ArrayBuffer>);
+    }
+    return threads;
   }
 
   /**

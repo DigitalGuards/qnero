@@ -65,16 +65,29 @@ export function cryptoAdapter(prover: ProverClient): SyncCrypto {
             } satisfies ScannedNote),
       );
     },
-    coinbaseNote: async (blockNumber, value, genesisHash) => {
-      const answer = await prover.coinbaseNote(blockNumber, value, genesisHash);
-      return {
-        value: BigInt(answer.value),
-        rho: answer.rho,
-        r: answer.r,
-        commitment: answer.commitment,
-        nullifier: answer.nullifier,
-        memo: '',
-      };
+    coinbaseBatch: async (items) => {
+      const answers = await prover.coinbaseBatch(
+        items.map((item) => ({
+          index: item.index,
+          blockNumber: item.blockNumber,
+          value: item.value.toString(),
+          genesisHash: item.genesisHash,
+          commitment: item.commitment,
+          ciphertext: item.ciphertext,
+        })),
+      );
+      return answers.map((answer) =>
+        answer === null
+          ? null
+          : ({
+              value: BigInt(answer.value),
+              rho: answer.rho,
+              r: answer.r,
+              commitment: answer.commitment,
+              nullifier: answer.nullifier,
+              memo: answer.memo,
+            } satisfies ScannedNote),
+      );
     },
     entryRho: (blockNumber, entryIndex) => prover.entryRho(blockNumber, entryIndex),
   };

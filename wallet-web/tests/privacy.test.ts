@@ -179,7 +179,8 @@ function crypto(): SyncCrypto {
   return {
     decryptBatch: (items) =>
       Promise.resolve(items.map((item) => (item.index === OUR_LEAF ? ours : null))),
-    coinbaseNote: () => Promise.reject(new Error('this chain has no coinbase leaves in the fixture')),
+    coinbaseBatch: () =>
+      Promise.reject(new Error('this chain has no coinbase leaves in the fixture')),
     entryRho: () => Promise.resolve('00'.repeat(32)),
   };
 }

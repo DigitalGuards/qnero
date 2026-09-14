@@ -99,22 +99,36 @@ export interface ChainContext {
 export const CONNECT_DEADLINE_MS = 15_000;
 
 /**
+ * How long the provider waits before trying a dropped socket again.
+ *
+ * Not `false`. With auto-reconnect off, `WsProvider` rejects every request in
+ * flight on a close and then does nothing: the session is dead until the page
+ * is reloaded, and nothing on screen says so, because the app's own state
+ * still reads `live` from the one connect that succeeded. Every ordinary cause
+ * reaches this: a laptop sleeping, a network changing, a proxy reloading, a
+ * node restarting.
+ */
+export const RECONNECT_DELAY_MS = 2500;
+
+/**
  * Connect, or fail by the deadline.
  *
- * `WsProvider` retries forever on its own and `ApiPromise.create` never
- * settles while it does, so a wrong or down endpoint is a permanent
- * "connecting" with nothing said. The deadline turns the commonest deployment
- * mistake into a named failure.
+ * The provider retries an unreachable endpoint on its own and
+ * `ApiPromise.create` never settles while it does, so a wrong or down endpoint
+ * would be a permanent "connecting" with nothing said. The deadline turns the
+ * commonest deployment mistake into a named failure, and the retry behind it
+ * is what keeps a working endpoint working across a drop.
+ *
+ * The provider connects from its own constructor when a retry delay is set, so
+ * there is no `connect()` call here: a second one throws "WebSocket is already
+ * connected".
  */
 export async function connect(endpoint: string): Promise<ChainContext> {
-  const provider = new WsProvider(endpoint, false);
+  const provider = new WsProvider(endpoint, RECONNECT_DELAY_MS);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      (async (): Promise<void> => {
-        await provider.connect();
-        await provider.isReady;
-      })(),
+      provider.isReady,
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           reject(new Error(`${endpoint} did not answer within ${CONNECT_DEADLINE_MS / 1000} s`));
@@ -122,7 +136,7 @@ export async function connect(endpoint: string): Promise<ChainContext> {
       }),
     ]);
     const api = await ApiPromise.create({ provider, noInitWarn: true, types: CHAIN_TYPES });
-    return describe(api, provider);
+    return describe(api, provider, endpoint);
   } catch (error) {
     await provider.disconnect().catch(() => undefined);
     throw error;
@@ -131,6 +145,29 @@ export async function connect(endpoint: string): Promise<ChainContext> {
       clearTimeout(timer);
     }
   }
+}
+
+/**
+ * Follow the socket, which is the only thing that knows whether the node is
+ * still there.
+ *
+ * A wallet that decides it is connected once, at the one connect that
+ * succeeded, shows a green dot and a frozen block height over a dead socket
+ * and offers a Sync button that cannot work. The provider emits both edges;
+ * this passes them on and hands back the way to stop listening.
+ */
+export function watchConnection(
+  context: ChainContext,
+  handlers: { onConnected?: () => void; onDisconnected?: () => void },
+): () => void {
+  const connected = (): void => handlers.onConnected?.();
+  const disconnected = (): void => handlers.onDisconnected?.();
+  const offConnected = context.provider.on('connected', connected);
+  const offDisconnected = context.provider.on('disconnected', disconnected);
+  return () => {
+    offConnected();
+    offDisconnected();
+  };
 }
 
 /** A little-endian constant value out of metadata, as a bigint. */
@@ -190,7 +227,7 @@ function extrinsicVersionOf(metadata: { extrinsic: unknown }): number {
   throw new Error("this runtime's metadata declares no extrinsic format version");
 }
 
-function describe(api: ApiPromise, provider: WsProvider): ChainContext {
+function describe(api: ApiPromise, provider: WsProvider, endpoint: string): ChainContext {
   const properties = api.registry.getChainProperties();
   const metadata = api.runtimeMetadata.asLatest;
 
@@ -233,8 +270,24 @@ function describe(api: ApiPromise, provider: WsProvider): ChainContext {
   return {
     api,
     provider,
-    send: async <T,>(method: string, params: unknown[]): Promise<T> =>
-      provider.send<T>(method, params),
+    // The one seam. A request made while the socket is down comes back with
+    // polkadot-js's own internal string, which names the method and not the
+    // endpoint, so a reader sees "WebSocket is not connected" and no clue
+    // which node that was.
+    send: async <T,>(method: string, params: unknown[]): Promise<T> => {
+      try {
+        return await provider.send<T>(method, params);
+      } catch (error) {
+        if (!provider.isConnected) {
+          throw new Error(
+            `${endpoint} is not answering: the connection to it dropped. The wallet retries it ` +
+              `every ${RECONNECT_DELAY_MS / 1000} s, and the status beside the chain name says ` +
+              'whether it is back.',
+          );
+        }
+        throw error;
+      }
+    },
     specName: api.runtimeVersion.specName.toString(),
     specVersion: api.runtimeVersion.specVersion.toNumber(),
     transactionVersion: api.runtimeVersion.transactionVersion.toNumber(),

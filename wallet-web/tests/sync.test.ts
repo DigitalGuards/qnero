@@ -91,13 +91,13 @@ function fakeCrypto(leaves: readonly FakeLeaf[]): SyncCrypto {
   const byIndex = new Map(leaves.map((leaf) => [leaf.index, leaf.note]));
   return {
     decryptBatch: (items) => Promise.resolve(items.map((item) => byIndex.get(item.index) ?? null)),
-    coinbaseNote: (blockNumber) => {
-      const leaf = leaves.find((entry) => entry.blockNumber === blockNumber);
-      if (leaf?.note == null) {
-        throw new Error('this fixture has no coinbase note at that height');
-      }
-      return Promise.resolve(leaf.note);
-    },
+    coinbaseBatch: (items) =>
+      Promise.resolve(
+        items.map((item) => {
+          const leaf = leaves.find((entry) => entry.blockNumber === item.blockNumber);
+          return leaf?.note ?? null;
+        }),
+      ),
     entryRho: () => Promise.resolve('00'.repeat(32)),
   };
 }
