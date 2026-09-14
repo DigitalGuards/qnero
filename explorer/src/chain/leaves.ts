@@ -117,14 +117,20 @@ export async function fetchLeaves(
   return out;
 }
 
-/** One leaf, read on its own. */
-export async function fetchLeaf(
-  context: ChainContext,
-  index: number,
-  at: string,
-): Promise<LeafRecord | null> {
-  const [leaf] = await fetchLeaves(context, index, index + 1, at);
-  return leaf ?? null;
+export interface CommitmentMatch {
+  /** The leaf the commitment sits at, or null when the walk did not reach it. */
+  index: number | null;
+  /**
+   * The aligned window the match came out of, as `[start, end)`.
+   *
+   * A caller that wants more than the index reads this whole range back rather
+   * than the one leaf. A point read would name that leaf to whoever runs the
+   * node, which is the per-viewer leaf-interest log this site does not produce;
+   * a window is the same request every other batch of the scan already made.
+   */
+  window: { start: number; end: number } | null;
+  scanned: number;
+  exhausted: boolean;
 }
 
 /**
@@ -140,7 +146,7 @@ export async function findCommitment(
   at: string,
   limit: number,
   onProgress?: (scanned: number) => void,
-): Promise<{ index: number | null; scanned: number; exhausted: boolean }> {
+): Promise<CommitmentMatch> {
   const leaves = storage(context, 'zkTree', 'leaves');
   const target = commitment.toLowerCase();
   let scanned = 0;
@@ -154,12 +160,17 @@ export async function findCommitment(
     const values = await queryAt(context, [...keys.values()], at);
     for (let index = end - 1; index >= start; index -= 1) {
       if ((values.get(keys.get(index) ?? '') ?? '').toLowerCase() === target) {
-        return { index, scanned: scanned + (end - index), exhausted: start === 0 };
+        return {
+          index,
+          window: { start, end },
+          scanned: scanned + (end - index),
+          exhausted: start === 0,
+        };
       }
     }
     scanned += end - start;
     end = start;
     onProgress?.(scanned);
   }
-  return { index: null, scanned, exhausted: end === 0 };
+  return { index: null, window: null, scanned, exhausted: end === 0 };
 }

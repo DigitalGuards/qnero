@@ -30,28 +30,26 @@ export function Home(): ReactNode {
   // Walking the whole nullifier key space is twenty-five paged requests and the
   // set only grows, so re-walking it on every imported block would stack a walk
   // per block and throw away all but the last. The walk is pinned to a baseline
-  // block that moves once per recent-list window, and the blocks after it are
+  // height that moves once per recent-list window, and the blocks after it are
   // counted from the SlotSettled events the recent list has already decoded.
-  // Resolving the baseline hash costs one call per head so a reorg cannot leave
-  // the count pinned to an orphan, while the walk itself is keyed by the hash
-  // and re-runs only when that block really changes.
+  // The baseline height is the whole key: resolving its hash inside the read
+  // keeps the head out of the key, which is what stops an imported block from
+  // restarting the walk. A reorg that replaces the baseline leaves the count
+  // off by the settlements in the replaced blocks until the window moves.
   const recentDepth = bundle?.config.recentBlocks ?? 0;
   const baselineNumber =
     headNumber === null || recentDepth <= 0 ? null : Math.floor(headNumber / recentDepth) * recentDepth;
-  const baselineHash = useAsync(
-    bundle === null || baselineNumber === null || headHash === null
-      ? null
-      : `baseline:${baselineNumber}:${headHash}`,
+  const counted = useAsync(
+    bundle === null || baselineNumber === null ? null : `nullifiers:${baselineNumber}`,
     bundle === null || baselineNumber === null
       ? null
-      : () => blockHashAt(bundle.context, baselineNumber),
-  );
-  const baselineAt = baselineHash.status === 'ready' ? baselineHash.value : null;
-  const counted = useAsync(
-    bundle === null || baselineAt === null ? null : `nullifiers:${baselineAt}`,
-    bundle === null || baselineAt === null
-      ? null
-      : (live) => countNullifiers(bundle.context, baselineAt, bundle.config.nullifierPageLimit, live),
+      : async (live) => {
+          const at = await blockHashAt(bundle.context, baselineNumber);
+          if (at === null) {
+            throw new Error(`this chain has no block at height ${baselineNumber}`);
+          }
+          return countNullifiers(bundle.context, at, bundle.config.nullifierPageLimit, live);
+        },
   );
   const seedNumber =
     bundle === null || bundle.constants === null || headNumber === null

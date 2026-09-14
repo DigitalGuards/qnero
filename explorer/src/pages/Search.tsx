@@ -3,20 +3,14 @@ import { useState, type ReactNode, type SyntheticEvent } from 'react';
 import { useChain } from '../app/chainContext';
 import { href, navigate } from '../app/router';
 import { useAsync } from '../app/useAsync';
-import { fetchLeaf, findCommitment } from '../chain/leaves';
+import { fetchLeaves, findCommitment } from '../chain/leaves';
 import { blockForHash, classifyQuery, findExtrinsic, findNullifierBlock } from '../chain/search';
 import { fetchSnapshot, nullifierSeen } from '../chain/state';
 import { formatCount } from '../lib/units';
 import { Empty, ErrorBox, Field, Fields, Loading, Notice, Panel } from '../components/ui';
 
 export function Search({ query }: { query: string }): ReactNode {
-  const [text, setText] = useState(query);
   const kind = classifyQuery(query);
-
-  const onSubmit = (event: SyntheticEvent): void => {
-    event.preventDefault();
-    navigate({ name: 'search', query: text.trim() });
-  };
 
   return (
     <>
@@ -28,27 +22,10 @@ export function Search({ query }: { query: string }): ReactNode {
         </p>
       </header>
 
-      <Panel>
-        <form className="row row--search" onSubmit={onSubmit} role="search">
-          <label className="field__label" htmlFor="search-input">
-            Query
-          </label>
-          <input
-            id="search-input"
-            className="input"
-            value={text}
-            onChange={(event) => {
-              setText(event.target.value);
-            }}
-            placeholder="height, or 0x followed by 64 hex characters"
-            spellCheck={false}
-            autoComplete="off"
-          />
-          <button className="button button--action" type="submit">
-            Look up
-          </button>
-        </form>
-      </Panel>
+      {/* Keyed by the route's query, so the box follows the route. A box that
+          kept the previous value across a back button would leave the consent
+          notice below naming 32 bytes that are not the ones the lookup sends. */}
+      <SearchBox key={query} initial={query} />
 
       {query === '' ? null : kind === 'unknown' ? (
         <Empty>
@@ -63,6 +40,37 @@ export function Search({ query }: { query: string }): ReactNode {
         <HashResult key={query.toLowerCase()} hash={query.toLowerCase()} />
       )}
     </>
+  );
+}
+
+function SearchBox({ initial }: { initial: string }): ReactNode {
+  const [text, setText] = useState(initial);
+  const onSubmit = (event: SyntheticEvent): void => {
+    event.preventDefault();
+    navigate({ name: 'search', query: text.trim() });
+  };
+  return (
+    <Panel>
+      <form className="row row--search" onSubmit={onSubmit} role="search">
+        <label className="field__label" htmlFor="search-input">
+          Query
+        </label>
+        <input
+          id="search-input"
+          className="input"
+          value={text}
+          onChange={(event) => {
+            setText(event.target.value);
+          }}
+          placeholder="height, or 0x followed by 64 hex characters"
+          spellCheck={false}
+          autoComplete="off"
+        />
+        <button className="button button--action" type="submit">
+          Look up
+        </button>
+      </form>
+    </Panel>
   );
 }
 
@@ -105,9 +113,13 @@ function HashResult({ hash }: { hash: string }): ReactNode {
     <>
       <Notice>
         <p>
-          A nullifier lookup builds a map key out of the 32 bytes above and asks the node for it,
-          so whoever runs the node learns that someone asked about that value. It runs only when
-          you ask for it below, and so do the two scans, which read public ranges and name nothing.
+          This page is answering for <span className="mono">{hash}</span>.
+        </p>
+        <p>
+          A nullifier lookup builds a map key out of those 32 bytes and asks the node for it, so
+          whoever runs the node learns that someone asked about that value. It runs only when you
+          ask for it below, and so do the two scans, which read leaves and events in ranges and
+          name no single one of them.
         </p>
       </Notice>
 
@@ -149,18 +161,25 @@ function HashResult({ hash }: { hash: string }): ReactNode {
  */
 function NullifierLookup({ hash }: { hash: string }): ReactNode {
   const { bundle, head } = useChain();
-  const [run, setRun] = useState(false);
+  // The block the question was asked at, captured on the click. Keying this on
+  // the live head instead would re-send the lookup on every imported block, so
+  // one consent would keep naming the value to the node for as long as the tab
+  // stayed open, and every re-run would drop the answer back to loading and
+  // throw away the walk below it.
+  const [askedAt, setAskedAt] = useState<{ hash: string; number: number } | null>(null);
   const result = useAsync(
-    !run || bundle === null || head === null ? null : `nullifier:${hash}:${head.hash}`,
-    !run || bundle === null || head === null
+    bundle === null || askedAt === null ? null : `nullifier:${hash}`,
+    bundle === null || askedAt === null
       ? null
-      : () => nullifierSeen(bundle.context, hash, head.hash),
+      : () => nullifierSeen(bundle.context, hash, askedAt.hash),
   );
+  // The key holds no head, so a ready answer stays ready and the walk mounted
+  // under it is never unmounted halfway through by a newly imported block.
+  const answered = result.status === 'ready' ? result.value : null;
   if (bundle === null) {
     return null;
   }
   const drift = bundle.context.storageDrift;
-  const seen = result.status === 'ready' ? result.value : null;
 
   return (
     <>
@@ -171,18 +190,21 @@ function NullifierLookup({ hash }: { hash: string }): ReactNode {
             here would answer &ldquo;not seen&rdquo; for every value with no error anywhere:{' '}
             {drift.join('; ')}.
           </ErrorBox>
-        ) : !run ? (
+        ) : askedAt === null ? (
           <>
             <p>
               This asks the node for one key built from these 32 bytes, which names the value to
-              whoever runs it. Membership proves some note was spent and says nothing about which
-              note it was.
+              whoever runs it. It runs once, against the block the chain is at when you ask.
+              Membership proves some note was spent and says nothing about which note it was.
             </p>
             <button
               className="button"
               type="button"
+              disabled={head === null}
               onClick={() => {
-                setRun(true);
+                if (head !== null) {
+                  setAskedAt({ hash: head.hash, number: head.header.number });
+                }
               }}
             >
               Check the settled nullifier set
@@ -195,11 +217,13 @@ function NullifierLookup({ hash }: { hash: string }): ReactNode {
             <Fields>
               <Field
                 label="In the settled nullifier set"
-                value={result.status === 'error' ? 'not answered' : seen === true ? 'seen' : 'not seen'}
+                value={
+                  result.status === 'error' ? 'not answered' : answered === true ? 'seen' : 'not seen'
+                }
                 note={
                   result.status === 'error'
                     ? 'the node did not answer, so this is not an absence'
-                    : 'presence proves some note was spent and says nothing about which'
+                    : `as of block ${formatCount(askedAt.number)}: presence proves some note was spent and says nothing about which`
                 }
               />
             </Fields>
@@ -207,7 +231,7 @@ function NullifierLookup({ hash }: { hash: string }): ReactNode {
           </>
         )}
       </Panel>
-      {seen === true ? <NullifierBlock hash={hash} /> : null}
+      {answered === true ? <NullifierBlock hash={hash} /> : null}
     </>
   );
 }
@@ -291,10 +315,20 @@ function CommitmentScan({ hash }: { hash: string }): ReactNode {
             bundle.config.searchWindowBlocks * 4,
             setScanned,
           );
-          if (found.index === null) {
+          if (found.index === null || found.window === null) {
             return { index: null, scanned: found.scanned, exhausted: found.exhausted, block: null };
           }
-          const leaf = await fetchLeaf(bundle.context, found.index, head.hash);
+          // The window the match came out of, read back whole, and the row
+          // picked here. Asking for the one leaf would name it to whoever runs
+          // the node, which is the correlation this site exists not to hand
+          // over, and it would do it on the page that says it does not.
+          const window = await fetchLeaves(
+            bundle.context,
+            found.window.start,
+            found.window.end,
+            head.hash,
+          );
+          const leaf = window.find((row) => row.index === found.index);
           return {
             index: found.index,
             scanned: found.scanned,
@@ -312,7 +346,8 @@ function CommitmentScan({ hash }: { hash: string }): ReactNode {
         <>
           <p>
             The tree is keyed by leaf index, so finding a commitment means reading leaves newest
-            first. This reads commitments only and says nothing about which one matters.
+            first. Every request here asks for a range of leaves, so none of them names the one
+            that matters.
           </p>
           <button
             className="button"
