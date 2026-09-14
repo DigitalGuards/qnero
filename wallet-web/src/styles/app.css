@@ -22,7 +22,17 @@
 
 @theme inline {
   --color-deep: var(--bg-deep);
-  --color-body: var(--bg-body);
+  /*
+   * The page ground, named `ground` rather than `body`.
+   *
+   * A colour token and a size token may not share a name. `--color-body`
+   * and `--text-body` both generate the class `text-body`, the colour won,
+   * and every `text-body` in this app set a colour instead of the 13 px
+   * body size: a filled button's label took `--bg-body` and looked right
+   * only because that value is near black in the dark theme, and would have
+   * moved with any retune of the page ground.
+   */
+  --color-ground: var(--bg-body);
   --color-panel: var(--bg-panel);
   --color-raised: var(--bg-raised);
   --color-field: var(--bg-field);
