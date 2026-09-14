@@ -79,7 +79,7 @@ deploy time; nothing about a chain is compiled in.
 | `rpcEndpoint` | Required. Must be `ws://` or `wss://`: the live head is a subscription and subscriptions are WebSocket only |
 | `chainName` | Required. The name in the rail and the home page heading |
 | `recentBlocks` | Blocks in the home list and in the rolling block-time window. Default 12 |
-| `searchWindowBlocks` | How far back a search by extrinsic hash or nullifier walks before giving up. Default 512 |
+| `searchWindowBlocks` | How far back a search by extrinsic hash or nullifier walks before giving up. Default 512. A walk that needs a block's events also needs the node's state at that block, and a node started without `--state-pruning archive` keeps only a few hundred blocks of it, so on a pruned node a walk ends at the bottom of that window and says so |
 | `nullifierPageLimit` | Pages of 1000 keys the nullifier count reads before reporting a floor instead of a total. Default 25 |
 
 A page served over `https` cannot open a `ws://` socket. Put the node behind
@@ -162,8 +162,9 @@ Each of these is a decision.
 - **It does not decode a settlement's anchor height.** The anchor is a public
   input inside the proof. The settlement page states the window the chain
   enforced, which is what the site can establish from chain state alone.
-- **No analytics, no fonts, no images, no CDN.** The only request the page makes
-  is to the configured node.
+- **No analytics, no fonts, no images, no CDN.** The only requests the page
+  makes are to the configured node and to the host serving the page, which
+  answers for `config.json` at startup and for the page's own assets.
 
 ## What it reads, and what that costs
 
@@ -172,15 +173,23 @@ is a bounded walk that says how far it looked.
 
 | Page | Reads |
 |---|---|
-| Home | One header, one runtime call per consensus constant, four storage values, and header, events and timestamp per recent block. Blocks are cached by hash, so a poll fetches only what is new |
-| Block | One body, one events blob, one timestamp |
+| Home | One header, four storage values, and one state decoration per recent block carrying that block's events and timestamp. Blocks are cached by hash, so a poll fetches only what is new. The three consensus constants are three runtime calls, made after the connection is published |
+| Block | One body and one state decoration |
 | Settlement from a block link | One body. From a bare hash, one body per block walked backwards, capped at `searchWindowBlocks` |
-| Search, nullifier | One point lookup on a constructed key, which names that nullifier to the node. The page says so before it runs one |
+| Search, nullifier | One point lookup on a constructed key, which names that nullifier to the node. The page prints that before it offers the button, and the lookup runs only on the button |
 | Search, commitment | `ZkTree::Leaves` newest first, 256 keys per request, capped |
-| Nullifier count | `state_getKeysPaged` at 1000 keys a page, capped by `nullifierPageLimit`, and reported as a floor when it hits the cap |
+| Nullifier count | `state_getKeysPaged` at 1000 keys a page, capped by `nullifierPageLimit`, and reported as a floor when it hits the cap. It is pinned to a baseline block that moves once per recent-list window, and the blocks after the baseline are counted from the settlement events the recent list already holds, so an imported block costs no new walk |
 
-Every one of these degrades rather than failing a page: a refused unsafe method
-or a missing runtime call empties a panel and leaves the rest readable.
+Every one of these degrades rather than failing a page. A refused unsafe method
+or a missing runtime call empties the fields that needed it and leaves the rest
+readable; a block whose state the node no longer keeps still renders its header
+and its body, with the panels that read events saying why they are empty; and a
+walk that reaches the bottom of a pruned state window ends as a bounded miss
+that names the boundary.
+
+A negative is never inferred from a failure. "Not in the settled nullifier set"
+is rendered only when the node answered, and a refused or drifted read reads as
+"not answered" instead, because the absence is the answer someone acts on.
 
 ## Two decoder seams worth knowing about
 
@@ -220,7 +229,8 @@ nice -n 19 npm run build
 
 `npm test` is vitest over the decoders: the settlement, coinbase and shield
 event shapes, the header and its digest, the extrinsic envelope, the `U512`
-difficulty, the units, and the seed-height rule. The fixtures in
+difficulty, the units, the seed-height and rotation rules, and the route
+grammar. The fixtures in
 `tests/fixtures/` were captured from a `--dev --tmp` node that had shielded once
 and sent once, by:
 

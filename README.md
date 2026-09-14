@@ -2,7 +2,7 @@
 
 Monero's principles, rebuilt without elliptic curves: every transfer shielded, sender, recipient and amount hidden, no transparent option for users, and no elliptic curve anywhere in the transaction path. Emission is proof of work, with no stake, no validators, no foundation keys in consensus.
 
-**Pre-alpha, devnet only, and no part of Qnero itself has been audited.** The repository is two days of commits, 2026-09-11 and 2026-09-12. What runs today is a local `--dev --tmp` chain and a CLI wallet, exercised end to end on one workstation. No public testnet, no seed node, no explorer, no GUI. Key storage is dev grade. The wallet docs say it plainly: use this on a dev chain and nowhere else. The design draft estimates 10 to 12 weeks to a private testnet.
+**Pre-alpha, devnet only, and no part of Qnero itself has been audited.** The repository is two days of commits, 2026-09-11 and 2026-09-12. What runs today is a local `--dev --tmp` chain and a CLI wallet, exercised end to end on one workstation. No public testnet, no seed node, no hosted explorer, no GUI. Key storage is dev grade. The wallet docs say it plainly: use this on a dev chain and nowhere else. The design draft estimates 10 to 12 weeks to a private testnet.
 
 ## For Monero users
 
