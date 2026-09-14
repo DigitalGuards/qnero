@@ -192,8 +192,16 @@ pub fn prove_transfer(prover: &WalletProver, request: &TransferRequest) -> Resul
         memory: MemorySpan::end(before),
     });
 
+    // Both copies are made before the clock starts. `verify` consumes the
+    // proof and the proof is needed afterwards for its bytes, and
+    // `batch_verifier_data` clones the common circuit data on every call, so
+    // leaving either inside the timed region reports a deep copy of 150908
+    // bytes as part of a stage named for the verify. Measured, that copy was
+    // about a third of the wasm figure.
+    let verifier = prover.batch_verifier_data();
+    let to_verify = batch.clone();
     let before = MemorySpan::start();
-    let (verified, millis) = timed(|| prover.batch_verifier_data().verify(batch.clone()));
+    let (verified, millis) = timed(|| verifier.verify(to_verify));
     verified
         .map_err(|_| anyhow::anyhow!("this wallet's own private-batch proof does not verify"))?;
     phases.push(PhaseReport {

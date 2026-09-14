@@ -1,8 +1,12 @@
 //! The native side of the M8 measurement.
 //!
-//! Same crate, same request JSON and same code path as the browser run, on
-//! this machine's own CPU, so the two columns in `docs/BENCH.md` differ in the
-//! target and in nothing else.
+//! Same crate, same code path and the same fixture seeds the browser worker
+//! uses, on this machine's own CPU. Three things still differ from the browser
+//! column and `docs/BENCH.md` states them beside the tables: this side builds
+//! the circuits once and proves nine times in one warm process, where the
+//! harness launches a browser per run and proves once; and on both sides every
+//! `prepare` draws a fresh randomized dummy input and fresh KEM randomness, so
+//! no two proofs here are the same work either.
 //!
 //! ```text
 //! RAYON_NUM_THREADS=1 nice -n 19 cargo test -j 2 --release \
@@ -21,14 +25,21 @@ use qnero_prover_wasm::prove::{
 use qnero_prover_wasm::request::TransferRequest;
 
 /// Nine, because of the leaf. The FRI challenge carries 16 grinding bits and
-/// the search for them is a geometric random variable, so a leaf prove at this
-/// degree is dominated by how lucky the grind was; `docs/BENCH.md` says to
-/// compare means over the same sample count for exactly this circuit. Three
-/// samples put the leaf anywhere in a 2x spread, which is enough to invent a
-/// wasm/native ratio that does not exist. The private batch is steady to
-/// within a percent and pays nine runs of about ten seconds each for the
-/// leaf's sake.
+/// the search for them is a geometric random variable, and the witness moves
+/// under it on every run: `prepare` randomizes the dummy input and the KEM
+/// randomness, so each leaf grinds a different transcript. Nine samples of
+/// that still leave a standard error of several percent on the mean, which is
+/// why `docs/BENCH.md` publishes the leaf ratio as a range and the two heavy
+/// stages as point figures. Three samples put the leaf anywhere in a 2x
+/// spread, which is enough to invent a wasm/native ratio that does not exist.
+/// The private batch is steady to within a percent and pays nine runs of about
+/// ten seconds each for the leaf's sake.
 const RUNS: usize = 9;
+
+/// The seeds `www/worker.js` holds fixed (`SENDER_SEED`, `RECIPIENT_SEED`), so
+/// the fixed half of the request is the same witness on both sides of the
+/// comparison. `request(0x31)` is sender `31..31`, recipient `32..32`.
+const BROWSER_SEED_TAG: u8 = 0x31;
 
 fn request(tag: u8) -> TransferRequest {
     let json = synthetic_transfer_request(
@@ -54,12 +65,30 @@ fn mean(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len() as f64
 }
 
+/// The standard error of the mean, so a row that moves between reruns can be
+/// read against how well this sample pins its own mean. The leaf needs it; the
+/// private batch's is a fraction of a percent.
+fn stderr(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let mean = mean(values);
+    let variance = values
+        .iter()
+        .map(|value| (value - mean) * (value - mean))
+        .sum::<f64>()
+        / (values.len() - 1) as f64;
+    (variance / values.len() as f64).sqrt()
+}
+
 fn line(label: &str, values: &[f64]) {
     let min = values.iter().copied().fold(f64::INFINITY, f64::min);
     let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     println!(
-        "{label}: mean {:.1} ms, median {:.1} ms, min {:.1} ms, max {:.1} ms, runs {:?}",
+        "{label}: mean {:.1} ms (stderr {:.1}), median {:.1} ms, min {:.1} ms, max {:.1} ms, \
+         runs {:?}",
         mean(values),
+        stderr(values),
         median(values.to_vec()),
         min,
         max,
@@ -88,9 +117,9 @@ fn native_single_thread_at_the_chain_slot_count() {
     let mut verify = Vec::with_capacity(RUNS);
     let mut proof_bytes = 0usize;
 
-    for run in 0..RUNS {
-        let submission =
-            prove_transfer(&built.prover, &request(0x30 + run as u8)).expect("the transfer proves");
+    let request = request(BROWSER_SEED_TAG);
+    for _ in 0..RUNS {
+        let submission = prove_transfer(&built.prover, &request).expect("the transfer proves");
         for phase in &submission.report.phases {
             match phase.phase {
                 "leaf_prove" => leaf.push(phase.millis),
@@ -121,8 +150,9 @@ fn native_zero_knowledge_leaf() {
     let mut proof_bytes = 0usize;
     let mut degree_bits = 0usize;
 
-    for run in 0..RUNS {
-        let report = prove_zk_leaf(&request(0x40 + run as u8)).expect("the ZK leaf proves");
+    let request = request(BROWSER_SEED_TAG);
+    for _ in 0..RUNS {
+        let report = prove_zk_leaf(&request).expect("the ZK leaf proves");
         assert!(report.zero_knowledge, "this is the blinded configuration");
         build.push(report.build_millis);
         prove.push(report.prove_millis);
