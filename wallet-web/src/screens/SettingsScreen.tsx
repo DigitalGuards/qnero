@@ -197,7 +197,7 @@ export function SettingsScreen({
           </p>
         </Prose>
         <div className="mt-3 flex flex-wrap gap-2">
-          <Button data-testid="lock-wallet" onClick={onLock}>
+          <Button data-testid="lock-wallet" disabled={!proverRunning} onClick={onLock}>
             <Lock className="size-3.5" aria-hidden />
             Lock
           </Button>
@@ -206,6 +206,12 @@ export function SettingsScreen({
             Rescan from leaf zero
           </Button>
         </div>
+        {!proverRunning && (
+          <p className="mt-2 text-meta text-muted" data-testid="lock-needs-prover">
+            Locking is unavailable while the prover is stopped. Unlocking hands the worker the
+            seed, so the switch above goes back on first.
+          </p>
+        )}
         <p className="mt-2 text-meta text-muted">
           A rescan drops this wallet&apos;s watermark and its record of which blocks it has seen,
           then walks the node&apos;s whole tree again. It runs add only: spent flags and orphaned

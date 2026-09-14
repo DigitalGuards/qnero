@@ -98,6 +98,18 @@ export class ProverClient {
         pending.reject(error);
       }
       this.waiting.clear();
+      // And the worker goes with them. A module script that 404s or throws at
+      // the top level leaves a worker that can never answer, and keeping it
+      // installed made the first failure the only one reported: every later
+      // request posted into it and hung with no rejection and no timeout, so
+      // the Sync button stayed disabled over an empty error area for the life
+      // of the tab. `stopped` is deliberately not set: this is a failure
+      // rather than the operator's switch, so the next call spawns a fresh
+      // worker and gets a real answer or a real error.
+      worker.terminate();
+      if (this.worker === worker) {
+        this.worker = null;
+      }
     };
     this.worker = worker;
     return worker;
@@ -146,11 +158,26 @@ export class ProverClient {
    * Hand the seed over and keep nothing.
    *
    * The buffer is transferred, so the page's `Uint8Array` is detached the
-   * moment this returns and there is no copy left on this side to erase. The
-   * caller still zeroes whatever it decoded the seed out of.
+   * moment the message is posted and there is no copy left on this side to
+   * erase. The caller still zeroes whatever it decoded the seed out of.
+   *
+   * Two paths reach here without posting anything: a prover that was stopped,
+   * and a worker that cannot be spawned. On those the transfer never happens
+   * and the caller is holding a live 32-byte spend key it believes was
+   * detached, so this erases it. The `try` is for the ordinary path, where the
+   * buffer is detached by the time a later rejection arrives and `fill` throws.
    */
   unlock(seed: Uint8Array<ArrayBuffer>): Promise<ProverAccount> {
-    return this.call<ProverAccount>({ kind: 'unlock', seed }, [seed.buffer]);
+    return this.call<ProverAccount>({ kind: 'unlock', seed }, [seed.buffer]).catch(
+      (error: unknown) => {
+        try {
+          seed.fill(0);
+        } catch {
+          // Already detached: the transfer happened and this side holds nothing.
+        }
+        throw error;
+      },
+    );
   }
 
   /**

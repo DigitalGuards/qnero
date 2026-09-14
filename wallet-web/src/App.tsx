@@ -392,6 +392,20 @@ export function App(): ReactNode {
         const key = await deriveKey(passphrase, phase.meta.kdf.saltHex);
         const store = WalletStore.unlocked(db, phase.meta.address, key);
         const seed = await store.seed();
+        // A prover somebody switched off in settings is started again here
+        // rather than refused. Locking after stopping it left the wallet with
+        // one reachable screen, an unlock that refused with "turn it back on
+        // in settings", and no way to reach settings: the advice named a
+        // screen the locked phase forbids, and the other button on that screen
+        // erases the wallet.
+        if (!current.prover.isRunning) {
+          if (config === null) {
+            throw new Error('this wallet has not finished loading its configuration');
+          }
+          setProverThreads(await current.startProver(config));
+          setProverRunning(current.prover.isRunning);
+          setCircuitsBuilt(current.circuitsBuilt);
+        }
         const account = await current.prover.unlock(seed as Uint8Array<ArrayBuffer>);
         if (account.address !== phase.meta.address) {
           // The post-decrypt identity check. A valid envelope from another
@@ -425,7 +439,7 @@ export function App(): ReactNode {
         setBusy(false);
       }
     },
-    [phase, refresh],
+    [config, phase, refresh],
   );
 
   const sync = useCallback(
@@ -611,6 +625,25 @@ export function App(): ReactNode {
     [address, proverThreads, refresh],
   );
 
+  /**
+   * Everything on screen that belongs to one wallet and one moment.
+   *
+   * One function rather than a line per field in `forget` and another in
+   * `lock`, because the failure was a field that had been added to one and not
+   * the other. `forget` promises that it clears every record, and the last
+   * payment's recipient, amount, both nullifiers and extrinsic hash sat in
+   * React state on the Send tab afterwards: one click and a wallet created
+   * after the erase rendered the erased wallet's payment.
+   */
+  const clearWalletView = useCallback((): void => {
+    setSpendProgress(null);
+    setSpendResult(null);
+    setSpendError(null);
+    setSyncStage(null);
+    setError(null);
+    setUnlockError(null);
+  }, []);
+
   const forget = useCallback(async (): Promise<void> => {
     const current = session;
     const store = current.store;
@@ -631,8 +664,9 @@ export function App(): ReactNode {
     setRejected([]);
     setBalances(EMPTY_BALANCES);
     setSyncReport(null);
+    clearWalletView();
     setPhase({ kind: 'landing' });
-  }, []);
+  }, [clearWalletView]);
 
   const lock = useCallback(async (): Promise<void> => {
     const current = session;
@@ -640,11 +674,15 @@ export function App(): ReactNode {
     await current.lock();
     setStoreUnlocked(false);
     setMinerKey(null);
+    // The same reset a wipe does. A locked wallet that unlocks onto the last
+    // payment it made, on a screen whose own notice says its text may name a
+    // note, is the lock showing what the lock was for.
+    clearWalletView();
     await refresh();
     if (meta !== undefined) {
       setPhase({ kind: 'locked', meta });
     }
-  }, [refresh]);
+  }, [clearWalletView, refresh]);
 
   const feeFloor = useMemo(() => {
     const context = session.context;
