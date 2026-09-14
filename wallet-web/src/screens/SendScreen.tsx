@@ -75,6 +75,17 @@ export function SendScreen({
   // React compiler can reason about, and it re-renders this field alone.
   const memo = useWatch({ control: form.control, name: 'memo' });
   const [elapsed, setElapsed] = useState(0);
+  /**
+   * Which phase is running, and what the clock read when it started.
+   *
+   * The bar needs the phase's own elapsed time rather than the run's: see
+   * `progressFraction`. The worker reports a stage and no timestamp, so the
+   * boundary is this component's first render after the stage changed.
+   */
+  const [phase, setPhase] = useState<{ index: number; startedAt: number }>({
+    index: -1,
+    startedAt: 0,
+  });
 
   // The elapsed clock is an external system this component subscribes to, so
   // the effect starts and stops the interval and nothing else.
@@ -98,15 +109,26 @@ export function SendScreen({
     setElapsed(0);
   }
 
+  const current = running ? PHASES.findIndex((step) => step.key === progress?.stage) : -1;
+  if (phase.index !== current) {
+    setPhase({ index: current, startedAt: running ? elapsed : 0 });
+  }
+
   if (result !== null) {
     return <SendResultView result={result} onDismiss={onDismiss} />;
   }
 
   if (running) {
-    const current = PHASES.findIndex((phase) => phase.key === progress?.stage);
     const expectedMillis = expectedSeconds * 1000;
     // The estimate stops being quoted the moment it is wrong. Two numbers in
     // one panel that disagree are worse than one number and an admission.
+    //
+    // Both sides of this comparison are the same interval: the clock started
+    // at the button press and the expectation is what a payment takes from the
+    // button press to a settled block. They used to be the run's clock against
+    // a proving-only figure, so the admission fired about halfway through every
+    // correct payment and the number it withdrew was out by about a factor of
+    // two.
     const overdue = elapsed > expectedMillis;
     return (
       <Panel title="Sending">
@@ -116,8 +138,8 @@ export function SendScreen({
             {overdue ? (
               <>
                 This is longer than this browser expected
-                {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}; the worker
-                is still proving.
+                {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}; nothing has
+                failed, and the list below says where it is.
               </>
             ) : (
               <>
@@ -125,7 +147,8 @@ export function SendScreen({
                   ? "This browser's last payment took about "
                   : 'The published figure for one payment is about '}
                 {expectedSeconds} seconds
-                {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}.
+                {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}, from this
+                button to a settled block.
               </>
             )}{' '}
             <strong className="text-ink">Leave this tab open.</strong>
@@ -135,14 +158,17 @@ export function SendScreen({
           <div
             className="h-full bg-accent-fill transition-[width] duration-300"
             style={{
-              width: `${Math.min(100, progressFraction(current, elapsed, expectedMillis) * 100)}%`,
+              width: `${Math.min(
+                100,
+                progressFraction(current, elapsed - phase.startedAt, expectedMillis) * 100,
+              )}%`,
             }}
           />
         </div>
         <ul className="mt-3 list-none space-y-1 p-0 text-meta" data-testid="send-phases">
-          {PHASES.map((phase, index) => (
+          {PHASES.map((step, index) => (
             <li
-              key={phase.key}
+              key={step.key}
               className={
                 index < current
                   ? 'flex justify-between text-muted'
@@ -152,7 +178,7 @@ export function SendScreen({
               }
               data-state={index < current ? 'done' : index === current ? 'running' : 'waiting'}
             >
-              <span>{phase.label}</span>
+              <span>{step.label}</span>
               <span>{index < current ? 'done' : index === current ? '…' : ''}</span>
             </li>
           ))}

@@ -31,7 +31,7 @@ import { loadConfig, type WalletConfig } from './chain/config';
 import { fetchHead } from './chain/reads';
 import { chainAdapter, cryptoAdapter } from './app/adapters';
 import { readEndpoint, writeEndpoint } from './app/endpoint';
-import { readMeasuredProveSeconds, writeMeasuredProveSeconds } from './app/proverMode';
+import { readMeasuredSendSeconds, writeMeasuredSendSeconds } from './app/proverMode';
 import { Session, type ConnectionState } from './app/session';
 import { Notice } from './components/UI/Notice';
 import { Panel } from './components/UI/Panel';
@@ -114,8 +114,12 @@ export function App(): ReactNode {
     endpoint: '',
   });
   const [proverThreads, setProverThreads] = useState(1);
-  /** What the last payment on this machine cost, in seconds, or null. */
-  const [measuredProveSeconds, setMeasuredProveSeconds] = useState<number | null>(null);
+  /**
+   * What the last payment on this machine cost end to end, in seconds, or
+   * null. The send button to a settled block, which is what the sending
+   * screen's own clock measures.
+   */
+  const [measuredSendSeconds, setMeasuredSendSeconds] = useState<number | null>(null);
   const [circuitsBuilt, setCircuitsBuilt] = useState(false);
   // Mirrors of session fields a screen reads. The session is a module
   // singleton and React does not re-render for a field on one, so the two that
@@ -301,7 +305,7 @@ export function App(): ReactNode {
         }
         setProverThreads(threads);
         setProverRunning(session.prover.isRunning);
-        setMeasuredProveSeconds(readMeasuredProveSeconds(threads));
+        setMeasuredSendSeconds(readMeasuredSendSeconds(threads));
         const meta = await session.loadMeta();
         if (stopped()) {
           return;
@@ -541,6 +545,9 @@ export function App(): ReactNode {
       setSpendRunning(true);
       setSpendError(null);
       setSpendResult(null);
+      // The clock the sending screen shows starts at this button, so the
+      // figure it quotes is measured from here too.
+      const startedAt = performance.now();
       try {
         const stored = await store.notes();
         const candidates = [];
@@ -587,9 +594,12 @@ export function App(): ReactNode {
         );
         setSpendResult(result);
         // What the sending screen quotes next time. The published figure is
-        // one workstation's; this one is the machine the reader is on.
-        writeMeasuredProveSeconds(proverThreads, result.proveMillis);
-        setMeasuredProveSeconds(readMeasuredProveSeconds(proverThreads));
+        // one workstation's; this one is the machine the reader is on. The
+        // whole send rather than `result.proveMillis`: a payment is a circuit
+        // build, two proofs, a submission and a wait for a block, and the
+        // screen that quotes this prints it beside a clock measuring all five.
+        writeMeasuredSendSeconds(proverThreads, performance.now() - startedAt);
+        setMeasuredSendSeconds(readMeasuredSendSeconds(proverThreads));
         await refresh();
       } catch (sendError) {
         setSpendError((sendError as Error).message);
@@ -848,12 +858,12 @@ export function App(): ReactNode {
                       // it was out by a factor of two on this workstation,
                       // which the sending screen then printed beside its own
                       // elapsed clock. See `app/proverMode.ts`.
-                      measuredProveSeconds ??
+                      measuredSendSeconds ??
                       (proverThreads > 1
-                        ? (config?.expectedProveSeconds.threaded ?? 11)
-                        : (config?.expectedProveSeconds.single ?? 38))
+                        ? (config?.expectedSendSeconds.threaded ?? 23)
+                        : (config?.expectedSendSeconds.single ?? 55))
                     }
-                    expectedFrom={measuredProveSeconds === null ? 'published' : 'measured'}
+                    expectedFrom={measuredSendSeconds === null ? 'published' : 'measured'}
                     checkAddress={(candidate) => session.prover.addressIsValid(candidate)}
                     circuitsBuilt={circuitsBuilt}
                     proverThreads={proverThreads}

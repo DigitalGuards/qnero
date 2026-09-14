@@ -35,12 +35,25 @@ const TOTAL_WEIGHT = PHASES.reduce((sum, phase) => sum + phase.weight, 0);
  * How far along the bar is: everything finished, plus what the running phase
  * has spent of its own share.
  *
+ * `millisInPhase` is the clock since this phase started, and `expectedMillis`
+ * is what the whole payment is expected to take, so the phase's own budget is
+ * its weight of that. Both of those are load bearing. The elapsed clock of the
+ * whole send over the whole send's expectation was neither: it crawled to 11%
+ * through a circuit build that is a fifth of the payment, jumped fifty-eight
+ * points in one frame when proving started, then saturated at the clamp and
+ * sat still for the last ten seconds. A bar that jumps and then freezes is the
+ * exact reading the weights were introduced to prevent.
+ *
  * The running phase's own progress comes from the clock rather than from the
  * worker, which reports a stage and not a fraction, so the bar keeps moving
  * while the longest phase is busy. It is clamped below the next boundary, so
  * it never claims a phase is done before it is.
  */
-export function progressFraction(current: number, elapsedMillis: number, expectedMillis: number): number {
+export function progressFraction(
+  current: number,
+  millisInPhase: number,
+  expectedMillis: number,
+): number {
   if (current < 0) {
     return 0;
   }
@@ -49,7 +62,7 @@ export function progressFraction(current: number, elapsedMillis: number, expecte
   if (phase === undefined) {
     return 1;
   }
-  const within =
-    expectedMillis > 0 ? Math.min(0.95, Math.max(0, elapsedMillis / expectedMillis)) : 0;
+  const budget = expectedMillis * (phase.weight / TOTAL_WEIGHT);
+  const within = budget > 0 ? Math.min(0.95, Math.max(0, millisInPhase / budget)) : 0;
   return (done + phase.weight * within) / TOTAL_WEIGHT;
 }

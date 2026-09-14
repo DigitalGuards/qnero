@@ -39,14 +39,20 @@ export function readThreadCap(search: string = globalThis.location.search): numb
  * After that the screen quotes this machine. It is `localStorage` rather than
  * the store because it is a convenience per browser, it is worthless on
  * another machine, and a wallet that has been locked has no store to read.
+ *
+ * What is stored is the whole send: the wall clock from the send button to a
+ * settled block, which is the interval the sending screen's own clock measures
+ * and therefore the only figure that can sit beside it without contradicting
+ * it. The key says so, because the earlier one held the proof's own milliseconds
+ * and quoting those against that clock made every correct payment overdue.
  */
-const MEASURED_KEY = 'qnero-wallet-prove-seconds';
+const MEASURED_KEY = 'qnero-wallet-send-seconds';
 
 function measuredKey(threads: number): string {
   return `${MEASURED_KEY}-${threads > 1 ? 'threaded' : 'single'}`;
 }
 
-export function readMeasuredProveSeconds(threads: number): number | null {
+export function readMeasuredSendSeconds(threads: number): number | null {
   try {
     const stored = localStorage.getItem(measuredKey(threads));
     if (stored === null) {
@@ -59,7 +65,7 @@ export function readMeasuredProveSeconds(threads: number): number | null {
   }
 }
 
-export function writeMeasuredProveSeconds(threads: number, millis: number): void {
+export function writeMeasuredSendSeconds(threads: number, millis: number): void {
   if (!Number.isFinite(millis) || millis <= 0) {
     return;
   }

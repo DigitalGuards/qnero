@@ -20,7 +20,13 @@ export interface WalletConfig {
   numLeaves: number;
   /**
    * What one payment is expected to cost in this browser, in seconds, per
-   * module.
+   * module, measured from the send button to a settled block.
+   *
+   * That interval rather than the proof's, because it is the interval the
+   * reader is in: the sending screen prints this beside its own elapsed clock,
+   * which starts at the button. A proving-only figure there was exceeded about
+   * halfway through every correct payment, so the one sentence the wallet
+   * offers about how long a wait will be withdrew itself every time.
    *
    * Two numbers rather than one. The threaded module proves in about a third
    * of the single-threaded one's time (`docs/BENCH.md`, M10), and a page that
@@ -28,14 +34,15 @@ export interface WalletConfig {
    * threads to expect three times the wait they were about to have. A single
    * number in `config.json` is still read, as both.
    */
-  expectedProveSeconds: { threaded: number; single: number };
+  expectedSendSeconds: { threaded: number; single: number };
 }
 
 const DEFAULTS = {
   wasmBase: 'wasm/',
   numLeaves: 6,
-  // The M10 table's `proveTransfer` rows, rounded.
-  expectedProveSeconds: { threaded: 11, single: 38 },
+  // The M10 table's "Send to settled" rows after the review fixes, rounded:
+  // 21.6, 25.6 and 23.6 s threaded, 55.4 s on one thread (`docs/BENCH.md`).
+  expectedSendSeconds: { threaded: 23, single: 55 },
 } as const;
 
 function readNumber(source: Record<string, unknown>, key: string, fallback: number): number {
@@ -74,30 +81,30 @@ export function parseConfig(raw: unknown): WalletConfig {
     chainName,
     wasmBase: wasmBase ?? DEFAULTS.wasmBase,
     numLeaves: readNumber(source, 'numLeaves', DEFAULTS.numLeaves),
-    expectedProveSeconds: readExpectation(source['expectedProveSeconds']),
+    expectedSendSeconds: readExpectation(source['expectedSendSeconds']),
   };
 }
 
 /** One number for both modules, or one per module, or neither. */
 function readExpectation(value: unknown): { threaded: number; single: number } {
   if (value === undefined) {
-    return DEFAULTS.expectedProveSeconds;
+    return DEFAULTS.expectedSendSeconds;
   }
   if (typeof value === 'number') {
     if (!Number.isFinite(value) || value <= 0) {
-      throw new Error('config.json: expectedProveSeconds must be a positive number');
+      throw new Error('config.json: expectedSendSeconds must be a positive number');
     }
     return { threaded: value, single: value };
   }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(
-      'config.json: expectedProveSeconds must be a number or {threaded, single} in seconds',
+      'config.json: expectedSendSeconds must be a number or {threaded, single} in seconds',
     );
   }
   const source = value as Record<string, unknown>;
   return {
-    threaded: readNumber(source, 'threaded', DEFAULTS.expectedProveSeconds.threaded),
-    single: readNumber(source, 'single', DEFAULTS.expectedProveSeconds.single),
+    threaded: readNumber(source, 'threaded', DEFAULTS.expectedSendSeconds.threaded),
+    single: readNumber(source, 'single', DEFAULTS.expectedSendSeconds.single),
   };
 }
 

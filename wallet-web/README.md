@@ -78,7 +78,7 @@ testnet and nothing about a chain is compiled in.
   "chainName": "Qnero devnet",
   "wasmBase": "wasm/",
   "numLeaves": 6,
-  "expectedProveSeconds": { "threaded": 11, "single": 38 }
+  "expectedSendSeconds": { "threaded": 23, "single": 55 }
 }
 ```
 
@@ -90,12 +90,16 @@ testnet and nothing about a chain is compiled in.
   runtime's embedded verifier. A proof built at another N has a public-input
   length that verifier cannot read, and the refusal arrives after the whole
   proving cost.
-- `expectedProveSeconds` is what this build tells somebody to expect while a
-  payment proves, per module, from the M10 table in `docs/BENCH.md`. The page
-  prints the figure for the module it is actually running, because the threaded
-  one proves in about a third of the time and a single figure beside a live
-  thread count is wrong for one of the two. A plain number is still read, as
-  both.
+- `expectedSendSeconds` is what this build tells somebody to expect while a
+  payment runs, per module, from the "Send to settled" column of the M10 table
+  in `docs/BENCH.md`. That interval rather than the proof's, because the
+  sending screen prints this beside a clock that starts at the send button: a
+  proving-only figure there is exceeded about halfway through every correct
+  payment. After the first payment the screen quotes what this machine actually
+  took instead. The page prints the figure for the module it is running,
+  because the threaded one proves in about a third of the time and a single
+  figure beside a live thread count is wrong for one of the two. A plain number
+  is still read, as both.
 
 `?prover=single` in the URL pins the single-threaded module on an origin that
 could run the threaded one. It is how both rows in `docs/BENCH.md` are measured
