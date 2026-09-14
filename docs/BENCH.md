@@ -709,16 +709,113 @@ panic and the runner writes no fixed-name file for a stale run to occupy.
 - **A phone.** The 2 to 4 factor is a floor with a peak-clock ratio under it. A
   device test on a mid-range Android and on an iPhone is what replaces it, and
   the iOS answer may be that the tab is reclaimed before it finishes.
-- **Threads.** The single-threaded wasm number is the one that misses the
+- **Threads.** ~~The single-threaded wasm number is the one that misses the
   target, and M3 measured about 3.1x from four native threads. Whether
-  wasm threads deliver that is unmeasured, and `docs/DESIGN.md` section 8
-  carries what trying would cost.
+  wasm threads deliver that is unmeasured.~~ **Measured at M10: 3.36x from
+  four threads, at the same peak memory.** See the M10 section.
 - **The module over a real network.** The cold-start figure covers init,
   circuit build and one payment over loopback. Three megabytes uncompressed, no
   `wasm-opt` pass, and no measurement of what that costs on a mobile link or of
   what a service worker holding it would save.
-- **`wasm-opt`.** Neither the size nor the speed after a `wasm-opt -O` pass is
-  known.
+- **`wasm-opt`.** ~~Neither the size nor the speed after a `wasm-opt -O` pass
+  is known.~~ **Sized at M10:** 18% of the raw single-threaded module and 49%
+  of the threaded one, 3% and 10% compressed. The speed effect is still
+  unmeasured, and both shipped modules have been through the pass since, so
+  every browser figure in the M10 section is an optimised one.
 - **Scanning at chain scale.** `decryptNote` is measured only as part of the
   round-trip test. A wallet scanning thousands of ciphertexts per sync is a
   different budget and nothing here bounds it.
+
+# M10: the browser wallet, threaded and single threaded (2026-09-14)
+
+M8 measured one browser prover on one thread and left three things unmeasured
+by name: threads, `wasm-opt`, and what a payment costs end to end rather than
+in a harness. M10 is a wallet rather than a harness, so all three are measured
+here the way a person would meet them: in `wallet-web`'s own Playwright suite,
+against a `--dev --tmp` node mining on the same box, from pressing Send to a
+settled block.
+
+That last clause is why these numbers are not directly comparable with M8's.
+The harness ran alone; this runs beside a RandomX miner at one thread, a
+Substrate node, a preview server and the test runner, on the same workstation.
+The single-threaded row is 37.6 s where M8's harness measured 32.8 s, and the
+difference is the rest of the machine.
+
+## One payment, in the wallet
+
+Two invocations of one suite, each against its own fresh chain, one browser at
+a time:
+
+```
+cd wallet-web
+nice -n 19 npx playwright test                      # the threaded module
+QNERO_PROVER=single nice -n 19 npx playwright test  # the single-threaded one
+```
+
+`?prover=single` is what the second one sets. The preview origin is
+cross-origin isolated either way, so the difference is the module and the pool
+rather than the headers.
+
+| | threaded, 4 threads | single threaded | ratio |
+|---|---|---|---|
+| `proveTransfer` (leaf, private batch, verify) | **11.2 s** | **37.6 s** | 3.36x |
+| Send pressed to settled block | 24.6 s | 53.4 s | 2.17x |
+| Peak linear memory | 917.6 MiB | 910.2 MiB | 1.01x |
+| Proof | 150,908 bytes | 150,908 bytes | 1.00x |
+
+The pool is `min(navigator.hardwareConcurrency, 4)`, and this box reports 20,
+so the threaded column is four threads.
+
+**Threads deliver what M3 measured natively.** The open question M8 left was
+whether wasm threads reach the 3.1x that four native threads bought. They
+reach 3.36x, and the extra is the miner's contention falling on the serial run
+harder than on the parallel one rather than a claim that wasm threads beat
+native ones.
+
+**The memory did not move.** 917.6 MiB against 910.2 MiB. Four threads share
+one linear memory and each reserves an 8 MiB stack, which is what the 7 MiB is.
+A threaded prover is not a memory tradeoff at this size, which is the answer
+that matters for a phone: M8's peak stands.
+
+**What the other 13 seconds are.** The whole-send figure carries the circuit
+build (about 4.5 s threaded), the anchor read and its header check, a local
+rebuild of the whole commitment tree, the submission, and the wait for a block.
+A dev chain at a 12 s target block time contributes most of the remainder, and
+it is the one part a faster prover cannot shorten.
+
+## `wasm-opt -O`, both modules
+
+Measured by running `wasm-bindgen` into a scratch directory and optimising a
+copy, so the before and after are the same build.
+
+| module | raw | raw after `-O` | gzip | gzip after `-O` |
+|---|---|---|---|---|
+| single threaded | 3,117,321 | 2,551,705 (-18.1%) | 753,401 | 729,045 (-3.2%) |
+| threaded | 5,632,049 | 2,854,132 (-49.3%) | 861,576 | 774,119 (-10.2%) |
+
+The threaded module halves because `-Z build-std` compiles a `std` that has
+never been through an optimiser, and the single-threaded one uses the shipped
+`std`, which has. Over the wire the two end up 45 KB apart compressed, so
+threading costs about six percent of transfer for 3.36x of clock.
+
+The M8 section's module size of 3,069,517 bytes was this crate before the
+wallet surface: `noteDigests`, `coinbaseNote`, `treePath`, `headerBlockHash`,
+`walletLimits` and the rest add about 48 KB unoptimised, and `wasm-opt` takes
+the shipped module below the old unoptimised one either way.
+
+Both build scripts run the pass when binaryen is on `PATH` and say so when it
+is not, because a size pass is not a correctness pass and a clone without
+binaryen should still produce a working module.
+
+## What M10 leaves unmeasured
+
+- **A phone.** Still the 2 to 4 factor with no device under it. Threads make
+  the arithmetic comfortable rather than closing it: 11.2 s at 4x is 45 s, and
+  a phone with four usable cores is the assumption inside that.
+- **Scanning at chain scale.** The wallet's sync reads every leaf and tries
+  every ciphertext, and this suite's chain is tens of blocks deep. Nothing here
+  bounds a sync against a chain with a million leaves, and the batching
+  constants (64 leaves per query, 1000 keys per page) are the CLI's rather than
+  a measured optimum.
+- **The module over a real network.** Everything above is loopback.
+

@@ -1028,6 +1028,58 @@ Two of the default tests run the wallet against a scriptable JSON-RPC node in
   conflict set is one candidate at its largest member's value, spends that
   member, and reports every member spent once the shared nullifier settles.
 
+## The browser wallet (M10)
+
+`wallet-web/` is the same wallet in a page, and it holds to the rules above
+rather than relaxing them for the browser. Its own reference is
+`wallet-web/README.md`; what follows is what differs from this CLI and why.
+
+**The rules that are identical.** A sync never names a nullifier: the settled
+set is paged whole through `state_getKeysPaged` and every spent decision is
+local. A spend never names a leaf: Merkle paths are rebuilt from
+`ZkTree::Leaves` read as a contiguous range at the anchor block, and
+`zkTree_getMerkleProof` is not reachable at all, because there is no
+`--merkle-rpc` in the browser and a lint fence refuses every spelling of the
+call. The node gates run in the same order with the same refusals: genesis
+binding recorded by the first operation that commits, the checkpoint-hash fork
+walk over at most 16 checkpoints, the leaf-count gate, and a rescan that is
+add-only and never bypasses the chain check. The scan pins every read of a pass
+to one block hash and reads the same four keys per leaf in batches of 64. The
+fee floor, the memo pad, the two-input selection with its tie on the lowest
+leaf index, the conflict-set rule and the anchor-at-the-head rule are the same
+rules, ported line for line.
+
+The property that no request names one of this wallet's own values is asserted
+rather than asserted-in-prose: `wallet-web/tests/privacy.test.ts` drives the
+real read layer through a recording transport and checks the calls themselves,
+because no assertion over an answer can tell a paged set from forty point
+lookups.
+
+**What the browser adds.** Key storage that is not dev grade in the way this
+CLI's is: the seed and each note's `rho`, `r`, `nullifier` and `memo` are
+sealed with AES-256-GCM under a PBKDF2-SHA-256 key at 600,000 iterations, a
+fresh IV per record per write, each ciphertext bound to its own slot with
+additional data. What stays in the clear is deliberate and stated on the page:
+commitment, leaf index, block, value, origin, spent and the checkpoints, which
+is what lets a locked wallet still show a balance and still sync. It is a
+choice rather than an oversight, and a threat model that wants the value graph
+hidden encrypts those too and then needs the passphrase to sync.
+
+**What the browser cannot do.** It cannot shield. Entry into the pool is a
+signed extrinsic under the FIPS 204 ML-DSA-87 context, the wasm module exports
+no signing, and this crate's `extrinsic.rs`, `fee.rs`, `scale.rs` and
+`select.rs` are not wasm-clean. So `shield` stays a command-line step and the
+browser wallet is funded by a `send` from one, or by a node configured with its
+miner key. The browser can predict and recognise a shield: `entryRho(block,
+index)` and `Shielded::EntryCount` are both exported.
+
+**What the browser costs.** A payment is a circuit build and two proofs in wasm
+rather than in native code, which `docs/BENCH.md` measures at a 2.8x to 3.6x
+penalty per stage. The wallet prints the expectation beside the elapsed clock
+while it proves, so a slow machine reads as slow rather than as stuck, and the
+circuits stay resident afterwards because dropping them would charge the next
+payment for the build again.
+
 ## Provenance
 
 `quantus-cli` 2.2.2 was read while this was written and **no code was copied
