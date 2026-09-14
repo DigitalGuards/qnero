@@ -13,13 +13,13 @@ use qnero_runtime::{
 	genesis_config_presets::treasury_signer_seed, Balances, Executive, Multisig, RuntimeCall,
 	System,
 };
-use qp_dilithium_crypto::Dilithium65Pair;
+use qp_dilithium_crypto::Dilithium87Pair;
 use sp_core::Pair;
 use sp_runtime::traits::IdentifyAccount;
 
 #[test]
 fn treasury_signer_seed_covers_create_and_first_proposal() {
-	let proposer_pair = Dilithium65Pair::from_seed_slice(&[61u8; 32]).expect("valid seed");
+	let proposer_pair = Dilithium87Pair::from_seed_slice(&[61u8; 32]).expect("valid seed");
 	let proposer = proposer_pair.public().into_account();
 	let signers = vec![proposer.clone(), TestCommons::account_id(2), TestCommons::account_id(3)];
 

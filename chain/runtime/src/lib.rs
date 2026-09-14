@@ -10,10 +10,11 @@ pub mod apis;
 mod benchmarks;
 pub mod configs;
 
-pub use qp_dilithium_crypto::{
-	Dilithium65Pair, Dilithium65Public, Dilithium65Signature, Dilithium65SignatureWithPublic,
-	Dilithium87Public, Dilithium87Signature, DilithiumSignatureScheme,
-};
+// ML-DSA-87 is the transparent entry's only signature scheme. The upstream
+// `DilithiumSignatureScheme` enum still carries a second variant, and
+// `runtime/src/extrinsic.rs` is the consensus rule that refuses it; nothing
+// re-exports that variant's types from here.
+pub use qp_dilithium_crypto::{Dilithium87Public, Dilithium87Signature, DilithiumSignatureScheme};
 
 use alloc::vec::Vec;
 use sp_core::U512;
@@ -32,6 +33,7 @@ pub use pallet_timestamp::Call as TimestampCall;
 #[cfg(any(feature = "std", test))]
 pub use sp_runtime::BuildStorage;
 
+pub mod extrinsic;
 pub mod genesis_config_presets;
 pub mod governance;
 pub mod transaction_extensions;
@@ -90,7 +92,11 @@ impl_opaque_keys! {
 // layout under an unchanged version decodes with the stale shape, succeeds and
 // is silently wrong, and nothing in the node reports it. 101 is the M6 review
 // pass, which added a `pallet-shielded` error variant and changed three event
-// layouts across `pallet-shielded` and `pallet-mining-rewards`.
+// layouts across `pallet-shielded` and `pallet-mining-rewards`. 103 is the
+// consensus rule in `runtime/src/extrinsic.rs`: the transparent entry admits
+// ML-DSA-87 and refuses ML-DSA-65. That rule changes which extrinsics are
+// valid, so it moves `spec_version`; it changes no byte of the signed extrinsic
+// encoding and no entry of the metadata, so `transaction_version` stays at 7.
 // `the_runtime_identity_is_pinned` in `tests/call_filter.rs` is the tripwire.
 //
 // Bump `impl_version` when the emitted wasm changes under an unchanged
@@ -109,7 +115,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
 	spec_name: alloc::borrow::Cow::Borrowed("qnero"),
 	impl_name: alloc::borrow::Cow::Borrowed("qnero-node"),
 	authoring_version: 1,
-	spec_version: 102,
+	spec_version: 103,
 	impl_version: 2,
 	apis: apis::RUNTIME_API_VERSIONS,
 	transaction_version: 7,
@@ -226,8 +232,13 @@ pub type TxExtension = (
 );
 
 /// Unchecked extrinsic type as expected by this runtime.
-pub type UncheckedExtrinsic =
-	generic::UncheckedExtrinsic<Address, RuntimeCall, Signature, TxExtension>;
+///
+/// This is [`extrinsic::QneroUncheckedExtrinsic`], a SCALE-transparent wrapper
+/// around the upstream generic extrinsic whose `Checkable` implementation
+/// carries one consensus rule: the transparent entry admits ML-DSA-87 and
+/// refuses ML-DSA-65 with `InvalidTransaction::BadSigner`. Read that module
+/// before changing this line.
+pub use extrinsic::QneroUncheckedExtrinsic as UncheckedExtrinsic;
 
 /// The payload being signed in transactions.
 pub type SignedPayload = generic::SignedPayload<RuntimeCall, TxExtension>;

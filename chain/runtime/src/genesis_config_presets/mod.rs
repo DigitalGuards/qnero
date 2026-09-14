@@ -717,6 +717,57 @@ mod tests {
 		assert!(seed_tech_collective(&[]).is_ok());
 	}
 
+	/// Every account a preset derives from a key is an ML-DSA-87 account, which
+	/// is the one scheme the transparent entry admits (`runtime/src/extrinsic.rs`).
+	/// A helper moved to the other variant of `DilithiumSignatureScheme` would
+	/// hash to a different `AccountId32`, so pinning each derivation to the
+	/// ML-DSA-87 pair for its public seed is what catches it.
+	///
+	/// What this cannot cover, said plainly so the coverage is not read wider
+	/// than it is: the Planck and mainnet accounts are SS58 literals decoded by
+	/// `account_from_ss58`, and both variants hash into the same 32-byte
+	/// account, so a literal carries no variant to assert on. Only a
+	/// key-derived account can carry one.
+	#[test]
+	fn every_key_derived_preset_account_is_ml_dsa_87() {
+		let ml_dsa_87 = |seed: [u8; 32]| -> AccountId {
+			Dilithium87Pair::from_seed_slice(&seed)
+				.expect("static seed is valid")
+				.into_account()
+		};
+		// The five public seeds every dev and Heisenberg account comes from.
+		let known: Vec<AccountId> = (0u8..5).map(|i| ml_dsa_87([i; 32])).collect();
+
+		for account in dilithium_default_accounts()
+			.into_iter()
+			.chain(dilithium_extra_collective_members())
+			.chain(heisenberg_treasury_signers())
+			.chain(development_tech_collective_seed())
+			.chain(heisenberg_tech_collective_seed())
+		{
+			assert!(
+				known.contains(&account),
+				"a preset derived {account:?} from a key that is not the ML-DSA-87 pair for one \
+				 of the public seeds [0u8; 32]..[4u8; 32]"
+			);
+		}
+
+		// Both development treasuries are multisigs over the first three of
+		// those signers, so pinning the signer set pins the treasury address.
+		assert_eq!(
+			development_treasury_account(),
+			Multisig::<crate::Runtime>::derive_multisig_address(&known[..3], 2, 0)
+		);
+		assert_eq!(
+			heisenberg_treasury_account(),
+			Multisig::<crate::Runtime>::derive_multisig_address(
+				&known[..3],
+				2,
+				HEISENBERG_TREASURY_MULTISIG_NONCE
+			)
+		);
+	}
+
 	#[test]
 	fn all_presets_meet_the_tech_collective_floor() {
 		for seed in [

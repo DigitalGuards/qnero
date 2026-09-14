@@ -95,7 +95,7 @@ impl TxWatch {
 					continue;
 				};
 
-				let from_account = match &uxt.preamble {
+				let from_account = match &uxt.0.preamble {
 					Preamble::Signed(addr, _, _) => match addr {
 						MultiAddress::Id(id) => Some(id.clone()),
 						other => {
@@ -106,7 +106,7 @@ impl TxWatch {
 					_ => None,
 				};
 
-				let transfers = extract_all_transfers(&uxt.function, 0);
+				let transfers = extract_all_transfers(&uxt.0.function, 0);
 				if transfers.is_empty() {
 					continue;
 				}

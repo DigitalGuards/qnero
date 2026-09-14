@@ -17,7 +17,7 @@ use qnero_runtime::{
 	ReversibleTransfers, Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin, System,
 	UncheckedExtrinsic, EXISTENTIAL_DEPOSIT, MILLI_UNIT, UNIT,
 };
-use qp_dilithium_crypto::Dilithium65Pair;
+use qp_dilithium_crypto::Dilithium87Pair;
 use qp_scheduler::BlockNumberOrTimestamp;
 use qp_wormhole::{derive_wormhole_address, POW_ENGINE_ID};
 use sp_core::Pair;
@@ -26,8 +26,8 @@ use sp_runtime::{generic::DigestItem, traits::IdentifyAccount, AccountId32, Mult
 const STARTING_BALANCE: u128 = 1000 * UNIT;
 const HS_DELAY_BLOCKS: u32 = 5;
 
-pub(crate) fn pair() -> Dilithium65Pair {
-	Dilithium65Pair::from_seed_slice(&[42u8; 32]).expect("valid seed")
+pub(crate) fn pair() -> Dilithium87Pair {
+	Dilithium87Pair::from_seed_slice(&[42u8; 32]).expect("valid seed")
 }
 
 fn guardian() -> AccountId32 {
@@ -75,7 +75,7 @@ fn assert_ok_hs(account: &AccountId32) {
 }
 
 pub(crate) fn signed_call(
-	pair: &Dilithium65Pair,
+	pair: &Dilithium87Pair,
 	sender: AccountId32,
 	call: RuntimeCall,
 	nonce: u32,
@@ -94,7 +94,7 @@ fn inclusion_fee(xt: &UncheckedExtrinsic) -> u128 {
 
 /// Largest tip `Preservation::Preserve` will accept for this call: leave ED plus
 /// the zero-tip inclusion fee, with slack for the extra compact-encoded tip bytes.
-fn max_preserve_tip(pair: &Dilithium65Pair, sender: &AccountId32, call: &RuntimeCall) -> u128 {
+fn max_preserve_tip(pair: &Dilithium87Pair, sender: &AccountId32, call: &RuntimeCall) -> u128 {
 	let probe = signed_call(pair, sender.clone(), call.clone(), 0, 0);
 	let fee = inclusion_fee(&probe);
 	Balances::free_balance(sender)
@@ -155,7 +155,7 @@ fn paid_fee_or_zero(who: &AccountId32) -> u128 {
 /// A high-security signer may lose at most the ordinary (zero-tip) inclusion fee,
 /// plus any amount the call itself is allowed to lock on the delay path.
 fn assert_tip_cannot_move_extra_value(
-	pair: &Dilithium65Pair,
+	pair: &Dilithium87Pair,
 	account: &AccountId32,
 	call: RuntimeCall,
 	allowed_call_lock: u128,

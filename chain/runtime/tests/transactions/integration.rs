@@ -335,10 +335,12 @@ mod tests {
 		assert!(!is_valid, "Signature verification worked with wrong payload");
 	}
 
-	//
-	// Integration test for ML-DSA-65 signatures
-	// Tests the valid round-trip case
-	//
+	// The `DilithiumSignatureScheme` primitive still verifies both variants,
+	// and these two tests are what pins that: the enum is upstream's and stays
+	// as it is. What Qnero refuses is the ML-DSA-65 variant at the transparent
+	// entry, one layer up, in `runtime/src/extrinsic.rs`. The guard for that
+	// rule is `transactions/signature_scheme.rs`; these tests are about the
+	// primitive underneath it, which no longer decides admission on its own.
 	#[test]
 	fn test_dilithium65_extrinsic() {
 		setup();

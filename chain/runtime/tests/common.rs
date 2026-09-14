@@ -5,7 +5,7 @@ use qnero_runtime::{
 	Runtime, RuntimeCall, Signature, SignedPayload, System, TxExtension, UncheckedExtrinsic, UNIT,
 	VERSION,
 };
-use qp_dilithium_crypto::Dilithium65Pair;
+use qp_dilithium_crypto::Dilithium87Pair;
 use sp_core::{crypto::AccountId32, Pair};
 use sp_runtime::{generic::Era, traits::AccountIdConversion, BuildStorage, MultiAddress};
 
@@ -102,15 +102,40 @@ impl TestCommons {
 
 	/// Build a fully signed extrinsic through the production `TxExtension`
 	/// pipeline: the immortal-era extension tuple, the matching implicit
-	/// tuple, and an ML-DSA-65 (Dilithium) signature over the signed payload,
-	/// claiming `sender` as the transaction origin.
+	/// tuple, and an ML-DSA-87 signature over the signed payload, claiming
+	/// `sender` as the transaction origin.
 	///
-	/// This is the ONLY test-side copy of the extension tuple — keep it in
+	/// ML-DSA-87 is the only scheme the transparent entry admits; the rule is
+	/// in `runtime/src/extrinsic.rs` and its guard is
+	/// `transactions/signature_scheme.rs`.
+	pub fn signed_extrinsic(
+		pair: &Dilithium87Pair,
+		sender: AccountId32,
+		call: RuntimeCall,
+		nonce: u32,
+		tip: u128,
+	) -> UncheckedExtrinsic {
+		Self::signed_extrinsic_signed_with(
+			|payload| Signature::Dilithium87(pair.sign(payload)),
+			sender,
+			call,
+			nonce,
+			tip,
+		)
+	}
+
+	/// The same pipeline, with the signature supplied by the caller.
+	///
+	/// This is the ONLY test-side copy of the extension tuple: keep it in
 	/// lockstep with `TxExtension` in `runtime/src/lib.rs`.
 	/// (`node/src/benchmarking.rs` keeps its own copy because the node crate
 	/// cannot depend on runtime test code.)
-	pub fn signed_extrinsic(
-		pair: &Dilithium65Pair,
+	///
+	/// The one caller that needs the seam is the consensus-rule guard in
+	/// `transactions/signature_scheme.rs`, which has to build the extrinsic the
+	/// runtime refuses. Everything else signs through `signed_extrinsic`.
+	pub fn signed_extrinsic_signed_with(
+		sign: impl FnOnce(&[u8]) -> Signature,
 		sender: AccountId32,
 		call: RuntimeCall,
 		nonce: u32,
@@ -148,14 +173,9 @@ impl TestCommons {
 				(),
 			),
 		);
-		let signature = raw_payload.using_encoded(|e| pair.sign(e));
+		let signature = raw_payload.using_encoded(sign);
 
-		UncheckedExtrinsic::new_signed(
-			call,
-			MultiAddress::Id(sender),
-			Signature::Dilithium65(signature),
-			tx_ext,
-		)
+		UncheckedExtrinsic::new_signed(call, MultiAddress::Id(sender), signature, tx_ext)
 	}
 
 	/// Helper to calculate total blocks needed for a governance process
