@@ -243,3 +243,83 @@ impl<'a> serde::Deserialize<'a> for QneroUncheckedExtrinsic {
 			.map_err(|e| serde::de::Error::custom(alloc::format!("Decode error: {}", e)))
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	// The crate denies these at the top of `lib.rs`, which is the right default
+	// for a runtime: a panic in a dispatch is a dead block. A test that cannot
+	// build the extrinsic it is about has nothing to assert, so the deny is
+	// lifted here and nowhere else in this module.
+	#![allow(clippy::expect_used)]
+
+	use super::*;
+	use crate::{AccountId, Runtime};
+	use qp_dilithium_crypto::{Dilithium65Pair, Dilithium87Pair};
+	use sp_core::Pair;
+	use sp_runtime::generic::Era;
+
+	/// The production extension tuple, immortal and untipped. Every constructor
+	/// here is a plain value, so this needs no externalities.
+	fn tx_ext() -> TxExtension {
+		(
+			frame_system::CheckNonZeroSender::<Runtime>::new(),
+			frame_system::CheckSpecVersion::<Runtime>::new(),
+			frame_system::CheckTxVersion::<Runtime>::new(),
+			frame_system::CheckGenesis::<Runtime>::new(),
+			frame_system::CheckEra::<Runtime>::from(Era::immortal()),
+			frame_system::CheckNonce::<Runtime>::from(0u32),
+			frame_system::CheckWeight::<Runtime>::new(),
+			crate::transaction_extensions::ReversibleTransactionExtension::<Runtime>::new(),
+			pallet_transaction_payment::ChargeTransactionPayment::<Runtime>::from(0u128),
+			frame_metadata_hash_extension::CheckMetadataHash::<Runtime>::new(false),
+			frame_system::WeightReclaim::<Runtime>::new(),
+		)
+	}
+
+	fn call() -> RuntimeCall {
+		RuntimeCall::System(frame_system::Call::remark { remark: alloc::vec![42u8] })
+	}
+
+	fn signed_with(signature: Signature) -> QneroUncheckedExtrinsic {
+		QneroUncheckedExtrinsic::new_signed(
+			call(),
+			Address::Id(AccountId::new([9u8; 32])),
+			signature,
+			tx_ext(),
+		)
+	}
+
+	/// The rule, under the default feature set.
+	///
+	/// `check` and `unchecked_into_checked_i_know_what_i_am_doing` both answer
+	/// out of this one function, and the second is behind `try-runtime`, which
+	/// no gate compiles. Pinning the shared function is what keeps the replay
+	/// path's half of the rule from being deleted in silence.
+	#[test]
+	fn a_level_3_signature_is_refused_and_a_level_5_one_is_not() {
+		let payload = b"the payload the scheme signs";
+
+		let level_5 = Dilithium87Pair::from_seed_slice(&[3u8; 32]).expect("static seed is valid");
+		let admitted = signed_with(Signature::Dilithium87(level_5.sign(payload)));
+		assert_eq!(admitted.ensure_supported_signature_scheme(), Ok(()));
+
+		let level_3 = Dilithium65Pair::from_seed_slice(&[3u8; 32]).expect("static seed is valid");
+		let refused = signed_with(Signature::Dilithium65(level_3.sign(payload)));
+		assert_eq!(
+			refused.ensure_supported_signature_scheme(),
+			Err(InvalidTransaction::BadSigner.into()),
+			"the transparent entry admits ML-DSA-87 only"
+		);
+	}
+
+	/// An inherent carries no signature, so there is no scheme to refuse and the
+	/// rule must not reach it. `Shielded`'s batch and coinbase calls arrive this
+	/// way.
+	#[test]
+	fn a_bare_extrinsic_carries_no_scheme_to_refuse() {
+		assert_eq!(
+			QneroUncheckedExtrinsic::new_bare(call()).ensure_supported_signature_scheme(),
+			Ok(())
+		);
+	}
+}

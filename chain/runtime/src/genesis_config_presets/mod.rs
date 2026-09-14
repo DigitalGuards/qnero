@@ -195,6 +195,9 @@ fn heisenberg_tech_collective_seed() -> Vec<AccountId> {
 
 /// Initial tech collective members for Planck: the three treasury signers plus two dedicated
 /// members, giving the [`MIN_TECH_COLLECTIVE_MEMBERS`] the tech-referenda curves assume.
+///
+/// ML-DSA-87 accounts, like every literal in this file. See [`account_from_ss58`]
+/// for why that is a procedure and not something a test can check.
 fn planck_tech_collective_seed() -> Vec<AccountId> {
 	let mut members = planck_treasury_signers();
 	members.extend([
@@ -460,10 +463,14 @@ pub fn heisenberg_config_genesis() -> Value {
 	)
 }
 
+/// ML-DSA-87, as every Planck literal must be ([`account_from_ss58`]).
 fn planck_faucet_account() -> AccountId {
 	account_from_ss58("qzka7DZXAT7GnzgXQfxiSwrPKRWgW6m6G89QRsQiLThThZ6Cw")
 }
 
+/// ML-DSA-87, as every Planck literal must be ([`account_from_ss58`]). These
+/// three carry the 2-of-3 treasury, so a wrong scheme here freezes the treasury
+/// itself.
 fn planck_treasury_signers() -> Vec<AccountId> {
 	vec![
 		account_from_ss58("qzoRRfx5bUSdq2YWSXBXrmFFSwe24bNSUoMu3Vhz5hrtPri7D"),
@@ -683,6 +690,24 @@ pub fn get_preset(id: &PresetId) -> Option<Vec<u8>> {
 	)
 }
 
+/// Decode a preset account from its SS58 literal.
+///
+/// An address is `hash_bytes(public_key)`, and both variants of
+/// `DilithiumSignatureScheme` hash into the same 32 bytes, so a literal carries
+/// no trace of the scheme its key belongs to. No test can assert one, and the
+/// consequence of getting it wrong is permanent: the transparent entry refuses
+/// an ML-DSA-65 signature (`runtime/src/extrinsic.rs`), so a level-3 account
+/// among these literals can never sign. Its vesting claim, its treasury
+/// approval and its faucet drip all answer `BadSigner`, and its balance is
+/// stranded for good.
+///
+/// Provenance is therefore a procedure, standing in for an assertion nothing
+/// here can make. Every address passed here must be an ML-DSA-87 account: mint
+/// one with `qnero-node key qnero`, which builds an ML-DSA-87 pair and has no
+/// other mode. The node refuses `key generate --scheme dilithium65` for the
+/// same reason (`node/src/command.rs`), and `docs/DESIGN.md` section 7.3
+/// carries the pre-mainnet check that every literal has been confirmed before
+/// genesis.
 fn account_from_ss58(ss58: &str) -> AccountId {
 	AccountId::from_ss58check_with_version(ss58)
 		.expect("Failed to decode SS58 address")
@@ -727,7 +752,10 @@ mod tests {
 	/// than it is: the Planck and mainnet accounts are SS58 literals decoded by
 	/// `account_from_ss58`, and both variants hash into the same 32-byte
 	/// account, so a literal carries no variant to assert on. Only a
-	/// key-derived account can carry one.
+	/// key-derived account can carry one. A level-3 account among those
+	/// literals would be stranded for good, since the entry refuses its
+	/// signature; `account_from_ss58` carries the procedure that stands in for
+	/// the assertion, and `docs/DESIGN.md` section 7.3 the pre-mainnet check.
 	#[test]
 	fn every_key_derived_preset_account_is_ml_dsa_87() {
 		let ml_dsa_87 = |seed: [u8; 32]| -> AccountId {

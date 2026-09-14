@@ -92,7 +92,10 @@ impl_opaque_keys! {
 // layout under an unchanged version decodes with the stale shape, succeeds and
 // is silently wrong, and nothing in the node reports it. 101 is the M6 review
 // pass, which added a `pallet-shielded` error variant and changed three event
-// layouts across `pallet-shielded` and `pallet-mining-rewards`. 103 is the
+// layouts across `pallet-shielded` and `pallet-mining-rewards`. 102 is M7,
+// where the runtime stopped verifying the proof of work and became the oracle
+// the client asks for difficulty and the seed schedule: it took three `QPoWApi`
+// methods and the `ProofSubmitted` event out of the metadata. 103 is the
 // consensus rule in `runtime/src/extrinsic.rs`: the transparent entry admits
 // ML-DSA-87 and refuses ML-DSA-65. That rule changes which extrinsics are
 // valid, so it moves `spec_version`; it changes no byte of the signed extrinsic

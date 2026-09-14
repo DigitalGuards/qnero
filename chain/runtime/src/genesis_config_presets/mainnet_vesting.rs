@@ -19,6 +19,11 @@
 //!    schedule before the multisig can act. The vesting pot additionally receives its existential
 //!    deposit from `genesis_template`, the only issuance outside the 27%.
 //! 6. Accounts are SS58 addresses only — no personal names.
+//! 7. Every address below must be an ML-DSA-87 account, minted with `qnero-node key qnero`. An SS58
+//!    literal carries no trace of its scheme, so nothing here can assert it; the entry refuses an
+//!    ML-DSA-65 signature, which would strand such an account and everything vested to it for good.
+//!    `super::account_from_ss58` states the procedure and `docs/DESIGN.md` section 7.3 the
+//!    pre-mainnet check.
 //!
 //! Flip [`FINALIZED`] only after every `REPLACE_WITH_` placeholder is filled. Until then the
 //! `mainnet` preset refuses to build.

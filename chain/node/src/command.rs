@@ -365,6 +365,48 @@ impl SubstrateCli for Cli {
 	}
 }
 
+/// The transparent entry's consensus rule, said where a key is minted.
+///
+/// `runtime/src/extrinsic.rs` refuses a signed extrinsic carrying the ML-DSA-65
+/// variant of `DilithiumSignatureScheme` with `InvalidTransaction::BadSigner`.
+/// The vendored `sc-cli` fork still offers `--scheme dilithium65` on its key
+/// commands, minting material the entry refuses, and that tree stays as upstream
+/// wrote it so the next subtree merge is clean. Qnero's own dispatch is where the
+/// two meet. A level-3 key minted here carries an address that looks like any
+/// other Qnero address, and the first sign that it cannot spend arrives at the
+/// entry as `BadSigner`, a code that also means "the signature did not verify";
+/// an operator reading it debugs the payload, the nonce and the genesis hash
+/// long before suspecting the scheme. Say it at the point of minting instead.
+#[allow(clippy::result_large_err)]
+fn ensure_key_scheme_is_the_one_the_chain_admits(
+	cmd: &sc_cli::KeySubcommand,
+) -> sc_cli::Result<()> {
+	let scheme = match cmd {
+		sc_cli::KeySubcommand::Generate(cmd) => Some(cmd.crypto_scheme.scheme),
+		sc_cli::KeySubcommand::Inspect(cmd) => Some(cmd.crypto_scheme.scheme),
+		sc_cli::KeySubcommand::Insert(cmd) => Some(cmd.scheme),
+		// Node keys are the p2p identity, one scheme wide, and carry no
+		// `--scheme` flag of their own.
+		sc_cli::KeySubcommand::GenerateNodeKey(_) | sc_cli::KeySubcommand::InspectNodeKey(_) =>
+			None,
+	};
+
+	// What the entry refuses, this refuses at the point of minting.
+	if matches!(scheme, Some(sc_cli::CryptoScheme::Dilithium65)) {
+		return Err(sc_cli::Error::Input(
+			"Qnero has one signature scheme at the transparent entry, ML-DSA-87. \
+			 `--scheme dilithium65` mints a key this chain refuses: a signed extrinsic \
+			 carrying the ML-DSA-65 variant is invalid and is answered with BadSigner \
+			 before it is verified (runtime/src/extrinsic.rs), so the account could \
+			 never spend what it holds. Use `--scheme dilithium87`, or \
+			 `qnero-node key qnero` for a transparent address."
+				.to_string(),
+		));
+	}
+
+	Ok(())
+}
+
 /// Parse and run command line arguments
 #[allow(clippy::result_large_err)]
 pub fn run() -> sc_cli::Result<()> {
@@ -374,7 +416,10 @@ pub fn run() -> sc_cli::Result<()> {
 	match &cli.subcommand {
 		Some(Subcommand::Key(cmd)) => {
 			match cmd {
-				QuantusKeySubcommand::Sc(sc_cmd) => sc_cmd.run(&cli),
+				QuantusKeySubcommand::Sc(sc_cmd) => {
+					ensure_key_scheme_is_the_one_the_chain_admits(sc_cmd)?;
+					sc_cmd.run(&cli)
+				},
 				QuantusKeySubcommand::Quantus {
 					scheme,
 					seed,
