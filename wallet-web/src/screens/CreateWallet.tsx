@@ -95,7 +95,7 @@ export function CreateWallet({
           </p>
         </Prose>
         <p
-          className="mm-secret elev-inset my-3 rounded-input border border-notice-edge bg-notice-bg
+          className="mm-secret elev-inset my-3 rounded-field border border-notice-edge bg-notice-bg
             p-3 text-body leading-6 tracking-wide text-notice"
           data-testid="seed-hex"
         >

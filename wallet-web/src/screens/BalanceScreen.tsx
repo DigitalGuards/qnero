@@ -194,7 +194,7 @@ export function BalanceScreen({
                   <th className="text-right">Quanta</th>
                   <th>Origin</th>
                   <th>State</th>
-                  <th>Memo</th>
+                  <th className="w-full">Memo</th>
                 </tr>
               </thead>
               <tbody>
@@ -243,7 +243,7 @@ export function BalanceScreen({
                 <tr>
                   <th>Leaf</th>
                   <th className="text-right">Quanta</th>
-                  <th>Reason</th>
+                  <th className="w-full">Reason</th>
                 </tr>
               </thead>
               <tbody>

@@ -27,6 +27,10 @@
 #      storage" when the truth is that it has it and did not publish it. The
 #      symbols appear one at a time as each is exported, so the error names
 #      only the first one missing.
+#   3c. `warning: unstable feature specified for -Ctarget-feature: atomics` is
+#      expected and is not a problem to chase. It is the compiler saying what
+#      point 2 already says: this target feature is unstable, which is why the
+#      whole recipe needs nightly.
 #   4. The serving origin has to be cross-origin isolated (COOP `same-origin`
 #      plus COEP `require-corp`) or `SharedArrayBuffer` does not exist in the
 #      page at all. `wallet-web/vite.config.ts` sends those headers for the dev

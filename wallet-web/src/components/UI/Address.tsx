@@ -26,7 +26,10 @@ export function Address({
     <p
       data-testid={testId}
       className={cn(
-        'mm-secret elev-inset my-2 rounded-input border p-2 text-meta leading-4',
+        // Capped and scrollable rather than 2600 characters tall. The whole
+        // value stays in the box and `user-select: all` still takes all of it
+        // in one gesture, so nothing is hidden from a copy or from a reader.
+        'mm-secret elev-inset my-2 max-h-44 overflow-y-auto rounded-field border p-2 text-meta leading-4',
         tone === 'secret'
           ? 'border-notice-edge bg-notice-bg text-notice'
           : 'border-edge bg-field text-ink',
