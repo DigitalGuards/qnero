@@ -35,6 +35,20 @@
 
 /** OWASP's 2023 floor, and what the sibling wallet uses. */
 export const PBKDF2_ITERATIONS = 600_000;
+/**
+ * The shortest passphrase this build will derive a key from.
+ *
+ * Enforced here rather than on the screen that asks for one. A form rule is a
+ * hint: `react-hook-form` skips `minLength` on an empty field, so a screen
+ * carrying only that rule accepts the empty string and seals the spend key
+ * under a key derived from it. This is the boundary every path crosses, and
+ * there is no way to reach a `CryptoKey` around it.
+ *
+ * An existing store cannot have been written under a shorter one, because no
+ * key existed to seal it with, so refusing here at unlock costs nothing and
+ * says what happened instead of reporting a wrong passphrase.
+ */
+export const MIN_PASSPHRASE = 8;
 export const SALT_BYTES = 16;
 /** 96 bits, the AES-GCM standard nonce. */
 export const IV_BYTES = 12;
@@ -63,6 +77,14 @@ export class WrongPassphraseError extends Error {
   constructor(message = 'that passphrase does not open this wallet') {
     super(message);
     this.name = 'WrongPassphraseError';
+  }
+}
+
+/** Thrown when a passphrase is below [`MIN_PASSPHRASE`]. */
+export class WeakPassphraseError extends Error {
+  constructor(message = `a passphrase is at least ${MIN_PASSPHRASE} characters`) {
+    super(message);
+    this.name = 'WeakPassphraseError';
   }
 }
 
@@ -104,8 +126,14 @@ export function newSalt(): Uint8Array<ArrayBuffer> {
  * Non-extractable: the bytes never exist in the JavaScript heap, so the worst
  * a later bug can do is use the key, which is already what an unlocked wallet
  * permits.
+ *
+ * A passphrase below [`MIN_PASSPHRASE`] is refused here, which is the only
+ * place the floor is real: see that constant.
  */
 export async function deriveKey(passphrase: string, saltHex: string): Promise<CryptoKey> {
+  if (passphrase.length < MIN_PASSPHRASE) {
+    throw new WeakPassphraseError();
+  }
   const material = await crypto.subtle.importKey(
     'raw',
     encoder.encode(passphrase),

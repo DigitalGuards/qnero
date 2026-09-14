@@ -15,7 +15,9 @@ import {
   deriveKey,
   newSalt,
   bytesToHex,
+  MIN_PASSPHRASE,
   UnreadableStoreError,
+  WeakPassphraseError,
   WrongPassphraseError,
 } from '../src/wallet/crypto';
 import {
@@ -114,6 +116,34 @@ describe('a new store', () => {
   it('writes the schema version the command-line wallet is at', async () => {
     const store = await makeStore(db);
     expect((await store.meta()).schemaVersion).toBe(STORE_VERSION);
+  });
+});
+
+describe('the passphrase floor', () => {
+  // The floor used to live only in the create and restore screens, as a
+  // `minLength` rule. react-hook-form skips `minLength` on an empty field, so
+  // both wizards accepted the empty string and sealed the spend key under a
+  // key derived from it while the screen said otherwise. A screen is not a
+  // boundary; this is.
+  it('refuses to derive a key from a passphrase below the floor', async () => {
+    const saltHex = bytesToHex(newSalt());
+    await expect(deriveKey('', saltHex)).rejects.toBeInstanceOf(WeakPassphraseError);
+    await expect(deriveKey('x'.repeat(MIN_PASSPHRASE - 1), saltHex)).rejects.toBeInstanceOf(
+      WeakPassphraseError,
+    );
+  });
+
+  it('derives from the shortest passphrase it allows', async () => {
+    const saltHex = bytesToHex(newSalt());
+    await expect(deriveKey('x'.repeat(MIN_PASSPHRASE), saltHex)).resolves.toBeDefined();
+  });
+
+  it('leaves no way to create a store under an empty passphrase', async () => {
+    // `createStore` takes a key rather than a passphrase, and the only way to
+    // a key is `deriveKey`, so the refusal above is the whole surface.
+    await expect(makeStore(db, '')).rejects.toBeInstanceOf(WeakPassphraseError);
+    const meta = await WalletStore.open(db);
+    expect(meta).toBeNull();
   });
 });
 

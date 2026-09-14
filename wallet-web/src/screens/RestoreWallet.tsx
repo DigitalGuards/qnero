@@ -13,9 +13,8 @@ import { useForm, useWatch } from 'react-hook-form';
 import { Button } from '../components/UI/Button';
 import { Field, Textarea, Input } from '../components/UI/Field';
 import { Panel, Prose } from '../components/UI/Panel';
-import { seedHexIsWellFormed } from '../wallet/crypto';
+import { MIN_PASSPHRASE, seedHexIsWellFormed } from '../wallet/crypto';
 
-const MIN_PASSPHRASE = 8;
 
 interface RestoreForm {
   seed: string;
@@ -84,10 +83,11 @@ export function RestoreWallet({
             data-testid="passphrase"
             autoComplete="new-password"
             {...form.register('passphrase', {
-              minLength: {
-                value: MIN_PASSPHRASE,
-                message: `use at least ${MIN_PASSPHRASE} characters for the passphrase`,
-              },
+              // `validate` rather than `minLength`, which react-hook-form skips
+              // on an empty field. See `CreateWallet` and `wallet/crypto.ts`.
+              validate: (value) =>
+                value.length >= MIN_PASSPHRASE ||
+                `use at least ${MIN_PASSPHRASE} characters for the passphrase`,
             })}
           />
         </Field>

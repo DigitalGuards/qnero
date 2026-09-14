@@ -21,6 +21,7 @@ import { Button } from '../components/UI/Button';
 import { Field, Input } from '../components/UI/Field';
 import { Notice } from '../components/UI/Notice';
 import { Panel, Prose } from '../components/UI/Panel';
+import { MIN_PASSPHRASE } from '../wallet/crypto';
 import { Qr } from '../components/UI/Qr';
 import { newSeed, bytesToHex } from '../wallet/crypto';
 
@@ -29,7 +30,6 @@ const GROUP_LENGTH = 8;
 /** How many groups are asked back. Three of eight is 24 of the 64 characters. */
 const CHALLENGES = 3;
 /** The floor on a passphrase this build will write a wallet under. */
-const MIN_PASSPHRASE = 8;
 
 function groupsOf(seedHex: string): string[] {
   const out: string[] = [];
@@ -214,10 +214,12 @@ export function CreateWallet({
             data-testid="passphrase"
             autoComplete="new-password"
             {...lockForm.register('passphrase', {
-              minLength: {
-                value: MIN_PASSPHRASE,
-                message: `use at least ${MIN_PASSPHRASE} characters`,
-              },
+              // `validate` rather than `minLength`: react-hook-form skips
+              // `minLength` when the field is empty, so a rule written that way
+              // is dead for the one value that matters. `wallet/crypto.ts`
+              // refuses the same floor at the boundary, where it is real.
+              validate: (value) =>
+                value.length >= MIN_PASSPHRASE || `use at least ${MIN_PASSPHRASE} characters`,
             })}
           />
         </Field>

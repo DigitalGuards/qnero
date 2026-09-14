@@ -9,7 +9,13 @@
       content="A browser wallet for a Qnero chain. Keys are generated and used in the page, proofs are built on this machine, and nothing is contacted but the node you configure."
     />
     <!-- No preconnect, no font host, no analytics. The configured node is the
-         only thing this page contacts, and the settings screen says so. -->
+         only thing this page contacts, and the settings screen says so.
+
+         The Content-Security-Policy that enforces that is injected into the
+         built HTML by `vite.config.ts` and served as a header by the dev and
+         preview servers. It is not written here, so the policy and the header
+         a deployment should send cannot drift apart: one constant produces
+         both. `README.md` carries the header for a production host. -->
   </head>
   <body>
     <div id="root"></div>
