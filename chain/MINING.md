@@ -63,6 +63,15 @@ the rig finds pays the note for `--rewards-miner-key`, whatever the login says.
 | `--stratum-max-connections-per-ip N` | 16 | Connections one address may hold. Several rigs behind one NAT gateway arrive from a single address. |
 | `--stratum-share-timeout S` | 600, rising with the share difficulty | How long a logged-in session has to produce an accepted share before it is closed. |
 
+The share deadline is sized in expected share intervals at the configured share
+difficulty, so it does not depend on the block interval: 600 seconds is five
+block intervals at this chain's 120 second target and was fifty at 12 seconds,
+and the ceiling of 7200 seconds is sixty intervals where it was six hundred.
+A rig that has stopped hashing is still cut loose inside ten minutes. Longer
+blocks do make the endpoint quieter in one way: a job is rolled on each new
+template, so a rig holds one for about 120 seconds and meets a tenth as many
+stale shares across a roll.
+
 The endpoint speaks the Monero stratum dialect xmrig uses: `login`, `job`
 pushes with `blob`, `target`, `seed_hash` and `next_seed_hash`, `submit`,
 `keepalived`. A stale share is answered with a retryable message so the rig
@@ -85,16 +94,32 @@ allowlist or a pool.
 
 RandomX's key rotates the way Monero's does: every 2048 blocks, lagged 64
 blocks, resolved along the block's own ancestry. Both constants are runtime
-constants and are read by the node; at a 12 second block target 2048 blocks
-is about 6.8 hours, and each rotation costs a full-mode rig a dataset rebuild
-of a few seconds. Whether to lengthen the epoch is an open decision recorded
-in `docs/DESIGN.md`, to be made before any network launches.
+constants and are read by the node. At this chain's 120 second target 2048
+blocks is 2.84 days, which is Monero's own rotation cadence to the hour: the
+block count and the wall clock both match, so a rig pays the same dataset
+rebuild here as it pays there and no more often. The lag of 64 blocks is 2.1
+hours, and whether to raise it above `MaxReorgDepth` is the one part of the
+schedule still open, recorded in `docs/DESIGN.md`.
 
 ## Difficulty
 
 Difficulty adjusts per block toward the target block time, floored so a chain
 at the floor can climb. A devnet starts at the floor and retargets within the
 first minute of a rig attaching. Measured figures are in `docs/BENCH.md`.
+
+The adjustment is Homestead's and its buckets scale with the target, so at 120
+seconds the neutral band is 100 to 200 seconds: an honest block leaves
+difficulty flat, a faster one raises it by 1/2048 and a much slower one lowers
+it by up to 99/2048. What a longer target changes is the wall clock rather than
+the block count. A chain climbing from the floor of 128 to a live difficulty
+takes the same number of blocks it always did and ten times as long in days:
+about 13 600 blocks for one 3.5 kH/s rig, which is 19 days at 120 seconds.
+`pallets/qpow`'s own test pins that figure.
+
+Because the retarget settles at the bottom of its neutral band, a chain with a
+steady hash rate sits at about 100 second blocks rather than exactly 120. That
+is inside the band by construction and it is what the algorithm has always
+done.
 
 ## Numbers from one workstation
 

@@ -297,12 +297,25 @@ block mints to its author. `pallet-mining-rewards` still computes the emission
 and still collects transaction fees, and it no longer mints anything to an
 account. It hands the credit to a sink, and the sink is the shielded pool.
 
-Genesis is the exception, and it is a large one: `mainnet_vesting` mints 27% of
-`MAX_SUPPLY` at genesis as transparent balances, a keyless vesting pot plus a
-seed to each treasurer and each collective member. None of it is a note, all of
-it is inside `Balances::total_issuance()`, and it reaches its holders through
+Genesis is the exception: `mainnet_vesting` mints 2% of `MAX_SUPPLY` at genesis
+as transparent balances, a keyless vesting pot plus a seed to each treasurer and
+each collective member. None of it is a note, all of it is inside
+`Balances::total_issuance()`, and it reaches its holders through
 `Vesting::claim`, which publishes the beneficiary and the amount. Section 7.2
 is why that call is the one transparent payout v1 keeps.
+
+**The 2% is a placeholder, decided 2026-09-14.** The table this chain forked
+minted 27% across 48 vesting rows to the upstream project's own allocation
+sheet, which is not an allocation this project can defend: those addresses have
+no relationship with Qnero and 27% of the supply is a claim on every miner who
+ever runs it. Every one of those rows is gone. What is there now is one vesting
+row to one placeholder ML-DSA-87 account, 419 940 QNR on the same one-year lock
+and three-year linear unlock, plus the 60 QNR of seed endowments that let the
+treasurers and the tech collective pay their first deposits. The treasury holds
+no schedule at all. Before mainnet genesis this is replaced with a real
+allocation or deleted outright, and deleting it is a live option: a chain whose
+entire supply is mined is the cleanest thing this project could launch. Section
+7.3's pre-mainnet check carries the line.
 
 ```text
 block author's node            inherent              pallet-shielded
@@ -521,6 +534,13 @@ row) and every literal in `genesis_config_presets/mod.rs` was minted with
 `qnero-node key qnero`, which builds an ML-DSA-87 pair and has no other mode.
 `account_from_ss58` carries the same instruction beside the code.
 
+**And replace or delete the placeholder allocation.** `mainnet_vesting::VESTING`
+is one row paying `mainnet_vesting::PLACEHOLDER`, an address generated with
+`qnero-node key qnero` to stand in for an allocation nobody has decided on.
+Shipping it would mint 2% of the supply to an account held by nothing. Either
+name a real beneficiary there or remove the row and set `GENESIS_ALLOCATION` to
+the seed endowments alone. Section 7.1 is the reasoning.
+
 Two consequences worth writing down. The vendored `sc-cli` fork still offers
 `--scheme dilithium65` on its key commands, and that tree stays as upstream
 wrote it so the next subtree merge is clean; Qnero's own dispatch refuses the
@@ -531,6 +551,70 @@ dispatch by the call filter, so a block already carrying one fails to
 re-execute under the rule. Qnero is devnet-only, so a devnet carrying
 such a block has to be reset.
 
+### 7.4 The block interval (consensus, 2026-09-14)
+
+**Blocks target 120 000 ms.** Monero's interval, and the decision is Monero's
+reasoning applied to a chain that is not yet a network. The old target was 12 s,
+inherited from the upstream chain along with everything else in `pallets/qpow`.
+
+Four reasons, in the order they matter.
+
+**It is Monero's cadence, and this chain's seed schedule is Monero's.** The
+RandomX seed epoch is 2048 blocks with a lag of 64, copied from Monero because
+the masked rule is what a stock rig already implements. At 12 s those 2048
+blocks were 6.8 hours, so every full-mode rig paid a 2 GiB dataset rebuild four
+times a day where Monero's rigs pay it every 2.84 days. At 120 s the block
+count and the wall clock both match Monero, and the constant needed no special
+value to get there. `pallets/qpow` carries the same note beside the constant.
+
+**The retarget is calmer on a small network.** The Homestead adjustment reads
+one block time and moves difficulty by at most +1/2048 or -99/2048. At a 12 s
+target one slow block inside a 10 s bucket is a real signal about a network with
+a handful of CPUs on it; at 120 s the same absolute timestamp noise is a tenth
+of the bucket and the retarget stops chasing it. The 15 s of legal timestamp
+drift a miner may claim used to push an honest block into the next bucket and
+cost a single -1 step, and at a 100 s divisor it does not leave the neutral band
+at all. The algorithm is unchanged: only its divisor is denominated in time, and
+that scales with the target.
+
+**A light wallet walks ten times fewer headers a day.** Both wallets
+authenticate a block's leaf range by walking headers down from the head, one
+`chain_getHeader` per block, and the browser wallet holds one chunk of 1024 of
+them resident. A day of chain is 720 headers at 120 s where it was 7200 at 12 s,
+so a wallet opened daily catches up inside one chunk instead of seven. The same
+arithmetic runs through the shielded anchor window: 256 blocks is 8.5 hours of
+anchor validity rather than 51 minutes, which is the difference between a phone
+that starts a proof, locks its screen and finishes later and one that has to
+start again.
+
+**Nothing about the pool got slower.** Block size and weight are unchanged, so
+a block still settles the same number of payments. Per second it settles a
+tenth as many, and that is a real consequence rather than a free one: at 53
+inner batches of up to 6 transfers the ceiling is 318 settlements a block, which
+was about 26 a second and is now about 2.6. Nothing on this chain is near that
+ceiling and nothing will be for a long time, so the decision is deferred rather
+than answered. When it needs answering the options are Monero's own: a larger
+block, or a dynamic size with a penalty above a rolling median.
+
+**What it cost.** The emission divisor was rescaled from 50 000 000 to
+5 000 000 so the supply against wall clock is exactly what it was, ten blocks'
+worth of geometric decay folded into one. Every constant derived from the target
+kept its duration and changed its block count, and every constant chosen as a
+block count kept its count and gained a new duration; `runtime/tests/block_time.rs`
+is the list, one test for each kind. The initial difficulty moved from 100 000 to
+1 000 000, because difficulty is expected hashes per block and the same network
+needs ten times as much at a ten times longer target.
+
+**One binary, two cadences.** The target is a genesis-configured storage value
+in `pallets/qpow` with no setter and no extrinsic, defaulting to the runtime
+constant. The `dev` preset writes 12 000 so every end-to-end suite keeps the
+cadence it was sized for, and the public presets take 120 000. Setter-free is
+what makes it safe for the scheduler to derive its timestamp bucket from: a
+target that moved under a running chain would strand every task already queued
+at an old bucket boundary. `QPoWApi::get_target_block_time` is how the client,
+both wallets and the explorer read it, and none of them carries the interval as
+a constant.
+
 ## 8. Milestones
 
 | # | Deliverable | Estimate |
@@ -540,7 +624,7 @@ such a block has to be reset.
 | M3 | Private and public batch aggregators on the new PI layout | DONE 2026-09-11 (private batch 5 + 21N public inputs, ZK, N = 7; public batch forwards each inner verbatim under an aggregator address and refuses a repeated inner in circuit; see `docs/CIRCUIT.md` section 8) |
 | M4 | `pallet-shielded` + runtime wiring, local dev chain end to end | DONE 2026-09-12 (chain forked as a git subtree at `chain/`; `pallet-shielded` settles private and public batches, `shield` is the only v0 entry, `pallet-zk-tree` stores raw `Hash256` leaves; N = 6, n = 53; see `docs/CIRCUIT.md` section 9 and `docs/OPS-DEV.md`) |
 | M5 | Wallet CLI: keygen, sync/scan, build leaf + batch, submit | DONE 2026-09-12 (`crates/qnero-wallet`, binary `qnero-wallet`: keygen, address, shield, sync, balance, send, status; hand-encoded extrinsics over JSON-RPC, storage layout and fee floor read from runtime metadata, Merkle paths rebuilt locally and the settled nullifier set paged whole so no request names a note as its own, notes in one JSON store beside the seed; memos padded to one size, at a pad chosen so the padded pair stays a fee bucket below a pair padded to `MaxCiphertextBytes`, and the payment's output slot drawn per spend, so the chain publishes neither a memo length nor which of a settlement's two leaves is the sender's change; one checkpoint-hash walk decides both whether a node is on the wallet's chain and whether it has reached everything the wallet has read, rewinding the leaf watermark to the newest checkpoint still canonical on a fork and refusing a node that is behind, with a leaf-count gate under it so the watermark never regresses outside the fork path, and spent status is derived from the settled set in both directions; see `docs/WALLET.md`, and `docs/BENCH.md` for the public batch at `n = 53`, which M4 left unmeasured); `sync --rescan` is the operator override on the node gates, runs add-only, and its known edges are docs/WALLET.md open issue 14) |
-| M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | DONE 2026-09-12 (every unit of value created after genesis is a note, the genesis allocation staying transparent and reaching its holders through `Vesting::claim`: `pallet-shielded` mints one coinbase note per block from a required inherent, the author's share of settled fees rides in it, mining rewards to transparent accounts are off, and `BaseCallFilter` refuses every call that moves transparent value between accounts a user chooses, leaving `Vesting::claim`, a genesis-fixed payout from a keyless pot, as the one transparent payout; `pallet-wormhole` is out of the runtime with its transaction extension, the runtime identifies as `qnero` at `spec_version` 101 and `transaction_version` 7, and the wallet finds its coinbase notes from a miner key the node is configured with; see section 7, `docs/CIRCUIT.md` section 10, `docs/WALLET.md` and `docs/OPS-DEV.md`. The review pass that closed it changed five things: the header's author item became per block so no coinbase leaf carries a mining identity, `set_high_security` joined the refused list so no account can enrol into a feature whose every call v1 refuses, and the high-security whitelist stayed as it is because every call on it is delayed and a guardian can reverse it, `Vesting::claim` stays dispatchable so the genesis allocation is deliverable and no preset endows a keyless account, the coinbase inherent refuses the encrypted payload nothing builds, and a block with no emission still mints the author fee the pool already holds. A second review pass reversed one of those: `shield` and `burn` came back off the high-security whitelist, because every other call on it is delayed and a guardian can reverse it, and the freeze they were paying for is unreachable while the enrolment itself is refused. It also moved `spec_version` to 101, which is the number above, for the metadata the first pass changed without it. A third pass bound the coinbase note's `r` to the chain's genesis, so one miner key on two chains no longer mints byte-identical notes at equal heights, and corrected the claim this row itself carried: the 27% genesis allocation is transparent and reaches its holders through `Vesting::claim`) |
+| M6 | v1 mandatory privacy: coinbase into notes, transparent transfers disabled | DONE 2026-09-12 (every unit of value created after genesis is a note, the genesis allocation staying transparent and reaching its holders through `Vesting::claim`: `pallet-shielded` mints one coinbase note per block from a required inherent, the author's share of settled fees rides in it, mining rewards to transparent accounts are off, and `BaseCallFilter` refuses every call that moves transparent value between accounts a user chooses, leaving `Vesting::claim`, a genesis-fixed payout from a keyless pot, as the one transparent payout; `pallet-wormhole` is out of the runtime with its transaction extension, the runtime identifies as `qnero` at `spec_version` 101 and `transaction_version` 7, and the wallet finds its coinbase notes from a miner key the node is configured with; see section 7, `docs/CIRCUIT.md` section 10, `docs/WALLET.md` and `docs/OPS-DEV.md`. The review pass that closed it changed five things: the header's author item became per block so no coinbase leaf carries a mining identity, `set_high_security` joined the refused list so no account can enrol into a feature whose every call v1 refuses, and the high-security whitelist stayed as it is because every call on it is delayed and a guardian can reverse it, `Vesting::claim` stays dispatchable so the genesis allocation is deliverable and no preset endows a keyless account, the coinbase inherent refuses the encrypted payload nothing builds, and a block with no emission still mints the author fee the pool already holds. A second review pass reversed one of those: `shield` and `burn` came back off the high-security whitelist, because every other call on it is delayed and a guardian can reverse it, and the freeze they were paying for is unreachable while the enrolment itself is refused. It also moved `spec_version` to 101, which is the number above, for the metadata the first pass changed without it. A third pass bound the coinbase note's `r` to the chain's genesis, so one miner key on two chains no longer mints byte-identical notes at equal heights, and corrected the claim this row itself carried: the genesis allocation is transparent and reaches its holders through `Vesting::claim`) |
 | M7 | RandomX proof of work, so a Monero rig mines Qnero | DONE 2026-09-13 (the engine is RandomX `rx/0`, stock upstream constants, so the hash is bit-identical to what a stock xmrig computes and a Monero rig moves over with a config change; `chain/client/consensus/randomx` is the whole engine, the runtime no longer verifies a nonce because RandomX cannot run in wasm, `pallet-qpow` keeps the difficulty storage and the Homestead retarget because both are functions of block times rather than of the hash, and the node grew a stratum endpoint behind `--stratum-port` speaking the dialect xmrig speaks to a Monero pool. The M6 author seam did what it was built for: `H(cvk, parent_hash)`, `configs::QpowAuthor`, the coinbase inherent, the header shape and fork choice are untouched, and `POW_ENGINE_ID` is still `pow_`. The proof is a 4-byte nonce and a 4-byte extra nonce over a fixed 76-byte blob with the nonce at offset 39 where xmrig writes it, packed into the 64-byte seal the digest window needs with the remaining 56 bytes pinned to zero, because free seal bytes would be free block-hash grinding. The comparison is Monero's: the hash read little-endian, accepted when `hash * difficulty <= 2^256 - 1`. Seed rotation is Monero's rule with the epoch and lag as runtime constants. `spec_version` moved to 102 for the three runtime-API methods and the event that went away; `transaction_version` stayed at 7. See section 10, `docs/OPS-DEV.md` and `docs/BENCH.md`) |
 | M8 | Prover budget on a phone-class device: a browser prover, measured | DONE 2026-09-14 (`crates/qnero-prover-wasm` is the browser surface, compiled to `wasm32-unknown-unknown`, single threaded, rayon-free: derive an address, decrypt a ciphertext while scanning, and prove one private batch at `N = 6`, with a headless-Chromium harness under `www/` and its Node runner. Nine samples per per-payment figure: **33.6 s per payment and 910.4 MiB peak** in single-threaded wasm, on top of 12.1 s of circuit build once per worker, against 9.82 s and the same shape natively. A desktop core under headless Chromium is the phone proxy and the stated factor is 2 to 4 with room above it, so a phone is 67 to 134 s per payment or worse: **memory fits and the single-threaded clock misses the 60 s target at every point of the range**. Seven slots were measured too: 65.8 s and 1.72 GiB, which fits this browser and does not fit a phone. The ZK leaf a delegated batcher would take is 16.6 s of proving on top of a 6.8 s circuit build, 511 MiB on its own, and 150932 bytes, 24 bytes larger than the whole six-slot batch it would be handed to. See the section below and `docs/BENCH.md`) |
 | M9 | silQ Road, the Qnero explorer: what a chain reader can see, and what it cannot | DONE 2026-09-14 (`explorer/` is **silQ Road**, a static Vite and React site over `@polkadot/api`, configured by one runtime JSON so one build serves a devnet and a testnet, with no server-side indexer: home, a paged block list, a block page, a settlement page by extrinsic hash, search over heights, block hashes, extrinsic hashes, nullifiers and commitments, and a "What this chain reveals" page taken from `docs/CIRCUIT.md` section 10.7 and `docs/WALLET.md`. Two decoder seams a generic Substrate client gets silently wrong are handled and tested: the header's `zkTreeRoot` between `extrinsicsRoot` and `digest`, which polkadot-js otherwise decodes the digest out of, and the block body, which the typed `chain_getBlock` refuses because the ML-DSA-87 signature is a fixed 7219-byte array above polkadot-js's 2048-byte array limit, so the envelope is walked by hand with the signature lengths and the extension list read out of metadata. Everything else is metadata-driven and the assumed storage hashers are asserted against it at startup, because an absent key and an empty map are indistinguishable and the difference renders as "0 leaves, 0 nullifiers" with no error. The presentation rules are part of the deliverable: a slot's two outputs are an unordered pair, there is no miner table because the author label is `H(cvk, parent_hash)` and rotates every block, a refused call is named without reprinting the arguments the block body already carries, ciphertext size and anchor gap are shown where they inform and are sortable nowhere, and `zkTree_getMerkleProof` is never called, which a lint rule enforces in both the shapes the node serves it in, the method and the `ZkTreeApi_get_merkle_proof` runtime call behind `state_call` and `archive_v1_call`. Degradation is part of it too: the consensus constants are read after the connection is published so a refused `state_call` costs those fields alone, a block whose state the node no longer keeps still renders its header and body, a bounded walk that reaches the bottom of a pruned state window ends as a miss that names the boundary, and every read on the search page whose request carries the query's own 32 bytes, the nullifier lookup and the block-hash header check alike, is printed as a warning first and runs only when a reader presses its button. 100 vitest cases over the decoders, the route grammar and the three answers a page may give about a block whose state the node did not keep run against fixtures captured from a dev node, and a Playwright smoke starts its own `--dev --tmp` node at one mining thread, shields once, sends once, serves the build and asserts the five pages, counting the frames that carry a query's own 32 bytes and relaying the page's socket to answer one block's state reads the way a pruned node does, then stops the node by pidfile and waits for the port to close. See `explorer/README.md`) |
@@ -646,17 +730,17 @@ way.
 1. ML-KEM-1024 chosen for addresses (level-5 parity with ML-DSA-87, same as Hegemon). Encoded address is 2571 characters.
 2. Proof size and verify weight for the private batch under the new PI
    layout; Wormhole's numbers are the baseline.
-3. ~~Whether to keep QPoW or bring RandomX~~ **Closed at M7: RandomX.** What
-   is open is the sizing of its two seed constants, which are runtime
-   constants and so a one-line change. The epoch is Monero's 2048 blocks,
-   which at this chain's 12 s target rotates every 6.8 hours instead of
-   Monero's 2.8 days, and every rotation costs a full-mode rig a 2 GiB dataset
-   rebuild; 16384 restores the cadence. The lag is Monero's 64 blocks and
-   `MaxReorgDepth` is 100, so the seed block is still inside the window a legal
-   reorg can move. That cannot split the chain, because the seed is resolved
-   along each candidate's own ancestry, but a deep reorg across a boundary does
-   change the seed under work already started; a lag of 128 removes it. Decide
-   both before a network launches, because after that they are a fork.
+3. ~~Whether to keep QPoW or bring RandomX~~ **Closed at M7: RandomX.** The
+   sizing of its two seed constants was open under it and the epoch closed
+   itself on 2026-09-14: the target block time moved to Monero's 120 s, so
+   Monero's 2048 blocks is Monero's 2.84 days here as well, and the epoch stays
+   at 2048 with nothing left to tune. What remains open is the lag. It is
+   Monero's 64 blocks and `MaxReorgDepth` is 100, so the seed block is still
+   inside the window a legal reorg can move. That cannot split the chain,
+   because the seed is resolved along each candidate's own ancestry, but a deep
+   reorg across a boundary does change the seed under work already started; a
+   lag of 128 removes it. Decide it before a network launches, because after
+   that it is a fork.
 4. Fee visibility: fees are public, as in Monero. **M4 decided: per-slot public
    fees, no tiering. M6 kept it, and the coinbase is why.** A block's coinbase
    note is worth the emission plus every fee the block settled, and that total

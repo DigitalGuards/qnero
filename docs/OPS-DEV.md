@@ -473,6 +473,50 @@ printed, both ends of the string. A stale or mistyped miner key mines correct
 blocks into notes the operator's wallet cannot open, block after block, and the
 only other symptom is a balance that never grows.
 
+### The block interval: 120 s in public, 12 s in `dev`
+
+The public chain targets 120 000 ms, Monero's interval. `docs/DESIGN.md` section
+7.4 carries the decision and what moved with it.
+
+One binary serves both cadences, because the target is chain state rather than a
+compile-time constant. `pallet_qpow::TargetBlockTimeMs` is written once at
+genesis from the chain spec and there is no setter and no extrinsic that can
+move it afterwards; when it is unset the pallet falls back to
+`TARGET_BLOCK_TIME_MS`, which is 120 000.
+
+| preset | target | why |
+|---|---|---|
+| `dev` | 12 000 | every end-to-end suite is sized for this cadence, and ten times longer blocks would make each of them ten times slower |
+| `heisenberg`, `planck`, `mainnet` | 120 000 | the public default |
+
+`the_dev_preset_keeps_the_fast_block_time` in
+`runtime/src/genesis_config_presets/mod.rs` asserts both halves, so neither can
+drift silently.
+
+**Reading it.** Everything that quotes a wait, estimates a hash rate or turns a
+block count into a duration reads the chain rather than a constant. Over JSON-RPC
+that is one `state_call`:
+
+```
+curl -s -H 'Content-Type: application/json'   -d '{"jsonrpc":"2.0","id":1,"method":"state_call","params":["QPoWApi_get_target_block_time","0x"]}'   http://127.0.0.1:9944
+# {"jsonrpc":"2.0","id":1,"result":"0xe02e000000000000"}   0x2ee0 = 12000
+```
+
+The answer is a SCALE `u64`, eight little-endian bytes.
+
+**Running a dev node at the public target.** Useful for a stratum or miner smoke
+test that has to see the cadence a rig will actually meet. Build the `dev` spec,
+edit the one field and start from the file:
+
+```
+./target/release/qnero-node build-spec --chain dev --disable-default-bootnode > /tmp/dev.json
+# set .genesis.runtimeGenesis.patch.qPoW.targetBlockTime to 120000
+./target/release/qnero-node --chain /tmp/dev.json --tmp --validator --mining-threads 1
+```
+
+The difficulty stays the `dev` preset's floor of 128, which is what keeps a
+single machine finding blocks; only the cadence the retarget aims at changes.
+
 ### The proof of work: RandomX, and what to point at it
 
 Since M7 the engine is RandomX, algorithm `rx/0`, stock constants. That is the
@@ -498,7 +542,7 @@ nice -n 19 ./target/release/qnero-node --dev --tmp \
 | `--stratum-host ADDR` | `127.0.0.1` | Bind address. A rig on another machine needs `0.0.0.0`. Requires `--stratum-port`. |
 | `--stratum-share-difficulty D` | 5000 | Per-connection share difficulty, clamped per job to the block difficulty. Requires `--stratum-port`. |
 | `--stratum-max-connections-per-ip N` | 16 | Connections one address may hold. A farm behind one NAT gateway and several xmrig instances on the node's own box all arrive from a single address. Requires `--stratum-port`. |
-| `--stratum-share-timeout S` | 600, rising with the share difficulty | How long a logged-in session has to produce an accepted share. The endpoint's whole liveness rule. Requires `--stratum-port`. |
+| `--stratum-share-timeout S` | 600, rising with the share difficulty | How long a logged-in session has to produce an accepted share. The endpoint's whole liveness rule. Independent of the block interval: 600 s is five block intervals at the public 120 s target. Requires `--stratum-port`. |
 
 An authority with `--mining-threads 0` and no `--stratum-port` has nothing
 mining, so the node refuses to start and says so. `--mining-threads` above the
@@ -563,7 +607,11 @@ is there to be mined with.
 successful login and expects a reply. It is inert otherwise.
 
 The default is 600 seconds and it rises with `--stratum-share-difficulty`:
-twelve expected share intervals for a rig of 100 H/s, capped at 7200. A deadline
+twelve expected share intervals for a rig of 100 H/s, capped at 7200. Neither
+number is denominated in block intervals and neither moved when the target went
+to 120 s: 600 seconds is five block intervals there, where it was fifty at 12 s,
+and 7200 is sixty where it was six hundred. What the rule counts is accepted
+shares, and a share is found against the share difficulty. A deadline
 fixed in seconds is a bet on the rig's hash rate. It is computed from the
 *configured* share difficulty, and a job's share difficulty is that value
 clamped down to the block difficulty, so the estimate is never shorter than the
@@ -646,19 +694,22 @@ instead of stalling at the boundary.
 Two things about 2048 and 64 are worth knowing before a launch, and both are a
 one-line change in `runtime/src/configs/mod.rs`:
 
-- 2048 blocks at Monero's 120 s target is 2.8 days. At this chain's 12 s target
-  it is 6.8 hours, so a rig rebuilds its dataset three times a day. 16384
-  blocks restores Monero's cadence and is still a power of two.
+- 2048 blocks at Monero's 120 s target is 2.84 days, and this chain's target is
+  the same 120 s, so the block count and the wall clock both match Monero. A rig
+  rebuilds its dataset here as often as it does there and no more. Under the old
+  12 s target the same 2048 blocks was 6.8 hours and the epoch was the constant
+  that would have had to move; it does not.
 - The lag is 64 and `MaxReorgDepth` is 100, so the seed block is still inside
   the window a legal reorg can move. That cannot split the chain, because the
   seed follows each candidate's ancestry, but a deep reorg across an epoch
   boundary does change the seed under work already started. A lag of 128
-  removes even that.
+  removes even that. In wall clock the lag is 2.1 hours and the reorg window
+  3.3 hours at a 120 s target.
 
 **The difficulty floor moved with the engine.** `get_min_difficulty()` was
 Ethereum's 2^17 and is now 128. At the 33 H/s one light-mode thread manages,
-the old floor was 66 core-minutes per block against a 12 s target: a
-single-machine devnet would never produce one. The `dev` preset starts at the
+the old floor was 66 core-minutes per block, which no single-machine devnet
+would ever produce against any target this chain has had. The `dev` preset starts at the
 floor, and the Homestead retarget's increment is `max(difficulty / 2048, 1)`.
 Integer division rounds `difficulty / 2048` to zero anywhere below 2048, which
 left a chain at the floor unable to leave it, so M7 floored the increment at
@@ -2841,8 +2892,11 @@ tree leaves       23
 tree depth        3
 ```
 
-41 quanta is the emission at genesis supply, `(21_000_000 - 0) / 50_000_000`
-QNR quantized down to a whole pool quantum. The occasional 42 is the carry: a
+41 quanta was the emission at genesis supply under the 12 s target,
+`(21_000_000 - 0) / 50_000_000` QNR quantized down to a whole pool quantum. At
+the 120 s target the divisor is 5 000 000 and the figure is 411 quanta, which is
+the same supply against the same wall clock. The transcript below is from the
+12 s run and its numbers are read with that divisor. The occasional carry: a
 block's credit is not a whole number of quanta, the remainder waits in
 `PendingCoinbaseFee`, and every eighth block or so it completes one. Nothing is
 lost between the two books and nothing is created.
@@ -3318,7 +3372,7 @@ does.
   schedule the dev preset used to carry, paying the keyless wormhole test address, left the suite
   green, because the pot's endowment is computed from the schedule totals and so covers a payee
   nobody can sign for. Every beneficiary is checked against a per-preset table now.
-- **The 27% genesis allocation is not a note, and five sentences said it was.** `mainnet_vesting`
+- **The genesis allocation is not a note, and five sentences said it was.** `mainnet_vesting`
   mints 5,670,000 QNR at genesis as transparent balances and every planck of it reaches its holder
   through `Vesting::claim`. "Value enters circulation in exactly one place" is true of value created
   after genesis, which is what DESIGN 7.1, the pillar list, the M6 row, CIRCUIT section 10, the
@@ -4143,9 +4197,11 @@ address. Six things moved and one thing deliberately did not.
   `SeedEpochBlocks` and `SeedEpochLag`, and two runtime-API methods read them.
 - **The floor moved, and the increment grew a floor of its own.**
   `get_min_difficulty()` was Ethereum's 2^17 and is 128: at 33 H/s the old
-  floor was 66 core-minutes per block against a 12 s target, so a
-  single-machine devnet could never produce one. `QPoWInitialDifficulty` went
-  from about 10^11 to 100 000 for the same reason. And because the Homestead
+  floor was 66 core-minutes per block, which no single-machine devnet could ever
+  produce. `QPoWInitialDifficulty` went from about 10^11 to 100 000 for the same
+  reason, and to 1 000 000 when the target block time moved to 120 s: difficulty
+  is expected hashes per block, so the same network needs ten times as much at a
+  ten times longer target. And because the Homestead
   increment is `parent / 2048`, which integer division rounds to zero below
   2048, a chain that reached the new floor could never leave it; the increment
   is now `max(parent / 2048, 1)`, which changes nothing above 2048.

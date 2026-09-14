@@ -1645,7 +1645,7 @@ Three things about them are worth carrying into M5:
 
 Value created after genesis enters circulation in one place under v1: the note a
 block mints to its author. The genesis allocation is the exception and it is
-transparent, 27% of `MAX_SUPPLY` paid out by `Vesting::claim`
+transparent, the genesis allocation paid out by `Vesting::claim`
 (`docs/DESIGN.md` section 7.1). This is what the chain stores for a coinbase,
 what it checks, and what it deliberately does not.
 

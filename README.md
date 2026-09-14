@@ -20,9 +20,11 @@ The mental model carries over almost intact.
 
 **Rigs mine it.** Qnero's proof of work is RandomX, stock `rx/0`, behind the same `FindAuthor` seam QPoW ran behind, so a Monero rig mines Qnero with a config change. The node serves the stratum dialect xmrig speaks to a Monero pool.
 
-Two habits do not carry over. There is no unlock time field: an anchor expires after `BlockHashWindow`, 256 blocks, and that is the only waiting rule.
+Two habits do not carry over. There is no unlock time field: an anchor expires after `BlockHashWindow`, 256 blocks, which is 8.5 hours at a 120-second target, and that is the only waiting rule.
 
 Tail emission is undesigned. The emission schedule inherited from the upstream chain runs against `MAX_SUPPLY`, so the question Monero answered with a tail is open here, listed in the mapping as absent.
+
+Blocks target 120 seconds, Monero's interval, decided 2026-09-14. The emission schedule was rescaled with it, so the supply against wall clock is what it was at 12 seconds, and the RandomX seed epoch of 2048 blocks is now Monero's 2.84 days to the hour. The interval is genesis-configured chain state rather than a compiled-in constant: the `dev` preset runs at 12 seconds so the test suites keep their cadence, and no wallet or explorer carries the number.
 
 ## Why the cryptography was replaced
 
@@ -53,7 +55,7 @@ One workstation, 20 cores, WSL2. `docs/BENCH.md` is the log.
 - Public batch at n = 53: proof 237544 bytes, prove 29 s, a 2.2x margin under `MAX_PROOF_BYTES` of 524288, 318 real slots.
 - Verify is flat in what a proof wraps: 2.2 ms for a leaf, 4.2 ms for a private batch, 6.04 ms for the public-batch check, all native. A private batch verifies in 14.1 ms of browser wasm against 3.7 ms for the same call natively, 3.8x, and the module's very first verify costs 20.5 ms because V8 has yet to tier that code up. Neither is `WASM_VERIFY_FACTOR = 5`, which governs the runtime's own wasmtime executor and stays unmeasured.
 - In a browser, single threaded: a payment is 33.6 s of wasm and 910.4 MiB of peak linear memory, on top of 12.1 s of circuit build once per worker. Natively on one thread the same batch is 9.82 s, so wasm costs about 3.3x. There is no phone in these figures: a desktop core under headless Chromium is the proxy, and the stated 2-to-4 factor is a floor, because its low end is a peak single-core score ratio that leaves out both throttling and mobile browser engines. A phone therefore lands at 67 to 134 s per payment or worse. The memory fits a 6 GB device and the single-threaded clock misses the 60 s target, so threads are the measured gap.
-- An address `qn1...` is 2571 characters, mostly its 1568-byte ML-KEM-1024 key. Amounts are pool quanta of 10^10 planck, 0.01 QNR; a `send` defaults to a fee of 8 quanta and takes 6.47 to 7.81 s, and emission at genesis supply is 41 quanta a block.
+- An address `qn1...` is 2571 characters, mostly its 1568-byte ML-KEM-1024 key. Amounts are pool quanta of 10^10 planck, 0.01 QNR; a `send` defaults to a fee of 8 quanta and takes 6.47 to 7.81 s to prove, and emission at genesis supply is 411 quanta a block against a 120-second target.
 
 ## How it compares
 
@@ -67,8 +69,8 @@ Five projects, set against each other on the points that decide whether a paymen
 | Privacy by default | Mandatory for user transfers; Root exempt; shields, coinbase values and fees public | Optional; transfers transparent; rewards paid to wormhole addresses | Absent, fully transparent ledger | Mandatory for user payments, no opt-out; coinbase amounts and fees public | Absent, fully transparent ledger |
 | What hides sender, receiver, amount | Poseidon2 Merkle membership, ML-KEM ciphertexts, in-circuit commitments | Wormhole hides the burn-to-exit link; amounts and addresses public | Nothing on chain | Ring signatures, stealth addresses, RingCT with Bulletproofs+ | Nothing; pseudonymous addresses |
 | What a quantum computer breaks | No curves in the path; residual exposure is lattice, ML-KEM, Poseidon2 (Grover-halved), FRI | No curves in the path; residual exposure is lattice, Poseidon2 (Grover-halved), FRI | No curves in the path; history was always public | Unspent outputs stealable; past rings resolved, amounts readable, recipients matched to known addresses | Every exposed key at once, Taproot included; the rest in the confirmation race |
-| Block time | 12 seconds | 12 seconds | 60 seconds legacy; 60-second slots on QRL 2.0 testnet | 120 seconds | 10 minutes |
-| Supply and emission | 21M QNR cap, upstream decay schedule; genesis allocation and tail undecided | 21M QTC cap, geometric decay, 27% genesis vesting | 105M cap on legacy, flat reward since QIP-016; no published QRL 2.0 schedule | No cap; perpetual tail of 0.6 XMR per block | 21M cap; halvings to zero, then fees |
+| Block time | 120 seconds | 12 seconds | 60 seconds legacy; 60-second slots on QRL 2.0 testnet | 120 seconds | 10 minutes |
+| Supply and emission | 21M QNR cap, upstream decay schedule; 2% placeholder allocation, may be removed; tail undecided | 21M QTC cap, geometric decay, 27% genesis vesting | 105M cap on legacy, flat reward since QIP-016; no published QRL 2.0 schedule | No cap; perpetual tail of 0.6 XMR per block | 21M cap; halvings to zero, then fees |
 | Smart contracts | None; one fixed circuit | None | None on legacy; QRVM and Hyperion on QRL 2.0 | None; a fixed set of transaction types | Bitcoin Script and Tapscript, no loops |
 | Audits | None of its own code; upstream Poseidon and chain reviewed; its RandomX engine unreviewed | Eiger: chain, Poseidon, earlier PoW; Neodyme: ML-DSA; Immunefi contest Aug 2026 | Red4Sec and X41 D-Sec 2018, Halborn; QRL 2.0 audits partial | Bulletproofs 2018, RandomX 2019, CLSAG 2020, Bulletproofs+ 2021 | Quarkslab 2025 on P2P, mempool and validation; open review since 2009 |
 | Licence | MIT, Rust, forked post-quantum Substrate chain | MIT family, Rust, Substrate | MIT on legacy Python, GPL-3.0 on QRL 2.0 | 3-clause BSD, C++ | MIT, C++ |

@@ -11,18 +11,18 @@ Runtime upgrades never go through `set_code`: a runtime WASM is hundreds of KiB,
 
 ## 1. Timing
 
-All periods are in blocks. `runtime/src/lib.rs`: `TARGET_BLOCK_TIME_MS = 12_000`, so `MINUTES = 5`, `HOURS = 300`, `DAYS = 7200` blocks.
+All periods are in blocks. `runtime/src/lib.rs`: `TARGET_BLOCK_TIME_MS = 120_000`, so `HOURS = 30` and `DAYS = 720` blocks, each derived from milliseconds so it keeps its name. `MINUTES` floors at one block, which at this target is two minutes: one block is the shortest wait a block count can express, so `10 * MINUTES` on the fast-upgrade track is 10 blocks, 20 minutes.
 
 | Parameter | Track 0 | Track 1 `fast_upgrade` | Meaning |
 |---|---|---|---|
-| `prepare_period` | `2 * HOURS` (600) | `10 * MINUTES` (50) | Delay between submission and decision start |
-| `decision_period` | `DAYS` (7200) | `DAYS` (7200) | Window in which the referendum must reach passing state |
+| `prepare_period` | `2 * HOURS` (60) | `10 * MINUTES` (10) | Delay between submission and decision start |
+| `decision_period` | `DAYS` (720) | `DAYS` (720) | Window in which the referendum must reach passing state |
 | `confirm_period` | `DAYS` | `10 * MINUTES` | Must remain continuously passing this long to be approved |
 | `min_enactment_period` | `DAYS` | `10 * MINUTES` | Min delay between approval and dispatch |
 | `max_deciding` | 1 | 1 | Per track: one deciding referendum at a time on each lane |
 | `decision_deposit` | `TECH_COLLECTIVE_DECISION_DEPOSIT` = `scale_fee(UNIT)` | same | Bond required to enter deciding |
 
-Fastest end to end on track 1: 10 min prepare + 10 min confirm + 10 min enactment ≈ **30 minutes** after submission (plus the time to place the decision deposit and collect 8 ayes); the WASM can be applied in the block after `authorize_upgrade` executes. Track 0: 2 h + 24 h + 24 h ≈ 50 h.
+Fastest end to end on track 1: 10 blocks prepare + 10 blocks confirm + 10 blocks enactment ≈ **60 minutes** after submission at the public 120s target (20 minutes each, because `MINUTES` floors at one block) (plus the time to place the decision deposit and collect 8 ayes); the WASM can be applied in the block after `authorize_upgrade` executes. Track 0: 2 h + 24 h + 24 h ≈ 50 h.
 
 To change a track's timing, edit its `TrackInfo` in `create_tech_collective_tracks`. Any change is itself a runtime upgrade and only takes effect once shipped through the `fast_upgrade` lane (the release workflow bumps `spec_version`, `runtime/src/lib.rs`, currently 147).
 

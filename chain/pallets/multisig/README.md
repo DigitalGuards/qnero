@@ -513,7 +513,7 @@ impl pallet_multisig::Config for Runtime {
     type MaxSigners = ConstU32<100>;                    // Max complexity
     type MaxTotalProposalsInStorage = ConstU32<200>;    // Total storage cap (cleanup via claim_deposits/remove_expired)
     type MaxCallSize = ConstU32<10240>;                 // Per-proposal storage limit
-    type MaxExpiryDuration = ConstU32<100_800>;         // Max proposal lifetime (~2 weeks @ 12s)
+    type MaxExpiryDuration = MaxExpiryDuration;         // Max proposal lifetime, 14 * DAYS (10_080 blocks at a 120s target)
     type MaxInnerCallWeight = MaxInnerCallWeight;        // Per-proposal inner-call weight limit
     
     // Economic parameters (example values - adjust per runtime)
@@ -604,7 +604,7 @@ let multisig_addr = Multisig::create_multisig(
 // Propose and get 3 approvals for:
 ReversibleTransfers::set_high_security(
     Origin::signed(multisig_addr),
-    delay: 100_800, // 2 weeks @ 12s blocks
+    delay: 10_080, // 2 weeks: 14 * DAYS at a 120s target
     guardian: guardian_account
 );
 

@@ -348,7 +348,12 @@ Fixed costs measured alongside:
 
 ## Dev-chain block time
 
-`--dev --tmp --mining-threads 1`, genesis difficulty 128 (the pallet's floor):
+Measured on the `dev` preset, whose target is 12 s. The public chain targets
+120 s (`docs/DESIGN.md` section 7.4), and the `dev` preset keeps 12 s precisely
+so figures like these stay comparable and the suites keep their cadence. What a
+120 s target changes here is the wall clock and not the block counts: the
+retarget's step is a fixed fraction per block at any target, so a climb that
+takes 66 blocks takes 66 blocks either way and ten times as long in seconds.
 
 | | value |
 |---|---|
@@ -357,7 +362,7 @@ Fixed costs measured alongside:
 | difficulty at #66 | 189 |
 | blocks in the run | 66 in 3 m 48 s, 50 mined in process and 14 by xmrig |
 
-4.3 s against a 12 s target is the retarget climbing: at 32.9 H/s a difficulty
+4.3 s against this chain's 12 s dev target is the retarget climbing: at 32.9 H/s a difficulty
 of 128 is about four seconds, so the chain runs fast and the difficulty rises
 one step per block. The step is one because integer division rounds
 `difficulty / 2048` to zero below 2048, and M7 floored the increment at one so
@@ -675,9 +680,11 @@ sticky for the life of the worker and a second prover would add its own.
 
 ## The anchor window is not the constraint here
 
-A segment must name a block inside `BlockHashWindow`, 256 blocks, which at the
-12 s target is about 51 minutes. A browser payment is 45.7 s cold and 33.6 s
-warm, so the window has room to spare even at 4x. The ordering still matters:
+A segment must name a block inside `BlockHashWindow`, 256 blocks. At the public
+chain's 120 s target that is 8.5 hours; the measurements below were taken on a
+12 s dev chain where the same 256 blocks was about 51 minutes. A browser payment
+is 45.7 s cold and 33.6 s warm, so the window had room to spare even at 4x on
+the tighter of the two. The ordering still matters:
 the harness builds every circuit before it takes an anchor, and a wallet that
 anchored first would spend a third of a browser payment on work that has
 nothing to do with the anchor.
@@ -781,7 +788,10 @@ that matters for a phone: M8's peak stands.
 build (about 4.5 s threaded), the anchor read and its header check, a local
 rebuild of the whole commitment tree, the submission, and the wait for a block.
 A dev chain at a 12 s target block time contributes most of the remainder, and
-it is the one part a faster prover cannot shorten. It is also the noisiest
+it is the one part a faster prover cannot shorten. On the public chain's 120 s
+target that term is ten times larger and it dominates: a payment there is the
+proof plus up to two minutes, which is why both wallets now quote the wait as
+those two parts and read the interval from the chain. It is also the noisiest
 figure here: repeat runs of the threaded row landed at 19.6 s and 24.6 s,
 because where the settlement falls inside a block interval is luck. The
 proving time moves too, by more than this paragraph first claimed. See the
@@ -1013,9 +1023,10 @@ linear check into a quadratic one. The command-line wallet carries its
 `TreeFrontier` across the chunks and checks each chunk's roots as it climbs.
 
 What this does not measure is a chain deep enough for the per-block term to
-matter. At a twelve-second target a year is about 2.6 million blocks, so a
-first sync on such a chain is 2.6 million header requests, against the 2.6
-million coinbase leaves it already reads. The two grow together, which is why
+matter. At the public chain's 120 s target a year is 262 980 blocks, so a first
+sync on such a chain is 262 980 header requests, against the 262 980 coinbase
+leaves it already reads. At the 12 s target these figures were measured against
+it was ten times that. The two grow together, which is why
 the header walk does not change the shape of a first sync, and it is also why
 neither is affordable at that depth without the checkpointed frontier the
 structure is already built for: `TreeFrontier` is a few dozen digests and
