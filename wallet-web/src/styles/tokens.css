@@ -1,0 +1,170 @@
+/*
+ * The token set, carried over from MyMonero's web wallet.
+ *
+ * See `NOTICE`. What is carried is the design system that stylesheet states by
+ * repetition: the dark surface ramp, the text ramp above it, the two-part
+ * elevation recipe (a half-pixel inset highlight over a one-pixel dark
+ * shadow), the 13/12/11/10 px scale with 0.5 px tracking on every label, the
+ * 3 px button radius, the 4 px input radius and the 5 px panel radius, the
+ * 32 px action button, the 29 px input, and the label-over-value field row
+ * that every form in that wallet is built from.
+ *
+ * The accent is Qnero's own, and it is the same one the explorer uses so the
+ * two read as one project. MyMonero's cyan is the one value in that palette
+ * carrying its identity, so it is the one value not carried.
+ *
+ * Dark is where this design comes from and it is what the wallet is drawn for,
+ * but the tokens are defined light-first: a page whose JavaScript has not run
+ * still reads, and the media query and the `data-theme` attribute redefine the
+ * same names in both directions so a toggle wins either way.
+ *
+ * Every text token is measured against the surface it actually lands on.
+ * `--text-muted` carries the field labels, the table headers and every
+ * provenance note at 10 to 11 px, and clears 4.5:1 on the panel and on the
+ * body in both themes. `--text-dim` is for a disabled control and a strip dot
+ * and must be lifted before it is given prose. `--border-strong` is the edge
+ * that makes a control a control and clears 3:1 against the panel.
+ */
+
+:root {
+  --bg-deep: #f4f2f0;
+  --bg-body: #fbfaf9;
+  --bg-panel: #ffffff;
+  --bg-raised: #f0eeec;
+  --bg-field: #f6f4f2;
+  --bg-hover: #e9e6e3;
+  --border: #d8d4d0;
+  --border-strong: #8f8a86;
+
+  --text-primary: #1b1a19;
+  --text-bright: #000000;
+  --text-secondary: #55514e;
+  --text-muted: #6a6460;
+  --text-dim: #948d88;
+
+  --accent: #8a4b06;
+  --accent-hover: #6f3c05;
+  --accent-fill: #8a4b06;
+  --accent-on-fill: #ffffff;
+  --destructive: #a32020;
+  --destructive-fill: #a32020;
+  --destructive-on-fill: #ffffff;
+  --positive: #1f6b3a;
+  --notice: #6b4a00;
+  --notice-bg: rgba(184, 134, 11, 0.1);
+  --notice-border: rgba(138, 100, 8, 0.45);
+
+  /* The elevation recipe: a shadow below, a highlight at the top edge. */
+  --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
+  --shadow-inset: 0 0.5px 0 0 rgba(27, 26, 25, 0.08), inset 0 0.5px 0 0 rgba(27, 26, 25, 0.14);
+  --shadow-float: 0 1px 4px 0 rgba(27, 26, 25, 0.16);
+  --shadow-modal: 0 8px 32px 0 rgba(27, 26, 25, 0.28);
+  --shadow-edge: rgba(27, 26, 25, 0.25);
+  --shadow-edge-fade: rgba(27, 26, 25, 0);
+
+  --fs-body: 13px;
+  --fs-ui: 12px;
+  --fs-meta: 11px;
+  --fs-label: 10px;
+  --ls-wide: 0.5px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 15px;
+  --space-4: 22px;
+  --space-5: 32px;
+
+  --radius-sm: 3px;
+  --radius-input: 4px;
+  --radius-md: 5px;
+
+  --control-h: 32px;
+  --input-h: 29px;
+  --strip-height: 24px;
+  /* Reading measure, on the container rather than the paragraph: a `ch` cap
+     tracks the child's font size, so an 11 px note would stop at half a box. */
+  --measure: 620px;
+  --shell-width: 760px;
+  --wizard-width: 420px;
+
+  --font-stack-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+    'Open Sans', 'Helvetica Neue', sans-serif;
+  --font-stack-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono',
+    'Liberation Mono', monospace;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg-deep: #161416;
+    --bg-body: #272527;
+    --bg-panel: #1d1b1d;
+    --bg-raised: #383638;
+    --bg-field: #1d1b1d;
+    --bg-hover: #3f3e3f;
+    --border: #494749;
+    --border-strong: #6d6b6d;
+
+    --text-primary: #fcfbfc;
+    --text-bright: #ffffff;
+    --text-secondary: #9e9c9e;
+    --text-muted: #909090;
+    --text-dim: #6b696b;
+
+    --accent: #e6a145;
+    --accent-hover: #f2b968;
+    --accent-fill: #e6a145;
+    --accent-on-fill: #161416;
+    --destructive: #f97777;
+    --destructive-fill: #f97777;
+    --destructive-on-fill: #161416;
+    --positive: #7fd4a0;
+    --notice: #f5e67e;
+    --notice-bg: rgba(245, 230, 125, 0.05);
+    --notice-border: rgba(245, 230, 125, 0.3);
+
+    --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
+    --shadow-inset: 0 0.5px 0 0 rgba(56, 54, 56, 0.5), inset 0 0.5px 0 0 #161416;
+    --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
+    --shadow-modal: 0 8px 32px 0 rgba(0, 0, 0, 0.55);
+    --shadow-edge: rgba(255, 255, 255, 0.22);
+    --shadow-edge-fade: rgba(255, 255, 255, 0);
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg-deep: #161416;
+  --bg-body: #272527;
+  --bg-panel: #1d1b1d;
+  --bg-raised: #383638;
+  --bg-field: #1d1b1d;
+  --bg-hover: #3f3e3f;
+  --border: #494749;
+  --border-strong: #6d6b6d;
+
+  --text-primary: #fcfbfc;
+  --text-bright: #ffffff;
+  --text-secondary: #9e9c9e;
+  --text-muted: #909090;
+  --text-dim: #6b696b;
+
+  --accent: #e6a145;
+  --accent-hover: #f2b968;
+  --accent-fill: #e6a145;
+  --accent-on-fill: #161416;
+  --destructive: #f97777;
+  --destructive-fill: #f97777;
+  --destructive-on-fill: #161416;
+  --positive: #7fd4a0;
+  --notice: #f5e67e;
+  --notice-bg: rgba(245, 230, 125, 0.05);
+  --notice-border: rgba(245, 230, 125, 0.3);
+
+  --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
+  --shadow-inset: 0 0.5px 0 0 rgba(56, 54, 56, 0.5), inset 0 0.5px 0 0 #161416;
+  --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
+  --shadow-modal: 0 8px 32px 0 rgba(0, 0, 0, 0.55);
+  --shadow-edge: rgba(255, 255, 255, 0.22);
+  --shadow-edge-fade: rgba(255, 255, 255, 0);
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+.devnet/
+
+# The prover, staged in by `scripts/stage-wasm.sh`. Three megabytes of build
+# output per module, rebuilt from `crates/qnero-prover-wasm` and never edited
+# here.
+public/wasm/

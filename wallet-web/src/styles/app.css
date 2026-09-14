@@ -1,0 +1,181 @@
+/*
+ * The stylesheet: Tailwind v4 over the token file.
+ *
+ * Two halves, and the split is deliberate. `tokens.css` holds the values
+ * carried over from MyMonero's web wallet (see `NOTICE`); this file maps them
+ * into Tailwind's theme so a component can say `bg-panel text-muted` and get
+ * that wallet's ramp, and then states the handful of recipes that are a shape
+ * rather than a value: the sunken input, the raised button, the two-part
+ * elevation, the label-over-value field row.
+ *
+ * The build is the sibling web wallet's: Tailwind v4 through
+ * `@tailwindcss/postcss`, configured in CSS rather than in a config file.
+ *
+ * Every mapped colour is `var(--...)` rather than a literal, so redefining a
+ * token under `prefers-color-scheme: dark` or `[data-theme]` flows through
+ * every utility built from it. A literal here would freeze the light palette
+ * into the utility and leave the dark theme half applied.
+ */
+
+@import './tokens.css';
+@import 'tailwindcss';
+
+@theme inline {
+  --color-deep: var(--bg-deep);
+  --color-body: var(--bg-body);
+  --color-panel: var(--bg-panel);
+  --color-raised: var(--bg-raised);
+  --color-field: var(--bg-field);
+  --color-hover: var(--bg-hover);
+  --color-edge: var(--border);
+  --color-edge-strong: var(--border-strong);
+
+  --color-ink: var(--text-primary);
+  --color-ink-bright: var(--text-bright);
+  --color-ink-2: var(--text-secondary);
+  --color-muted: var(--text-muted);
+  --color-dim: var(--text-dim);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fill: var(--accent-fill);
+  --color-on-accent: var(--accent-on-fill);
+  --color-destructive: var(--destructive);
+  --color-destructive-fill: var(--destructive-fill);
+  --color-on-destructive: var(--destructive-on-fill);
+  --color-positive: var(--positive);
+  --color-notice: var(--notice);
+  --color-notice-bg: var(--notice-bg);
+  --color-notice-edge: var(--notice-border);
+
+  /* MyMonero's scale: 13 body, 12 control, 11 meta, 10 label. */
+  --text-body: var(--fs-body);
+  --text-body--line-height: 20px;
+  --text-ui: var(--fs-ui);
+  --text-ui--line-height: 18px;
+  --text-meta: var(--fs-meta);
+  --text-meta--line-height: 16px;
+  --text-label: var(--fs-label);
+  --text-label--line-height: 14px;
+  --text-display: 32px;
+  --text-display--line-height: 38px;
+
+  --radius-control: var(--radius-sm);
+  --radius-field: var(--radius-input);
+  --radius-panel: var(--radius-md);
+
+  --font-sans: var(--font-stack-ui);
+  --font-mono: var(--font-stack-mono);
+
+  --tracking-label: var(--ls-wide);
+}
+
+@layer base {
+  html {
+    background: var(--bg-deep);
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg-body);
+    color: var(--text-primary);
+    font-family: var(--font-stack-ui);
+    font-size: var(--fs-body);
+    line-height: 20px;
+    -webkit-font-smoothing: subpixel-antialiased;
+  }
+
+  /* One visible focus style everywhere, including on the elements that get
+     focus from a Radix primitive rather than from a click. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  /* Hue alone is about 1.2:1 against this text, so a link inside prose is
+     underlined as well. */
+  .prose a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+}
+
+@layer components {
+  /*
+   * The two-part elevation MyMonero repeats on every raised control: a
+   * one-pixel shadow below, a half-pixel highlight along the top edge. It is
+   * the whole reason that interface reads as physical at 12 px.
+   */
+  .elev-raised {
+    box-shadow: var(--shadow-raised);
+  }
+
+  .elev-inset {
+    box-shadow: var(--shadow-inset);
+  }
+
+  /* The sunken input: 29 px tall, 4 px radius, field ground, inset edge. */
+  .mm-input {
+    display: block;
+    width: 100%;
+    min-height: 29px;
+    padding: 5px 7px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-input);
+    background: var(--bg-field);
+    color: var(--text-primary);
+    font-family: var(--font-stack-mono);
+    font-size: var(--fs-body);
+    line-height: 17px;
+    box-shadow: var(--shadow-inset);
+  }
+
+  .mm-input::placeholder {
+    color: var(--text-dim);
+  }
+
+  .mm-input:focus-visible {
+    border-color: var(--accent);
+  }
+
+  /* The uppercase field label, 10 px with half a pixel of tracking. */
+  .mm-label {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text-muted);
+    font-size: var(--fs-label);
+    letter-spacing: var(--ls-wide);
+    text-transform: uppercase;
+  }
+
+  /*
+   * The balance: 32 px at weight 100, with the fractional part dimmed. Both
+   * come from that wallet's balance label, and the dimming is what keeps a
+   * long number readable at a glance without rounding away what is held.
+   */
+  .mm-balance {
+    font-size: 32px;
+    font-weight: 100;
+    line-height: 38px;
+    letter-spacing: -0.5px;
+  }
+
+  .mm-balance-fraction {
+    opacity: 0.35;
+  }
+
+  /* A long secret or address, wrapped to the box and selectable in one drag. */
+  .mm-secret {
+    overflow-wrap: anywhere;
+    font-family: var(--font-stack-mono);
+    user-select: all;
+  }
+
+  /* A memo is remote input. Escaping happens in `lib/memo.ts`; isolation is a
+     property of the box, so it is stated here as well. */
+  .mm-memo {
+    unicode-bidi: isolate;
+    overflow-wrap: anywhere;
+  }
+}

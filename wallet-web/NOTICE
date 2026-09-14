@@ -1,0 +1,42 @@
+This application's look follows MyMonero's web wallet
+(https://github.com/mymonero/mymonero-web-js, BSD-3-Clause, Copyright (c)
+2014-2019, MyMonero.com), read at the default branch on 2026-09-14, together
+with its desktop sibling (https://github.com/mymonero/mymonero-app-js, same
+licence and copyright).
+
+Files carrying that work
+------------------------
+
+  src/styles/tokens.css   the surface and text ramps, the elevation recipe,
+                          the type scale and the tracking, the radii, the
+                          control heights
+  src/styles/app.css      the component recipes those tokens build: the action
+                          button, the sunken input, the label-over-value field
+                          row, the panel, the secret box, the status strip
+
+What is carried over is the design system those stylesheets state by
+repetition, and the screen flow: a landing that offers "Create new wallet" and
+"Use existing wallet", a wallet screen whose balance is the largest thing on
+it with the transaction list under it, a send screen with the fee on its own
+line and a named sending state, a receive screen that is an address and its QR
+code, and a settings screen that holds the lock and the server address. The
+copy keeps that wallet's register: short sentences, sentence case in prose,
+uppercase field labels.
+
+No file was copied. Where a value is MyMonero's it is stated as a custom
+property in `tokens.css`, which the original does not have, and the components
+are written against those properties rather than against inline styles.
+
+What is not carried over: the accent colour, which is the one value in that
+palette carrying MyMonero's identity, replaced by Qnero's own; the light
+palette, which is this project's; and the `Native-*` typefaces, which are a
+licensed retail family outside the BSD grant on the source, whose roles are
+filled by system stacks instead.
+
+BSD-3-Clause clause 3 forbids using the copyright holder's or contributors'
+names to endorse or promote products derived from this software. The MyMonero
+name and logo appear nowhere in this application. The credit is in
+`README.md`, as a statement of provenance.
+
+Full licence text:
+https://github.com/mymonero/mymonero-web-js/blob/master/LICENSE.txt
