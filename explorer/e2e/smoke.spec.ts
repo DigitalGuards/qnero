@@ -36,9 +36,12 @@ test('the home page reads the head, the work and the pool off the node', async (
   await expect(field(page, 'Difficulty')).toHaveText(/\d/);
   await expect(field(page, 'Network hash rate')).toHaveText(/H\/s$/);
 
-  // The devnet is far below one epoch, so the seed is still the genesis block
-  // and the rotation is announced ahead of it.
+  // The devnet is far below one epoch, so the seed in use is the genesis block
+  // and the next rotation installs the first epoch boundary. The two are never
+  // the same number: a next-seed field that reads back the seed already in use
+  // would be telling the reader the dataset rotates to itself.
   await expect(field(page, 'RandomX seed height')).toHaveText('0');
+  await expect(field(page, 'Next seed height')).toHaveText('2,048');
   await expect(page.locator('[data-field="Next seed height"] .field__note')).toContainText(
     'epoch 2,048 lag 64',
   );
@@ -103,6 +106,16 @@ test('the settlement block shows slots, both nullifiers and both commitments', a
   await expect(extrinsics).toContainText('Shielded.submit_private_batch');
   await expect(extrinsics).toContainText('Timestamp.set');
   await expect(extrinsics).toContainText('Shielded.coinbase');
+
+  // Only the settlement links to the settlement page. A timestamp inherent
+  // opened there would be titled as a settlement and would carry a statement
+  // about spent notes over an extrinsic that spent nothing.
+  const rows = extrinsics.locator('tbody tr');
+  for (const row of await rows.all()) {
+    const call = await row.locator('td').nth(1).innerText();
+    const links = await row.locator('td a').count();
+    expect(links).toBe(call === 'Shielded.submit_private_batch' ? 1 : 0);
+  }
 });
 
 test('a settlement page states what it publishes and what it does not', async ({ page }) => {
@@ -119,7 +132,12 @@ test('a settlement page states what it publishes and what it does not', async ({
 
   await expect(panel(page, 'Slots').locator('.slot')).toHaveCount(1);
   await expect(page.locator('.notice')).toContainText('What this publishes');
-  await expect(page.locator('.notice')).toContainText('a pair with no order');
+  await expect(page.locator('.notice')).toContainText('the pair is rendered here with no order');
+  // The join a slot does publish is stated beside the join it does not.
+  await expect(page.locator('.notice')).toContainText(
+    'Nothing on chain joins a nullifier to the leaf it spent',
+  );
+  await expect(panel(page, 'Slots')).toContainText('The two leaves beside it are the outputs');
 });
 
 test('search answers a height, a block hash and a settled nullifier', async ({ page }) => {
@@ -138,14 +156,24 @@ test('search answers a height, a block hash and a settled nullifier', async ({ p
   await expect(field(page, 'A block on this chain')).toContainText(
     `block ${facts().settlementHeight}`,
   );
+
+  // The nullifier lookup names its argument to the node, so it never runs on
+  // its own: the warning is on the page and the answer is not, until asked.
+  const lookup = panel(page, 'The settled nullifier set');
+  await expect(page.locator('.notice')).toContainText('learns that someone asked about that value');
+  await expect(page.locator('[data-field="In the settled nullifier set"]')).toHaveCount(0);
+  await lookup.getByRole('button', { name: 'Check the settled nullifier set' }).click();
   await expect(field(page, 'In the settled nullifier set')).toHaveText('not seen');
 
+  // A second 32-byte query starts from the warning again: one click is not
+  // permission for every value typed after it.
   await open(page, `#/search?q=${nullifier}`);
-  await expect(field(page, 'In the settled nullifier set')).toHaveText('seen');
   await expect(field(page, 'A block on this chain')).toHaveText('not seen');
-  await expect(page.locator('.notice')).toContainText('names that value to whoever runs it');
+  await expect(page.locator('[data-field="In the settled nullifier set"]')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Check the settled nullifier set' }).click();
+  await expect(field(page, 'In the settled nullifier set')).toHaveText('seen');
 
-  // The scans are explicit, and the nullifier one finds the settling block.
+  // The scans are explicit too, and the nullifier one finds the settling block.
   await page.getByRole('button', { name: /Read the last/ }).click();
   await expect(panel(page, 'Which settlement published it')).toContainText(
     `block ${facts().settlementHeight}`,
