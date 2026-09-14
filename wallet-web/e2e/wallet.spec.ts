@@ -211,6 +211,17 @@ test.describe('the browser wallet against a dev chain', () => {
     await page.goto(MODE === 'single' ? '/?prover=single' : '/');
     await expect(page.getByTestId('create-wallet')).toBeVisible({ timeout: 60_000 });
 
+    // The policy travels with the files. `tests/policy.test.ts` asserts what
+    // the directives say; this asserts that the page a host serves carries
+    // them at all, which is the half a unit test cannot see. A build that
+    // dropped the injection would serve a wallet that works perfectly and
+    // refuses nothing.
+    const policy = await page
+      .locator('meta[http-equiv="Content-Security-Policy"]')
+      .getAttribute('content');
+    expect(policy).toContain("default-src 'none'");
+    expect(policy).toContain("connect-src 'self' ws: wss:");
+
     const address = await createWallet(page);
 
     // The node the page is talking to is the one this suite started.
