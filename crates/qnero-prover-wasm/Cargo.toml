@@ -22,6 +22,10 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 wasm-bindgen = "0.2"
+# Only under `threads`. It is what turns a rayon pool into a set of Web
+# Workers sharing one linear memory, and it is the crate that defines the
+# `initThreadPool` the page calls before proving.
+wasm-bindgen-rayon = { version = "1.3", optional = true }
 
 # Two getrandom majors, two direct dependencies, one cfg. Cargo features are
 # per crate *version* and additive, so naming one does nothing for the other
@@ -66,8 +70,17 @@ qnero-circuit-builder = { workspace = true }
 
 [features]
 default = []
-# Deliberately absent: anything that turns on `parallel` anywhere below this
-# crate. rayon-core spawns `std::thread`, which on wasm32-unknown-unknown
-# without the atomics target feature fails at runtime, and rayon needs a
-# SharedArrayBuffer-backed pool to be worth anything at all.
-# `tests/no_parallel.rs` asserts the dependency tree stays rayon-free.
+# The threaded build, and the only thing in this workspace that turns on
+# `parallel` below this crate.
+#
+# It is off by default and it is not a flag flip. rayon-core spawns
+# `std::thread`, which on `wasm32-unknown-unknown` needs the `atomics` and
+# `bulk-memory` target features and a `std` rebuilt with them
+# (`-Z build-std`, nightly), and the pool it starts needs a
+# `SharedArrayBuffer`, which needs the serving origin to be cross-origin
+# isolated. `scripts/build-threaded-wasm.sh` is the whole recipe and
+# `docs/BENCH.md` carries what it bought.
+#
+# `tests/no_parallel.rs` asserts that the *default* tree stays rayon-free, so
+# a `parallel` feature cannot reach the single-threaded module by accident.
+threads = ["dep:wasm-bindgen-rayon", "qnero-prover/parallel"]

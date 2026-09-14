@@ -10,6 +10,10 @@
 //! entropy_self_check()                 draw from both entropy paths, once, at startup
 //! derive_account(seed)                 address and the public half of the key tree
 //! decrypt_note(seed, ct, commitment)   one scan step
+//! note_digests(seed, v, rho, r)        the commitment and the nullifier of a held note
+//! coinbase_note(seed, genesis, block)  the miner-key derivation a scan rebuilds from
+//! header_block_hash(anchor)            the anchor check, before a proof is paid for
+//! tree_path(leaves, depth, index)      the local rebuild that names no leaf to the node
 //! WasmWalletProver.fromSource(n)       build both circuits from compiled code
 //! WasmWalletProver.fromArtifacts(..)   build them, with the padding leaf supplied
 //!   .proveTransfer(request)            one leaf, one private batch, one verify
@@ -67,10 +71,23 @@ pub mod prove;
 pub mod random;
 pub mod request;
 pub mod scan;
+pub mod wallet;
 
 use wasm_bindgen::prelude::*;
 
 pub use prove::CHAIN_NUM_LEAVES;
+
+/// `initThreadPool(threads)`, present only in the threaded module.
+///
+/// It spawns that many Web Workers over one `SharedArrayBuffer`-backed linear
+/// memory and hands them to rayon. The page calls it once, after `init()` and
+/// before anything is proved; a page that skips it gets a rayon pool of one,
+/// which is the single-threaded module with extra steps.
+///
+/// Its absence is how a loader tells the two modules apart at runtime, which
+/// is why it is re-exported here rather than left where the macro put it.
+#[cfg(feature = "threads")]
+pub use wasm_bindgen_rayon::init_thread_pool;
 
 /// Turn an internal error into one JS can throw.
 ///
@@ -272,6 +289,112 @@ impl WasmWalletProver {
     pub fn verify_proof(&self, proof: &[u8]) -> Result<f64, JsError> {
         prove::verify(&self.inner, proof).map_err(js_error)
     }
+}
+
+/// The anchor header's own hash, recomputed from the preimage the chain
+/// hashes.
+///
+/// A wallet checks this against `chain_getBlockHash` before it proves. See
+/// [`wallet::header_block_hash_hex`].
+#[wasm_bindgen(js_name = headerBlockHash)]
+pub fn header_block_hash(anchor_json: &str) -> Result<String, JsError> {
+    wallet::header_block_hash_hex(anchor_json).map_err(js_error)
+}
+
+/// Rebuild the commitment tree over a leaf range and take one leaf's path.
+///
+/// `leaf_hashes` is `32 * n` bytes, `ZkTree::Leaves` in index order read at
+/// one block hash, and `depth` is `ZkTree::Depth` read at that same hash.
+/// See [`wallet::tree_path_json`].
+#[wasm_bindgen(js_name = treePath)]
+pub fn tree_path(leaf_hashes: &[u8], depth: usize, leaf_index: usize) -> Result<String, JsError> {
+    wallet::tree_path_json(leaf_hashes, depth, leaf_index).map_err(js_error)
+}
+
+/// The root a rebuild reaches, with no path taken: the gate against the
+/// header's `zkTreeRoot`.
+#[wasm_bindgen(js_name = treeRoot)]
+pub fn tree_root(leaf_hashes: &[u8], depth: usize) -> Result<String, JsError> {
+    wallet::tree_root_hex(leaf_hashes, depth).map_err(js_error)
+}
+
+/// The smallest tree depth that holds a leaf count.
+#[wasm_bindgen(js_name = depthFor)]
+pub fn depth_for(leaf_count: usize) -> Result<usize, JsError> {
+    wallet::depth_for(leaf_count).map_err(js_error)
+}
+
+/// The adapter from `zkTree_getMerkleProof`'s shape to the circuit's.
+///
+/// Opt in only: fetching a proof names the leaf being spent to whoever runs
+/// the node. See [`wallet::path_from_unsorted_json`].
+#[wasm_bindgen(js_name = pathFromUnsorted)]
+pub fn path_from_unsorted(unsorted_json: &str, leaf_hex: &str) -> Result<String, JsError> {
+    wallet::path_from_unsorted_json(unsorted_json, leaf_hex).map_err(js_error)
+}
+
+/// The commitment and the nullifier of a note this seed owns.
+///
+/// The nullifier is as sensitive as the note: for an unspent note it has
+/// appeared nowhere, so it must not reach a log, a URL or an error message.
+/// See [`wallet::note_digests_json`].
+#[wasm_bindgen(js_name = noteDigests)]
+pub fn note_digests(
+    seed_hex: &str,
+    value: u64,
+    rho_hex: &str,
+    r_hex: &str,
+) -> Result<String, JsError> {
+    wallet::note_digests_json(seed_hex, value, rho_hex, r_hex).map_err(js_error)
+}
+
+/// The coinbase note this seed's miner key mints at one height on one chain.
+#[wasm_bindgen(js_name = coinbaseNote)]
+pub fn coinbase_note(
+    seed_hex: &str,
+    genesis_hash_hex: &str,
+    block_number: u32,
+    value: u64,
+) -> Result<String, JsError> {
+    wallet::coinbase_note_json(seed_hex, genesis_hash_hex, block_number, value).map_err(js_error)
+}
+
+/// `rho = H(RHO_ENTRY, block_number, entry_index)`, the shield rule.
+#[wasm_bindgen(js_name = entryRho)]
+pub fn entry_rho(block_number: u32, entry_index: u64) -> String {
+    wallet::entry_rho_hex(block_number, entry_index)
+}
+
+/// The `qnm1...` a node is configured with. Secret bearing: it carries the
+/// coinbase viewing key, so it is not the address and must be labelled.
+#[wasm_bindgen(js_name = minerKey)]
+pub fn miner_key(seed_hex: &str) -> Result<String, JsError> {
+    wallet::miner_key_hex(seed_hex).map_err(js_error)
+}
+
+/// What a leaf's `ct_digest` public input commits to.
+#[wasm_bindgen(js_name = ctDigest)]
+pub fn ct_digest(ct_1: &[u8], ct_2: &[u8]) -> String {
+    wallet::ct_digest_hex(ct_1, ct_2)
+}
+
+/// Whether a string decodes as an address of this chain.
+#[wasm_bindgen(js_name = addressIsValid)]
+pub fn address_is_valid(address: &str) -> bool {
+    wallet::address_is_valid(address)
+}
+
+/// The constants a wallet must not keep a second copy of: the memo pad, the
+/// fixed ciphertext size, the depth cap and the chain's leaf-slot count.
+#[wasm_bindgen(js_name = walletLimits)]
+pub fn wallet_limits() -> String {
+    wallet::wallet_limits_json()
+}
+
+/// A memo's padded length, or a refusal naming the pad.
+#[wasm_bindgen(js_name = memoFits)]
+pub fn memo_fits(memo: &str) -> Result<usize, JsError> {
+    wallet::memo_fits(memo).map_err(js_error)
 }
 
 /// A synthetic transfer request, for the harness.

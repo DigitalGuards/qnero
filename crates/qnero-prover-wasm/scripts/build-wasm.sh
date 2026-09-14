@@ -57,11 +57,43 @@ fi
 echo "building ${package} for ${target}"
 nice -n 19 cargo build -j 2 --release -p "${package}" --target "${target}"
 
+
+# `wasm-opt -O`, when binaryen is installed.
+#
+# It is a real saving and it is not the same saving on both modules: the
+# single-threaded one loses about 18% of its raw bytes and 3% of its
+# compressed bytes, and the threaded one loses about 49% raw and 10%
+# compressed, because `-Z build-std` emits a std that has never been through
+# an optimiser. `docs/BENCH.md` carries the measured numbers.
+#
+# Optional, because it is a size pass rather than a correctness one and a
+# clone without binaryen should still produce a working module. The acceptance
+# gate is what proves the optimised module still proves:
+#   QNERO_WASM_PROOF=<...>.proof QNERO_ARTIFACT_DIR=www/artifacts \
+#     cargo test -p qnero-prover-wasm --release --test wasm_proof -- --ignored
+run_wasm_opt() {
+    local module="$1"
+    shift
+    if ! command -v wasm-opt >/dev/null 2>&1; then
+        echo "wasm-opt is not on PATH, so the module ships unoptimised (install binaryen)"
+        return
+    fi
+    local before
+    before="$(stat -c%s "${module}")"
+    nice -n 19 wasm-opt -O "$@" "${module}" -o "${module}.opt"
+    mv "${module}.opt" "${module}"
+    local after
+    after="$(stat -c%s "${module}")"
+    echo "wasm-opt -O: ${before} -> ${after} bytes"
+}
+
 echo "running wasm-bindgen into ${out_dir#"${workspace_dir}"/}"
 rm -rf "${out_dir}"
 wasm-bindgen --target web --no-typescript \
     --out-dir "${out_dir}" \
     "target/${target}/release/qnero_prover_wasm.wasm"
+
+run_wasm_opt "${out_dir}/qnero_prover_wasm_bg.wasm"
 
 if [[ "${want_artifacts}" == "1" ]]; then
     if [[ -f "${artifact_dir}/config.json" ]]; then
