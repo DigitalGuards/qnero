@@ -63,8 +63,11 @@ struct Cli {
     /// every leaf index, block number, checkpoint hash and spent flag in it is
     /// a statement about that chain. A node serving a different genesis, which
     /// is what a restarted `--dev --tmp` node is, makes all of them wrong.
-    /// This moves the old store aside rather than deleting it: it holds the
-    /// only copy of every note's rho and r.
+    /// This moves the old store aside rather than deleting it: it is the
+    /// fastest copy of every note's rho and r, and the seed is what recovers
+    /// them, because every note's plaintext is on the chain inside its
+    /// ciphertext. What a lost store costs is the record of which notes are
+    /// spent and the time of a full rescan.
     #[arg(long, global = true)]
     new_chain_store: bool,
     #[command(subcommand)]

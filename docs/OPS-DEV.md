@@ -2306,8 +2306,10 @@ Four rules came out of it, and all four are properties of the sync.
   `STORE_VERSION` is 5. The address bound the store to a seed and nothing bound
   it to a chain, while every leaf index, block number, checkpoint hash and
   spent flag in the file is a statement about one. `--new-chain-store` archives
-  the old file as `<store>.archived` rather than deleting it, since it holds
-  the only copy of every note's `rho` and `r`. A version-4 store records the
+  the old file as `<store>.archived` rather than deleting it, since it is the
+  fastest copy of every note's `rho` and `r`: the seed recovers them, because
+  every note's plaintext is on the chain inside its ciphertext, and what a lost
+  store costs is the spent record and the time of a full rescan. A version-4 store records the
   genesis of the node it is first synced against, which is the most that can be
   recovered: the version that wrote it never asked.
 - **A duplicated nullifier is a conflict set.** A sender picks `rho` and `r`,
