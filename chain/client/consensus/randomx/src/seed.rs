@@ -24,9 +24,10 @@ use primitive_types::H256;
 
 /// Default epoch length, in blocks.
 ///
-/// Monero rotates every 2048 blocks at a 120 s target, which is about 2.8 days.
-/// Qnero's target is 12 s, so the runtime constant is what scales this; the
-/// value here is only the fallback when the runtime cannot be asked.
+/// Monero rotates every 2048 blocks at a 120 s target, which is 2.84 days.
+/// Qnero's public target is the same 120 s, so the block count and the wall
+/// clock both match Monero. The runtime constant is still what decides it, and
+/// the value here is only the fallback when the runtime cannot be asked.
 pub const DEFAULT_SEED_EPOCH_BLOCKS: u32 = 2048;
 
 /// Default lag, in blocks, between the epoch boundary and the seed block.

@@ -39,7 +39,9 @@ const LOG_FREQUENCY: u64 = 1000;
 /// distinguish "way behind, still syncing" from "roughly current", and a tight
 /// window would let a chain stall outlast it, deadlocking recovery if all
 /// miners restart during the stall (nobody authors the block that would
-/// freshen the tip). Tunable via `--max-tip-age`.
+/// freshen the tip). Tunable via `--max-tip-age`. Unchanged at a 120 s target:
+/// 24 hours is 720 block intervals there and was 7200 at 12 s, and both are far
+/// past "roughly current" either way.
 pub const DEFAULT_MAX_TIP_AGE_SECS: u64 = 24 * 60 * 60;
 
 fn tip_is_stale(now_ms: u64, tip_timestamp_ms: u64, max_tip_age_ms: u64) -> bool {

@@ -35,7 +35,10 @@
 //! away from consensus, and every miner-supplied string is truncated and
 //! escaped before it reaches a log line.
 //!
-//! **What keeps a session alive.** One rule: an accepted share. A logged-in
+//! **What keeps a session alive.** One rule: an accepted share, never a block.
+//! The deadline is sized in expected share intervals, so it is independent of
+//! the chain's target block time: a rig on a 120 s chain and a rig on a 12 s
+//! dev chain are held to the same ten minutes. A logged-in
 //! connection has `first_share_timeout` to produce its first share at or above
 //! the job's share target, and `share_timeout` between accepted shares after
 //! that. Nothing else refreshes that clock. A blank line does not, a
@@ -124,7 +127,10 @@ const SUBMIT_REFILL_PER_SECOND: f64 = 32.0;
 /// chain whose difficulty sits below the configured share difficulty the two
 /// rules are the same rule. A new chain sits at the difficulty floor and so
 /// does one recovering from a hashrate collapse, and there a 10 kH/s rig finds
-/// about 78 shares a second, every one of them a block. Refusing those for
+/// about 78 shares a second, every one of them a block. A 120 s target settles
+/// at ten times the difficulty a 12 s one did, so the clamp bites for fewer
+/// blocks after a launch, but the burst it has to survive while it does is
+/// unchanged. Refusing those for
 /// budget throws blocks away before they are ever hashed. The concurrency cap
 /// on the hashing itself is what bounds the work, and it is unchanged: a
 /// connection has at most one submit in flight, because it is served from its
@@ -201,6 +207,17 @@ const MAX_SEEN_SHARES: usize = 100_000;
 ///
 /// The ceiling bounds what one unproductive session can cost when the share
 /// difficulty is raised far enough for the estimate below to run away.
+///
+/// Neither number is denominated in block intervals and neither moved when the
+/// chain's target went from 12 s to 120 s. What the rule counts is accepted
+/// shares, and a share is found against the *share* difficulty, which the block
+/// interval does not enter. In block intervals the floor is now five and the
+/// ceiling sixty, where they used to be fifty and six hundred, so a rig that
+/// has genuinely stopped hashing is still cut loose inside ten minutes and one
+/// that is working is never close to either. Longer blocks make the endpoint
+/// quieter in one respect: a job is rolled on each new template, so a rig now
+/// holds a job about 120 s instead of 12 s and meets a tenth as many stale
+/// shares across a template roll.
 const DEFAULT_SHARE_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_SHARE_TIMEOUT: Duration = Duration::from_secs(7_200);
 
