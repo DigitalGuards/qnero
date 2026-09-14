@@ -19,6 +19,17 @@ import { messageOf } from './useAsync';
 
 export type ConnectionStatus = 'connecting' | 'live' | 'offline' | 'failed';
 
+/**
+ * How long the first connection is given before the page says so.
+ *
+ * A WsProvider retries an unreachable endpoint on its own and `ApiPromise`
+ * never settles while it does, so without a deadline the commonest deployment
+ * mistake, a wrong or down endpoint, reads as "connecting" and "Reading the
+ * chain head" for as long as the tab is open, with the 'failed' state built for
+ * it unreachable.
+ */
+const CONNECT_DEADLINE_MS = 15_000;
+
 export interface Head {
   header: BlockHeader;
   hash: string;
@@ -41,6 +52,8 @@ export interface ChainBundle {
 interface ChainState {
   status: ConnectionStatus;
   bundle: ChainBundle | null;
+  /** Held from the moment config.json is read, so a failing address can be shown while it fails. */
+  endpoint: string | null;
   head: Head | null;
   error: string | null;
 }
@@ -48,9 +61,38 @@ interface ChainState {
 const Context = createContext<ChainState>({
   status: 'connecting',
   bundle: null,
+  endpoint: null,
   head: null,
   error: null,
 });
+
+/** The connection, with a deadline, and no socket left retrying behind a failed page. */
+async function connectWithin(endpoint: string, ms: number): Promise<ChainContext> {
+  const attempt = connect(endpoint);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      attempt,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new Error(
+              `${endpoint} did not answer in ${ms / 1000} seconds. The node may be down, or this page may be configured with the wrong endpoint.`,
+            ),
+          );
+        }, ms);
+      }),
+    ]);
+  } catch (error: unknown) {
+    void attempt.then(
+      (context) => context.api.disconnect(),
+      () => undefined,
+    );
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export function useChain(): ChainState {
   return useContext(Context);
@@ -60,6 +102,7 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
   const [state, setState] = useState<ChainState>({
     status: 'connecting',
     bundle: null,
+    endpoint: null,
     head: null,
     error: null,
   });
@@ -72,7 +115,10 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
 
     const start = async (): Promise<void> => {
       const config = await loadConfig();
-      const context = await connect(config.rpcEndpoint);
+      if (stillLive()) {
+        setState((previous) => ({ ...previous, endpoint: config.rpcEndpoint }));
+      }
+      const context = await connectWithin(config.rpcEndpoint, CONNECT_DEADLINE_MS);
       if (!stillLive()) {
         await context.api.disconnect();
         return;
@@ -154,7 +200,13 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
 
     start().catch((error: unknown) => {
       if (stillLive()) {
-        setState({ status: 'failed', bundle: null, head: null, error: messageOf(error) });
+        setState((previous) => ({
+          status: 'failed',
+          bundle: null,
+          endpoint: previous.endpoint,
+          head: null,
+          error: messageOf(error),
+        }));
       }
     });
 

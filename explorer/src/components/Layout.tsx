@@ -13,7 +13,7 @@ const NAV: { label: string; route: Route; match: Route['name'][] }[] = [
 ];
 
 function StatusStrip(): ReactNode {
-  const { status, bundle, head, error } = useChain();
+  const { status, endpoint, head, error } = useChain();
   const warn = status === 'offline' || status === 'failed';
   const dot =
     status === 'live' ? 'strip__dot strip__dot--live' : warn ? 'strip__dot strip__dot--down' : 'strip__dot';
@@ -29,7 +29,9 @@ function StatusStrip(): ReactNode {
               ? 'node unreachable, retrying'
               : 'connection failed'}
       </span>
-      {bundle === null ? null : <span className="mono">{bundle.config.rpcEndpoint}</span>}
+      {/* The endpoint is held from the moment config.json is read, so the
+          address that is failing to answer is on screen while it fails. */}
+      {endpoint === null ? null : <span className="mono">{endpoint}</span>}
       {head === null ? null : <span>block {formatCount(head.header.number)}</span>}
       {error === null ? null : <span>{error}</span>}
       <span className="strip__spacer" />
@@ -42,7 +44,17 @@ export function Layout({ current, children }: { current: Route['name']; children
   const { bundle } = useChain();
   return (
     <>
-      <a className="skip-link" href="#main">
+      {/* The fragment belongs to the router, so following this as a link would
+          navigate to "main" and render the not-a-page view. It moves focus
+          itself, and main takes focus because an anchor target does not. */}
+      <a
+        className="skip-link"
+        href="#main"
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById('main')?.focus();
+        }}
+      >
         Skip to content
       </a>
       <StatusStrip />
@@ -65,7 +77,7 @@ export function Layout({ current, children }: { current: Route['name']; children
             ))}
           </div>
         </nav>
-        <main className="main" id="main">
+        <main className="main" id="main" tabIndex={-1}>
           <div className="main__inner">{children}</div>
         </main>
       </div>
