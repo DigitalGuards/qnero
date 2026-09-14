@@ -8,11 +8,17 @@
 //! builds.
 //!
 //! ```text
-//! cd crates/qnero-prover-wasm/www && node run.mjs
-//! QNERO_WASM_PROOF=www/results/private_batch.proof \
+//! cd crates/qnero-prover-wasm/www && node run.mjs --runs 1 --mode source --no-zk
+//! QNERO_WASM_PROOF=www/results/private_batch-source-n6-nozk-x1.proof \
 //! QNERO_ARTIFACT_DIR=www/artifacts \
 //!   cargo test -p qnero-prover-wasm --release --test wasm_proof -- --ignored --nocapture
 //! ```
+//!
+//! The runner writes one proof per invocation shape and no fixed name, and the
+//! name carries the `N` it was proved at. That is deliberate: this test's only
+//! failure message is that the proof did not verify, so a run at another `N`
+//! leaving its proof under a name this test reads would report a slot-count
+//! mismatch as a feature-graph divergence.
 //!
 //! Ignored rather than skipped-when-unset: a test that passes because its input
 //! was missing is worse than no test.
@@ -51,9 +57,14 @@ fn a_browser_proof_verifies_against_the_runtime_artifact() {
     let verifier =
         QneroPrivateBatchVerifier::from_artifact_bytes(&verifier_bytes, CHAIN_NUM_LEAVES)
             .expect("the runtime's own verifier loads");
-    let public = verifier
-        .verify_proof_bytes(&proof)
-        .expect("a proof the browser produced verifies natively");
+    let public = verifier.verify_proof_bytes(&proof).unwrap_or_else(|error| {
+        panic!(
+            "a proof the browser produced does not verify natively at N = \
+                 {CHAIN_NUM_LEAVES}: {error}. Either the two builds' feature graphs diverged, \
+                 or this proof was produced at another slot count; \
+                 QNERO_WASM_PROOF names the run it came from."
+        )
+    });
 
     assert_eq!(
         public.slots.len(),

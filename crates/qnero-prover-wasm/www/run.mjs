@@ -93,13 +93,28 @@ function mean(values) {
   return values.reduce((total, value) => total + value, 0) / values.length;
 }
 
+/** The standard error of the mean: how well this sample pins its own mean. */
+function stderr(values) {
+  if (values.length < 2) {
+    return 0;
+  }
+  const average = mean(values);
+  const variance =
+    values.reduce((total, value) => total + (value - average) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance / values.length);
+}
+
 function summarize(values) {
   return {
     // The mean is here for the leaf. Its FRI challenge carries 16 grinding
-    // bits and the search for them is a geometric random variable, so a leaf
-    // prove is a draw rather than a constant and a median over a few samples
-    // hides that. docs/BENCH.md compares means for that stage.
+    // bits and the search for them is a geometric random variable, and every
+    // `prepare` randomizes the dummy input, so each leaf grinds a different
+    // transcript and a median over a few samples hides that. docs/BENCH.md
+    // compares means for that stage, and reads them against `stderr`: nine
+    // samples of the leaf still leave several percent on the mean, which is
+    // why its wasm/native ratio is published as a range.
     mean: Number(mean(values).toFixed(1)),
+    stderr: Number(stderr(values).toFixed(1)),
     median: Number(median(values).toFixed(1)),
     min: Number(Math.min(...values).toFixed(1)),
     max: Number(Math.max(...values).toFixed(1)),
@@ -207,6 +222,13 @@ const summary = {
   runs: options.runs,
   proof_bytes: results[0].proof_bytes,
   ciphertext_bytes: results[0].ciphertext_bytes,
+  // The Rust-side verify, timed inside the module with deserialization
+  // outside the clock, and the second verify the module executes. The
+  // `private_batch_verify` phase in `rust_phases_millis` is the first one,
+  // which is what a cold V8 charges for the same call. Both are published.
+  standalone_verify_millis: results[0].standalone_verify_millis
+    ? summarize(results.map((report) => report.standalone_verify_millis))
+    : null,
   artifact_bytes: results[0].artifact_bytes,
   stages_millis: stages,
   module_bytes: results[0].module_bytes,
@@ -249,25 +271,33 @@ const summary = {
 
 const outDir = join(here, "results");
 await mkdir(outDir, { recursive: true });
-// Two names: the last run, and one per invocation shape, so a second
-// invocation cannot quietly overwrite the numbers a table was built from.
+// One name per invocation shape, and no fixed name at all. A fixed name is how
+// a run at another `N` hands the acceptance gate a proof the gate's own
+// verifier cannot read, and the gate's failure carries no hint of which run
+// wrote the file: it reads as a feature-graph divergence.
 const tag = [
   options.mode,
   `n${options.numLeaves}`,
   options.zkOnly ? "zkonly" : options.zkLeaf ? "zk" : "nozk",
   `x${options.runs}`,
 ].join("-");
-await writeFile(join(outDir, "wasm-measurement.json"), JSON.stringify(summary, null, 2));
-await writeFile(join(outDir, `wasm-measurement-${tag}.json`), JSON.stringify(summary, null, 2));
+const measurementPath = join(outDir, `wasm-measurement-${tag}.json`);
+await writeFile(measurementPath, JSON.stringify(summary, null, 2));
 await writeFile(join(outDir, `runs-${tag}.json`), JSON.stringify(results, null, 2));
-await writeFile(join(outDir, "runs.json"), JSON.stringify(results, null, 2));
+let proofPath = null;
 if (lastProof) {
-  // The acceptance gate: this is verified natively, against the same artifact
-  // set, by `cargo test -p qnero-prover-wasm --test wasm_proof -- --ignored`.
-  // Tagged as well as canonical, so a run at another `N` cannot leave a proof
-  // behind under the name the gate reads.
-  await writeFile(join(outDir, "private_batch.proof"), Buffer.from(lastProof, "base64"));
-  await writeFile(join(outDir, `private_batch-${tag}.proof`), Buffer.from(lastProof, "base64"));
+  // The acceptance gate reads this exact path, which names the `N` it was
+  // proved at:
+  //   QNERO_WASM_PROOF=www/results/private_batch-<tag>.proof \
+  //   QNERO_ARTIFACT_DIR=www/artifacts \
+  //     cargo test -p qnero-prover-wasm --release --test wasm_proof \
+  //       -- --ignored --nocapture
+  proofPath = join(outDir, `private_batch-${tag}.proof`);
+  await writeFile(proofPath, Buffer.from(lastProof, "base64"));
+}
+process.stderr.write(`wrote ${measurementPath}\n`);
+if (proofPath) {
+  process.stderr.write(`wrote ${proofPath}\n`);
 }
 
 console.log(JSON.stringify(summary, null, 2));
