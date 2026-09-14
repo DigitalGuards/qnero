@@ -24,10 +24,13 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ChainContext } from '../src/chain/api';
-import { fetchLeafHashes, fetchLeaves, fetchTreeTotals } from '../src/chain/reads';
+import { fetchLeafHashes, fetchLeaves, fetchTreeShape, fetchTreeTotals } from '../src/chain/reads';
 import { waitForInclusion } from '../src/chain/submit';
 
 const AT = `0x${'aa'.repeat(32)}`;
+
+/** What the module reports, and what bounds a leaf count here. */
+const MAX_TREE_DEPTH = 16;
 
 /** A storage entry whose keys this test can read back. See `privacy.test.ts`. */
 function entry(prefix: string): unknown {
@@ -109,7 +112,7 @@ describe('a leaf row', () => {
       [`${KEYS.leafBlocks}0`, '0x09000000'],
       [`${KEYS.coinbaseValues}0`, '0x0a00000000000000'],
     ]);
-    const [row] = await fetchLeaves(nodeWith(values), 0, 1, AT);
+    const [row] = await fetchLeaves(nodeWith(values), 0, 1, AT, 1);
     expect(row?.commitment).toBe(`0x${'cd'.repeat(32)}`);
     expect(row?.ciphertext).toEqual(new Uint8Array([0x00, 0x11, 0x22, 0x33]));
     expect(row?.blockNumber).toBe(9);
@@ -118,7 +121,7 @@ describe('a leaf row', () => {
 
   it('refuses a leaf that is not 32 bytes, and names it', async () => {
     const values = new Map<string, string>([[`${KEYS.leaves}3`, `0x${'cd'.repeat(31)}`]]);
-    await expect(fetchLeaves(nodeWith(values), 3, 4, AT)).rejects.toThrow(
+    await expect(fetchLeaves(nodeWith(values), 3, 4, AT, 4)).rejects.toThrow(
       /ZkTree::Leaves\(3\) is 31 bytes, expected 32/,
     );
   });
@@ -127,24 +130,55 @@ describe('a leaf row', () => {
     // The failure this replaces is silent: a truncated ciphertext decrypts as
     // nobody's, so every leaf on the chain reads as somebody else's and the
     // sync reports zero notes received over a completed pass.
-    const values = new Map<string, string>([[`${KEYS.ciphertexts}0`, vec(4, '001122')]]);
-    await expect(fetchLeaves(nodeWith(values), 0, 1, AT)).rejects.toThrow(
+    const values = new Map<string, string>([
+      [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
+      [`${KEYS.ciphertexts}0`, vec(4, '001122')],
+    ]);
+    await expect(fetchLeaves(nodeWith(values), 0, 1, AT, 1)).rejects.toThrow(
       /Shielded::Ciphertexts\(0\) declares 4 bytes and carries 3/,
     );
   });
 
   it('refuses a block height that is not a u32', async () => {
     const values = new Map<string, string>([
+      [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
       [`${KEYS.leafBlocks}0`, '0x0900000000000000'],
     ]);
-    await expect(fetchLeaves(nodeWith(values), 0, 1, AT)).rejects.toThrow(
+    await expect(fetchLeaves(nodeWith(values), 0, 1, AT, 1)).rejects.toThrow(
       /Shielded::LeafBlocks\(0\) is 8 bytes and this build decodes it as 4/,
     );
   });
 
+  it('refuses a leaf the node withheld below its own leaf count, and names all three', async () => {
+    // The tree has no gaps under its own count: `pallet-zk-tree` appends a
+    // leaf and raises `LeafCount` in one call and nothing removes one. So an
+    // absent commitment below the count read at this same block hash is an
+    // answer withheld, and reading it as "no leaf here" is silent and
+    // permanent: the scan steps over it, the pass writes a watermark above it,
+    // and a payment on that leaf is never read again without a rescan.
+    const values = new Map<string, string>([
+      [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
+      [`${KEYS.leaves}2`, `0x${'ce'.repeat(32)}`],
+    ]);
+    await expect(fetchLeaves(nodeWith(values), 0, 3, AT, 3)).rejects.toThrow(
+      new RegExp(`no ZkTree::Leaves\\(1\\) at block ${AT}, where it reports 3 leaves`),
+    );
+  });
+
+  it('reads a leaf above the count as absent, which is what the range past the end is', async () => {
+    // The same answer above the count is ordinary: a window may run to the end
+    // of a range the count does not reach, and nothing there is withheld.
+    const values = new Map<string, string>([[`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`]]);
+    const rows = await fetchLeaves(nodeWith(values), 0, 2, AT, 1);
+    expect(rows[1]?.commitment).toBeNull();
+  });
+
   it('refuses a coinbase value that is not a u64', async () => {
-    const values = new Map<string, string>([[`${KEYS.coinbaseValues}0`, '0x0a000000']]);
-    await expect(fetchLeaves(nodeWith(values), 0, 1, AT)).rejects.toThrow(
+    const values = new Map<string, string>([
+      [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
+      [`${KEYS.coinbaseValues}0`, '0x0a000000'],
+    ]);
+    await expect(fetchLeaves(nodeWith(values), 0, 1, AT, 1)).rejects.toThrow(
       /Shielded::CoinbaseValues\(0\) is 4 bytes and this build decodes it as 8/,
     );
   });
@@ -154,11 +188,11 @@ describe('the chain-wide totals a pass reads once', () => {
   it('reads the three of them in one request', async () => {
     const values = new Map<string, string>([
       [KEYS.leafCount, '0x0800000000000000'],
-      [KEYS.depth, '0x03000000'],
+      [KEYS.depth, '0x03'],
       [KEYS.entryCount, '0x0200000000000000'],
     ]);
     const asked: string[][] = [];
-    const totals = await fetchTreeTotals(recordingNode(values, asked), AT);
+    const totals = await fetchTreeTotals(recordingNode(values, asked), AT, MAX_TREE_DEPTH);
     expect(totals).toEqual({ leafCount: 8, depth: 3, entryCount: 2n });
     // One call carrying all three keys. The counter used to be fetched again
     // through an accessor of its own, so every pass that found a leaf asked
@@ -174,12 +208,67 @@ describe('the chain-wide totals a pass reads once', () => {
     // it belongs to is running.
     const values = new Map<string, string>([
       [KEYS.leafCount, '0x0800000000000000'],
-      [KEYS.depth, '0x03000000'],
+      [KEYS.depth, '0x03'],
       [KEYS.entryCount, `0x${'ff'.repeat(32)}`],
     ]);
-    await expect(fetchTreeTotals(nodeWith(values), AT)).rejects.toThrow(
+    await expect(fetchTreeTotals(nodeWith(values), AT, MAX_TREE_DEPTH)).rejects.toThrow(
       /Shielded::EntryCount is 32 bytes and this build decodes it as 8/,
     );
+  });
+});
+
+describe('the two numbers that decide how long a scan runs', () => {
+  it('refuses a leaf count that is not a u64, which used to be read at any width', async () => {
+    // `LeafCount` decides how many leaves the scan window walks. Read at
+    // whatever width the bytes carried, 32 bytes of 0xff is a scan of
+    // 2^256 - 1 leaves out of one storage answer.
+    const values = new Map<string, string>([
+      [KEYS.leafCount, `0x${'ff'.repeat(32)}`],
+      [KEYS.depth, '0x03'],
+      [KEYS.entryCount, '0x0200000000000000'],
+    ]);
+    await expect(fetchTreeTotals(nodeWith(values), AT, MAX_TREE_DEPTH)).rejects.toThrow(
+      /ZkTree::LeafCount is 32 bytes and this build decodes it as 8/,
+    );
+  });
+
+  it('refuses a depth that is not a u8, where the command-line wallet names the item', async () => {
+    // `u8::decode` is what `Chain::tree_depth_at` runs. A two-byte 0x0004 read
+    // as a little-endian number is 1024 where the chain says 4, and a rebuild
+    // at the wrong depth reaches a root the anchor header does not carry.
+    const values = new Map<string, string>([
+      [KEYS.leafCount, '0x0800000000000000'],
+      [KEYS.depth, '0x0400'],
+      [KEYS.entryCount, '0x0200000000000000'],
+    ]);
+    await expect(fetchTreeTotals(nodeWith(values), AT, MAX_TREE_DEPTH)).rejects.toThrow(
+      /ZkTree::Depth is 2 bytes and this build decodes it as 1/,
+    );
+  });
+
+  it('refuses a leaf count above what a tree this wallet can prove over holds', async () => {
+    // A 4-ary tree at the circuit's maximum depth holds 4 ** depth leaves.
+    // Above that is not a tree this chain carries, and it is the number the
+    // scan turns into windows of reads.
+    const values = new Map<string, string>([
+      [KEYS.leafCount, `0x${'ff'.repeat(8)}`],
+      [KEYS.depth, '0x03'],
+      [KEYS.entryCount, '0x0200000000000000'],
+    ]);
+    await expect(fetchTreeTotals(nodeWith(values), AT, MAX_TREE_DEPTH)).rejects.toThrow(
+      /ZkTree::LeafCount is 18446744073709551615 at this block/,
+    );
+  });
+
+  it('reads the shape alone at the same widths', async () => {
+    const values = new Map<string, string>([
+      [KEYS.leafCount, '0x0600000000000000'],
+      [KEYS.depth, '0x03'],
+    ]);
+    expect(await fetchTreeShape(nodeWith(values), AT, MAX_TREE_DEPTH)).toEqual({
+      leafCount: 6,
+      depth: 3,
+    });
   });
 });
 

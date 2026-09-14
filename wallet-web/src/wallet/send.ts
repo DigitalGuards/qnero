@@ -311,7 +311,7 @@ export async function spend(
   }
 
   report({ stage: 'tree', detail: 'rebuilding the commitment tree at the anchor' });
-  const shape = await fetchTreeShape(context, head.hash);
+  const shape = await fetchTreeShape(context, head.hash, limits.max_tree_depth);
   // The leaf gate, before a single note is looked at, and it is the gate
   // `runSync` already refuses this node with (`wallet/sync.ts`). Every other
   // check below is against this node's own answers: the rebuild roots to this

@@ -17,9 +17,18 @@ import {
   fetchUsedNullifiers,
 } from '../chain/reads';
 import type { ProverClient } from '../worker/client';
+import type { ProverLimits } from '../worker/protocol';
 import type { ScannedNote, SyncChain, SyncCrypto } from '../wallet/sync';
 
-export function chainAdapter(context: ChainContext): SyncChain {
+/**
+ * The chain seam, wired to the real read layer.
+ *
+ * `limits` is the module's own, and what the sync takes from it is
+ * `max_tree_depth`: a 4-ary tree of that depth holds `4 ** depth` leaves, and
+ * the read layer refuses a `LeafCount` above it, so one storage answer cannot
+ * open an unbounded scan window.
+ */
+export function chainAdapter(context: ChainContext, limits: ProverLimits): SyncChain {
   return {
     storageDrift: context.storageDrift,
     anchorWindow: context.constants.blockHashWindow,
@@ -32,8 +41,9 @@ export function chainAdapter(context: ChainContext): SyncChain {
       return hash;
     },
     blockHashAt: (height) => blockHashAt(context, height),
-    treeShape: (at) => fetchTreeTotals(context, at),
-    leaves: (from, to, at, onProgress) => fetchLeaves(context, from, to, at, onProgress),
+    treeShape: (at) => fetchTreeTotals(context, at, limits.max_tree_depth),
+    leaves: (from, to, at, leafCount, onProgress) =>
+      fetchLeaves(context, from, to, at, leafCount, onProgress),
     usedNullifiers: (at, onProgress) => fetchUsedNullifiers(context, at, undefined, onProgress),
   };
 }

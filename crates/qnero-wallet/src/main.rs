@@ -14,7 +14,8 @@ use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{RpcClient, DEFAULT_NODE_URL};
 use qnero_wallet::store::{NoteRow, PendingKind, StoredNote};
 use qnero_wallet::wallet::{
-    ChainBinding, EntryRhoCheck, MerkleSource, SyncOptions, Wallet, NUM_LEAF_PROOFS,
+    ChainBinding, EntryRhoCheck, MerkleSource, SyncOptions, Wallet, ENTRY_WALK_LIMIT,
+    NUM_LEAF_PROOFS,
 };
 use qnero_wallet::POOL_QUANTUM;
 
@@ -382,6 +383,18 @@ fn main() -> Result<()> {
             }
             if let Some(notice) = report.rescan_notice() {
                 println!("warning     {notice}");
+            }
+            if let Some(entries) = report.entry_walk_truncated {
+                // Beside the rescan notice, and for the same reason: a pass
+                // that gave up part of what a sync normally decides says so
+                // where the operator is already reading. `origin` is written
+                // once at receipt, so a shield labelled `spend` here keeps
+                // that label until a rescan.
+                println!(
+                    "warning     this chain has settled {entries} shield entries and the origin \
+                     walk stops at {ENTRY_WALK_LIMIT}, so a shield received in this pass may be \
+                     listed as a transfer. Origin is a label and no rule selects on it."
+                );
             }
             if report.recorded_genesis {
                 println!("chain       recorded this node's genesis in the store");

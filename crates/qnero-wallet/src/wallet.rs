@@ -108,7 +108,7 @@ const INCLUSION_TIMEOUT: Duration = Duration::from_secs(120);
 /// is a label: `origin` separates a shield from a spend's output in the
 /// listing and no rule selects on it. `wallet-web` holds the same bound in
 /// `src/worker/protocol.ts`.
-const ENTRY_WALK_LIMIT: u64 = 100_000;
+pub const ENTRY_WALK_LIMIT: u64 = 100_000;
 
 pub struct Wallet {
     pub seed_path: PathBuf,
@@ -339,17 +339,10 @@ impl Wallet {
         } else {
             stance.watermark(self.store.next_leaf)
         };
-        if leaf_count < watermark {
-            bail!(
-                "this node's tree holds {leaf_count} leaves at its head, block {}, and this \
-                 wallet's scan would start at leaf {watermark}. A tree only grows along one \
-                 chain, so a node whose tree is shorter than that watermark is behind this \
-                 wallet and the leaves it is missing are ones it has not executed yet. Scanning \
-                 against it would walk the watermark backwards and skip the check that marks \
-                 the notes the chain no longer carries. Nothing has been changed. Point --node \
-                 at a node that has caught up, or wait for this one to.",
-                head.number
-            );
+        if let Some(refusal) =
+            short_tree_refusal(leaf_count, watermark, head.number, SYNC_SHORT_TREE)
+        {
+            return Err(refusal);
         }
 
         // Both gates have passed. From here the store is written.
@@ -400,13 +393,43 @@ impl Wallet {
             // for every leaf; asking per received note was one round trip each
             // for a field that is only a label.
             let entry_count = chain.entry_count_at(&head.hash)?;
+            // Said out loud when the walk cannot cover the counter. The bound
+            // is what keeps one storage answer from deciding how long this
+            // scan runs; what it costs is a label, and a label nobody is told
+            // about is a label an operator reads as a fact.
+            if entry_count > ENTRY_WALK_LIMIT {
+                report.entry_walk_truncated = Some(entry_count);
+            }
             let miner_key = self.key.miner_key();
             for record in chain.leaves(start..leaf_count, &head.hash)? {
                 report.leaves_scanned += 1;
                 let Some(commitment) = record.commitment else {
-                    // A gap in the leaf map, which the tree never leaves: this
-                    // is a node answering about a block it does not have.
-                    continue;
+                    // A gap in the leaf map, which the tree never leaves.
+                    // `pallet-zk-tree` appends a leaf and raises `LeafCount`
+                    // in one call and nothing ever removes one, so below the
+                    // count this pass read at this same block hash there is a
+                    // commitment at every index: an absent one is an answer
+                    // this node withheld.
+                    //
+                    // Stepping over it is silent and permanent. The leaf would
+                    // be counted as scanned, `next_leaf` and a checkpoint
+                    // would be written above it at the end of the pass, and
+                    // every later sync starts above it, so a payment on that
+                    // leaf is out of the balance with no error and no line in
+                    // the report until somebody rescans. The pass is refused
+                    // instead, before anything is saved. `wallet-web` refuses
+                    // the same answer in `chain/reads.ts` and in `runSync`.
+                    bail!(
+                        "this node answered with no ZkTree::Leaves({}) at block {}, where it \
+                         reports {leaf_count} leaves. The tree has no gaps below its own count: \
+                         the pallet appends a leaf and raises the count in one call and nothing \
+                         removes one, so an absent commitment below it is an answer withheld. \
+                         Scanning past it would step over a payment on that leaf and then write \
+                         a watermark above it, and nothing would read it again. Nothing has been \
+                         changed.",
+                        record.index,
+                        hex::encode(head.hash)
+                    );
                 };
                 let Ok(commitment) = Digest::from_bytes(&commitment) else {
                     continue;
@@ -1354,9 +1377,12 @@ impl Wallet {
         // losing fork, a rolled-back snapshot and a head the node has not
         // finished executing all have that shape, and none of them says the
         // chain dropped a leaf.
-        if let Some(refusal) =
-            short_tree_refusal(tree.leaf_count(), self.store.next_leaf, anchor_block)
-        {
+        if let Some(refusal) = short_tree_refusal(
+            tree.leaf_count(),
+            self.store.next_leaf,
+            anchor_block,
+            SPEND_SHORT_TREE,
+        ) {
             return Err(refusal);
         }
         for note in selected {
@@ -1762,6 +1788,15 @@ pub struct SyncReport {
     /// marked off chain, whatever this node's answers implied. See
     /// [`RESCAN_ADD_ONLY`] for the sentence a caller prints.
     pub add_only: bool,
+    /// `Shielded::EntryCount` at this pass's block, when it is past
+    /// [`ENTRY_WALK_LIMIT`] and the origin walk therefore stopped short.
+    ///
+    /// Set rather than silent, because `origin` is written once at receipt and
+    /// no later pass revisits it: a shield received in a truncated pass keeps
+    /// the `spend` label until a rescan. `wallet-web` reports the same bound
+    /// as a warning on its own pass, and `docs/WALLET.md` open issue 3 is the
+    /// rule.
+    pub entry_walk_truncated: Option<u64>,
     /// The node gate this sync bypassed, as the refusal it would have been.
     ///
     /// Only `--rescan` produces one, and only for the checkpoint walk: a node
@@ -1910,18 +1945,60 @@ impl std::error::Error for NoteNotOnChain {}
 /// the watermark that recorded it, and a tree only grows along one chain, so
 /// any head at or above that point carries at least that many leaves. What
 /// trips it is a node that is behind, and the answer to that is a sync.
-fn short_tree_refusal(leaf_count: u64, watermark: u64, anchor_block: u32) -> Option<anyhow::Error> {
+fn short_tree_refusal(
+    leaf_count: u64,
+    watermark: u64,
+    block: u32,
+    context: ShortTree,
+) -> Option<anyhow::Error> {
     if leaf_count >= watermark {
         return None;
     }
+    let ShortTree {
+        read_at,
+        consequence,
+    } = context;
     Some(anyhow!(
-        "this node's tree holds {leaf_count} leaves at the anchor, block {anchor_block}, and this \
-         wallet has already read {watermark}. A node on this chain whose leaf count is short has \
-         a head it has not finished executing, so the leaf indices this wallet holds cannot be \
-         checked against it. Nothing has been written off and nothing has been submitted. Sync \
-         against a node that has caught up, or wait for this one to."
+        "this node's tree holds {leaf_count} leaves at {read_at}, block {block}, and this wallet \
+         has already read {watermark}. A tree only grows along one chain, so a node whose tree is \
+         shorter than that watermark is behind this wallet and the leaves it is missing are ones \
+         it has not executed yet. {consequence} Point --node at a node that has caught up, or \
+         wait for this one to."
     ))
 }
+
+/// What a caller of [`short_tree_refusal`] contributes to the sentence.
+///
+/// The rule is one rule and the two callers differ in two clauses: where the
+/// count was read, and what that pass would have gone on to do with it. Two
+/// copies of the comparison is how a sync and a spend end up disagreeing about
+/// which node is short, each with a test of its own and neither crossing over.
+#[derive(Debug, Clone, Copy)]
+struct ShortTree {
+    /// Where the count was read: the node's head for a sync, the anchor for a
+    /// spend.
+    read_at: &'static str,
+    /// What this pass would have done against a short tree.
+    consequence: &'static str,
+}
+
+/// What a sync contributes. The scan range would go empty, so the pass would
+/// skip the vanished check and then write the watermark down to this node's
+/// own count.
+const SYNC_SHORT_TREE: ShortTree = ShortTree {
+    read_at: "its head",
+    consequence: "Scanning against it would walk the watermark backwards and skip the check \
+                  that marks the notes the chain no longer carries. Nothing has been changed.",
+};
+
+/// What a spend contributes. Every other check it makes is against this node's
+/// own answers, the rebuilt root included, so a short tree reaches the
+/// write-off and marks a real, spendable note off chain.
+const SPEND_SHORT_TREE: ShortTree = ShortTree {
+    read_at: "the anchor",
+    consequence: "The leaf indices this wallet holds cannot be checked against it. Nothing has \
+                  been written off and nothing has been submitted.",
+};
 
 fn out_of_range(note: &StoredNote, leaf_count: u64, anchor_block: u32) -> anyhow::Error {
     match note.block_number {
@@ -2253,7 +2330,8 @@ mod tests {
         };
 
         // A store that has read 40 leaves, against a node whose head holds 4.
-        let refusal = short_tree_refusal(4, 40, 12).expect("a short tree is refused");
+        let refusal =
+            short_tree_refusal(4, 40, 12, SPEND_SHORT_TREE).expect("a short tree is refused");
         let text = format!("{refusal:#}");
         assert!(text.contains("4 leaves"), "{text}");
         assert!(text.contains("already read 40"), "{text}");
@@ -2273,8 +2351,26 @@ mod tests {
 
         // At the watermark and above it the gate is silent, which is every
         // honest node: leaf 37 was read below the watermark that recorded it.
-        assert!(short_tree_refusal(40, 40, 12).is_none());
-        assert!(short_tree_refusal(41, 40, 12).is_none());
+        assert!(short_tree_refusal(40, 40, 12, SPEND_SHORT_TREE).is_none());
+        assert!(short_tree_refusal(41, 40, 12, SPEND_SHORT_TREE).is_none());
+
+        // One implementation, two callers. The sync's version of the same
+        // refusal differs in the two clauses it passes and in nothing else,
+        // and that is what keeps a sync and a spend from disagreeing about
+        // which node is short.
+        let sync_side = short_tree_refusal(
+            4,
+            40,
+            12,
+            ShortTree {
+                read_at: "its head",
+                consequence: "Nothing has been changed.",
+            },
+        )
+        .expect("a short tree is refused on the sync path too");
+        let sync_text = format!("{sync_side:#}");
+        assert!(sync_text.contains("4 leaves at its head"), "{sync_text}");
+        assert!(text.contains("4 leaves at the anchor"), "{text}");
     }
 
     /// `N` is resolved from the environment the way the pallet's build script

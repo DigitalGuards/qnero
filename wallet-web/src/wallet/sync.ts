@@ -73,10 +73,19 @@ export interface SyncChain {
    * accessor made the node answer two byte-identical requests per pass.
    */
   treeShape(at: string): Promise<{ leafCount: number; depth: number; entryCount: bigint }>;
+  /**
+   * Four items for each leaf in `[from, to)`, at one block.
+   *
+   * `leafCount` is the count read at that same block hash, and the read layer
+   * refuses an absent commitment below it: the leaf map has no gaps under its
+   * own count, so a missing answer there is a node withholding one. See
+   * `chain/reads.ts`.
+   */
   leaves(
     from: number,
     to: number,
     at: string,
+    leafCount: number,
     onProgress?: (done: number) => void,
   ): Promise<
     {
@@ -527,7 +536,7 @@ export async function runSync(
     let ciphertextsTried = 0;
     for (let windowFrom = watermark; windowFrom < shape.leafCount; windowFrom += WINDOW) {
       const windowTo = Math.min(windowFrom + WINDOW, shape.leafCount);
-      const records = await chain.leaves(windowFrom, windowTo, head.hash);
+      const records = await chain.leaves(windowFrom, windowTo, head.hash, shape.leafCount);
       progress('scan', `${windowTo - watermark} of ${total} leaves`);
 
       const candidates = records.filter(
@@ -589,9 +598,29 @@ export async function runSync(
       for (const record of records) {
         report.leavesScanned += 1;
         if (record.commitment === null) {
-          // A gap in the leaf map, which the tree never leaves: a node
-          // answering about a block it does not have.
-          continue;
+          // A gap in the leaf map, which the tree never leaves. The pallet
+          // appends a leaf and raises `LeafCount` in one call and nothing ever
+          // removes one, so below the count this pass read at this same block
+          // hash there is a commitment at every index: an absent one is a node
+          // withholding an answer.
+          //
+          // Stepping over it is silent and permanent. The leaf would be
+          // counted as scanned, the pass would commit a watermark and a
+          // checkpoint above it, and every later pass starts above it, so a
+          // payment on that leaf is out of the balance with no error, no
+          // warning and no field in the report until somebody rescans. The
+          // pass is refused instead, and nothing is written: this function
+          // writes nothing at all and its caller commits only what it returns.
+          // `chain/reads.ts` refuses the same answer one layer down, so a
+          // wallet on the real read layer never reaches this line, and
+          // `Wallet::sync_with` refuses it in the command-line wallet.
+          throw new NodeRefusedError(
+            `this node answered with no ZkTree::Leaves(${record.index}) at block ${head.hash}, ` +
+              `where it reports ${shape.leafCount} leaves. The tree has no gaps below its own ` +
+              'count, so that answer is withheld rather than absent, and scanning past it would ' +
+              'hide any payment on that leaf behind a watermark written above it. Nothing has ' +
+              'been changed.',
+          );
         }
         const commitment = normaliseHash(record.commitment);
 

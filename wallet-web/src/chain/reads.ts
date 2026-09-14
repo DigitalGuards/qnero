@@ -119,19 +119,49 @@ export async function headerAt(context: ChainContext, hash: string): Promise<unk
   return context.send<unknown>('chain_getHeader', [hash]);
 }
 
-function leNumber(value: string | undefined): number {
-  return value === undefined ? 0 : Number(leBytesToBigInt(hexToBytes(value)));
+/**
+ * `ZkTree::LeafCount` and `ZkTree::Depth`, each at its declared width and
+ * bounded by what the circuit can prove over.
+ *
+ * `LeafCount` is a `u64` and `Depth` is a `u8`, which is what `Chain::
+ * leaf_count_at` and `Chain::tree_depth_at` decode them as, naming the item at
+ * any other width. Read at whatever width the bytes happened to carry, thirty
+ * two bytes of `0xff` is a scan window of 2^256 - 1 leaves and a two-byte
+ * `0x0004` is a depth of 1024 where the chain says 4.
+ *
+ * The count is bounded as well as sized. A 4-ary tree of depth `d` holds
+ * `4 ** d` leaves and `d` is capped by the circuit at `limits.max_tree_depth`,
+ * so a count above that is a number no tree on this chain can reach, and it is
+ * the number the scan turns into work: one window of reads per 64 of it.
+ */
+function readTreeShape(
+  values: Map<string, string>,
+  keys: { leafCount: string; depth: string },
+  maxTreeDepth: number,
+): { leafCount: number; depth: number } {
+  const leafCount = decodeInteger(values.get(keys.leafCount), 'ZkTree::LeafCount', 8) ?? 0n;
+  const depth = decodeInteger(values.get(keys.depth), 'ZkTree::Depth', 1) ?? 0n;
+  const capacity = 4n ** BigInt(maxTreeDepth);
+  if (leafCount > capacity) {
+    throw new Error(
+      `ZkTree::LeafCount is ${leafCount} at this block and a tree this wallet can prove over ` +
+        `holds at most ${capacity} leaves, which is 4 ** ${maxTreeDepth}. A count above that is ` +
+        'not a tree this chain carries, and it is what decides how many leaves the scan reads.',
+    );
+  }
+  return { leafCount: Number(leafCount), depth: Number(depth) };
 }
 
 /** `ZkTree::LeafCount` and `ZkTree::Depth` at one block, in one call. */
 export async function fetchTreeShape(
   context: ChainContext,
   at: string,
+  maxTreeDepth: number,
 ): Promise<{ leafCount: number; depth: number }> {
   const leafCount = storage(context, 'zkTree', 'leafCount').key();
   const depth = storage(context, 'zkTree', 'depth').key();
   const values = await queryAt(context, [leafCount, depth], at);
-  return { leafCount: leNumber(values.get(leafCount)), depth: leNumber(values.get(depth)) };
+  return readTreeShape(values, { leafCount, depth }, maxTreeDepth);
 }
 
 /**
@@ -141,24 +171,27 @@ export async function fetchTreeShape(
  * it is chain wide and the whole scan is pinned to one block, so asking per
  * received note was a round trip each for a field that is only a label.
  *
- * The counter is decoded at its declared width, the way every other integer
- * here is. It is a `u64` on chain and it is the one number the wallet turns
- * into work: the origin walk hashes once per unit of it, inside the worker
- * that holds the seed, so a value read at whatever width the bytes happened to
- * carry is a node answer that spends the session. Thirty-two bytes of 0xff
- * read as 2^256 - 1 before this. `ENTRY_WALK_LIMIT` is the second half of it.
+ * All three are decoded at their declared widths, and each of the three is a
+ * number the wallet turns into work. The counter is a `u64` and the origin
+ * walk hashes once per unit of it, inside the worker that holds the seed, so a
+ * value read at whatever width the bytes happened to carry is a node answer
+ * that spends the session: thirty-two bytes of 0xff read as 2^256 - 1 before
+ * this, and `ENTRY_WALK_LIMIT` is the second half of it. `LeafCount` is a
+ * `u64` and it decides how many leaves the scan window walks;
+ * [`readTreeShape`] bounds it by what the circuit can prove over. `Depth` is a
+ * `u8`, which the command-line wallet decodes it as.
  */
 export async function fetchTreeTotals(
   context: ChainContext,
   at: string,
+  maxTreeDepth: number,
 ): Promise<{ leafCount: number; depth: number; entryCount: bigint }> {
   const leafCount = storage(context, 'zkTree', 'leafCount').key();
   const depth = storage(context, 'zkTree', 'depth').key();
   const entryCount = storage(context, 'shielded', 'entryCount').key();
   const values = await queryAt(context, [leafCount, depth, entryCount], at);
   return {
-    leafCount: leNumber(values.get(leafCount)),
-    depth: leNumber(values.get(depth)),
+    ...readTreeShape(values, { leafCount, depth }, maxTreeDepth),
     entryCount: decodeInteger(values.get(entryCount), 'Shielded::EntryCount', 8) ?? 0n,
   };
 }
@@ -301,12 +334,25 @@ function decodeCommitment(value: string | undefined, index: number): string | nu
  * `CoinbaseValues` is the fourth and it is what makes a coinbase note
  * readable: presence marks a coinbase leaf, and the value is public because
  * the chain hashes it into a commitment over an `inner` it cannot open.
+ *
+ * `leafCount` is `ZkTree::LeafCount` read at this same block hash, and it is
+ * what makes an absent commitment mean something. `pallet-zk-tree` inserts a
+ * leaf and increments the count in one call and nothing ever removes one, so
+ * the map has no gaps below the count: an absent commitment at an index below
+ * it is a node withholding an answer, at a block it has just told this wallet
+ * the tree is that long. Read as "no leaf here" it is silent and permanent,
+ * because the scan would step over the leaf and the caller would then write a
+ * watermark past it, so a payment on that leaf is never looked at again
+ * without a rescan. It is refused by name instead, and the pass is refused
+ * with it. `Wallet::sync_with` in the command-line wallet refuses the same
+ * answer at the same point.
  */
 export async function fetchLeaves(
   context: ChainContext,
   from: number,
   to: number,
   at: string,
+  leafCount: number,
   onProgress?: (done: number) => void,
 ): Promise<LeafRecord[]> {
   const leaves = storage(context, 'zkTree', 'leaves');
@@ -337,9 +383,20 @@ export async function fetchLeaves(
       const block = values.get(row.keys[2]);
       const coinbase = values.get(row.keys[3]);
       const height = decodeInteger(block, `Shielded::LeafBlocks(${row.index})`, 4);
+      const commitment = decodeCommitment(values.get(row.keys[0]), row.index);
+      if (commitment === null && row.index < leafCount) {
+        throw new Error(
+          `this node answered with no ZkTree::Leaves(${row.index}) at block ${at}, where it ` +
+            `reports ${leafCount} leaves. The tree has no gaps below its own count: the pallet ` +
+            'appends a leaf and raises the count in one call and nothing removes one, so an ' +
+            'absent commitment below it is an answer withheld. Scanning past it would step over ' +
+            'a payment on that leaf and then write a watermark above it, and nothing would read ' +
+            'it again. Nothing has been changed.',
+        );
+      }
       out.push({
         index: row.index,
-        commitment: decodeCommitment(values.get(row.keys[0]), row.index),
+        commitment,
         ciphertext: decodeBytes(values.get(row.keys[1]), `Shielded::Ciphertexts(${row.index})`),
         blockNumber: height === null ? null : Number(height),
         coinbaseQuanta: decodeInteger(coinbase, `Shielded::CoinbaseValues(${row.index})`, 8),

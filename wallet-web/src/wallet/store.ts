@@ -86,6 +86,40 @@ function normaliseHash(hash: string): string {
   return hash.toLowerCase().replace(/^0x/, '');
 }
 
+/**
+ * One note's three flags, merged against what the store holds now.
+ *
+ * `stored` is the row as it is on disk at write time, `base` is the row as the
+ * sync read it before the pass ran, and `written` is what the pass decided.
+ * A field the store has moved since the pass read it belongs to whoever moved
+ * it: that writer saw something this pass did not, which is a settlement
+ * confirmed at a block above the head this pass was pinned to, or a leaf the
+ * spend's own anchor proved the chain does not carry. A field nobody touched
+ * takes the pass's answer, so a sync still clears a spent flag whose
+ * settlement was orphaned and still puts a note back on chain when it meets
+ * the commitment again.
+ *
+ * A row the store holds and the pass never read is a row written after the
+ * pass started, so all three of its flags stay.
+ */
+function mergeSyncedNote(
+  stored: StoredNote | undefined,
+  base: StoredNote | undefined,
+  written: StoredNote,
+): StoredNote {
+  if (stored === undefined) {
+    return written;
+  }
+  const spentMoved = base === undefined || stored.spent !== base.spent;
+  const onChainMoved = base === undefined || stored.onChain !== base.onChain;
+  return {
+    ...written,
+    spent: spentMoved ? stored.spent : written.spent,
+    spentSeenAtBlock: spentMoved ? stored.spentSeenAtBlock : written.spentSeenAtBlock,
+    onChain: onChainMoved ? stored.onChain : written.onChain,
+  };
+}
+
 function transactionDone(transaction: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     transaction.oncomplete = (): void => {
@@ -317,10 +351,28 @@ export class WalletStore {
    * on disk, checkpoints and genesis binding included. That is what "nothing
    * is written until all the gates pass" means, and a transaction is what
    * enforces it here.
+   *
+   * `base` is the note list the pass started from, and it is what turns this
+   * write into a merge. A sync reads its notes up front and a pass
+   * is tens of seconds of paging and decryption, so a spend that settles
+   * inside that window writes `spent` through [`markSpentByNullifier`] and a
+   * write-off writes `onChain` through [`markOffChain`], both after this pass
+   * read the row. Putting the pass's own copy back cleared the latch: the next
+   * selection offered a note the chain had already consumed and the pool
+   * refused the settlement, a whole proof for nothing. So each row is read
+   * again inside the write transaction and, field by field, a stored value
+   * that has moved since the pass read it is the one that stays. Those two
+   * writers read before they write for the same reason; this is the third.
+   *
+   * Only the three flags are merged. Everything else a scan writes, the leaf
+   * index, the block and the sealed secrets, comes from the chain the pass was
+   * pinned to and nothing else in this wallet writes them.
    */
   async commitSync(update: {
     meta: StoreMeta;
     notes: StoredNote[];
+    /** The rows as the pass read them, keyed by commitment on the way in. */
+    base: readonly StoredNote[];
     removedNotes: string[];
     rejected: RejectedNote[];
     removedRejected: string[];
@@ -331,13 +383,21 @@ export class WalletStore {
       [STORE_META, STORE_NOTES, STORE_REJECTED, STORE_CHECKPOINTS, STORE_PENDING],
       'readwrite',
     );
-    transaction.objectStore(STORE_META).put({ ...update.meta, updatedAt: Date.now() });
     const notes = transaction.objectStore(STORE_NOTES);
+    // Inside the write transaction, and the only thing awaited before the
+    // writes is this one request: an IndexedDB transaction stays alive across
+    // an await of its own request and closes when the queue drains, which is
+    // why the secrets are opened outside one everywhere else in this file.
+    const current = new Map(
+      (await request<StoredNote[]>(notes.getAll())).map((note) => [note.commitment, note]),
+    );
+    const base = new Map(update.base.map((note) => [note.commitment, note]));
+    transaction.objectStore(STORE_META).put({ ...update.meta, updatedAt: Date.now() });
     for (const commitment of update.removedNotes) {
       notes.delete(commitment);
     }
     for (const note of update.notes) {
-      notes.put(note);
+      notes.put(mergeSyncedNote(current.get(note.commitment), base.get(note.commitment), note));
     }
     const rejected = transaction.objectStore(STORE_REJECTED);
     for (const commitment of update.removedRejected) {

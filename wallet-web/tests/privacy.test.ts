@@ -107,7 +107,7 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
   const calls: Call[] = [];
   const values = new Map<string, string>();
   values.set(KEYS.leafCount, le(BigInt(LEAF_COUNT), 8));
-  values.set(KEYS.depth, le(3n, 4));
+  values.set(KEYS.depth, le(3n, 1));
   values.set(KEYS.entryCount, le(2n, 8));
   for (let index = 0; index < LEAF_COUNT; index += 1) {
     values.set(`${KEYS.leaves}${index}`, `0x${(index === OUR_LEAF ? OUR_COMMITMENT : 'cd'.repeat(32))}`);
@@ -220,7 +220,7 @@ async function syncOnce(): Promise<{ calls: Call[]; received: number }> {
   const { context, calls } = recordingContext();
   const result = await runSync(
     { meta: freshMeta(), held: [], rejected: [], checkpoints: [], pending: [] },
-    chainAdapter(context),
+    chainAdapter(context, LIMITS),
     crypto(),
   );
   return { calls, received: result.report.received };
@@ -391,7 +391,7 @@ function spendContext(options: { refuseSubmission?: boolean; leafCount?: number 
   const leafCount = options.leafCount ?? LEAF_COUNT;
   const values = new Map<string, string>();
   values.set(KEYS.leafCount, le(BigInt(leafCount), 8));
-  values.set(KEYS.depth, le(3n, 4));
+  values.set(KEYS.depth, le(3n, 1));
   for (let index = 0; index < leafCount; index += 1) {
     values.set(
       `${KEYS.leaves}${index}`,

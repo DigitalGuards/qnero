@@ -269,6 +269,79 @@ describe('the gates a sync passes before it writes', () => {
   });
 });
 
+describe('a leaf the node withholds inside the scanned range', () => {
+  /**
+   * The pass is refused, nothing is written, and the watermark does not move.
+   *
+   * `ZkTree::Leaves` has no gaps below `LeafCount`: the pallet appends a leaf
+   * and raises the count in one call and nothing removes one. So an absent
+   * commitment at an index below the count read at this same block hash is a
+   * node withholding an answer, and it used to be stepped over in silence. The
+   * pass reported the leaf as scanned, committed `nextLeaf` and a checkpoint
+   * above it, and every later pass started above it: a payment on that leaf
+   * was out of the balance permanently, with no error, no warning and no field
+   * in the report.
+   */
+  it('refuses the pass rather than scanning past it', async () => {
+    const mine = note(1000n, 'a1');
+    const leaves: FakeLeaf[] = [
+      { index: 0, commitment: 'cd'.repeat(32), blockNumber: 1, note: null },
+      { index: 1, commitment: mine.commitment, blockNumber: 1, note: mine },
+      { index: 2, commitment: 'ce'.repeat(32), blockNumber: 2, note: null },
+    ];
+    const honest = fakeChain({ head: 5, leaves, leafCount: 3 });
+    const withholding: SyncChain = {
+      ...honest,
+      leaves: async (from, to, at, leafCount, onProgress) =>
+        (await honest.leaves(from, to, at, leafCount, onProgress)).map((record) =>
+          // Leaf 1 is this wallet's incoming payment, and the node answers
+          // with nothing for it.
+          record.index === 1 ? { ...record, commitment: null } : record,
+        ),
+    };
+
+    await expect(
+      runSync(
+        { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+        withholding,
+        fakeCrypto(leaves),
+      ),
+    ).rejects.toThrow(/no ZkTree::Leaves\(1\)/);
+
+    // The same fixture with the answer in it finds the note and moves the
+    // watermark, which is what the refusal above is stopping.
+    const found = await runSync(
+      { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+      honest,
+      fakeCrypto(leaves),
+    );
+    expect(found.report.received).toBe(1);
+    expect(found.meta.nextLeaf).toBe(3);
+  });
+
+  it('is a node refusal, so the caller leaves the store alone', async () => {
+    const leaves: FakeLeaf[] = [
+      { index: 0, commitment: 'cd'.repeat(32), blockNumber: 1, note: null },
+    ];
+    const honest = fakeChain({ head: 5, leaves, leafCount: 1 });
+    const withholding: SyncChain = {
+      ...honest,
+      leaves: async (from, to, at, leafCount, onProgress) =>
+        (await honest.leaves(from, to, at, leafCount, onProgress)).map((record) => ({
+          ...record,
+          commitment: null,
+        })),
+    };
+    await expect(
+      runSync(
+        { meta: meta({ nextLeaf: 0 }), held: [], rejected: [], checkpoints: [], pending: [] },
+        withholding,
+        fakeCrypto(leaves),
+      ),
+    ).rejects.toBeInstanceOf(NodeRefusedError);
+  });
+});
+
 describe('a scan over more leaves than one window', () => {
   it('reads the range in contiguous windows and misses nothing between them', async () => {
     // The range used to be materialised whole before anything was decrypted,
@@ -288,9 +361,9 @@ describe('a scan over more leaves than one window', () => {
     const windows: [number, number][] = [];
     const watched: SyncChain = {
       ...chain,
-      leaves: (from, to, at, onProgress) => {
+      leaves: (from, to, at, leafCount, onProgress) => {
         windows.push([from, to]);
-        return chain.leaves(from, to, at, onProgress);
+        return chain.leaves(from, to, at, leafCount, onProgress);
       },
     };
 

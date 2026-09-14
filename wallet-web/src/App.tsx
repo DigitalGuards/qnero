@@ -24,7 +24,7 @@
  * works until somebody reloads the send screen.
  */
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Navigate, Route, Routes, useNavigate } from 'react-router';
 
 import { loadConfig, type WalletConfig } from './chain/config';
@@ -133,6 +133,24 @@ export function App(): ReactNode {
   const [spendResult, setSpendResult] = useState<SpendResult | null>(null);
   const [spendError, setSpendError] = useState<string | null>(null);
   const [spendRunning, setSpendRunning] = useState(false);
+
+  /**
+   * Which of the two long jobs is running, if either. One at a time.
+   *
+   * A sync reads every note up front and then spends tens of seconds paging
+   * the settled set and decrypting; a payment writes `spent` and `onChain` on
+   * those same rows when it settles. Run together, the sync's commit put its
+   * own stale copy of a row back over the spend's latch, the balance offered a
+   * consumed note again and the pool refused the next settlement after a whole
+   * proof had been paid for. `commitSync` merges field by field so a store can
+   * never lose that write, and this keeps the two from overlapping in the
+   * first place.
+   *
+   * A ref, because the `syncing` and `spendRunning` state is set for the
+   * screens and React applies it after the handler returns: two taps inside one
+   * frame both read `false`. This is set on the way in.
+   */
+  const running = useRef<'sync' | 'spend' | null>(null);
 
   /** Recompute the view of the store. Locked wallets get everything but memos. */
   const refresh = useCallback(async (): Promise<void> => {
@@ -494,6 +512,22 @@ export function App(): ReactNode {
         setError('unlock this wallet before syncing: a scan needs its viewing key');
         return;
       }
+      const limits = current.limits;
+      if (limits === null) {
+        setError('this wallet has not finished loading its prover, which a scan reads its bounds from');
+        return;
+      }
+      if (running.current !== null) {
+        setError(
+          running.current === 'spend'
+            ? 'a payment is being proved and submitted. A scan reads every note before it starts ' +
+              'and commits them at the end, so the two would write the same rows from two ' +
+              'different moments. It will run once the payment has settled.'
+            : 'a scan is already running.',
+        );
+        return;
+      }
+      running.current = 'sync';
       setSyncing(true);
       setError(null);
       try {
@@ -519,7 +553,7 @@ export function App(): ReactNode {
               submittedAtBlock: entry.submittedAtBlock,
             })),
           },
-          chainAdapter(context),
+          chainAdapter(context, limits),
           cryptoAdapter(current.prover),
           {
             rescan,
@@ -540,6 +574,9 @@ export function App(): ReactNode {
         await store.commitSync({
           meta: result.meta,
           notes: sealed,
+          // The rows as this pass read them, so the write merges against
+          // anything that moved since: see `WalletStore.commitSync`.
+          base: stored,
           removedNotes: result.removedNotes,
           rejected: result.rejected,
           removedRejected: result.removedRejected,
@@ -551,6 +588,7 @@ export function App(): ReactNode {
       } catch (syncError) {
         setError((syncError as Error).message);
       } finally {
+        running.current = null;
         setSyncing(false);
         setSyncStage(null);
       }
@@ -587,6 +625,17 @@ export function App(): ReactNode {
         setSpendError(mismatch);
         return;
       }
+      if (running.current !== null) {
+        setSpendError(
+          running.current === 'sync'
+            ? 'a scan is running. It reads every note before it starts and commits them at the ' +
+              'end, so a payment settling underneath it would be writing the same rows from a ' +
+              'later moment. Wait for the scan to finish.'
+            : 'a payment is already being proved.',
+        );
+        return;
+      }
+      running.current = 'spend';
       setSpendRunning(true);
       setSpendError(null);
       setSpendResult(null);
@@ -659,6 +708,7 @@ export function App(): ReactNode {
       } catch (sendError) {
         setSpendError((sendError as Error).message);
       } finally {
+        running.current = null;
         setSpendRunning(false);
         setSpendProgress(null);
       }
@@ -916,7 +966,12 @@ export function App(): ReactNode {
                     // The prover too. A sync runs every node gate and pages
                     // the whole settled set before it needs the worker, so a
                     // stopped prover spends all of that to refuse.
-                    canSync={connection.kind === 'live' && proverRunning}
+                    //
+                    // And never while a payment is in flight: the scan reads
+                    // every note at the start and commits at the end, and the
+                    // payment writes `spent` on those same rows when it
+                    // settles.
+                    canSync={connection.kind === 'live' && proverRunning && !spendRunning}
                     onSync={() => {
                       void sync(false);
                     }}
@@ -948,6 +1003,10 @@ export function App(): ReactNode {
                     proverThreads={proverThreads}
                     progress={spendProgress}
                     running={spendRunning}
+                    // The other half of the rule `canSync` carries: one of the
+                    // two long jobs at a time, and the button says which is
+                    // holding it rather than refusing on the press.
+                    syncing={syncing}
                     result={spendResult}
                     error={spendError}
                     onDismiss={() => {

@@ -88,11 +88,13 @@ Kept as upstream, deliberately:
   runtime's metadata, which is where a client reads the encoded length of a
   signature per variant index.
 
-  The refusal sits one layer up, in the runtime, where merges do not reach:
+  The rule sits one layer up, in the runtime, where merges do not reach:
   `chain/runtime/src/extrinsic.rs` wraps the generic extrinsic, and its
-  `Checkable` implementation refuses a signed extrinsic carrying the
-  `Dilithium65` variant with `InvalidTransaction::BadSigner`, on the live path
-  and on the `try-runtime` replay path alike. That is a consensus rule, written
+  `Checkable` implementation admits a signed extrinsic only when its signature
+  is the `Dilithium87` variant and refuses every other variant with
+  `InvalidTransaction::BadSigner`, on the live path and on the `try-runtime`
+  replay path alike. An allowlist, so a variant a later subtree merge adds is
+  refused by the arm that is already there. That is a consensus rule, written
   up in `docs/DESIGN.md` section 7.3, guarded by
   `chain/runtime/tests/transactions/signature_scheme.rs` and by the
   repository-wide `crates/qnero-wallet/tests/one_signature_scheme.rs`.

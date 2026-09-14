@@ -153,6 +153,85 @@ fn a_node_behind_this_wallet_is_refused_and_changes_nothing() {
     );
 }
 
+/// A leaf the node withholds inside the scanned range refuses the pass, and
+/// the watermark stays where it was.
+///
+/// The regression: an absent `ZkTree::Leaves` answer was read as "no leaf
+/// here" and stepped over. `pallet-zk-tree` appends a leaf and raises
+/// `LeafCount` in one call and nothing ever removes one, so the map has no
+/// gaps below the count, and below the count read at the same block hash an
+/// absent commitment is an answer withheld. Stepping over it is silent and
+/// permanent: the pass saves `next_leaf` above the leaf and every later sync
+/// starts above it, so a payment on that leaf is out of the balance with no
+/// error anywhere until somebody rescans. `wallet-web` refuses the identical
+/// answer in `chain/reads.ts` and in `runSync`.
+#[test]
+fn a_leaf_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing() {
+    let dir = support::scratch_dir("withheld-leaf");
+    let seed = dir.join("wallet.seed");
+    create_seed(&seed).expect("a fresh seed");
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    let address = wallet.address();
+
+    // Leaf 1 is this wallet's incoming payment and it is the one the node
+    // does not answer for.
+    let mine = note_for(address.pk, 1_000, "withheld");
+    let ct = ct_for(&address, &mine, 7);
+    let other = note_for(Digest::hash_bytes(&[b"somebody else"]), 5, "other");
+
+    let mut state = NodeState {
+        head_number: 9,
+        // The leaf this node answers nothing for, at an index below the count
+        // it reports one line down.
+        withheld_leaves: [1].into_iter().collect(),
+        ..Default::default()
+    };
+    put_leaf(
+        &mut state,
+        0,
+        8,
+        other.commitment(),
+        &ct_for(&address, &other, 8),
+    );
+    put_leaf(&mut state, 1, 8, mine.commitment(), &ct);
+    put_leaf(&mut state, 2, 8, Digest::hash_bytes(&[b"leaf two"]), &[]);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let metadata = test_metadata();
+
+    let before = serde_json::to_value(&wallet.store).expect("the store serializes");
+    let refused = wallet
+        .sync(&chain, &metadata)
+        .expect_err("a leaf the node withheld below its own count is refused");
+    let message = format!("{refused:#}");
+    assert!(message.contains("no ZkTree::Leaves(1)"), "{message}");
+    assert!(message.contains("reports 3 leaves"), "{message}");
+
+    // Nothing was written, in memory or on disk, and the watermark did not
+    // move past the leaf that was never read.
+    assert_eq!(wallet.store.next_leaf, 0);
+    assert_eq!(
+        serde_json::to_value(&wallet.store).expect("the store serializes"),
+        before,
+        "a refused sync must not have written anything"
+    );
+    let reopened = Wallet::open(&seed).expect("the store reopens");
+    assert_eq!(reopened.store.next_leaf, 0);
+    assert!(reopened.store.notes.is_empty());
+
+    // The same node answering for that leaf finds the payment, which is what
+    // the refusal above is standing in front of.
+    node.state().withheld_leaves.clear();
+    let report = wallet
+        .sync(&chain, &metadata)
+        .expect("the pass runs once the leaf is answered for");
+    assert_eq!(report.received, 1);
+    assert_eq!(wallet.store.next_leaf, 3);
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+}
+
 /// Rule 1, second half. A node with no block at a checkpoint's height is
 /// refused, and no checkpoint is popped.
 ///
@@ -793,7 +872,7 @@ fn a_leaf_count_below_the_watermark_is_refused_without_a_fork() {
     let message = format!("{refused:#}");
     assert!(message.contains("behind this wallet"), "{message}");
     assert!(message.contains("4 leaves"), "{message}");
-    assert!(message.contains("leaf 6"), "{message}");
+    assert!(message.contains("already read 6"), "{message}");
 
     assert_eq!(
         wallet.store.next_leaf, 6,

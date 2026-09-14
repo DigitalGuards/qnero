@@ -47,6 +47,16 @@ pub struct NodeState {
     pub fork_tag: u8,
     /// The lowest height `fork_tag` applies to.
     pub fork_from: u32,
+    /// Leaf indices `ZkTree::Leaves` answers nothing for, whatever the count
+    /// says.
+    ///
+    /// Below the count that is a node withholding an answer, which the sync
+    /// refuses by name: the map has no gaps below its own count, so reading
+    /// one as "no leaf here" steps over whatever was on that leaf and then
+    /// writes a watermark above it. Every other index below the count is
+    /// filled by [`storage_at`], because a fixture with a hole in it is a
+    /// chain no node can serve.
+    pub withheld_leaves: BTreeSet<u64>,
     /// Heights `chain_getBlockHash` answers `null` for, whatever the head is.
     ///
     /// A node that has a head and no block at a lower height: pruned, or
@@ -195,7 +205,7 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
         "state_getRuntimeVersion" => Ok(json!({"specVersion": 152, "transactionVersion": 6})),
         "state_getStorage" => {
             let key = params.get(0).and_then(Value::as_str).unwrap_or_default();
-            Ok(match state.storage.get(key) {
+            Ok(match storage_at(state, key) {
                 Some(value) => json!(format!("0x{}", hex::encode(value))),
                 None => Value::Null,
             })
@@ -210,9 +220,7 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
                 .iter()
                 .filter_map(Value::as_str)
                 .filter_map(|key| {
-                    state
-                        .storage
-                        .get(key)
+                    storage_at(state, key)
                         .map(|value| json!([key, format!("0x{}", hex::encode(value))]))
                 })
                 .collect();
@@ -264,6 +272,64 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
         "state_getMetadata" => Err("this fake node serves no metadata blob".into()),
         other => Err(format!("{other} is not served by this fake node")),
     }
+}
+
+/// One storage value, with the leaf map filled in below its own count.
+///
+/// `pallet-zk-tree` appends a leaf and raises `LeafCount` in one call and
+/// nothing ever removes one, so a real chain carries a commitment at every
+/// index below its count, and the wallet refuses an absent one there by name:
+/// below the count, no answer is an answer withheld, and scanning past it
+/// hides a payment behind a watermark written above it
+/// (`Wallet::sync_with`). A fixture that writes one leaf and a count of six is
+/// describing a chain no node can serve, so the gaps are filled here rather
+/// than in every test: what a fixture sets is what the wallet reads, and the
+/// rest is a leaf that belongs to nobody and carries no ciphertext.
+fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
+    if let Some(index) = leaf_index(key) {
+        if state.withheld_leaves.contains(&index) {
+            return None;
+        }
+    }
+    if let Some(value) = state.storage.get(key) {
+        return Some(value.clone());
+    }
+    unset_leaf_index(state, key).map(filler_leaf)
+}
+
+/// The leaf index of a `ZkTree::Leaves` key below this node's own leaf count.
+fn unset_leaf_index(state: &NodeState, key: &str) -> Option<u64> {
+    leaf_index(key).filter(|index| *index < node_leaf_count(state))
+}
+
+/// The leaf index a `ZkTree::Leaves` key names, whatever the count says.
+fn leaf_index(key: &str) -> Option<u64> {
+    let prefix = format!(
+        "0x{}",
+        hex::encode(qnero_wallet::scale::storage_prefix("ZkTree", "Leaves"))
+    );
+    let index = key.strip_prefix(&prefix)?;
+    let bytes: [u8; 8] = hex::decode(index).ok()?.try_into().ok()?;
+    Some(u64::from_le_bytes(bytes))
+}
+
+fn node_leaf_count(state: &NodeState) -> u64 {
+    let key = format!(
+        "0x{}",
+        hex::encode(qnero_wallet::scale::storage_prefix("ZkTree", "LeafCount"))
+    );
+    state
+        .storage
+        .get(&key)
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+        .map(u64::from_le_bytes)
+        .unwrap_or(0)
+}
+
+/// A leaf that is nobody's: 32 bytes derived from the index, with no
+/// ciphertext beside it, which is what a wormhole or reward leaf looks like.
+fn filler_leaf(index: u64) -> Vec<u8> {
+    qnero_wallet::scale::blake2_256(&index.to_le_bytes()).to_vec()
 }
 
 /// Block hashes are the block number, repeated. The wallet treats them as

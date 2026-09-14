@@ -193,6 +193,7 @@ describe('a locked store', () => {
     await store.commitSync({
       meta: { ...(await store.meta()), lastSyncedBlock: 9, nextLeaf: 5 },
       notes: [{ ...NOTE, secret: sealed }],
+      base: [],
       removedNotes: [],
       rejected: [],
       removedRejected: [],
@@ -220,6 +221,7 @@ describe('one sync commits as one transaction', () => {
     await store.commitSync({
       meta: { ...meta, genesisHash: '0x' + '11'.repeat(32), lastSyncedBlock: 12, nextLeaf: 8 },
       notes: [{ ...NOTE, secret: sealed }],
+      base: [],
       removedNotes: [],
       rejected: [{ commitment: 'ee'.repeat(32), leafIndex: 6, value: '5', reason: 'settled' }],
       removedRejected: [],
@@ -244,6 +246,7 @@ describe('one sync commits as one transaction', () => {
     await store.commitSync({
       meta,
       notes: [],
+      base: [],
       removedNotes: [],
       rejected: [],
       removedRejected: [],
@@ -349,6 +352,7 @@ describe('latching a spend', () => {
     await store.commitSync({
       meta: await store.meta(),
       notes: [larger, smaller, other],
+      base: [],
       removedNotes: [],
       rejected: [],
       removedRejected: [],
@@ -375,6 +379,7 @@ describe('latching a spend', () => {
     await store.commitSync({
       meta: await store.meta(),
       notes: [only],
+      base: [],
       removedNotes: [],
       rejected: [],
       removedRejected: [],
@@ -386,12 +391,133 @@ describe('latching a spend', () => {
   });
 });
 
+describe('a sync that commits while a spend is settling', () => {
+  /**
+   * The latch survives the pass that read the row before it was written.
+   *
+   * A sync reads every note up front and then spends tens of seconds paging
+   * the settled set and decrypting, and a payment that settles inside that
+   * window latches `spent` on the notes it consumed. Committing the pass's own
+   * copy of the row afterwards cleared the latch, so the next selection
+   * offered a note the chain had already consumed and the pool refused the
+   * settlement after a whole proof had been paid for.
+   */
+  it('keeps a spent flag written after the pass read the note', async () => {
+    const store = await makeStore(db);
+    const sealed = await store.sealNoteSecret(NOTE.commitment, SECRET);
+    const row: StoredNote = { ...NOTE, secret: sealed };
+    await store.commitSync({
+      meta: await store.meta(),
+      notes: [row],
+      base: [],
+      removedNotes: [],
+      rejected: [],
+      removedRejected: [],
+      checkpoints: [],
+      clearedPending: [],
+    });
+
+    // What a sync does: read the rows, then work for a long time.
+    const read = await store.notes();
+
+    // What the spend does in the middle of that work.
+    await store.markSpentByNullifier([SECRET.nullifier], 41);
+
+    // And the sync commits the rows it read, which say the note is unspent.
+    await store.commitSync({
+      meta: { ...(await store.meta()), lastSyncedBlock: 40, nextLeaf: 5 },
+      notes: read,
+      base: read,
+      removedNotes: [],
+      rejected: [],
+      removedRejected: [],
+      checkpoints: [],
+      clearedPending: [],
+    });
+
+    const after = (await store.notes())[0];
+    expect(after?.spent).toBe(true);
+    expect(after?.spentSeenAtBlock).toBe(41);
+  });
+
+  it('keeps a write-off made after the pass read the note', async () => {
+    const store = await makeStore(db);
+    const row: StoredNote = {
+      ...NOTE,
+      secret: await store.sealNoteSecret(NOTE.commitment, SECRET),
+    };
+    await store.commitSync({
+      meta: await store.meta(),
+      notes: [row],
+      base: [],
+      removedNotes: [],
+      rejected: [],
+      removedRejected: [],
+      checkpoints: [],
+      clearedPending: [],
+    });
+    const read = await store.notes();
+    expect(await store.markOffChain(NOTE.commitment)).toBe(true);
+    await store.commitSync({
+      meta: await store.meta(),
+      notes: read,
+      base: read,
+      removedNotes: [],
+      rejected: [],
+      removedRejected: [],
+      checkpoints: [],
+      clearedPending: [],
+    });
+    expect((await store.notes())[0]?.onChain).toBe(false);
+  });
+
+  it('still writes what the pass decided when nothing moved underneath it', async () => {
+    // The merge is about a field somebody else moved. A spent flag the pass
+    // itself cleared, because the settlement that set it was orphaned, is
+    // still the answer, and so is a note put back on chain by a scan that met
+    // the commitment again.
+    const store = await makeStore(db);
+    const row: StoredNote = {
+      ...NOTE,
+      spent: true,
+      spentSeenAtBlock: 9,
+      onChain: false,
+      secret: await store.sealNoteSecret(NOTE.commitment, SECRET),
+    };
+    await store.commitSync({
+      meta: await store.meta(),
+      notes: [row],
+      base: [],
+      removedNotes: [],
+      rejected: [],
+      removedRejected: [],
+      checkpoints: [],
+      clearedPending: [],
+    });
+    const read = await store.notes();
+    await store.commitSync({
+      meta: await store.meta(),
+      notes: read.map((note) => ({ ...note, spent: false, spentSeenAtBlock: null, onChain: true })),
+      base: read,
+      removedNotes: [],
+      rejected: [],
+      removedRejected: [],
+      checkpoints: [],
+      clearedPending: [],
+    });
+    const after = (await store.notes())[0];
+    expect(after?.spent).toBe(false);
+    expect(after?.onChain).toBe(true);
+  });
+});
+
 describe('writing a note off', () => {
   async function withNote(overrides: Partial<StoredNote>): Promise<WalletStore> {
     const store = await makeStore(db);
     await store.commitSync({
       meta: await store.meta(),
       notes: [{ ...NOTE, ...overrides, secret: await store.sealNoteSecret(NOTE.commitment, SECRET) }],
+      base: [],
       removedNotes: [],
       rejected: [],
       removedRejected: [],

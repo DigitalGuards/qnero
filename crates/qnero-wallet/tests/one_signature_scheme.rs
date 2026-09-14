@@ -101,7 +101,7 @@ const SKIPPED_DIRS: [&str; 10] = [
 /// version went from "the sentence that states the rule" to 16% of every line
 /// the guard walked. Move the number when you have read the new hits the
 /// failure message lists.
-const EXPECTED_EXEMPT_HITS: usize = 25;
+const EXPECTED_EXEMPT_HITS: usize = 22;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -298,6 +298,69 @@ fn the_refusal_rule_is_where_the_guard_says() {
         contents.contains("Preamble::Signed(..) => Err(InvalidTransaction::BadSigner.into())"),
         "every other signed shape is no longer refused with BadSigner"
     );
+}
+
+/// `docs/DESIGN.md` section 7.3 states the rule the runtime implements, in the
+/// runtime's own words.
+///
+/// The section is normative: it is where a client author reads what the
+/// transparent entry admits. It used to carry the rule as a denylist over one
+/// variant, which the runtime had already replaced with an allowlist, so the
+/// document promised that a third `DilithiumSignatureScheme` variant is
+/// admitted where the chain refuses it with `BadSigner`. Prose and code drift
+/// in silence, so the sentence is pinned here: the design document and the
+/// module have to carry the same one, word for word.
+#[test]
+fn the_design_document_states_the_rule_as_the_allowlist_it_is() {
+    // The rule, as `chain/runtime/src/extrinsic.rs` writes it, with the
+    // markdown blockquote markers and the wrapping removed.
+    const RULE: &str = "A signed extrinsic is valid only when its signature is the \
+        `Dilithium87` variant. Every other variant is refused with \
+        `InvalidTransaction::BadSigner`, before its signature is verified, before any \
+        transaction extension runs, and before its call is dispatched.";
+
+    let root = repo_root();
+    let design = fs::read_to_string(root.join("docs/DESIGN.md")).expect("docs/DESIGN.md");
+    assert!(
+        flatten(&design).contains(RULE),
+        "docs/DESIGN.md section 7.3 no longer states the rule the runtime implements:
+{RULE}"
+    );
+
+    // And the module it was taken from still says it, so this is one sentence
+    // living in two places.
+    let rule = fs::read_to_string(root.join("chain/runtime/src/extrinsic.rs"))
+        .expect("the consensus rule file exists");
+    assert!(
+        flatten(&rule).contains(RULE),
+        "chain/runtime/src/extrinsic.rs no longer carries the sentence docs/DESIGN.md quotes"
+    );
+}
+
+/// One line of text out of wrapped prose: blockquote and doc-comment markers
+/// dropped, every run of whitespace collapsed to one space, and the brackets
+/// of an intra-doc link dropped with them.
+///
+/// The last one is what lets one sentence live in a Rust module and in a
+/// markdown document: `[`InvalidTransaction::BadSigner`]` resolves to a link
+/// in `rustdoc` and would be a broken one in `docs/DESIGN.md`, and that is a
+/// difference in rendering. The rule is the same one.
+fn flatten(contents: &str) -> String {
+    contents
+        .lines()
+        .map(|line| {
+            line.trim_start()
+                .trim_start_matches("//!")
+                .trim_start_matches("///")
+                .trim_start()
+                .trim_start_matches('>')
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(['[', ']'], "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The narrowed exemption, checked on its own terms.

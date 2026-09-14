@@ -256,6 +256,20 @@ absent. For each leaf it reads `ZkTree::Leaves`, `Shielded::Ciphertexts`,
 `state_queryStorageAt`. All four maps are `Identity` hashed on the leaf index,
 so paging is by index and never by `state_getKeysPaged`.
 
+**A leaf the node withholds refuses the pass.** `pallet-zk-tree` appends a leaf
+and raises `LeafCount` in one call and nothing ever removes one, so the map has
+no gaps below the count, and the count is read at the same block hash every
+leaf is. An absent `ZkTree::Leaves` answer at an index below it is therefore a
+node withholding one, and it used to be stepped over in silence: the leaf was
+counted as scanned, the pass saved `next_leaf` and a checkpoint above it, and
+every later sync started above it, so a payment on that leaf was out of the
+balance permanently with no error, no warning and no line in the report. It is
+refused by name now, naming the index, the count and the block, and nothing is
+written. The browser wallet refuses the identical answer in its read layer and
+again in its scan (`wallet-web/src/chain/reads.ts`, `src/wallet/sync.ts`). An
+absent answer *above* the count is ordinary: a window may run past the end of
+the tree and nothing is being withheld there.
+
 **Coinbase leaves.** Every block mints one note to its author, and a leaf with
 a `CoinbaseValues` entry is one of those. Such a leaf is read differently, and
 not from its ciphertext: usually it has none. The value comes from the chain,
@@ -1031,7 +1045,9 @@ Two of the default tests run the wallet against a scriptable JSON-RPC node in
   chain and the output becomes holdable.
 - `tests/sync_guards.rs` asserts what a sync refuses. A node behind the
   wallet's own watermark is refused and the store is byte-identical afterwards,
-  on disk as well as in memory. A node with no block at a checkpoint's height
+  on disk as well as in memory. A node answering nothing for a leaf below the
+  count it reports is refused by index, with `next_leaf` left where it was, and
+  the same node answering for that leaf then finds the payment. A node with no block at a checkpoint's height
   is refused and no checkpoint is popped, while the same hash at that height is
   not a fork and the sync runs with nothing rewound. A store built against
   another chain is refused by `open_on_chain` and by `sync` on its own, and
@@ -1053,8 +1069,12 @@ local. A spend never names a leaf: Merkle paths are rebuilt from
 `--merkle-rpc` in the browser and a lint fence refuses every spelling of the
 call. The node gates run in the same order with the same refusals: genesis
 binding recorded by the first operation that commits, the checkpoint-hash fork
-walk over at most 16 checkpoints, the leaf-count gate, and a rescan that is
-add-only and never bypasses the chain check. The scan pins every read of a pass
+walk over at most 16 checkpoints, the leaf-count gate, the refusal of a leaf
+withheld below the count read at the same block, and a rescan that is add-only
+and never bypasses the chain check. The short-tree refusal is one sentence with
+two callers in each wallet now, the caller passing where it read the count and
+what it would have gone on to do with it (`short_tree_refusal` and `ShortTree`
+here). The scan pins every read of a pass
 to one block hash and reads the same four keys per leaf in batches of 64. The
 fee floor, the memo pad, the two-input selection with its tie on the lowest
 leaf index, the conflict-set rule and the anchor-at-the-head rule are the same
@@ -1089,7 +1109,26 @@ the identical node refuses it by name. And every
 storage value a scan reads is decoded by its declared type and refused by name
 at any other width, the way `Chain::leaves` and `Chain::ciphertext` do, because
 `REQUIRED_STORAGE` compares hashers and a changed value type would otherwise
-read as a chain on which no leaf is this wallet's.
+read as a chain on which no leaf is this wallet's. `ZkTree::LeafCount` at eight
+bytes and `ZkTree::Depth` at one are in that list, which `Chain::leaf_count_at`
+and `Chain::tree_depth_at` decode them as: read at whatever width the bytes
+carried, thirty-two bytes of `0xff` was a scan window of 2^256 - 1 leaves and a
+two-byte depth read 1024 where the chain said 4. The count is bounded as well
+as sized, at `4 ** max_tree_depth`, which is what a 4-ary tree the circuit can
+prove over holds.
+
+One rule is the browser's alone, because the shape is: a scan and a payment do
+not run at the same time, and the Send button and the Sync button each say so
+while the other is running. A scan reads every note before it starts and
+commits them at the end, and a payment latches `spent` on those same rows the
+moment it settles, so a pass committing its own copy afterwards cleared the
+latch and handed the next selection a note the chain had already consumed. The
+store carries the second half of it: `commitSync` reads each row again inside
+its write transaction and keeps `spent`, `spentSeenAtBlock` and `onChain`
+wherever the stored row has moved since the pass read it, the way
+`markSpentByNullifier` and `markOffChain` already read before they write. This
+CLI needs neither, because one process runs one command at a time and its store
+is one file written whole.
 
 The property that no request names one of this wallet's own values is asserted
 rather than asserted-in-prose: `wallet-web/tests/privacy.test.ts` drives the
@@ -1192,12 +1231,18 @@ are cited at each site.
    in the spend path reads it; the refusal that actually protects the
    recipient, a duplicated nullifier, does not depend on it either.
 
-   The walk stops at 100,000 entries, in both wallets. Its length is a number
-   the node answers with and every step is a Poseidon2 hash, so an unbounded
-   walk lets one storage answer decide how long a scan runs, on the thread that
-   holds the seed in the browser. Past the bound a note is labelled `transfer`,
-   which is what the label already says for every note the walk misses, and the
-   browser wallet reports the bound as a warning on the pass. The counter is
+   The walk stops at 100,000 entries, in both wallets, and both wallets report
+   it. Its length is a number the node answers with and every step is a
+   Poseidon2 hash, so an unbounded walk lets one storage answer decide how long
+   a scan runs, on the thread that holds the seed in the browser. Past the
+   bound a note is labelled `transfer`, which is what the label already says
+   for every note the walk misses. A pass that hit the bound says so: the
+   browser wallet as a warning on the pass, and this one as
+   `SyncReport::entry_walk_truncated`, printed beside the rescan notice and
+   carrying the counter the chain answered with. `origin` is written once at
+   receipt and no later pass revisits it, so a shield labelled a transfer here
+   keeps that label until a rescan, which is the whole reason the bound is said
+   out loud rather than only written down. The counter is
    also decoded at its declared `u64` width and refused by name at any other,
    the way every other integer a scan reads is: read at whatever width the
    bytes carried, thirty-two bytes of `0xff` was a walk of 2^256 - 1 steps.

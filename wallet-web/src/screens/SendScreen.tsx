@@ -49,6 +49,7 @@ export function SendScreen({
   onSend,
   progress,
   running,
+  syncing,
   result,
   error,
   onDismiss,
@@ -66,6 +67,15 @@ export function SendScreen({
   onSend: (to: string, amount: bigint, memo: string) => void;
   progress: SpendProgress | null;
   running: boolean;
+  /**
+   * Whether a scan is running, which is the one state this button is refused
+   * in that has nothing to do with what is typed into the form.
+   *
+   * A scan reads every note before it starts and commits them at the end, and
+   * a payment writes `spent` on those same rows the moment it settles, so the
+   * two do not overlap. Said on the screen, before the press.
+   */
+  syncing: boolean;
   result: SpendResult | null;
   error: string | null;
   onDismiss: () => void;
@@ -201,6 +211,13 @@ export function SendScreen({
           which is seconds on top of the proof.
         </Notice>
       )}
+      {syncing && (
+        <Notice className="mb-3" testId="send-blocked">
+          A scan is running. It reads every note before it starts and commits them at the end, so a
+          payment settling underneath it would write the same rows from a later moment. This button
+          comes back when the scan finishes.
+        </Notice>
+      )}
       <form
         onSubmit={(event) => {
           void form.handleSubmit((values) => {
@@ -327,7 +344,14 @@ export function SendScreen({
           </Notice>
         )}
 
-        <Button type="submit" variant="action" size="block" className="mt-4" data-testid="do-send">
+        <Button
+          type="submit"
+          variant="action"
+          size="block"
+          className="mt-4"
+          data-testid="do-send"
+          disabled={syncing}
+        >
           Send
         </Button>
       </form>
@@ -421,9 +445,10 @@ function SendResultView({
       </details>
       <p className="mt-3 text-meta text-muted">
         The payment landed in output slot {result.paymentSlot}, drawn for this spend. The circuit
-        derives each output&apos;s randomness from its slot, so either assignment settles the same
-        way, and drawing it is what stops a chain reader telling the counterparty&apos;s output from
-        the sender&apos;s change.
+        derives each output&apos;s <code>rho</code> from its slot and the proving module draws each
+        output&apos;s <code>r</code> fresh, so either assignment settles the same way, and drawing
+        it is what stops a chain reader telling the counterparty&apos;s output from the
+        sender&apos;s change.
       </p>
       <Button variant="action" size="block" className="mt-4" data-testid="send-done" onClick={onDismiss}>
         Done

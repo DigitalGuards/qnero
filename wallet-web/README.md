@@ -128,7 +128,13 @@ has the bug too.
   tried against this wallet's viewing key in the worker; coinbase notes are
   rebuilt from the miner key; the whole settled nullifier set is paged and
   spent status is decided locally. The node is never told which leaves or
-  which nullifiers are this wallet's.
+  which nullifiers are this wallet's. A leaf the node answers nothing for
+  below the count it reports at that same block refuses the pass: the tree has
+  no gaps under its own count, so that answer is withheld rather than absent,
+  and stepping over it would hide a payment on that leaf behind a watermark
+  written above it. One at a time with a payment, in both directions: a scan
+  reads every note before it starts and commits them at the end, and a payment
+  writes `spent` on those same rows the moment it settles.
 - **Balance.** Unspent, pending, off chain, and what one payment can reach,
   with the note table under it.
 - **Send.** The fee floor from the runtime's own constants, note selection
@@ -248,8 +254,11 @@ The unit tests cover the encryption at rest and what it refuses, the store's
 own contract, the fee floor and the memo pad against a runtime's constants,
 note selection and the conflict-set rule, memo escaping, the node gates on both
 the sync and the spend, the spent reconciliation in both directions, the widths
-every storage value is decoded at, the bound on the shield-origin walk, and the
-lint fence that keeps `zkTree_getMerkleProof` out of every spelling it has.
+every storage value is decoded at and the tree capacity `ZkTree::LeafCount` is
+bounded by, the refusal of a leaf withheld below that count, the merge that
+keeps a spend's own writes when a scan commits over them, the bound on the
+shield-origin walk, and the lint fence that keeps `zkTree_getMerkleProof` out
+of every spelling it has.
 
 `tests/privacy.test.ts` is the one that needs explaining. "The node learns
 nothing" is a property of the request stream: a wallet that asked one point
