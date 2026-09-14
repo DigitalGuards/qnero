@@ -301,6 +301,7 @@ export function App(): ReactNode {
           head: head.number,
           specName: context.specName,
           specVersion: context.specVersion,
+          targetBlockTimeMs: context.targetBlockTimeMs,
           drift: context.storageDrift,
         });
       } catch (connectError) {
@@ -1011,18 +1012,21 @@ export function App(): ReactNode {
                     feeFloor={feeFloor}
                     memoBytes={session.limits?.memo_bytes ?? 61}
                     reachable={balances.reachable}
-                    expectedSeconds={
-                      // This machine's last payment if there has been one.
-                      // The published figure is a first-payment estimate and
-                      // it was out by a factor of two on this workstation,
-                      // which the sending screen then printed beside its own
-                      // elapsed clock. See `app/proverMode.ts`.
-                      measuredSendSeconds ??
-                      (proverThreads > 1
-                        ? (config?.expectedSendSeconds.threaded ?? 23)
-                        : (config?.expectedSendSeconds.single ?? 55))
+                    // This machine's last payment if there has been one. The
+                    // published figure is a first-payment estimate and it was
+                    // out by a factor of two on this workstation, which the
+                    // sending screen then printed beside its own elapsed
+                    // clock. See `app/proverMode.ts`.
+                    measuredSeconds={measuredSendSeconds}
+                    provingSeconds={
+                      proverThreads > 1
+                        ? (config?.expectedProvingSeconds.threaded ?? 12)
+                        : (config?.expectedProvingSeconds.single ?? 36)
                     }
-                    expectedFrom={measuredSendSeconds === null ? 'published' : 'measured'}
+                    // The block half of the wait, from the chain. No default:
+                    // the send button is behind a live connection, and a
+                    // connection carries the target it read at connect.
+                    blockSeconds={Math.round((connection.targetBlockTimeMs ?? 0) / 1000)}
                     checkAddress={(candidate) => session.prover.addressIsValid(candidate)}
                     circuitsBuilt={circuitsBuilt}
                     proverThreads={proverThreads}

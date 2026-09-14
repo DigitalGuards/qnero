@@ -19,14 +19,17 @@ export interface WalletConfig {
   /** Leaf slots per private batch. Checked against the module before proving. */
   numLeaves: number;
   /**
-   * What one payment is expected to cost in this browser, in seconds, per
-   * module, measured from the send button to a settled block.
+   * What the proof alone is expected to cost in this browser, in seconds, per
+   * module.
    *
-   * That interval rather than the proof's, because it is the interval the
-   * reader is in: the sending screen prints this beside its own elapsed clock,
-   * which starts at the button. A proving-only figure there was exceeded about
-   * halfway through every correct payment, so the one sentence the wallet
-   * offers about how long a wait will be withdrew itself every time.
+   * The sending screen quotes a wait as a composition: this figure, then up to
+   * one block interval read from the chain. The block half cannot live in a
+   * file, because the same build serves a 120 s public chain and a 12 s dev
+   * chain and the node is the only thing that knows which. What a file can
+   * carry is the half that belongs to the browser, which is the proof.
+   *
+   * This key replaced `expectedSendSeconds`, which was one number for both
+   * halves and therefore wrong on any chain but the one it was measured on.
    *
    * Two numbers rather than one. The threaded module proves in about a third
    * of the single-threaded one's time (`docs/BENCH.md`, M10), and a page that
@@ -34,15 +37,16 @@ export interface WalletConfig {
    * threads to expect three times the wait they were about to have. A single
    * number in `config.json` is still read, as both.
    */
-  expectedSendSeconds: { threaded: number; single: number };
+  expectedProvingSeconds: { threaded: number; single: number };
 }
 
 const DEFAULTS = {
   wasmBase: 'wasm/',
   numLeaves: 6,
-  // The M10 table's "Send to settled" rows after the review fixes, rounded:
-  // 21.6, 25.6 and 23.6 s threaded, 55.4 s on one thread (`docs/BENCH.md`).
-  expectedSendSeconds: { threaded: 23, single: 55 },
+  // The M10 table's `proveTransfer` rows after the review fixes, rounded:
+  // 11.6, 11.9 and 13.3 s threaded, 36.0 s on one thread (`docs/BENCH.md`).
+  // The block half is added at render time from the chain's own target.
+  expectedProvingSeconds: { threaded: 12, single: 36 },
 } as const;
 
 function readNumber(source: Record<string, unknown>, key: string, fallback: number): number {
@@ -81,30 +85,30 @@ export function parseConfig(raw: unknown): WalletConfig {
     chainName,
     wasmBase: wasmBase ?? DEFAULTS.wasmBase,
     numLeaves: readNumber(source, 'numLeaves', DEFAULTS.numLeaves),
-    expectedSendSeconds: readExpectation(source['expectedSendSeconds']),
+    expectedProvingSeconds: readExpectation(source['expectedProvingSeconds']),
   };
 }
 
 /** One number for both modules, or one per module, or neither. */
 function readExpectation(value: unknown): { threaded: number; single: number } {
   if (value === undefined) {
-    return DEFAULTS.expectedSendSeconds;
+    return DEFAULTS.expectedProvingSeconds;
   }
   if (typeof value === 'number') {
     if (!Number.isFinite(value) || value <= 0) {
-      throw new Error('config.json: expectedSendSeconds must be a positive number');
+      throw new Error('config.json: expectedProvingSeconds must be a positive number');
     }
     return { threaded: value, single: value };
   }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(
-      'config.json: expectedSendSeconds must be a number or {threaded, single} in seconds',
+      'config.json: expectedProvingSeconds must be a number or {threaded, single} in seconds',
     );
   }
   const source = value as Record<string, unknown>;
   return {
-    threaded: readNumber(source, 'threaded', DEFAULTS.expectedSendSeconds.threaded),
-    single: readNumber(source, 'single', DEFAULTS.expectedSendSeconds.single),
+    threaded: readNumber(source, 'threaded', DEFAULTS.expectedProvingSeconds.threaded),
+    single: readNumber(source, 'single', DEFAULTS.expectedProvingSeconds.single),
   };
 }
 

@@ -24,18 +24,31 @@ export interface ConsensusConstants {
   seedEpochLag: number;
   /** Blocks below the tip that a reorg may still replace. There is no finality gadget under this. */
   maxReorgDepth: number;
+  /**
+   * The chain's target block time, in milliseconds.
+   *
+   * Read rather than assumed. The interval is chain state since spec 104, so
+   * one node binary serves a 120 000 ms public chain and a 12 000 ms dev chain,
+   * and every block count this page turns into a duration needs the chain's own
+   * answer. The observed inter-block time stays what the hash-rate estimate
+   * divides by: that is what the network is doing, and this is what it is
+   * aiming at.
+   */
+  targetBlockTimeMs: number;
 }
 
 export async function fetchConsensusConstants(context: ChainContext): Promise<ConsensusConstants> {
-  const [epoch, lag, reorg] = await Promise.all([
+  const [epoch, lag, reorg, target] = await Promise.all([
     stateCallInt(context, 'QPoWApi_get_seed_epoch_blocks'),
     stateCallInt(context, 'QPoWApi_get_seed_epoch_lag'),
     stateCallInt(context, 'QPoWApi_get_max_reorg_depth'),
+    stateCallInt(context, 'QPoWApi_get_target_block_time'),
   ]);
   return {
     seedEpochBlocks: Number(epoch),
     seedEpochLag: Number(lag),
     maxReorgDepth: Number(reorg),
+    targetBlockTimeMs: Number(target),
   };
 }
 

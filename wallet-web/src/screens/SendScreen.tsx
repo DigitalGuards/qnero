@@ -41,8 +41,9 @@ export function SendScreen({
   feeFloor,
   memoBytes,
   reachable,
-  expectedSeconds,
-  expectedFrom,
+  measuredSeconds,
+  provingSeconds,
+  blockSeconds,
   circuitsBuilt,
   proverThreads,
   checkAddress,
@@ -57,9 +58,27 @@ export function SendScreen({
   feeFloor: bigint;
   memoBytes: number;
   reachable: bigint;
-  expectedSeconds: number;
-  /** Whether the figure is this machine's last payment or the published one. */
-  expectedFrom: 'measured' | 'published';
+  /**
+   * What the last payment on this machine cost end to end, in seconds, or
+   * null. Measured from this button to a settled block, which is the interval
+   * this screen's own clock reads.
+   */
+  measuredSeconds: number | null;
+  /**
+   * The published figure for the proof alone, in seconds, for the module this
+   * browser is running. The browser's half of the wait.
+   */
+  provingSeconds: number;
+  /**
+   * One block interval, in seconds, read from the chain.
+   *
+   * The chain's half of the wait, and it is the chain's because the interval
+   * is chain state: the same build faces a 120 s public chain and a 12 s dev
+   * chain. A settled payment waits for the next block whatever the proof cost,
+   * so a wait is quoted as the two halves and not as one number measured
+   * somewhere else.
+   */
+  blockSeconds: number;
   circuitsBuilt: boolean;
   proverThreads: number;
   /** The module's bech32m check, asked as the address is typed. */
@@ -129,6 +148,9 @@ export function SendScreen({
   }
 
   if (running) {
+    // Worst case, so the admission below fires late rather than early: the
+    // block half is "up to" one interval and lands sooner on average.
+    const expectedSeconds = measuredSeconds ?? provingSeconds + blockSeconds;
     const expectedMillis = expectedSeconds * 1000;
     // The estimate stops being quoted the moment it is wrong. Two numbers in
     // one panel that disagree are worse than one number and an admission.
@@ -152,14 +174,19 @@ export function SendScreen({
                 failed, and the list below says where it is.
               </>
             ) : (
-              <>
-                {expectedFrom === 'measured'
-                  ? "This browser's last payment took about "
-                  : 'The published figure for one payment is about '}
-                {expectedSeconds} seconds
-                {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}, from this
-                button to a settled block.
-              </>
+              measuredSeconds === null ? (
+                <>
+                  The published figure is about {provingSeconds} seconds of proving
+                  {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}, then up
+                  to one block interval of {blockSeconds} seconds before it settles.
+                </>
+              ) : (
+                <>
+                  This browser&rsquo;s last payment took about {measuredSeconds} seconds
+                  {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}, from this
+                  button to a settled block.
+                </>
+              )
             )}{' '}
             <strong className="text-ink">Leave this tab open.</strong>
           </p>

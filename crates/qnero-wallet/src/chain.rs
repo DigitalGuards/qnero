@@ -881,6 +881,24 @@ impl<'a> Chain<'a> {
         Ok((spec as u32, tx as u32))
     }
 
+    /// The chain's target block time, in milliseconds.
+    ///
+    /// Chain state since spec 104, so one node binary serves a 120 s public
+    /// chain and a 12 s dev chain and no wallet may carry the interval as a
+    /// constant. `QPoWApi_get_target_block_time` answers with a SCALE `u64`.
+    pub fn target_block_time_ms(&self) -> Result<u64> {
+        let hex: String = self
+            .rpc
+            .call_as("state_call", json!(["QPoWApi_get_target_block_time", "0x"]))?;
+        let bytes = decode_hex(&hex).context("the target block time is not hex")?;
+        let ms = u64::decode(&mut &bytes[..])
+            .context("QPoWApi_get_target_block_time did not answer with a u64")?;
+        if ms == 0 {
+            bail!("the node reports a target block time of zero");
+        }
+        Ok(ms)
+    }
+
     pub fn submit_extrinsic(&self, encoded: &[u8]) -> Result<String> {
         self.rpc
             .call_as("author_submitExtrinsic", json!([hex_0x(encoded)]))

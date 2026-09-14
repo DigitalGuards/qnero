@@ -647,6 +647,17 @@ fn main() -> Result<()> {
             let resolved_fee = wallet.preflight(&metadata, &recipient, amount, fee, &memo)?;
             println!("fee         {resolved_fee} quanta");
 
+            // What the wait is made of, said before it starts, and the same
+            // composition the browser wallet quotes. The block half is read
+            // from the chain: the interval is chain state, so a 120 s public
+            // chain and a 12 s dev chain give different answers here and
+            // neither number belongs in this binary.
+            let target_block_time_ms = chain.target_block_time_ms()?;
+            println!(
+                "expect      tens of seconds of proving, then up to one block interval of {:.0} s",
+                target_block_time_ms as f64 / 1_000.0
+            );
+
             let build_started = std::time::Instant::now();
             // One build per process. Building both circuits is seconds and
             // proving is tens of seconds; constructing a prover per
@@ -677,8 +688,10 @@ fn main() -> Result<()> {
             println!("proof       {} bytes", report.proof_bytes);
             println!("proving     {:.2?}", report.proving);
             println!(
-                "inclusion   block {} after {:.2?}",
-                report.included_at, report.inclusion
+                "inclusion   block {} after {:.2?} (one block interval is {:.0} s)",
+                report.included_at,
+                report.inclusion,
+                target_block_time_ms as f64 / 1_000.0
             );
             let sync = wallet.sync(&chain, &metadata)?;
             println!(

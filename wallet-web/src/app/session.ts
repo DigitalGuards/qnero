@@ -22,6 +22,12 @@ export interface ConnectionState {
   chainName?: string;
   specName?: string;
   specVersion?: number;
+  /**
+   * The chain's target block time, in milliseconds, as this connection
+   * reported it. Read from the chain rather than compiled in: see
+   * `ChainContext.targetBlockTimeMs`.
+   */
+  targetBlockTimeMs?: number;
   error?: string;
   drift?: string[];
 }

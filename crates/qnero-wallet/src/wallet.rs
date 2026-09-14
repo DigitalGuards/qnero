@@ -130,6 +130,11 @@ pub const ENTRY_WALK_LIMIT: u64 = 100_000;
 /// round trips, which is one page of work either way. `docs/BENCH.md` carries
 /// the per-block cost and this size. `wallet-web` holds the same bound in
 /// `src/wallet/sync.ts`.
+///
+/// A block count, deliberately: what it bounds is memory and round trips per
+/// chunk, and neither is a duration. At the public chain's 120 s target the
+/// chunk covers 34 hours of chain where at 12 s it covered 3.4, so a wallet
+/// opened daily now catches up inside one chunk.
 pub const HEADER_WALK_LIMIT: u32 = 1024;
 
 /// How many per-leaf detector warnings one pass writes out in full.

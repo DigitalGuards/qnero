@@ -80,6 +80,15 @@ export interface ShieldedConstants {
 export interface ChainContext {
   api: ApiPromise;
   provider: WsProvider;
+  /**
+   * The chain's target block time, in milliseconds, read from the chain.
+   *
+   * Never a constant in this wallet. The interval is chain state since spec
+   * 104, so one node binary serves a 120 000 ms public chain and a 12 000 ms
+   * dev chain, and a wallet that compiled either number in would quote the
+   * wrong wait on the other.
+   */
+  targetBlockTimeMs: number;
   /** The one seam every raw read goes through. See the module docs. */
   send: <T>(method: string, params: unknown[]) => Promise<T>;
   /**
@@ -152,7 +161,8 @@ export async function connect(endpoint: string): Promise<ChainContext> {
       }),
     ]);
     const api = await ApiPromise.create({ provider, noInitWarn: true, types: CHAIN_TYPES });
-    return describe(api, provider, endpoint);
+    const targetBlockTimeMs = await readTargetBlockTime(provider, endpoint);
+    return describe(api, provider, endpoint, targetBlockTimeMs);
   } catch (error) {
     await provider.disconnect().catch(() => undefined);
     throw error;
@@ -161,6 +171,27 @@ export async function connect(endpoint: string): Promise<ChainContext> {
       clearTimeout(timer);
     }
   }
+}
+
+/**
+ * The chain's target block time, in milliseconds.
+ *
+ * `QPoWApi_get_target_block_time` answers with a SCALE `u64`: eight
+ * little-endian bytes. Asked once at connect, because the pallet has no setter
+ * for it and a running chain cannot change it.
+ *
+ * A node that cannot answer is a node this build does not understand, so this
+ * fails the connect rather than falling back to a guess: every figure the
+ * wallet quotes about a wait is composed from this number, and a wrong one is
+ * worse than a refused connection.
+ */
+async function readTargetBlockTime(provider: WsProvider, endpoint: string): Promise<number> {
+  const raw = await provider.send<string>('state_call', ['QPoWApi_get_target_block_time', '0x']);
+  const ms = leBigInt(raw);
+  if (ms <= 0n) {
+    throw new Error(`${endpoint} reports a target block time of ${ms} ms`);
+  }
+  return Number(ms);
 }
 
 /**
@@ -243,7 +274,12 @@ function extrinsicVersionOf(metadata: { extrinsic: unknown }): number {
   throw new Error("this runtime's metadata declares no extrinsic format version");
 }
 
-function describe(api: ApiPromise, provider: WsProvider, endpoint: string): ChainContext {
+function describe(
+  api: ApiPromise,
+  provider: WsProvider,
+  endpoint: string,
+  targetBlockTimeMs: number,
+): ChainContext {
   const properties = api.registry.getChainProperties();
   const metadata = api.runtimeMetadata.asLatest;
 
@@ -286,6 +322,7 @@ function describe(api: ApiPromise, provider: WsProvider, endpoint: string): Chai
   return {
     api,
     provider,
+    targetBlockTimeMs,
     // The one seam. A request made while the socket is down comes back with
     // polkadot-js's own internal string, which names the method and not the
     // endpoint, so a reader sees "WebSocket is not connected" and no clue

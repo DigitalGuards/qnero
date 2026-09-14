@@ -15,7 +15,7 @@ import {
 import { countNullifiers, fetchSnapshot } from '../chain/state';
 import { estimateHashrate, formatDifficulty, formatHashrate } from '../lib/difficulty';
 import { blocksToNextSeed, nextSeedHeight, seedHeight } from '../lib/seed';
-import { formatCount, formatQnr, formatSeconds } from '../lib/units';
+import { formatCount, formatQnr, formatSeconds, formatSpan } from '../lib/units';
 import { Empty, ErrorBox, Field, Fields, Hash, Loading, Notice, Panel } from '../components/ui';
 import { RecentBlocks } from './parts/RecentBlocks';
 
@@ -224,9 +224,16 @@ export function Home(): ReactNode {
             label="Block time"
             value={<span className="num">{observedMs === null ? '-' : formatSeconds(observedMs)}</span>}
             note={
-              blockTimeMs === null
-                ? 'last observed inter-block time'
-                : `mean over the last ${formatCount(bundle.config.recentBlocks)} blocks`
+              // The target comes from the chain, never from a constant in this
+              // build: one node binary serves a 120 s public chain and a 12 s
+              // dev chain, and this page is pointed at whichever it is given.
+              `${
+                blockTimeMs === null
+                  ? 'last observed inter-block time'
+                  : `mean over the last ${formatCount(bundle.config.recentBlocks)} blocks`
+              }${
+                constants === null ? '' : `, against a target of ${formatSeconds(constants.targetBlockTimeMs)}`
+              }`
             }
           />
         </Fields>
@@ -253,7 +260,17 @@ export function Home(): ReactNode {
                   : '-'}
               </span>
             }
-            note="estimated from difficulty and the observed block time"
+            note={
+              // The observed time and not the target: difficulty is expected
+              // hashes per block, so dividing by what the chain actually took
+              // is what measures the network. A chain running ahead of or
+              // behind its target reads as the rate it really has.
+              constants === null
+                ? 'estimated from difficulty and the observed block time'
+                : `estimated from difficulty and the observed block time, not the ${formatSeconds(
+                    constants.targetBlockTimeMs,
+                  )} target`
+            }
           />
           <Field
             label="RandomX seed height"
@@ -274,9 +291,13 @@ export function Home(): ReactNode {
             note={
               constants === null || untilRotation === null
                 ? missingConstants
-                : `rotates in ${formatCount(untilRotation)} blocks, epoch ${formatCount(
+                : `rotates in ${formatCount(untilRotation)} blocks, about ${formatSpan(
+                    untilRotation * constants.targetBlockTimeMs,
+                  )} at this chain's target; epoch ${formatCount(
                     constants.seedEpochBlocks,
-                  )} lag ${formatCount(constants.seedEpochLag)}`
+                  )} blocks (${formatSpan(
+                    constants.seedEpochBlocks * constants.targetBlockTimeMs,
+                  )}) lag ${formatCount(constants.seedEpochLag)}`
             }
           />
         </Fields>

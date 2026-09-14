@@ -23,55 +23,59 @@ import { parseConfig } from '../src/chain/config';
 
 const MINIMAL = { rpcEndpoint: 'ws://127.0.0.1:9944', chainName: 'Qnero devnet' };
 
-describe('the send expectation', () => {
+describe('the proving expectation', () => {
   it('takes one figure per module', () => {
     const config = parseConfig({
       ...MINIMAL,
-      expectedSendSeconds: { threaded: 11, single: 38 },
+      expectedProvingSeconds: { threaded: 11, single: 38 },
     });
-    expect(config.expectedSendSeconds).toEqual({ threaded: 11, single: 38 });
+    expect(config.expectedProvingSeconds).toEqual({ threaded: 11, single: 38 });
   });
 
   it('reads one number as both, so an older config still loads', () => {
-    const config = parseConfig({ ...MINIMAL, expectedSendSeconds: 34 });
-    expect(config.expectedSendSeconds).toEqual({ threaded: 34, single: 34 });
+    const config = parseConfig({ ...MINIMAL, expectedProvingSeconds: 34 });
+    expect(config.expectedProvingSeconds).toEqual({ threaded: 34, single: 34 });
   });
 
   it('has a measured default when the file says nothing', () => {
     const config = parseConfig(MINIMAL);
-    expect(config.expectedSendSeconds.threaded).toBeGreaterThan(0);
-    expect(config.expectedSendSeconds.single).toBeGreaterThan(
-      config.expectedSendSeconds.threaded,
+    expect(config.expectedProvingSeconds.threaded).toBeGreaterThan(0);
+    expect(config.expectedProvingSeconds.single).toBeGreaterThan(
+      config.expectedProvingSeconds.threaded,
     );
   });
 
-  it('ships a default that is the whole send rather than the proof alone', () => {
+  it('ships the proof alone, because the block half comes from the chain', () => {
     // `docs/BENCH.md`: `proveTransfer` is 11.6 to 13.3 s threaded and 36.0 s
-    // single, and "Send to settled" for the same runs is 21.6 to 25.6 s and
-    // 55.4 s. A default inside the first band would be the figure that made
-    // every payment overdue.
+    // single. "Send to settled" for the same runs is 21.6 to 25.6 s and 55.4 s
+    // and this key is deliberately not that figure: the gap between them is
+    // one block interval, which is chain state and differs by a factor of ten
+    // between the public chain and a dev chain. The sending screen composes
+    // the two.
     const config = parseConfig(MINIMAL);
-    expect(config.expectedSendSeconds.threaded).toBeGreaterThan(15);
-    expect(config.expectedSendSeconds.single).toBeGreaterThan(45);
+    expect(config.expectedProvingSeconds.threaded).toBeGreaterThanOrEqual(11);
+    expect(config.expectedProvingSeconds.threaded).toBeLessThanOrEqual(14);
+    expect(config.expectedProvingSeconds.single).toBeGreaterThanOrEqual(30);
+    expect(config.expectedProvingSeconds.single).toBeLessThanOrEqual(40);
   });
 
   it('is the same figure the shipped config.json carries', () => {
     const shipped = JSON.parse(
       readFileSync(join(import.meta.dirname, '..', 'public', 'config.json'), 'utf8'),
     ) as Record<string, unknown>;
-    expect(parseConfig(shipped).expectedSendSeconds).toEqual(
-      parseConfig(MINIMAL).expectedSendSeconds,
+    expect(parseConfig(shipped).expectedProvingSeconds).toEqual(
+      parseConfig(MINIMAL).expectedProvingSeconds,
     );
   });
 
   it('refuses a figure that is not a positive number, by name', () => {
-    expect(() => parseConfig({ ...MINIMAL, expectedSendSeconds: 0 })).toThrow(
-      /expectedSendSeconds/,
+    expect(() => parseConfig({ ...MINIMAL, expectedProvingSeconds: 0 })).toThrow(
+      /expectedProvingSeconds/,
     );
-    expect(() => parseConfig({ ...MINIMAL, expectedSendSeconds: 'soon' })).toThrow(
-      /expectedSendSeconds/,
+    expect(() => parseConfig({ ...MINIMAL, expectedProvingSeconds: 'soon' })).toThrow(
+      /expectedProvingSeconds/,
     );
-    expect(() => parseConfig({ ...MINIMAL, expectedSendSeconds: { threaded: -1 } })).toThrow(
+    expect(() => parseConfig({ ...MINIMAL, expectedProvingSeconds: { threaded: -1 } })).toThrow(
       /threaded/,
     );
   });

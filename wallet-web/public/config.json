@@ -3,8 +3,8 @@
   "chainName": "Qnero devnet",
   "wasmBase": "wasm/",
   "numLeaves": 6,
-  "expectedSendSeconds": {
-    "threaded": 23,
-    "single": 55
+  "expectedProvingSeconds": {
+    "threaded": 12,
+    "single": 36
   }
 }

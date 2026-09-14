@@ -72,3 +72,30 @@ export function formatSeconds(ms: number): string {
   }
   return `${(ms / 1000).toFixed(1)} s`;
 }
+
+/**
+ * A span of milliseconds as the largest unit that leaves a number a reader can
+ * hold: seconds under two minutes, then minutes, hours and days.
+ *
+ * Block counts on this page are turned into durations with the chain's own
+ * target block time, and those spans range from a minute to several days, so
+ * one fixed unit would print either "0.0 d" or "245760.0 s".
+ */
+export function formatSpan(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return 'unknown';
+  }
+  const seconds = ms / 1000;
+  if (seconds < 120) {
+    return `${seconds.toFixed(0)} s`;
+  }
+  const minutes = seconds / 60;
+  if (minutes < 120) {
+    return `${minutes.toFixed(0)} min`;
+  }
+  const hours = minutes / 60;
+  if (hours < 48) {
+    return `${hours.toFixed(1)} h`;
+  }
+  return `${(hours / 24).toFixed(2)} days`;
+}

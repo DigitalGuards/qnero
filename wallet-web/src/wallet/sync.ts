@@ -1233,12 +1233,14 @@ export async function runSync(
      * The whole range used to be materialised first, and a `LeafRecord`
      * carries the leaf's ciphertext: 1,792 bytes each, one per leaf on the
      * chain, in the page, beside the worker's 918 MiB. The pallet mints a
-     * coinbase leaf per block at a twelve-second target, so a chain that has
-     * been running a year is gigabytes of ciphertext held at once for a first
-     * sync, and a tab reclaimed under that pressure dies with no catchable
-     * error and makes no progress, because nothing is committed until the pass
-     * ends. Reading in windows bounds what is resident to one window plus the
-     * notes this wallet actually holds.
+     * coinbase leaf per block, so the floor under a chain's leaf count is its
+     * height: a year of the public chain's 120 s blocks is 262,980 of them,
+     * about 450 MiB of ciphertext held at once for a first sync, and the 12 s
+     * dev chain this was first measured against reached ten times that. A tab
+     * reclaimed under either dies with no catchable error and makes no
+     * progress, because nothing is committed until the pass ends. Reading in
+     * windows bounds what is resident to one window plus the notes this wallet
+     * actually holds.
      *
      * The window is the read batch, so the request stream is unchanged: the
      * same contiguous range, the same four keys per leaf, 64 leaves a query.
