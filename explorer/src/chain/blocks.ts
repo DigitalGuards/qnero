@@ -50,7 +50,12 @@ export interface BlockSummary {
 export interface ExtrinsicRow extends ExtrinsicEnvelope {
   hash: string;
   name: string;
-  succeeded: boolean;
+  /**
+   * Null when the node kept no state at this block, so the outcome was never
+   * read. An unread outcome is not a failed one: the events that carry it are
+   * state, and below a pruned node's state window there are none to read.
+   */
+  succeeded: boolean | null;
 }
 
 export interface BlockDetail extends BlockSummary {
@@ -144,9 +149,15 @@ interface RawBlock {
 
 export async function fetchDetail(context: ChainContext, hash: string): Promise<BlockDetail> {
   const [raw, state] = await Promise.all([
-    context.provider.send<RawBlock>('chain_getBlock', [hash]),
+    // A hash the node does not know is answered with null rather than an
+    // error, and a hash is the one thing a reader can paste or follow from a
+    // genesis parent link, so the miss is a written sentence here.
+    context.provider.send<RawBlock | null>('chain_getBlock', [hash]),
     fetchBlockState(context, hash),
   ]);
+  if (raw === null) {
+    throw new Error(`this chain has no block with hash ${hash}`);
+  }
   const header = parseHeader(raw.block.header);
   const succeeded = successfulExtrinsics(state.events);
   const extrinsics = raw.block.extrinsics.map((hex, index) => {
@@ -161,7 +172,7 @@ export async function fetchDetail(context: ChainContext, hash: string): Promise<
         envelope.call === null
           ? 'unresolved'
           : callName(context.pallets, envelope.call.palletIndex, envelope.call.callIndex),
-      succeeded: succeeded.has(index),
+      succeeded: state.error === null ? succeeded.has(index) : null,
     };
   });
   return { ...summarise(hash, header, state), extrinsics };
@@ -187,12 +198,18 @@ export class BlockCache {
       return cached;
     }
     const fresh = await fetchSummary(context, hash);
-    this.summaries.set(hash, fresh);
-    this.order.push(hash);
-    while (this.order.length > this.limit) {
-      const evicted = this.order.shift();
-      if (evicted !== undefined) {
-        this.summaries.delete(evicted);
+    // A block whose state did not answer is not cached. A dropped socket
+    // during one list load would otherwise pin those rows to "state not kept
+    // at this block" for the life of the tab, on a node that had the state all
+    // along, and take their timestamps out of the rolling block time with them.
+    if (fresh.stateError === null) {
+      this.summaries.set(hash, fresh);
+      this.order.push(hash);
+      while (this.order.length > this.limit) {
+        const evicted = this.order.shift();
+        if (evicted !== undefined) {
+          this.summaries.delete(evicted);
+        }
       }
     }
     return fresh;

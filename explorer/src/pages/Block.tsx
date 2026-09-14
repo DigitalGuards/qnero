@@ -15,6 +15,44 @@ function isHash(id: string): boolean {
   return /^0x[0-9a-fA-F]{64}$/.test(id);
 }
 
+/**
+ * A block that could not be opened, with a way out.
+ *
+ * A bare error box leaves the page with no heading and no link, which is what
+ * a pasted hash or a genesis parent link used to land on.
+ */
+function BlockProblem({ children }: { children: ReactNode }): ReactNode {
+  return (
+    <>
+      <header className="page__head">
+        <h1>Block</h1>
+      </header>
+      <ErrorBox>{children}</ErrorBox>
+      <p>
+        <a href={href({ name: 'home' })}>Back to the chain</a>.
+      </p>
+    </>
+  );
+}
+
+/**
+ * A panel the node kept no state for.
+ *
+ * The absence sentence beside it ("no coinbase note", "no settlement") is a
+ * claim about what the chain published at this height. Over a read that failed
+ * it is a false one, and it is read by someone checking whether something
+ * happened here.
+ */
+function NotRead({ what, error }: { what: string; error: string }): ReactNode {
+  return (
+    <Empty>
+      <span className="dim" title={error}>
+        State not kept at this block, so {what} could not be read. This is not an absence.
+      </span>
+    </Empty>
+  );
+}
+
 export function Block({ id }: { id: string }): ReactNode {
   const { bundle, head } = useChain();
   const resolved = useAsync(
@@ -52,13 +90,13 @@ export function Block({ id }: { id: string }): ReactNode {
   );
 
   if (resolved.status === 'error') {
-    return <ErrorBox>{resolved.error}</ErrorBox>;
+    return <BlockProblem>{resolved.error}</BlockProblem>;
   }
   if (bundle === null || detail.status === 'loading' || resolved.status === 'loading') {
     return <Loading what="the block" />;
   }
   if (detail.status === 'error') {
-    return <ErrorBox>{detail.error}</ErrorBox>;
+    return <BlockProblem>{detail.error}</BlockProblem>;
   }
 
   const block = detail.value;
@@ -112,7 +150,20 @@ export function Block({ id }: { id: string }): ReactNode {
           <Field label="Hash" value={<Hash value={block.hash} full />} wide />
           <Field
             label="Parent"
-            value={<Hash value={block.header.parentHash} href={href({ name: 'block', id: block.header.parentHash })} full />}
+            value={
+              // Genesis names an all-zero parent that is no block, which is why
+              // the lede drops "previous" there too.
+              block.header.number === 0 ? (
+                <Hash value={block.header.parentHash} full />
+              ) : (
+                <Hash
+                  value={block.header.parentHash}
+                  href={href({ name: 'block', id: block.header.parentHash })}
+                  full
+                />
+              )
+            }
+            note={block.header.number === 0 ? 'genesis has no parent on this chain' : undefined}
             wide
           />
           <Field
@@ -165,7 +216,11 @@ export function Block({ id }: { id: string }): ReactNode {
 
       <Panel title="Coinbase note">
         {block.coinbase === null ? (
-          <Empty>This block minted no coinbase note.</Empty>
+          block.stateError === null ? (
+            <Empty>This block minted no coinbase note.</Empty>
+          ) : (
+            <NotRead what="the coinbase note" error={block.stateError} />
+          )
         ) : (
           <Fields>
             <Field label="Value" value={<span className="num">{formatQnr(block.coinbase.valuePlanck)}</span>} />
@@ -196,7 +251,11 @@ export function Block({ id }: { id: string }): ReactNode {
 
       <Panel title={`Settlements (${formatCount(block.settlements.length)})`}>
         {block.settlements.length === 0 ? (
-          <Empty>No settlement landed in this block.</Empty>
+          block.stateError === null ? (
+            <Empty>No settlement landed in this block.</Empty>
+          ) : (
+            <NotRead what="the settlements" error={block.stateError} />
+          )
         ) : (
           block.settlements.map((settlement) => {
             const extrinsic =
@@ -222,7 +281,11 @@ export function Block({ id }: { id: string }): ReactNode {
 
       <Panel title={`Shield entries (${formatCount(block.entries.length)})`}>
         {block.entries.length === 0 ? (
-          <Empty>No transparent value entered the pool in this block.</Empty>
+          block.stateError === null ? (
+            <Empty>No transparent value entered the pool in this block.</Empty>
+          ) : (
+            <NotRead what="the shield entries" error={block.stateError} />
+          )
         ) : (
           <>
             <Notice>
@@ -349,6 +412,13 @@ function OtherExtrinsics({
   block: BlockDetail;
   isSettlement: (index: number) => boolean;
 }): ReactNode {
+  if (block.extrinsics.length === 0) {
+    return (
+      <Panel title="Extrinsics (0)">
+        <Empty>This block carries no extrinsics.</Empty>
+      </Panel>
+    );
+  }
   return (
     <Panel title={`Extrinsics (${formatCount(block.extrinsics.length)})`}>
       <div className="table-wrap">
@@ -381,7 +451,15 @@ function OtherExtrinsics({
                     </span>
                   )}
                 </td>
-                <td>{extrinsic.succeeded ? 'succeeded' : 'failed'}</td>
+                <td className={extrinsic.succeeded === null ? 'dim' : undefined}>
+                  {extrinsic.succeeded === null ? (
+                    <span title={block.stateError ?? undefined}>state not kept at this block</span>
+                  ) : extrinsic.succeeded ? (
+                    'succeeded'
+                  ) : (
+                    'failed'
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>

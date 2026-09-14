@@ -93,13 +93,27 @@ export function Settlement({ hash, at }: { hash: string; at: string | null }): R
         <header className="page__head">
           <h1>Extrinsic</h1>
         </header>
-        <Empty>
-          No extrinsic with hash <Hash value={hash} full /> in the last{' '}
-          {formatCount(bundle.config.searchWindowBlocks)} blocks
-          {located.value.stopped === null ? '' : `, and ${located.value.stopped}`}. An older one is
-          still on the chain; this site holds no index, so it looks back a fixed distance and no
-          further.
-        </Empty>
+        {at === null ? (
+          <Empty>
+            No extrinsic with hash <Hash value={hash} full /> in the last{' '}
+            {formatCount(bundle.config.searchWindowBlocks)} blocks
+            {located.value.stopped === null ? '' : `, and ${located.value.stopped}`}. An older one
+            is still on the chain; this site holds no index, so it looks back a fixed distance and
+            no further.
+          </Empty>
+        ) : (
+          // One block was read, the one the link carried, so the walk's sentence
+          // would claim five hundred blocks this page never opened.
+          <Empty>
+            No extrinsic with hash <Hash value={hash} full /> in{' '}
+            <a href={href({ name: 'block', id: at })}>the block this link carried</a>, which is the
+            only block this page read. A reorg can replace the block a link was built from.{' '}
+            <a href={href({ name: 'settlement', hash, at: null })}>
+              Look back {formatCount(bundle.config.searchWindowBlocks)} blocks instead
+            </a>
+            .
+          </Empty>
+        )}
       </>
     );
   }

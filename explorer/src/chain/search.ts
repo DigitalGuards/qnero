@@ -43,6 +43,32 @@ export interface ScanResult<T> {
 const PRUNED =
   'the node answered nothing below this block, which is what a pruned state window looks like';
 
+/**
+ * What a node says when it no longer keeps the state at a block.
+ *
+ * Substrate answers a state read below its pruning window with an unknown-block
+ * error naming the discarded state, and answers a hash it has never seen with
+ * the header-and-parent message. Both are boundaries a walk can report.
+ */
+const STATE_BOUNDARY = [
+  /state already discarded/i,
+  /unknown ?block/i,
+  /unable to retrieve header and parent/i,
+];
+
+/**
+ * Whether a failed read is the bottom of the node's state window.
+ *
+ * Only this is reported as a boundary. A dropped socket or a timed-out request
+ * establishes nothing about the blocks below it, and calling one a pruning
+ * boundary would turn hundreds of unread blocks into "not published", which is
+ * a negative inferred from a failure. Anything else is raised, and the page
+ * shows the error it already has a branch for.
+ */
+function isStateBoundary(context: ChainContext, message: string): boolean {
+  return context.api.isConnected && STATE_BOUNDARY.some((pattern) => pattern.test(message));
+}
+
 export interface ExtrinsicLocation {
   blockHash: string;
   height: number;
@@ -75,7 +101,11 @@ export async function findExtrinsic(
     let detail: BlockDetail;
     try {
       detail = await fetchDetail(context, hash);
-    } catch {
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!isStateBoundary(context, message)) {
+        throw error;
+      }
       return { found: null, scanned, exhausted: true, stopped: PRUNED };
     }
     const match = detail.extrinsics.find((extrinsic) => extrinsic.hash.toLowerCase() === target);
@@ -126,6 +156,9 @@ export async function findNullifierBlock(
     }
     const state = await fetchBlockState(context, hash);
     if (state.error !== null) {
+      if (!isStateBoundary(context, state.error)) {
+        throw new Error(state.error);
+      }
       return { found: null, scanned, exhausted: true, stopped: PRUNED };
     }
     const settlements = decodeSettlements(state.events);
@@ -148,15 +181,18 @@ export async function findNullifierBlock(
   return { found: null, scanned, exhausted: false, stopped: null };
 }
 
-/** Whether a 32-byte value is a block hash on this chain. */
+/**
+ * Whether a 32-byte value is a block hash on this chain.
+ *
+ * The node answers a hash it does not know with null, so null is the whole
+ * negative and nothing here catches. A dropped socket or a refused read has to
+ * reach the caller: rendering it as "not seen" would tell a reader that a value
+ * which is a block on this chain was never on it.
+ */
 export async function blockForHash(context: ChainContext, hash: string): Promise<number | null> {
-  try {
-    const header = await context.provider.send<{ number: string } | null>('chain_getHeader', [hash]);
-    if (header === null) {
-      return null;
-    }
-    return Number(BigInt(header.number));
-  } catch {
+  const header = await context.provider.send<{ number: string } | null>('chain_getHeader', [hash]);
+  if (header === null) {
     return null;
   }
+  return Number(BigInt(header.number));
 }
