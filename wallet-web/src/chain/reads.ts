@@ -21,7 +21,7 @@
  * by the next.
  */
 
-import { hexToBytes, leBytesToBigInt } from '../lib/hex';
+import { hexByteLength, hexToBytes, leBytesToBigInt, readCompact } from '../lib/hex';
 import { storage, type ChainContext } from './api';
 
 /** Leaves per `state_queryStorageAt` when four items are read per leaf. */
@@ -78,18 +78,28 @@ export async function fetchHead(context: ChainContext): Promise<Head> {
  * for as long as the tab is open, which is a clock on how long this wallet
  * watched. One subscribe and then pushes says the same thing once.
  *
- * It names nothing: every wallet on the chain gets the same headers.
+ * It names nothing: every wallet on the chain gets the same headers, and the
+ * parameter list is empty.
+ *
+ * Through `ChainContext.subscribe` rather than `api.rpc.chain.subscribeNewHeads`
+ * for the reason the seam exists: a subscription is a request, and one written
+ * against the typed API would be invisible to `tests/privacy.test.ts`, which
+ * records the seam. The raw header is read for its number alone, so the custom
+ * `Header` codec is not needed here either.
  */
 export async function watchHead(
   context: ChainContext,
   onHead: (height: number) => void,
 ): Promise<() => void> {
-  const unsubscribe = await context.api.rpc.chain.subscribeNewHeads((header) => {
-    onHead(header.number.toNumber());
+  return context.subscribe('chain_newHead', 'chain_subscribeNewHead', [], (header) => {
+    // The node's own JSON, read for one field. A header that does not carry a
+    // number is not a header this wallet can do anything with, and a status
+    // strip is not the place to throw over one.
+    const number = (header as { number?: unknown }).number;
+    if (typeof number === 'string' || typeof number === 'number') {
+      onHead(Number(BigInt(number)));
+    }
   });
-  return () => {
-    unsubscribe();
-  };
 }
 
 /**
@@ -177,7 +187,19 @@ export async function fetchLeafHashes(
     for (let index = start; index < end; index += 1) {
       const value = values.get(keys.get(index) ?? '');
       if (value !== undefined) {
-        out.set(hexToBytes(value), (index - from) * 32);
+        // Checked before the write, not after. A longer value would overwrite
+        // the head of the next leaf's slot and a shorter one would leave the
+        // tail of this one as zeros, which is a valid canonical digest: either
+        // way the rebuild roots to the wrong number and the spend is refused
+        // with a message about syncing again, which fixes nothing.
+        const bytes = hexToBytes(value);
+        if (bytes.length !== 32) {
+          throw new Error(
+            `ZkTree::Leaves(${index}) is ${bytes.length} bytes, expected 32, so this wallet ` +
+              'cannot rebuild the tree over it.',
+          );
+        }
+        out.set(bytes, (index - from) * 32);
       }
     }
     onProgress?.(end - from);
@@ -196,16 +218,75 @@ export interface LeafRecord {
   coinbaseQuanta: bigint | null;
 }
 
-/** A stored `Vec<u8>`: a compact length prefix, then the bytes. */
-function decodeBytes(value: string | undefined): Uint8Array | null {
+/**
+ * A stored `Vec<u8>`: a compact length prefix, then exactly that many bytes.
+ *
+ * The length is checked against what follows it rather than skipped. The CLI
+ * runs `Vec::<u8>::decode` here (`crates/qnero-wallet/src/chain.rs`), which
+ * refuses a value whose prefix and body disagree. A reader that only skipped
+ * the prefix would hand the worker a truncated ciphertext, that ciphertext
+ * would fail to decrypt, and the leaf would be counted as somebody else's:
+ * a zero balance over a completed sync, with nothing said anywhere.
+ */
+function decodeBytes(value: string | undefined, what: string): Uint8Array | null {
   if (value === undefined) {
     return null;
   }
   const bytes = hexToBytes(value);
-  const first = bytes[0] ?? 0;
-  const mode = first & 0b11;
-  const offset = mode === 0 ? 1 : mode === 1 ? 2 : mode === 2 ? 4 : (first >>> 2) + 5;
-  return bytes.slice(offset);
+  const { value: length, next } = readCompact(bytes, 0);
+  const carried = bytes.length - next;
+  if (carried !== length) {
+    throw new Error(
+      `${what} declares ${length} bytes and carries ${carried}. This runtime stores it ` +
+        'differently from what this build decodes, so the sync is refused rather than reading ' +
+        "every leaf as somebody else's.",
+    );
+  }
+  return bytes.slice(next);
+}
+
+/**
+ * A fixed-width little-endian integer, refused by name at any other width.
+ *
+ * `u32` for `LeafBlocks` and `u64` for `CoinbaseValues`, which is what
+ * `Chain::leaf_block` and `Chain::coinbase_value` decode them as. A wider or
+ * narrower value is a runtime that changed the type, and reading it anyway
+ * produces a plausible number: a block height off by a factor of 2^32, or a
+ * coinbase this wallet then rebuilds at the wrong value and reads as nobody's.
+ */
+function decodeInteger(value: string | undefined, what: string, width: number): bigint | null {
+  if (value === undefined) {
+    return null;
+  }
+  const bytes = hexToBytes(value);
+  if (bytes.length !== width) {
+    throw new Error(
+      `${what} is ${bytes.length} bytes and this build decodes it as ${width}. This runtime ` +
+        'declares a different type for it.',
+    );
+  }
+  return leBytesToBigInt(bytes);
+}
+
+/**
+ * One leaf hash, which is 32 bytes or it is not a leaf hash.
+ *
+ * `Chain::leaves` converts each value with `<[u8; 32]>::try_from` and errors
+ * with the leaf's own index. `REQUIRED_STORAGE` compares hashers and cannot
+ * see a changed value type, so this is the check that names the item.
+ */
+function decodeCommitment(value: string | undefined, index: number): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  const length = hexByteLength(value);
+  if (length !== 32) {
+    throw new Error(
+      `ZkTree::Leaves(${index}) is ${length} bytes, expected 32. This runtime stores a leaf ` +
+        'differently from what this build reads, so nothing about this tree can be trusted.',
+    );
+  }
+  return value;
 }
 
 /**
@@ -249,12 +330,13 @@ export async function fetchLeaves(
     for (const row of rows) {
       const block = values.get(row.keys[2]);
       const coinbase = values.get(row.keys[3]);
+      const height = decodeInteger(block, `Shielded::LeafBlocks(${row.index})`, 4);
       out.push({
         index: row.index,
-        commitment: values.get(row.keys[0]) ?? null,
-        ciphertext: decodeBytes(values.get(row.keys[1])),
-        blockNumber: block === undefined ? null : Number(leBytesToBigInt(hexToBytes(block))),
-        coinbaseQuanta: coinbase === undefined ? null : leBytesToBigInt(hexToBytes(coinbase)),
+        commitment: decodeCommitment(values.get(row.keys[0]), row.index),
+        ciphertext: decodeBytes(values.get(row.keys[1]), `Shielded::Ciphertexts(${row.index})`),
+        blockNumber: height === null ? null : Number(height),
+        coinbaseQuanta: decodeInteger(coinbase, `Shielded::CoinbaseValues(${row.index})`, 8),
       });
     }
     onProgress?.(end - from);

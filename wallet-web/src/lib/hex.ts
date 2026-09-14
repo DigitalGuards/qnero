@@ -96,6 +96,17 @@ export function readCompact(bytes: Uint8Array, offset: number): CompactRead {
   return { value: Number(value), next: offset + 1 + length };
 }
 
+/**
+ * A hash as it is compared: lower case, no `0x`.
+ *
+ * One function because two spellings of the same hash are one chain, and a
+ * comparison that missed that would report a fork against a node serving the
+ * same blocks.
+ */
+export function normaliseHash(hash: string): string {
+  return stripPrefix(hash).toLowerCase();
+}
+
 /** A hash shortened for a dense table. The full value stays in the title attribute. */
 export function shortHash(hex: string, head = 8, tail = 6): string {
   const body = stripPrefix(hex);

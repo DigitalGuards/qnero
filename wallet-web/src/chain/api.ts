@@ -82,6 +82,22 @@ export interface ChainContext {
   provider: WsProvider;
   /** The one seam every raw read goes through. See the module docs. */
   send: <T>(method: string, params: unknown[]) => Promise<T>;
+  /**
+   * The same seam for a subscription, which is the other way to name something
+   * to a node.
+   *
+   * It is here rather than on `api.rpc` so that the head subscription is
+   * recordable the way every read is. A subscription is a request like any
+   * other: it carries a method and parameters, and a later one written as
+   * `api.rpc.state.subscribeStorage([myKey])` would name this wallet's own key
+   * and no unit test would see it.
+   */
+  subscribe: (
+    type: string,
+    method: string,
+    params: unknown[],
+    onValue: (value: unknown) => void,
+  ) => Promise<() => void>;
   specName: string;
   specVersion: number;
   transactionVersion: number;
@@ -287,6 +303,27 @@ function describe(api: ApiPromise, provider: WsProvider, endpoint: string): Chai
         }
         throw error;
       }
+    },
+    subscribe: async (
+      type: string,
+      method: string,
+      params: unknown[],
+      onValue: (value: unknown) => void,
+    ): Promise<() => void> => {
+      const id = await provider.subscribe(type, method, params, (error, value: unknown) => {
+        if (error === null) {
+          onValue(value);
+        }
+      });
+      // The unsubscribe method is the subscribe method with `subscribe`
+      // swapped for `unsubscribe`, which is the JSON-RPC convention this node
+      // follows. A socket that has already gone refuses it, and there is
+      // nothing left to undo in that case.
+      return () => {
+        void provider.unsubscribe(type, method.replace('subscribe', 'unsubscribe'), id).catch(
+          () => undefined,
+        );
+      };
     },
     specName: api.runtimeVersion.specName.toString(),
     specVersion: api.runtimeVersion.specVersion.toNumber(),

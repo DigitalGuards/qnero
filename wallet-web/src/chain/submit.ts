@@ -137,14 +137,24 @@ export async function waitForInclusion(
 ): Promise<Inclusion | null> {
   const deadline = Date.now() + options.timeoutMs;
   const pollMs = options.pollMs ?? 2000;
+  /** Every height up to here has been read. Nothing is skipped past. */
   let checked = options.fromBlock;
   while (Date.now() < deadline) {
     const head = await fetchHead(context);
     for (let height = checked + 1; height <= head.number; height += 1) {
       const hash = await context.send<string | null>('chain_getBlockHash', [height]);
       if (hash === null) {
-        continue;
+        // A height this node had no block for is a height that was not
+        // inspected, so the walk stops here and the next poll starts from it
+        // again. A reorg in progress, or a replica that has not filled in
+        // behind its own head, answers null for a height that then carries
+        // this settlement; skipping it means waiting out the whole timeout,
+        // telling the operator to prove again over a payment that landed, and
+        // leaving both inputs unlatched for the next send to select. The CLI
+        // treats the same answer as an error and names the height.
+        break;
       }
+      checked = height;
       options.onBlock?.(height);
       const extrinsics = await blockExtrinsics(context, hash);
       if (!extrinsics.includes(encoded)) {
@@ -153,7 +163,6 @@ export async function waitForInclusion(
       const settled = await confirmNullifiersSettled(context, nullifiers, hash);
       return { blockNumber: height, blockHash: hash, settled: settled.every(Boolean) };
     }
-    checked = head.number;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
   return null;

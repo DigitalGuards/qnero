@@ -36,6 +36,7 @@ import { describe, expect, it } from 'vitest';
 
 import { chainAdapter } from '../src/app/adapters';
 import type { ChainContext } from '../src/chain/api';
+import { watchHead } from '../src/chain/reads';
 import { runSync, type ScannedNote, type SyncCrypto } from '../src/wallet/sync';
 import { spend } from '../src/wallet/send';
 import type { WalletStore } from '../src/wallet/store';
@@ -299,6 +300,36 @@ describe('the request stream a sync makes', () => {
   });
 });
 
+describe('the head this wallet follows', () => {
+  it('subscribes through the seam, naming nothing and asking for nothing', async () => {
+    // The third call path, and the one that was not going through the seam at
+    // all: `api.rpc.chain.subscribeNewHeads` is invisible to this test, which
+    // is what made the invariant in `chain/api.ts` false in tree. A
+    // subscription is a request like any other, and the next one written that
+    // way could be `api.rpc.state.subscribeStorage([myKey])`.
+    const subscriptions: { type: string; method: string; params: unknown[] }[] = [];
+    let deliver: (value: unknown) => void = () => undefined;
+    const context = {
+      send: () => {
+        throw new Error('following the head asks the node nothing');
+      },
+      subscribe: (type: string, method: string, params: unknown[], onValue: (value: unknown) => void) => {
+        subscriptions.push({ type, method, params });
+        deliver = onValue;
+        return Promise.resolve(() => undefined);
+      },
+    } as unknown as ChainContext;
+
+    const heads: number[] = [];
+    await watchHead(context, (height) => heads.push(height));
+    expect(subscriptions).toEqual([
+      { type: 'chain_newHead', method: 'chain_subscribeNewHead', params: [] },
+    ]);
+    deliver({ number: '0x2a' });
+    expect(heads).toEqual([42]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The spend path.
 // ---------------------------------------------------------------------------
@@ -395,6 +426,7 @@ function spendContext(): { context: ChainContext; calls: Call[] } {
   const context = {
     send,
     extrinsicVersion: 4,
+    genesisHash: GENESIS,
     constants: {
       blockHashWindow: 256,
       minLeafFee: 4n,
@@ -427,8 +459,9 @@ function spendContext(): { context: ChainContext; calls: Call[] } {
 }
 
 /** A prover that answers plausibly and opens no socket, because it cannot. */
-function spendProver(): ProverClient {
+function spendProver(overrides: Partial<ProverClient> = {}): ProverClient {
   return {
+    addressIsValid: () => Promise.resolve(true),
     buildProver: () =>
       Promise.resolve({
         threads: 1,
@@ -471,27 +504,56 @@ function spendProver(): ProverClient {
           linear_memory_growth_bytes: 0,
         },
       }),
+    ...overrides,
   } as unknown as ProverClient;
 }
 
+/** What the module reports, which a spend measures its fee and its pad against. */
+const LIMITS = {
+  memo_bytes: 61,
+  ciphertext_fixed_bytes: 1731,
+  padded_ciphertext_bytes: 1792,
+  digest_logs_size: 110,
+  max_tree_depth: 32,
+  tree_arity: 4,
+  siblings_per_level: 3,
+  chain_num_leaves: 6,
+};
+
 /** A store that records what it was told and holds nothing. */
-function spendStore(): WalletStore {
+function spendStore(genesisHash: string | null = GENESIS): WalletStore {
+  const written: string[] = [];
   return {
+    meta: () => Promise.resolve({ ...freshMeta(), genesisHash }),
     sealPendingSecret: () => Promise.resolve({ v: 1, iv: '', ct: '' }),
-    commitPending: () => Promise.resolve(),
-    markSpentByNullifier: () => Promise.resolve(),
-    markOffChain: () => Promise.resolve(false),
-  } as unknown as WalletStore;
+    commitPending: () => {
+      written.push('pending');
+      return Promise.resolve();
+    },
+    markSpentByNullifier: () => {
+      written.push('spent');
+      return Promise.resolve();
+    },
+    markOffChain: () => {
+      written.push('offChain');
+      return Promise.resolve(false);
+    },
+    written: () => written,
+  } as unknown as WalletStore & { written: () => string[] };
 }
 
-async function spendOnce(): Promise<{ calls: Call[] }> {
+async function spendOnce(options: {
+  prover?: ProverClient;
+  store?: WalletStore;
+  to?: string;
+} = {}): Promise<{ calls: Call[] }> {
   const { context, calls } = spendContext();
   await spend(
     context,
-    spendProver(),
-    spendStore(),
+    options.prover ?? spendProver(),
+    options.store ?? spendStore(),
     {
-      to: 'qn1recipient',
+      to: options.to ?? 'qn1recipient',
       amount: 300n,
       memo: 'lunch',
       changeAddress: 'qn1mine',
@@ -512,16 +574,7 @@ async function spendOnce(): Promise<{ calls: Call[] }> {
         },
       ],
     },
-    {
-      memo_bytes: 61,
-      ciphertext_fixed_bytes: 1731,
-      padded_ciphertext_bytes: 1792,
-      digest_logs_size: 110,
-      max_tree_depth: 32,
-      tree_arity: 4,
-      siblings_per_level: 3,
-      chain_num_leaves: 6,
-    },
+    LIMITS,
     () => undefined,
   );
   return { calls };
@@ -590,6 +643,68 @@ describe('the request stream a payment makes', () => {
     for (const call of calls) {
       expect(allowed.has(call.method), `${call.method} is not a method a spend may call`).toBe(true);
     }
+  });
+
+  it('refuses a node on another chain before it asks it anything', async () => {
+    // The gate the command-line wallet opens `prepare_spend` with. Without it
+    // a spend anchors on the other chain's head, rebuilds the other chain's
+    // tree, passes the root gate over it (a rebuild over that node's own
+    // leaves roots to that node's own header) and then writes a real,
+    // spendable note off as one this chain does not carry, which no ordinary
+    // later sync undoes.
+    const { context, calls } = spendContext();
+    const store = spendStore(`0x${'99'.repeat(32)}`) as WalletStore & { written: () => string[] };
+    await expect(
+      spend(
+        context,
+        spendProver(),
+        store,
+        {
+          to: 'qn1recipient',
+          amount: 300n,
+          memo: '',
+          changeAddress: 'qn1mine',
+          candidates: [],
+        },
+        LIMITS,
+        () => undefined,
+      ),
+    ).rejects.toThrow(/bound to the chain whose genesis/);
+    expect(calls).toEqual([]);
+    expect(store.written()).toEqual([]);
+  });
+
+  it('refuses an address whose checksum does not hold, before it builds anything', async () => {
+    // ~2,600 bech32m characters, so a truncated paste is the ordinary
+    // mistake. Refused inside the module it costs the circuit build, the
+    // anchor read and a rebuild of every leaf on the chain first.
+    const { context, calls } = spendContext();
+    let built = 0;
+    const prover = spendProver({
+      addressIsValid: () => Promise.resolve(false),
+      buildProver: () => {
+        built += 1;
+        throw new Error('a spend refused on its address must not build the circuits');
+      },
+    });
+    await expect(
+      spend(
+        context,
+        prover,
+        spendStore(),
+        {
+          to: 'qn1truncated',
+          amount: 300n,
+          memo: '',
+          changeAddress: 'qn1mine',
+          candidates: [],
+        },
+        LIMITS,
+        () => undefined,
+      ),
+    ).rejects.toThrow(/checksum/);
+    expect(built).toBe(0);
+    expect(calls).toEqual([]);
   });
 
   it('starts looking for its own bytes at the block after the anchor', async () => {

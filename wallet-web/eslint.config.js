@@ -49,6 +49,44 @@ export const merkleProofFence = [
   },
 ];
 
+/**
+ * The transport fence.
+ *
+ * `chain/api.ts` states that every read goes through `ChainContext.send` and
+ * that `tests/privacy.test.ts` records the property there. That claim held
+ * only as long as nobody wrote the next read against polkadot-js's typed API,
+ * and one already had been: the head subscription went out over
+ * `api.rpc.chain.subscribeNewHeads`, which the recording seam cannot see.
+ *
+ * The shapes that carry a name to a node are `api.rpc.*` (an RPC call or a
+ * subscription), `api.query.*` (a storage read, and the one that would carry a
+ * raw nullifier under `Blake2_128Concat`), `api.call.*` (a runtime API, which
+ * is how a Merkle proof is reached) and `api.derive.*`. `api.tx` is not on the
+ * list: reading `.callIndex` off a submittable builds nothing and opens no
+ * socket, which is what `chain/submit.ts` does with it.
+ *
+ * `src/chain/api.ts` is exempt, because that is where the seam is built and
+ * where `storage()` turns `api.query` into a key without asking anybody.
+ */
+const NODE_SEAM_MESSAGE =
+  'Reach the node through ChainContext.send or ChainContext.subscribe. The typed API bypasses ' +
+  'the seam tests/privacy.test.ts records, so a read written this way is invisible to it.';
+
+export const nodeSeamFence = [
+  {
+    // `context.api.rpc`, `this.api.query`, and anything else that reads the
+    // member off an object called `api`.
+    selector:
+      "MemberExpression[property.name=/^(rpc|query|call|derive)$/][object.property.name='api']",
+    message: NODE_SEAM_MESSAGE,
+  },
+  {
+    // The same four, off a bare `api`.
+    selector: "MemberExpression[property.name=/^(rpc|query|call|derive)$/][object.name='api']",
+    message: NODE_SEAM_MESSAGE,
+  },
+];
+
 export default tseslint.config(
   // `public/wasm` is the generated wasm-bindgen glue, staged by
   // `scripts/stage-wasm.sh`. It is a build output that happens to be
@@ -80,6 +118,12 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       'no-restricted-syntax': ['error', ...merkleProofFence],
     },
+  },
+  {
+    // Everything but the file that owns the seam.
+    files: ['src/**/*.ts', 'src/**/*.tsx'],
+    ignores: ['src/chain/api.ts'],
+    rules: { 'no-restricted-syntax': ['error', ...merkleProofFence, ...nodeSeamFence] },
   },
   { files: ['**/*.js'], ...tseslint.configs.disableTypeChecked },
 );

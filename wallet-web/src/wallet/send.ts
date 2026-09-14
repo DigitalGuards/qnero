@@ -6,6 +6,14 @@
  * authority and `crates/qnero-wallet/src/wallet.rs` is the implementation this
  * mirrors.
  *
+ * 0. **The chain first.** The store is bound to a genesis hash by its first
+ *    committed operation, and every note's `leafIndex` is an index into that
+ *    chain's tree. A node on another chain rebuilds another tree, and the root
+ *    gate below passes over it, because a rebuild over that node's own leaves
+ *    roots to that node's own header. What follows is either a phantom note
+ *    written off on a chain it never lived on, or a leaf mismatch reported as
+ *    a stale store. `Wallet::prepare_spend` opens with this check and so does
+ *    this, before a fee is computed.
  * 1. **The fee floor first**, measured from the ciphertexts the submission
  *    will actually carry. The fee is a public input fixed at proving time, so
  *    a low one costs a whole 33-second proof and comes back as
@@ -32,9 +40,14 @@
  *    `rho` from its slot index, so either assignment proves and settles
  *    unchanged, and a fixed assignment would tell every chain reader which of
  *    a settlement's two leaves is the sender's change.
- * 8. **Prove, verify locally, write the change note, then submit.** The store
- *    is the only copy of the change note's `r`, and a tab reclaimed between
- *    the submit and the write has published a note nobody can open.
+ * 8. **Prove, verify locally, write the change note, then submit.** What that
+ *    row is, exactly: a claim that the note exists, so a balance shown before
+ *    the next sync includes the change. It seals no randomness, because the
+ *    circuit derives the change note's `(rho, r)` from the spend's own
+ *    nullifiers and this wallet recovers them by decrypting its own ciphertext
+ *    off the chain, which needs only the seed. The order is kept for the
+ *    weaker reason: a tab reclaimed between the submit and the write shows a
+ *    balance missing its own change until the next sync reaches it.
  */
 
 import type { ChainContext } from '../chain/api';
@@ -49,6 +62,7 @@ import {
   memoPadSeparationWarning,
   slotFeeFloor,
 } from './fee';
+import { normaliseHash } from '../lib/hex';
 import { memoRefusal } from '../lib/memo';
 import type { NoteSecret, PendingNote, StoredNote } from './model';
 import { selectNotes } from './select';
@@ -102,6 +116,36 @@ export interface SpendResult {
   warnings: string[];
 }
 
+/**
+ * The refusal a store bound to one chain owes a node serving another, or null.
+ *
+ * One function, called twice: once by the page, so the message renders where a
+ * spend error renders, and once at the top of [`spend`], so the non-UI path
+ * cannot skip it. `runSync` writes the same refusal from its own gate
+ * (`wallet/sync.ts`), and the wording is the same on purpose: it is the same
+ * mistake, met on a different screen.
+ */
+export function chainMismatchRefusal(
+  storeGenesis: string | null,
+  nodeGenesis: string | undefined,
+): string | null {
+  if (storeGenesis === null || nodeGenesis === undefined) {
+    // An unbound store is one that has never committed a sync, and it binds
+    // itself to the first chain it commits against. There is nothing to
+    // disagree with yet.
+    return null;
+  }
+  if (normaliseHash(storeGenesis) === normaliseHash(nodeGenesis)) {
+    return null;
+  }
+  return (
+    `this wallet is bound to the chain whose genesis is ${storeGenesis} and this node serves ` +
+    `${nodeGenesis}. Every note it holds is an index into the other chain's tree, so nothing ` +
+    'has been built and nothing has been written off. Point the wallet at a node on its own ' +
+    'chain.'
+  );
+}
+
 /** The floor this spend owes, from the runtime's constants and the pad. */
 export function feeFloorFor(context: ChainContext, limits: ProverLimits): bigint {
   return slotFeeFloor(
@@ -121,12 +165,30 @@ export async function spend(
 ): Promise<SpendResult> {
   const warnings: string[] = [];
 
+  // Before the fee, before the selection, before anything is read. A wrong
+  // node here is a note written off on a chain it never lived on.
+  const mismatch = chainMismatchRefusal((await store.meta()).genesisHash, context.genesisHash);
+  if (mismatch !== null) {
+    throw new Error(mismatch);
+  }
+
   report({ stage: 'fee' });
   // The memo against the pad, before anything is measured. The send screen
   // refuses the same bound where it is typed, from the same function.
   const refusal = memoRefusal(request.memo, limits.memo_bytes);
   if (refusal !== null) {
     throw new Error(`${refusal}. Nothing has been built.`);
+  }
+  // The recipient, checked here rather than inside the prover. A Qnero address
+  // is about 2,600 characters, so a truncated paste is the ordinary mistake,
+  // and the module decodes it at the end: after the circuit build, the anchor
+  // read and a rebuild of every leaf on the chain. The send form refuses the
+  // same thing as it is typed, from this same function.
+  if (!(await prover.addressIsValid(request.to.trim()))) {
+    throw new Error(
+      'that is not a valid Qnero address: its bech32m checksum does not hold, which is what a ' +
+        'truncated or edited paste looks like. Nothing has been built.',
+    );
   }
   // The pad against both of the runtime's bounds. The cap is a refusal, the
   // divisor is a warning: see `fee.ts`.
@@ -319,8 +381,11 @@ export async function spend(
     { ct1: submission.ct1, ct2: submission.ct2 },
   ]);
 
-  // Before the submission, in one committed transaction. The store is the only
-  // copy of this note's `r` anywhere in the world.
+  // Before the submission, in one committed transaction. Not because the row
+  // holds the only copy of anything: it seals empty strings, and the change
+  // note's randomness comes back by decrypting this wallet's own ciphertext
+  // off the chain. It is written first so a tab reclaimed between the two
+  // still shows the change in its balance.
   const changeCommitment = submission.report.public_inputs.commitments[paymentSlot === 1 ? 1 : 0];
   const pending: PendingNote = {
     commitment: changeCommitment,

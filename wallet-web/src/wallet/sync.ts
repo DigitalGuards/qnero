@@ -37,6 +37,7 @@
  *   checkpoints.
  */
 
+import { normaliseHash } from '../lib/hex';
 import { MAX_CHECKPOINTS, type NoteOrigin, type NoteSecret, type RejectedNote, type StoreMeta, type StoredNote, type SyncCheckpoint } from './model';
 
 /** What a scan needs out of the chain, so a test can supply it. */
@@ -275,10 +276,6 @@ export async function readNodeStance(
   // No checkpoints at or below the head and none above it: a fresh store, or
   // one whose checkpoints were dropped.
   return { kind: 'current' };
-}
-
-function normaliseHash(hash: string): string {
-  return hash.toLowerCase().replace(/^0x/, '');
 }
 
 /**

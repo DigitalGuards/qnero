@@ -17,13 +17,20 @@
 import { Linter } from 'eslint';
 import { describe, expect, it } from 'vitest';
 
-import { merkleProofFence } from '../eslint.config.js';
+import { merkleProofFence, nodeSeamFence } from '../eslint.config.js';
 
 const linter = new Linter();
 
 function lint(code: string): number {
   const messages = linter.verify(code, {
     rules: { 'no-restricted-syntax': ['error', ...merkleProofFence] },
+  });
+  return messages.length;
+}
+
+function lintSeam(code: string): number {
+  const messages = linter.verify(code, {
+    rules: { 'no-restricted-syntax': ['error', ...nodeSeamFence] },
   });
   return messages.length;
 }
@@ -66,6 +73,50 @@ describe('the Merkle-proof fence', () => {
   for (const [what, code] of Object.entries(ALLOWED)) {
     it(`leaves ${what} alone`, () => {
       expect(lint(code)).toBe(0);
+    });
+  }
+});
+
+/**
+ * The transport fence.
+ *
+ * `chain/api.ts` said every read goes through one seam and that the privacy
+ * test records the property there. The claim was already false: the head
+ * subscription went out over `api.rpc.chain.subscribeNewHeads`, which that
+ * test cannot see, and the next read written the same way could have been
+ * `api.query.shielded.usedNullifiers(mine)`, which puts a raw 32-byte
+ * nullifier on the wire and would pass every unit test in this suite.
+ */
+const SEAM_CAUGHT: Record<string, string> = {
+  'a storage read through the typed API':
+    'await context.api.query.shielded.usedNullifiers(mine);',
+  'a subscription through the typed API':
+    'await api.rpc.chain.subscribeNewHeads(onHead);',
+  'a runtime call through the typed API':
+    'await context.api.call.zkTreeApi.something(leaf);',
+  'a derive helper':
+    'await api.derive.chain.bestNumber();',
+};
+
+const SEAM_ALLOWED: Record<string, string> = {
+  'the seam itself': "await context.send('state_queryStorageAt', [keys, at]);",
+  'the subscription seam': "await context.subscribe('chain_newHead', 'chain_subscribeNewHead', [], onHead);",
+  'reading a call index off a submittable, which opens no socket':
+    "const index = context.api.tx['shielded']['submitPrivateBatch'].callIndex;",
+  'a local query of something that is not an api':
+    'const rows = store.query(everything);',
+};
+
+describe('the transport fence', () => {
+  for (const [what, code] of Object.entries(SEAM_CAUGHT)) {
+    it(`catches ${what}`, () => {
+      expect(lintSeam(code)).toBeGreaterThan(0);
+    });
+  }
+
+  for (const [what, code] of Object.entries(SEAM_ALLOWED)) {
+    it(`leaves ${what} alone`, () => {
+      expect(lintSeam(code)).toBe(0);
     });
   }
 });
