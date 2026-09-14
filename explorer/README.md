@@ -145,10 +145,23 @@ Each of these is a decision.
   to whoever runs the node, which is the correlation a wallet's local tree
   rebuild exists to avoid. An explorer making that call for a viewer would hand
   the node a per-viewer leaf-interest log. Leaves and the root are read as
-  public ranges instead, and `npm run lint` fails on the call in either of the
-  two forms the node serves it in: the `zkTree_getMerkleProof` method and the
-  `ZkTreeApi_get_merkle_proof` runtime call behind `state_call` and
-  `archive_v1_call`.
+  public ranges, and `npm run lint` fails on every spelling of the call: the
+  `zkTree_getMerkleProof` method, the `ZkTreeApi_get_merkle_proof` runtime call
+  behind `state_call`, `state_callAt` and `archive_v1_call` at whichever
+  parameter position that method's layout puts the name in, and the polkadot-js
+  sugar `api.call.<api>.getMerkleProof` with its snake-case and computed-key
+  spellings. A syntax fence fails open, so `tests/lint-fence.test.ts` runs each
+  spelling through the shipped selectors and fails if one of them lints clean.
+- **It does not read a settled nullifier as a note that was spent.** A leaf
+  slot has two input positions and its two nullifiers mark both of them
+  consumed. A position holding a real input spends one note; a position holding
+  a dummy input publishes a nullifier over no note, and the two are the same
+  uniform hash in the public record (`docs/CIRCUIT.md` section 5, the
+  `NF_DUMMY` tag, and section 9.5 on settling both nullifiers of every real
+  slot). At least one position of a settled slot is real, so a slot spends one
+  note or two. Every page that shows a nullifier says that, and the home page's
+  figure is twice the slots that settled, which bounds the notes this chain has
+  spent from above.
 - **It renders a slot's two outputs unordered.** Which one is the sender's
   change is hidden only because the wallet draws the payment's output slot per
   spend. Ordering them, or labelling one "to" and one "change", would
@@ -184,7 +197,7 @@ is a bounded walk that says how far it looked.
 | Search, block check | One `chain_getHeader` whose one parameter is the value itself. The answer names nothing the chain does not already publish; the question names the value, so it is behind the same click as the rest |
 | Search, nullifier | One point lookup on a constructed key, which names that nullifier to the node: a `Blake2_128Concat` key is the hash followed by the raw key. The page prints that before it offers the button, and the lookup runs once per click, pinned to the block the chain was at when it was asked, so an imported block never re-sends it |
 | Search, commitment | `ZkTree::Leaves` newest first, 256 keys per request, capped. A match is followed by a read of the window it came out of, so no request the scan makes names one leaf |
-| Nullifier count | `state_getKeysPaged` at 1000 keys a page, capped by `nullifierPageLimit`, and reported as a floor when it hits the cap. It is pinned to a baseline block that moves once per recent-list window, and the blocks after the baseline are counted from the settlement events the recent list already holds, so an imported block costs no new walk |
+| Nullifier count | `state_getKeysPaged` at 1000 keys a page, capped by `nullifierPageLimit`, and reported as a floor when it hits the cap. It is pinned to a baseline block that moves once per recent-list window, and the blocks after the baseline are counted from the settlement events the recent list already holds, so an imported block costs no new walk. A block after the baseline whose state did not answer settled events nobody decoded, so the figure carries a `+` and its note names how many blocks went unread; a baseline walk that did not answer leaves no figure to mark and reads as "not a count" |
 
 Every one of these degrades rather than failing a page. A refused unsafe method
 or a missing runtime call empties the fields that needed it and leaves the rest
@@ -205,7 +218,10 @@ three blocks into a 512-block walk raises an error where it would otherwise have
 concluded "not published" about 509 blocks nobody read. A block whose state did
 not answer says so in every panel that needed it, down to the outcome column,
 and it is not cached, so a blip does not pin those rows for the life of the
-tab. The same rule reaches the sentences beside a figure: a settlement whose
+tab. A count follows the same rule, and a heading counts as a claim: a panel
+over an unread event log is titled "(not counted)", the refused-calls panel is
+rendered over one so a refusal is never reported by absence, and a total that
+spans blocks which went unread is marked and says how many. The same rule reaches the sentences beside a figure: a settlement whose
 block state was not kept is never written up as an extrinsic that settled no
 slot, the newest block is called empty of a coinbase note only once a state
 read has answered for it, and a nullifier count that did not answer says so
@@ -250,8 +266,10 @@ nice -n 19 npm run build
 `npm test` is vitest over the decoders and the reads built on them: the
 settlement, coinbase and shield event shapes, the header and its digest, the
 extrinsic envelope, the `U512` difficulty, the units, the seed-height and
-rotation rules, the route grammar, and the three answers a page is allowed to
-give about a block whose state the node did not keep. The fixtures in
+rotation rules, the route grammar, the three answers a page is allowed to give
+about a block whose state the node did not keep, what a count may say over an
+unread event log, and the Merkle-proof lint fence against every spelling of the
+call. The fixtures in
 `tests/fixtures/` were captured from a `--dev --tmp` node that had shielded once
 and sent once, by:
 
@@ -271,13 +289,16 @@ nice -n 19 npm run e2e
 It starts its own dev node at one mining thread, shields once so an entry
 exists, sends once so a settlement exists, builds the site, serves the build,
 and drives a headless Chromium over the home, block, settlement, search and
-reveals pages asserting the values the wallet reported. It also counts the
+reveals pages asserting the values the wallet reported, and the words those
+pages use about what a settled nullifier stands for. It also counts the
 frames the page sends that carry the query's own 32 bytes, so a read that runs
 before its button, or twice after it, fails the run; it relays the page's own
 socket and answers the state reads at one block the way a node below its
 pruning window does, so the settlement page is driven through the failure that
-used to render as an extrinsic which settled nothing; it opens genesis and an
-unknown block hash, which are the two pages a dereference used to take down;
+used to render as an extrinsic which settled nothing; it opens genesis, an unknown block hash and a
+settlement at a block this chain does not have, which are the pages a
+dereference used to take down and the one that used to fail into a bare error
+box with nothing to click;
 and at 400 px it checks that a wide table scrolls inside its wrapper
 and that the skip link lands in the page with the route intact. It stops the
 node by its pidfile and does not finish until the RPC port is free again.

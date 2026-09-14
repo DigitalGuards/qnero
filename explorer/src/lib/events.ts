@@ -138,7 +138,11 @@ export interface SettlementOutput {
 }
 
 export interface SettlementSlot {
-  /** The two nullifiers this slot spent. Membership proves some note was spent and says nothing about which. */
+  /**
+   * The two nullifiers this slot settled, one per input position. A position
+   * holding a real input spends one note and a position holding a dummy
+   * publishes a nullifier over no note, so a slot spends one note or two.
+   */
   nullifiers: [string, string];
   /** The two leaves this slot appended, an unordered pair: which one is the change is not on chain. */
   outputs: [SettlementOutput, SettlementOutput];

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   latestCoinbase,
+  panelCount,
   rollingBlockTimeMs,
+  settledNullifiers,
   settlementOf,
   summarise,
   type BlockState,
@@ -147,5 +149,180 @@ describe('what the newest block says about its coinbase', () => {
       kind: 'unread',
       why: 'state-not-kept',
     });
+  });
+});
+
+/* -- what a count is allowed to say ------------------------------------ */
+
+/** One settled slot, with the two nullifiers a caller names. */
+function settling(height: number, nullifiers: readonly string[]): BlockSummary {
+  const base = block(height, { events: [], timestampMs: 1_000_000, error: null });
+  const output = { leafIndex: 0, commitment: '0xcc', ciphertextBytes: 1792 };
+  return {
+    ...base,
+    settlements: nullifiers.map((nullifier, index) => ({
+      extrinsicIndex: index + 2,
+      segments: 1,
+      declaredSlots: 1,
+      feePlanck: 0n,
+      authorFeePlanck: 0n,
+      slots: [{ nullifiers: [`${nullifier}a`, `${nullifier}b`], outputs: [output, output] }],
+    })),
+  };
+}
+
+describe('a panel title over an event log that did not answer', () => {
+  it('counts what the block published when the state answered', () => {
+    expect(panelCount([], null)).toBe('(0)');
+    expect(panelCount([1, 2, 3], null)).toBe('(3)');
+    expect(panelCount(Array.from({ length: 1234 }, () => 0), null)).toBe('(1,234)');
+  });
+
+  it('prints no count at all over an unread one', () => {
+    // The whole point. `decodeSettlements([])` is the empty list on a block the
+    // node kept no state for just as it is on a block that settled nothing, so
+    // a title built from the list length reads "Settlements (0)" over a body
+    // that says the read failed, and the title is the half a reader believes.
+    expect(panelCount([], DISCARDED)).toBe('(not counted)');
+    expect(panelCount([], DISCARDED)).not.toBe('(0)');
+  });
+});
+
+describe('the settled-nullifier figure', () => {
+  const walked = (count: number, capped = false) => ({ count, capped });
+
+  it('adds the window to the walk when every block above the baseline answered', () => {
+    const settled = settledNullifiers({
+      baseline: walked(4),
+      baselineError: null,
+      baselineNumber: 10,
+      headNumber: 12,
+      window: 'ready',
+      blocks: [settling(12, ['0x01']), settling(11, ['0x02']), settling(10, ['0x03'])],
+    });
+    // The baseline block's own settlement is already inside the walk, so only
+    // the two blocks above it are added, at two nullifiers each.
+    expect(settled).toStrictEqual({
+      kind: 'counted',
+      count: 8,
+      capped: false,
+      unreadBlocks: 0,
+    });
+  });
+
+  it('counts one nullifier once however many blocks in the window carry it', () => {
+    const settled = settledNullifiers({
+      baseline: walked(0),
+      baselineError: null,
+      baselineNumber: 10,
+      headNumber: 12,
+      window: 'ready',
+      blocks: [settling(12, ['0x01']), settling(11, ['0x01'])],
+    });
+    expect(settled.kind === 'counted' ? settled.count : null).toBe(2);
+  });
+
+  it('marks the figure and names the blocks whose state did not answer', () => {
+    // The regression. A block in the window that the node kept no state for
+    // decodes to no settlements at all, so adding the window blindly drops
+    // every nullifier that block settled and prints the short number as a
+    // total, with nothing on the page saying a block went unread.
+    const settled = settledNullifiers({
+      baseline: walked(4),
+      baselineError: null,
+      baselineNumber: 10,
+      headNumber: 12,
+      window: 'ready',
+      blocks: [settling(12, ['0x01']), pruned(11)],
+    });
+    expect(settled).toStrictEqual({
+      kind: 'counted',
+      count: 6,
+      capped: false,
+      unreadBlocks: 1,
+    });
+    expect(settled.kind === 'counted' ? settled.unreadBlocks : null).not.toBe(0);
+  });
+
+  it('counts a height the window never produced a block for as unread too', () => {
+    // `fetchRecent` drops a height the node answered no hash for. The
+    // shortfall is then in the window's own length, and every block it did
+    // return answered for its state.
+    const settled = settledNullifiers({
+      baseline: walked(4),
+      baselineError: null,
+      baselineNumber: 10,
+      headNumber: 13,
+      window: 'ready',
+      blocks: [settling(13, ['0x01'])],
+    });
+    expect(settled).toStrictEqual({
+      kind: 'counted',
+      count: 6,
+      capped: false,
+      unreadBlocks: 2,
+    });
+  });
+
+  it('leaves the count of unread blocks unknown when the window read failed', () => {
+    const settled = settledNullifiers({
+      baseline: walked(4),
+      baselineError: null,
+      baselineNumber: 10,
+      headNumber: 12,
+      window: 'error',
+      blocks: [],
+    });
+    expect(settled).toStrictEqual({
+      kind: 'counted',
+      count: 4,
+      capped: false,
+      unreadBlocks: null,
+    });
+  });
+
+  it('carries the walk’s own page-budget floor through', () => {
+    const settled = settledNullifiers({
+      baseline: walked(25_000, true),
+      baselineError: null,
+      baselineNumber: 10,
+      headNumber: 10,
+      window: 'ready',
+      blocks: [settling(10, ['0x01'])],
+    });
+    expect(settled).toStrictEqual({
+      kind: 'counted',
+      count: 25_000,
+      capped: true,
+      unreadBlocks: 0,
+    });
+  });
+
+  it('has no count to mark when the walk itself did not answer', () => {
+    expect(
+      settledNullifiers({
+        baseline: null,
+        baselineError: DISCARDED,
+        baselineNumber: 10,
+        headNumber: 12,
+        window: 'ready',
+        blocks: [settling(12, ['0x01'])],
+      }),
+    ).toStrictEqual({ kind: 'not-counted', why: DISCARDED });
+  });
+
+  it('says nothing while either half is still being read', () => {
+    const pending = {
+      baselineError: null,
+      baselineNumber: 10,
+      headNumber: 12,
+      blocks: [],
+    } as const;
+    expect(
+      settledNullifiers({ ...pending, baseline: null, window: 'ready' }),
+    ).toStrictEqual({ kind: 'counting' });
+    expect(
+      settledNullifiers({ ...pending, baseline: walked(4), window: 'loading' }),
+    ).toStrictEqual({ kind: 'counting' });
   });
 });

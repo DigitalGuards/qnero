@@ -29,7 +29,9 @@ import {
 import { decodeExtrinsic, type ExtrinsicEnvelope } from '../lib/extrinsics';
 import { hexToBytes } from '../lib/hex';
 import { parseHeader, type BlockHeader } from '../lib/header';
+import { formatCount } from '../lib/units';
 import { callName, normaliseEvents, type ChainContext } from './api';
+import type { NullifierCount } from './state';
 
 export interface BlockSummary {
   hash: string;
@@ -268,6 +270,92 @@ export function rollingBlockTimeMs(summaries: readonly BlockSummary[]): number |
     return null;
   }
   return (last.timestampMs - first.timestampMs) / blocks;
+}
+
+/**
+ * What a panel title may say about a list that came out of a block's state.
+ *
+ * `decodeSettlements([])` is an empty list on a block whose state the node
+ * refused just as it is on a block that settled nothing, so a title built from
+ * `list.length` prints "(0)" over a body that says the read failed. A count is
+ * a claim about what the chain published at that block; over an unread event
+ * log there is no count to print, and the title says so.
+ */
+export function panelCount(items: readonly unknown[], stateError: string | null): string {
+  return stateError === null ? `(${formatCount(items.length)})` : '(not counted)';
+}
+
+/**
+ * The size of the settled nullifier set, and what the figure leaves out.
+ *
+ * The home page reads the set once at a baseline height and adds the
+ * settlements of the blocks above it out of the recent-block window, which the
+ * page has already decoded. A block in that window whose state the node
+ * refused decodes to no settlements at all, so adding the window blindly
+ * subtracts every nullifier those blocks settled and prints the result as a
+ * total. The same holds for a window read that failed outright, and for a
+ * height in the window the node answered no hash for.
+ *
+ * So the unread blocks are counted here beside the nullifiers, and the page
+ * marks the figure and names them. A baseline that did not answer leaves
+ * nothing to mark: there is no count at all, and `not-counted` is that case.
+ */
+export type SettledNullifiers =
+  | { kind: 'counting' }
+  | { kind: 'not-counted'; why: string }
+  | {
+      kind: 'counted';
+      count: number;
+      /** True when the baseline walk stopped at its page budget, so the walk itself is a floor. */
+      capped: boolean;
+      /**
+       * Blocks above the baseline whose settlements were never decoded, either
+       * because their state did not answer or because the window never reached
+       * them. Null when the window read failed, which leaves even this unknown.
+       */
+      unreadBlocks: number | null;
+    };
+
+export function settledNullifiers(read: {
+  baseline: NullifierCount | null;
+  baselineError: string | null;
+  baselineNumber: number | null;
+  headNumber: number | null;
+  window: 'loading' | 'error' | 'ready';
+  blocks: readonly BlockSummary[];
+}): SettledNullifiers {
+  if (read.baselineError !== null) {
+    return { kind: 'not-counted', why: read.baselineError };
+  }
+  const { baseline, baselineNumber, headNumber } = read;
+  if (
+    baseline === null ||
+    baselineNumber === null ||
+    headNumber === null ||
+    read.window === 'loading'
+  ) {
+    return { kind: 'counting' };
+  }
+  if (read.window === 'error') {
+    return { kind: 'counted', count: baseline.count, capped: baseline.capped, unreadBlocks: null };
+  }
+  const above = read.blocks.filter((block) => block.header.number > baselineNumber);
+  const answered = above.filter((block) => block.stateError === null);
+  // Heights above the baseline the window never produced a block for, plus the
+  // blocks it produced whose state did not answer.
+  const missing = Math.max(0, headNumber - baselineNumber - above.length);
+  const since = new Set(
+    answered
+      .flatMap((block) => block.settlements)
+      .flatMap((settlement) => settlement.slots)
+      .flatMap((slot) => slot.nullifiers),
+  );
+  return {
+    kind: 'counted',
+    count: baseline.count + since.size,
+    capped: baseline.capped,
+    unreadBlocks: missing + (above.length - answered.length),
+  };
 }
 
 /**

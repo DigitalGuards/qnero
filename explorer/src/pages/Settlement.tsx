@@ -6,7 +6,8 @@ import { useAsync } from '../app/useAsync';
 import { fetchDetail, settlementOf, type BlockDetail } from '../chain/blocks';
 import { findExtrinsic } from '../chain/search';
 import { formatBytes, formatCount } from '../lib/units';
-import { Empty, ErrorBox, Field, Fields, Hash, Loading, NotRead, Notice, Panel } from '../components/ui';
+import { Empty, Field, Fields, Hash, Loading, NotRead, Notice, Panel } from '../components/ui';
+import { Problem } from './parts/Problem';
 import { SettlementView } from './parts/SettlementView';
 
 interface Located {
@@ -92,7 +93,15 @@ export function Settlement({ hash, at }: { hash: string; at: string | null }): R
     );
   }
   if (located.status === 'error') {
-    return <ErrorBox>{located.error}</ErrorBox>;
+    // The same shape the block page fails in: what kind of page this is, the
+    // value it was opened by, the node's own message, and a way out. A bare
+    // error box here was a dead end, on the page a reader reaches by following
+    // a link or pasting a hash.
+    return (
+      <Problem heading="Extrinsic" value={hash}>
+        {located.error}
+      </Problem>
+    );
   }
   if (located.value.found === null) {
     return (
@@ -212,17 +221,24 @@ export function Settlement({ hash, at }: { hash: string; at: string | null }): R
       {settlement === null ? null : (
         <Notice>
           <p>
-            What this publishes: that some notes were spent, how many slots settled, which
-            nullifiers entered the settled set, which commitments were appended and at which leaf
-            indices, the size of each ciphertext, and the fee.
+            What this publishes: how many slots settled, which nullifiers entered the settled set,
+            which commitments were appended and at which leaf indices, the size of each ciphertext,
+            and the fee.
           </p>
           <p>
-            What it does not: who sent anything, who received anything, and how much moved. Nothing
-            on chain joins a nullifier to the leaf it spent, and a commitment is a hash over a note
-            nothing on chain opens. What a slot does join is its own two outputs to its own two
-            nullifiers, so a payment and its change are publicly a pair. Which of the two is the
-            change is hidden only because the wallet draws the payment&rsquo;s output slot per
-            spend, so the pair is rendered here with no order.
+            A slot has two input positions and its two nullifiers mark both consumed. A position
+            holding a real input spends one note; a position holding a dummy input publishes a
+            nullifier over no note. At least one position of a settled slot is real, so a slot
+            spends one note or two, and the nullifiers below count positions.
+          </p>
+          <p>
+            What it does not: who sent anything, who received anything, how much moved, and which
+            of a slot&rsquo;s two nullifiers stands for a note. Nothing on chain joins a nullifier
+            to the leaf it spent, and a commitment is a hash over a note nothing on chain opens.
+            What a slot does join is its own two outputs to its own two nullifiers, so a payment
+            and its change are publicly a pair. Which of the two is the change is hidden only
+            because the wallet draws the payment&rsquo;s output slot per spend, so the pair is
+            rendered here with no order.
           </p>
           <p>
             The anchor this proof was built against is a public input too, and the gap between it

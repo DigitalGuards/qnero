@@ -60,9 +60,16 @@ export function Reveals(): ReactNode {
           Each accepted submission publishes how many of its circuit segments settled, how many
           leaf slots settled with them, and the fee those slots paid. A segment the chain skipped,
           for a nullifier another submission spent first or for an anchor it could no longer
-          resolve, is in neither count. Each settled slot publishes the two
-          nullifiers it spent, the two commitments it appended, both leaf indices and both
-          ciphertexts.
+          resolve, is in neither count. Each settled slot publishes its two nullifiers, the two
+          commitments it appended, both leaf indices and both ciphertexts.
+        </p>
+        <p>
+          A slot has two input positions, and a settled nullifier marks one position consumed. A
+          position holding a real input spends one note; a position holding a dummy input publishes
+          a nullifier over no note, and both are the same uniform hash in the public record. The
+          circuit keeps at least one position of every settled slot real, so a slot spends one note
+          or two. The settled set therefore holds twice the slots that settled and counts input
+          positions, which bounds the notes this chain has spent from above.
         </p>
         <p>
           That is the strongest linkage the system has. A payment and its change are publicly a
@@ -114,12 +121,15 @@ export function Reveals(): ReactNode {
           can total emission and total entries, and can total nothing about the notes in between.
         </p>
 
-        <h3>Which note a nullifier spends</h3>
+        <h3>What a settled nullifier stands for</h3>
         <p>
-          The settled set holds presence only, keyed by the nullifier. Membership proves some note
-          was spent and says nothing about which, because nothing on chain joins a nullifier to the
-          leaf it spent. What a settlement does join it to is the two leaves that same spend
-          created, which is above and is the strongest linkage the system has.
+          The settled set holds presence only, keyed by the nullifier. Membership marks one input
+          position of one settlement consumed. It says nothing about which note, because nothing on
+          chain joins a nullifier to the leaf it spent, and it leaves open whether a note was spent
+          at that position at all: a dummy input publishes a nullifier over no note, and the two
+          kinds of position are indistinguishable on chain by design. What a settlement does join a
+          nullifier to is the two leaves that same spend created, which is above and is the
+          strongest linkage the system has.
         </p>
 
         <h3>The miner&rsquo;s wallet</h3>

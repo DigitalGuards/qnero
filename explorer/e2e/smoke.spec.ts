@@ -56,8 +56,13 @@ test('the home page reads the head, the work and the pool off the node', async (
   await expect(page.locator('[data-field="Commitment tree leaves"] .field__note')).toContainText(
     'depth',
   );
-  // One send settled one slot, and a slot spends two notes.
+  // One send settled one slot, and a slot settles two nullifiers, one per
+  // input position. Every block in the window answered, so the figure carries
+  // no "at least" marker.
   await expect(field(page, 'Nullifiers settled')).toHaveText('2');
+  await expect(page.locator('[data-field="Nullifiers settled"] .field__note')).toContainText(
+    'two per settled slot, and a slot spends one note or two, so this is an upper bound on the notes spent',
+  );
   await expect(field(page, 'Pool value')).toContainText('QNR');
   await expect(page.locator('[data-field="Pool value"] .field__note')).toContainText(
     '1 entry has been shielded',
@@ -102,7 +107,7 @@ test('the settlement block shows slots, both nullifiers and both commitments', a
 
   const slot = settlements.locator('.slot').first();
   await expect(slot.locator('.slot__title')).toHaveText('Slot 1');
-  await expect(slot).toContainText('Nullifiers spent');
+  await expect(slot).toContainText('Nullifiers settled');
   await expect(slot).toContainText('Commitments appended, unordered');
   expect(await slot.locator('.field__value').allInnerTexts()).toHaveLength(4);
   await expect(slot).toContainText('1,792 bytes of ciphertext');
@@ -143,7 +148,48 @@ test('a settlement page states what it publishes and what it does not', async ({
   await expect(page.locator('.notice')).toContainText(
     'Nothing on chain joins a nullifier to the leaf it spent',
   );
-  await expect(panel(page, 'Slots')).toContainText('The two leaves beside it are the outputs');
+  await expect(panel(page, 'Slots')).toContainText('The two leaves beside them are the outputs');
+
+  // What a settled nullifier stands for. A slot has two input positions and its
+  // two nullifiers mark both consumed; a position holding a dummy input
+  // publishes a nullifier over no note (docs/CIRCUIT.md section 5, the NF_DUMMY
+  // tag, and section 9.5 on settling both nullifiers of every real slot). So
+  // the page bounds what the slot spent and counts positions.
+  await expect(page.locator('.notice')).toContainText(
+    'A slot has two input positions and its two nullifiers mark both consumed',
+  );
+  await expect(page.locator('.notice')).toContainText(
+    'a position holding a dummy input publishes a nullifier over no note',
+  );
+  await expect(page.locator('.notice')).toContainText('a slot spends one note or two');
+  await expect(page.locator('.notice')).toContainText(
+    'the nullifiers below count positions',
+  );
+  await expect(panel(page, 'Slots')).toContainText(
+    'Each of these marks one of the slot’s two input positions consumed',
+  );
+  await expect(panel(page, 'Slots')).toContainText(
+    'A real input spends one note and a dummy input publishes a nullifier over no note',
+  );
+
+  // And the claim it replaced is gone from the page, label included: a settled
+  // nullifier is not evidence that the note behind it was spent.
+  const settlementText = await page.locator('#main').innerText();
+  expect(settlementText).not.toContain('proves some note was spent');
+  expect(settlementText).not.toContain('Nullifiers spent');
+  expect(settlementText).not.toContain('that some notes were spent');
+});
+
+test('a settlement that cannot be answered is a page with a way out', async ({ page }) => {
+  // The same shape the block page fails in: the heading, the value the page was
+  // opened by, the node's own message, and a link back. The error branch here
+  // was a bare error box with no heading and nothing to click.
+  const unknown = `0x${'00'.repeat(31)}02`;
+  await open(page, `#/settlement/${unknown}?at=${unknown}`);
+  await expect(page.getByRole('heading', { name: 'Extrinsic' })).toBeVisible();
+  await expect(page.locator('.page__lede')).toContainText(unknown);
+  await expect(page.locator('.error')).toContainText('no block with hash');
+  await expect(page.getByRole('link', { name: 'Back to the chain' })).toBeVisible();
 });
 
 test('search answers a height, a block hash and a settled nullifier', async ({ page }) => {
@@ -274,8 +320,18 @@ test('the reveals page states both halves in plain words', async ({ page }) => {
   );
   await expect(panel(page, 'What stays hidden')).toContainText('no note names a recipient');
   await expect(panel(page, 'What stays hidden')).toContainText(
-    'Membership proves some note was spent',
+    'Membership marks one input position of one settlement consumed',
   );
+  await expect(panel(page, 'What stays hidden')).toContainText(
+    'a dummy input publishes a nullifier over no note',
+  );
+  await expect(panel(page, 'What an observer learns from one block')).toContainText(
+    'a position holding a dummy input publishes a nullifier over no note',
+  );
+  await expect(panel(page, 'What an observer learns from one block')).toContainText(
+    'which bounds the notes this chain has spent from above',
+  );
+  expect(await page.locator('#main').innerText()).not.toContain('proves some note was spent');
   await expect(panel(page, 'What this site does not ask the node')).toContainText(
     'never calls the Merkle-proof endpoint',
   );
@@ -424,9 +480,22 @@ test('a settlement whose block state is gone is never written up as one that set
   // The block page under the identical failure has always said this, which is
   // the wording the settlement page now shares.
   await open(page, `#/block/${blockHash}`);
-  await expect(page.locator('.notice')).toContainText('The node answered no state at this block');
-  await expect(panel(page, 'Settlements (0)')).toContainText('This is not an absence');
-  await expect(panel(page, 'Settlements (0)')).not.toContainText('No settlement landed');
+  await expect(page.locator('.notice').first()).toContainText(
+    'The node answered no state at this block',
+  );
+  // And the panel titles carry no count over it. "Settlements (0)" over a body
+  // that says the read failed is the same absence the body refuses, printed in
+  // the heading a reader believes first.
+  await expect(panel(page, 'Settlements (not counted)')).toContainText('This is not an absence');
+  await expect(panel(page, 'Settlements (not counted)')).not.toContainText('No settlement landed');
+  await expect(page.locator('[data-panel="Settlements (0)"]')).toHaveCount(0);
+  await expect(panel(page, 'Shield entries (not counted)')).toContainText('This is not an absence');
+  await expect(page.locator('[data-panel="Shield entries (0)"]')).toHaveCount(0);
+  // The refused-calls panel is a panel now. It used to disappear over an unread
+  // event log, which reports "nothing was refused here" by absence.
+  await expect(panel(page, 'Refused and failed calls (not counted)')).toContainText(
+    'This is not an absence',
+  );
 });
 
 test('every page is reachable from the keyboard and readable at 400 px', async ({ page }) => {

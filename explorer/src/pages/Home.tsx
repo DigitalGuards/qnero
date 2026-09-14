@@ -8,7 +8,9 @@ import {
   fetchRecent,
   latestCoinbase,
   rollingBlockTimeMs,
+  settledNullifiers,
   type LatestCoinbase,
+  type SettledNullifiers,
 } from '../chain/blocks';
 import { countNullifiers, fetchSnapshot } from '../chain/state';
 import { estimateHashrate, formatDifficulty, formatHashrate } from '../lib/difficulty';
@@ -44,6 +46,42 @@ function coinbaseNote(coinbase: LatestCoinbase): string {
     case 'no-block':
       return 'no block in the window to read';
   }
+}
+
+/**
+ * The sentence under the settled-nullifier figure.
+ *
+ * Two claims are in play and only one of them is about the chain. The figure
+ * is a sum of one walk and one window, and either half can come back short, so
+ * whatever the page prints has to carry which half did. The other claim is what
+ * the number means at all: the chain settles two nullifiers per real slot and
+ * one of a slot's two input positions may hold a dummy, so the set bounds the
+ * notes this chain has spent from above.
+ */
+function nullifierNote(settled: SettledNullifiers): string {
+  if (settled.kind === 'counting') {
+    return 'walking the settled set';
+  }
+  if (settled.kind === 'not-counted') {
+    return 'the node did not answer, so this is not a count';
+  }
+  const gaps: string[] = [];
+  if (settled.capped) {
+    gaps.push('the set is unbounded and this walk stops at its page budget');
+  }
+  if (settled.unreadBlocks === null) {
+    gaps.push('the recent-block read did not answer, so the blocks since the baseline are unread');
+  } else if (settled.unreadBlocks > 0) {
+    gaps.push(
+      `${formatCount(settled.unreadBlocks)} ${
+        settled.unreadBlocks === 1 ? 'block' : 'blocks'
+      } unread, so what they settled is uncounted`,
+    );
+  }
+  if (gaps.length === 0) {
+    return 'two per settled slot, and a slot spends one note or two, so this is an upper bound on the notes spent';
+  }
+  return `at least ${formatCount(settled.count)}: ${gaps.join('; ')}`;
 }
 
 export function Home(): ReactNode {
@@ -133,17 +171,21 @@ export function Home(): ReactNode {
       : `the runtime did not answer the consensus constants: ${bundle.constantsError}`;
 
   // The settled set as of the baseline, plus the settlements since, which the
-  // recent list has already decoded. Two nullifiers per settled slot.
-  const sinceBaseline =
-    recent.status === 'ready' && baselineNumber !== null
-      ? recent.value
-          .filter((block) => block.header.number > baselineNumber)
-          .flatMap((block) => block.settlements)
-          .flatMap((settlement) => settlement.slots)
-          .flatMap((slot) => slot.nullifiers)
-      : [];
-  const nullifierCount =
-    counted.status === 'ready' ? counted.value.count + new Set(sinceBaseline).size : null;
+  // recent list has already decoded. Two nullifiers per settled slot, and a
+  // block in the window whose state did not answer decodes to no settlements
+  // at all, so the blocks that went unread are carried out of the read with
+  // the figure and printed beside it.
+  const settled = settledNullifiers({
+    baseline: counted.status === 'ready' ? counted.value : null,
+    baselineError: counted.status === 'error' ? counted.error : null,
+    baselineNumber,
+    headNumber,
+    window: recent.status,
+    blocks: recent.status === 'ready' ? recent.value : [],
+  });
+  const atLeast =
+    settled.kind === 'counted' &&
+    (settled.capped || settled.unreadBlocks === null || settled.unreadBlocks > 0);
 
   return (
     <>
@@ -262,20 +304,14 @@ export function Home(): ReactNode {
             label="Nullifiers settled"
             value={
               <span className="num">
-                {nullifierCount === null
-                  ? counted.status === 'error'
-                    ? '-'
-                    : 'counting'
-                  : `${formatCount(nullifierCount)}${counted.status === 'ready' && counted.value.capped ? '+' : ''}`}
+                {settled.kind === 'not-counted'
+                  ? '-'
+                  : settled.kind === 'counting'
+                    ? 'counting'
+                    : `${formatCount(settled.count)}${atLeast ? '+' : ''}`}
               </span>
             }
-            note={
-              counted.status === 'error'
-                ? 'the node did not answer, so this is not a count'
-                : counted.status === 'ready' && counted.value.capped
-                  ? 'a floor: the set is unbounded and this count stops at its page budget'
-                  : 'each settled slot spends two'
-            }
+            note={nullifierNote(settled)}
           />
           <Field
             label="Pool value"

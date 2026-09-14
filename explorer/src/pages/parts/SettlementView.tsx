@@ -23,8 +23,10 @@ function ciphertextNote(bytes: number): ReactNode {
  * by presentation exactly what the protocol pays to hide.
  *
  * The two nullifiers and the two commitments of one slot are published
- * together and the page says so. What the chain hides is which note each
- * nullifier spent, and that is the only thing the note under them claims.
+ * together and the page says so. A nullifier marks one of the slot's two input
+ * positions consumed, and a position holding a dummy input publishes a
+ * nullifier over no note, so the note under them claims a bound on what the
+ * slot spent and nothing about which note each value stands for.
  */
 export function SettlementView({
   settlement,
@@ -54,7 +56,7 @@ export function SettlementView({
           <div className="slot__title">Slot {index + 1}</div>
           <div className="pair">
             <div>
-              <span className="field__label">Nullifiers spent</span>
+              <span className="field__label">Nullifiers settled</span>
               {/* Numbered rather than stacked: each of these wraps, so flush
                   against each other the two of them read as four lines of hex
                   and a reader cannot tell where the first one ends. */}
@@ -66,9 +68,11 @@ export function SettlementView({
                 ))}
               </ol>
               <span className="field__note">
-                Membership proves some note was spent and says nothing about which note it was:
-                nothing on chain joins a nullifier to the leaf it spent. The two leaves beside it
-                are the outputs this spend created, and the chain publishes that link.
+                Each of these marks one of the slot&rsquo;s two input positions consumed. A real
+                input spends one note and a dummy input publishes a nullifier over no note, so this
+                slot spent one note or two, and nothing on chain joins a nullifier to the leaf it
+                spent. The two leaves beside them are the outputs this spend created, and the chain
+                publishes that link.
               </span>
             </div>
             <div>

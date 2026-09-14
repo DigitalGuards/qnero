@@ -4,35 +4,22 @@ import { useChain } from '../app/chainContext';
 import { href } from '../app/router';
 import { useAsync } from '../app/useAsync';
 import { storageAt } from '../chain/api';
-import { blockHashAt, fetchDetail, type BlockDetail, type ExtrinsicRow } from '../chain/blocks';
+import {
+  blockHashAt,
+  fetchDetail,
+  panelCount,
+  type BlockDetail,
+  type ExtrinsicRow,
+} from '../chain/blocks';
 import { decodeU512, formatDifficulty } from '../lib/difficulty';
 import { seedHeight } from '../lib/seed';
 import { formatBytes, formatCount, formatQnr, REFERENCE_CIPHERTEXT_BYTES } from '../lib/units';
-import { Empty, ErrorBox, Field, Fields, Hash, Loading, NotRead, Notice, Panel } from '../components/ui';
+import { Empty, Field, Fields, Hash, Loading, NotRead, Notice, Panel } from '../components/ui';
+import { Problem } from './parts/Problem';
 import { SettlementLink, SettlementView } from './parts/SettlementView';
 
 function isHash(id: string): boolean {
   return /^0x[0-9a-fA-F]{64}$/.test(id);
-}
-
-/**
- * A block that could not be opened, with a way out.
- *
- * A bare error box leaves the page with no heading and no link, which is what
- * a pasted hash or a genesis parent link used to land on.
- */
-function BlockProblem({ children }: { children: ReactNode }): ReactNode {
-  return (
-    <>
-      <header className="page__head">
-        <h1>Block</h1>
-      </header>
-      <ErrorBox>{children}</ErrorBox>
-      <p>
-        <a href={href({ name: 'home' })}>Back to the chain</a>.
-      </p>
-    </>
-  );
 }
 
 export function Block({ id }: { id: string }): ReactNode {
@@ -72,13 +59,21 @@ export function Block({ id }: { id: string }): ReactNode {
   );
 
   if (resolved.status === 'error') {
-    return <BlockProblem>{resolved.error}</BlockProblem>;
+    return (
+      <Problem heading="Block" value={id}>
+        {resolved.error}
+      </Problem>
+    );
   }
   if (bundle === null || detail.status === 'loading' || resolved.status === 'loading') {
     return <Loading what="the block" />;
   }
   if (detail.status === 'error') {
-    return <BlockProblem>{detail.error}</BlockProblem>;
+    return (
+      <Problem heading="Block" value={id}>
+        {detail.error}
+      </Problem>
+    );
   }
 
   const block = detail.value;
@@ -185,7 +180,11 @@ export function Block({ id }: { id: string }): ReactNode {
                 ? `observed block time ${formatCount(block.difficulty.observedBlockTimeMs)} ms`
                 : storedDifficulty.status === 'error'
                   ? 'the node did not answer QPoW::CurrentDifficulty at this block'
-                  : 'QPoW::CurrentDifficulty at this block'
+                  : storedDifficulty.status === 'loading'
+                    ? 'reading QPoW::CurrentDifficulty at this block'
+                    : storedDifficulty.value === null
+                      ? 'the chain holds no QPoW::CurrentDifficulty at this block'
+                      : 'QPoW::CurrentDifficulty at this block'
             }
           />
           <Field
@@ -240,7 +239,7 @@ export function Block({ id }: { id: string }): ReactNode {
         )}
       </Panel>
 
-      <Panel title={`Settlements (${formatCount(block.settlements.length)})`}>
+      <Panel title={`Settlements ${panelCount(block.settlements, block.stateError)}`}>
         {block.settlements.length === 0 ? (
           block.stateError === null ? (
             <Empty>No settlement landed in this block.</Empty>
@@ -270,7 +269,7 @@ export function Block({ id }: { id: string }): ReactNode {
         )}
       </Panel>
 
-      <Panel title={`Shield entries (${formatCount(block.entries.length)})`}>
+      <Panel title={`Shield entries ${panelCount(block.entries, block.stateError)}`}>
         {block.entries.length === 0 ? (
           block.stateError === null ? (
             <Empty>No transparent value entered the pool in this block.</Empty>
@@ -328,14 +327,24 @@ export function Block({ id }: { id: string }): ReactNode {
   );
 }
 
+/**
+ * The calls this block refused, and the ones that failed for another reason.
+ *
+ * The panel is dropped only when a state read answered and held no failure. A
+ * failure is an event, and an unread event log decodes to none, so dropping the
+ * panel over one reported "nothing was refused in this block" by absence, on
+ * the panel a reader opens to find out whether anything was.
+ */
 function RefusedCalls({ block }: { block: BlockDetail }): ReactNode {
   const filtered = block.failures.filter((failure) => failure.filtered);
-  const other = block.failures.filter((failure) => !failure.filtered);
-  if (filtered.length === 0 && other.length === 0) {
+  if (block.stateError === null && block.failures.length === 0) {
     return null;
   }
   return (
-    <Panel title={`Refused and failed calls (${formatCount(block.failures.length)})`}>
+    <Panel title={`Refused and failed calls ${panelCount(block.failures, block.stateError)}`}>
+      {block.stateError === null ? null : (
+        <NotRead what="the refused and failed calls" error={block.stateError} />
+      )}
       {filtered.length === 0 ? null : (
         <Notice>
           <p>
@@ -350,33 +359,35 @@ function RefusedCalls({ block }: { block: BlockDetail }): ReactNode {
           </p>
         </Notice>
       )}
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th scope="col">Extrinsic</th>
-              <th scope="col">Call</th>
-              <th scope="col">Outcome</th>
-            </tr>
-          </thead>
-          <tbody>
-            {block.failures.map((failure) => {
-              const extrinsic =
-                failure.extrinsicIndex === null ? undefined : block.extrinsics[failure.extrinsicIndex];
-              return (
-                <tr key={`${failure.extrinsicIndex}-${failure.kind}`}>
-                  <td className="num">{failure.extrinsicIndex ?? '-'}</td>
-                  <td className="mono">{extrinsic?.name ?? 'unresolved'}</td>
-                  <td>
-                    {failure.filtered ? 'refused by the call filter' : failure.kind}
-                    {failure.detail === null ? '' : ` (${failure.detail})`}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+      {block.failures.length === 0 ? null : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Extrinsic</th>
+                <th scope="col">Call</th>
+                <th scope="col">Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              {block.failures.map((failure) => {
+                const extrinsic =
+                  failure.extrinsicIndex === null ? undefined : block.extrinsics[failure.extrinsicIndex];
+                return (
+                  <tr key={`${failure.extrinsicIndex}-${failure.kind}`}>
+                    <td className="num">{failure.extrinsicIndex ?? '-'}</td>
+                    <td className="mono">{extrinsic?.name ?? 'unresolved'}</td>
+                    <td>
+                      {failure.filtered ? 'refused by the call filter' : failure.kind}
+                      {failure.detail === null ? '' : ` (${failure.detail})`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Panel>
   );
 }

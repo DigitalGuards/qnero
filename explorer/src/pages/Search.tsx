@@ -250,7 +250,9 @@ function NullifierLookup({ hash }: { hash: string }): ReactNode {
             <p>
               This asks the node for one key built from these 32 bytes, which names the value to
               whoever runs it. It runs once, against the block the chain is at when you ask.
-              Membership proves some note was spent and says nothing about which note it was.
+              Membership marks one input position of one settlement consumed, and a position
+              holding a dummy input publishes a nullifier over no note, so it says nothing about
+              which note and nothing about whether one was spent there.
             </p>
             <button
               className="button"
@@ -278,7 +280,7 @@ function NullifierLookup({ hash }: { hash: string }): ReactNode {
                 note={
                   result.status === 'error'
                     ? 'the node did not answer, so this is not an absence'
-                    : `as of block ${formatCount(askedAt.number)}: presence proves some note was spent and says nothing about which`
+                    : `as of block ${formatCount(askedAt.number)}: presence marks one input position of one settlement consumed and says nothing about which note`
                 }
               />
             </Fields>
