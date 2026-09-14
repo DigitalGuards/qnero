@@ -190,6 +190,34 @@ fn unplaceable_leaf_warning(leaf: u64, block_number: u32) -> String {
     )
 }
 
+/// What the cap held back for moved leaves, carried as a count.
+///
+/// The sentence per leaf stops at [`WARNED_LEAVES_PER_PASS`] and this says how
+/// many more there were, so a node that mismatches at every leaf costs one
+/// closing sentence for the whole pass. `wallet-web/src/wallet/sync.ts` writes
+/// the same sentence.
+fn moved_overflow_warning(more: u64) -> String {
+    format!(
+        "and {more} more {} in this pass carried a ciphertext this wallet's own key \
+         opens beside a commitment that note does not open, each recorded at the \
+         index inside its own block that holds the commitment it opens. Sync against \
+         a second node before spending them.",
+        leaves_word(more)
+    )
+}
+
+/// What the cap held back for unplaceable leaves, carried as a count.
+///
+/// `wallet-web/src/wallet/sync.ts` writes the same sentence.
+fn unplaceable_overflow_warning(more: u64) -> String {
+    format!(
+        "and {more} more {} in this pass carried a ciphertext this wallet's own key \
+         opens whose commitment their own block holds nowhere, each skipped. If a \
+         payment is missing, sync against a second node.",
+        leaves_word(more)
+    )
+}
+
 pub struct Wallet {
     pub seed_path: PathBuf,
     pub store_path: PathBuf,
@@ -888,29 +916,17 @@ impl Wallet {
             }
         }
 
-        // What the cap held back, carried as a count. The sentence per leaf
-        // stops at the cap and this says how many more there were, so a node
-        // that mismatches at every leaf costs one closing sentence for the
-        // whole pass. See [`WARNED_LEAVES_PER_PASS`].
+        // What the cap held back, carried as a count, so the report a person
+        // reads stays one list whatever a node answered. See
+        // [`moved_overflow_warning`] and [`unplaceable_overflow_warning`].
         if let Some(more) = moved_leaves.checked_sub(WARNED_LEAVES_PER_PASS) {
             if more > 0 {
-                report.warnings.push(format!(
-                    "and {more} more {} in this pass carried a ciphertext this wallet's own key \
-                     opens beside a commitment that note does not open, each recorded at the \
-                     index inside its own block that holds the commitment it opens. Sync against \
-                     a second node before spending them.",
-                    leaves_word(more)
-                ));
+                report.warnings.push(moved_overflow_warning(more));
             }
         }
         if let Some(more) = unplaceable_leaves.checked_sub(WARNED_LEAVES_PER_PASS) {
             if more > 0 {
-                report.warnings.push(format!(
-                    "and {more} more {} in this pass carried a ciphertext this wallet's own key \
-                     opens whose commitment their own block holds nowhere, each skipped. If a \
-                     payment is missing, sync against a second node.",
-                    leaves_word(more)
-                ));
+                report.warnings.push(unplaceable_overflow_warning(more));
             }
         }
 

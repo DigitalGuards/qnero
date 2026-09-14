@@ -27,7 +27,11 @@ import { authorLabelFromHeader, type RawChainHeader } from '../src/chain/anchor'
 import {
   CIPHERTEXT_SUBSTITUTION_HINT,
   HEADER_WALK_LIMIT,
+  movedLeafWarning,
+  movedOverflowWarning,
   runSync,
+  unplaceableLeafWarning,
+  unplaceableOverflowWarning,
   WARNED_LEAVES_PER_PASS,
   type ScannedNote,
   type SyncChain,
@@ -1313,30 +1317,40 @@ describe('the fold these bound tests are modelled on', () => {
   });
 });
 
-describe('the sentence both wallets print', () => {
+describe('the sentences both wallets print', () => {
   /**
-   * One text, byte for byte, read out of the command-line wallet's own source.
+   * Every text both wallets emit, byte for byte, read out of the command-line
+   * wallet's own source.
    *
-   * `docs/WALLET.md` says the two wallets print the identical sentence, and
-   * nothing held them to it: they had drifted apart in their closing clause,
-   * so two operators looking at one bound were told two different things. The
-   * Rust literal is a `&str` with backslash line continuations, which strip
-   * the newline and the indentation of the line below them.
+   * `docs/WALLET.md` says the two wallets print identical sentences, and
+   * nothing held them to it: the closing hint had drifted apart in its final
+   * clause, so two operators looking at one bound were told two different
+   * things. The cap and the four per-leaf sentences beside it are the same
+   * kind of duplicated text, so they are all read from the Rust source here.
+   * A sentence edited on one side alone fails this file.
+   *
+   * The Rust literals are `&str`s with backslash line continuations, which
+   * strip the newline and the indentation of the line below them, and format
+   * placeholders, which are filled here with the values the browser call is
+   * given. `{}` is the positional one, `leaves_word`.
    */
-  it('is identical in the command-line wallet and the browser', () => {
-    const source = readFileSync(
-      new URL('../../crates/qnero-wallet/src/wallet.rs', import.meta.url),
-      'utf8',
-    );
-    const marker = 'pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =';
-    const from = source.indexOf(marker);
-    expect(from).toBeGreaterThan(0);
-    let cursor = source.indexOf('"', from) + 1;
+  const RUST = readFileSync(
+    new URL('../../crates/qnero-wallet/src/wallet.rs', import.meta.url),
+    'utf8',
+  );
+
+  /** The first string literal after a marker, with its continuations folded. */
+  function rustLiteral(marker: string): string {
+    const from = RUST.indexOf(marker);
+    if (from < 0) {
+      throw new Error(`the command-line wallet carries no ${marker}`);
+    }
+    let cursor = RUST.indexOf('"', from) + 1;
     let raw = '';
     for (;;) {
-      const char = source[cursor] as string;
+      const char = RUST[cursor] as string;
       if (char === '\\') {
-        raw += source.slice(cursor, cursor + 2);
+        raw += RUST.slice(cursor, cursor + 2);
         cursor += 2;
         continue;
       }
@@ -1346,7 +1360,76 @@ describe('the sentence both wallets print', () => {
       raw += char;
       cursor += 1;
     }
-    const rust = raw.replace(/\\\n\s*/g, '').replace(/\\"/g, '"');
-    expect(rust).toBe(CIPHERTEXT_SUBSTITUTION_HINT);
+    return raw.replace(/\\\n\s*/g, '').replace(/\\"/g, '"');
+  }
+
+  /** That literal with each placeholder filled the way the call fills it. */
+  function rustSentence(marker: string, values: Record<string, string>): string {
+    return rustLiteral(marker).replace(/\{(\w*)\}/g, (whole: string, name: string) => {
+      const value = values[name];
+      if (value === undefined) {
+        throw new Error(`${marker} carries ${whole}, which this test has no value for`);
+      }
+      return value;
+    });
+  }
+
+  const CASES: { name: string; marker: string; values: Record<string, string>; browser: string }[] =
+    [
+      {
+        name: 'the hint a pass that received nothing carries',
+        marker: 'pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =',
+        values: {},
+        browser: CIPHERTEXT_SUBSTITUTION_HINT,
+      },
+      {
+        name: 'the warning for a leaf its own block holds elsewhere',
+        marker: 'fn moved_leaf_warning(',
+        values: { leaf: '7', block_number: '42', index: '3' },
+        browser: movedLeafWarning(7, 42, 3),
+      },
+      {
+        name: 'the warning for a leaf its own block holds nowhere',
+        marker: 'fn unplaceable_leaf_warning(',
+        values: { leaf: '7', block_number: '42' },
+        browser: unplaceableLeafWarning(7, 42),
+      },
+      {
+        name: 'the moved-leaf count past the cap',
+        marker: 'fn moved_overflow_warning(',
+        values: { more: '5', '': 'leaves' },
+        browser: movedOverflowWarning(5),
+      },
+      {
+        name: 'the moved-leaf count past the cap, at one leaf',
+        marker: 'fn moved_overflow_warning(',
+        values: { more: '1', '': 'leaf' },
+        browser: movedOverflowWarning(1),
+      },
+      {
+        name: 'the unplaceable-leaf count past the cap',
+        marker: 'fn unplaceable_overflow_warning(',
+        values: { more: '5', '': 'leaves' },
+        browser: unplaceableOverflowWarning(5),
+      },
+      {
+        name: 'the unplaceable-leaf count past the cap, at one leaf',
+        marker: 'fn unplaceable_overflow_warning(',
+        values: { more: '1', '': 'leaf' },
+        browser: unplaceableOverflowWarning(1),
+      },
+    ];
+
+  it.each(CASES)('$name is identical in both wallets', ({ marker, values, browser }) => {
+    expect(rustSentence(marker, values)).toBe(browser);
+  });
+
+  it('caps the per-leaf warnings at the same count in both wallets', () => {
+    // The sentences above quote what this bound does, so a bound that moved on
+    // one side alone would leave both wallets printing a true sentence about
+    // two different lists.
+    const declared = /pub const WARNED_LEAVES_PER_PASS: u64 = (\d+);/.exec(RUST);
+    expect(declared).not.toBeNull();
+    expect(Number(declared?.[1])).toBe(WARNED_LEAVES_PER_PASS);
   });
 });
