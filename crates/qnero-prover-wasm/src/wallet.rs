@@ -48,9 +48,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use qnero_circuit::chain::ct_digest as chain_ct_digest;
 use qnero_circuit::header::DIGEST_LOGS_SIZE;
-use qnero_circuit::merkle::{
-    CommitmentTree, MerklePath, ARITY, MAX_DEPTH, SIBLINGS_PER_LEVEL,
-};
+use qnero_circuit::merkle::{CommitmentTree, MerklePath, ARITY, MAX_DEPTH, SIBLINGS_PER_LEVEL};
 use qnero_notes::{Address, Digest, Note};
 use serde::Deserialize;
 use serde_json::json;
@@ -66,8 +64,8 @@ use crate::request::{digest_from_hex, spending_key_from_hex, AnchorRequest};
 /// part that goes wrong, and the alternative to checking is paying for a proof
 /// and reading `BlockHashMismatch` off the pool.
 pub fn header_block_hash_hex(anchor_json: &str) -> Result<String> {
-    let anchor: AnchorRequest = serde_json::from_str(anchor_json)
-        .context("the anchor does not parse")?;
+    let anchor: AnchorRequest =
+        serde_json::from_str(anchor_json).context("the anchor does not parse")?;
     Ok(anchor.to_header()?.block_hash().to_hex())
 }
 
@@ -163,11 +161,10 @@ pub fn path_from_unsorted_json(unsorted_json: &str, leaf_hex: &str) -> Result<St
     let leaf = digest_from_hex("the leaf", leaf_hex)?;
     let mut levels = Vec::with_capacity(unsorted.siblings.len());
     for (level, siblings) in unsorted.siblings.iter().enumerate() {
-        let mut converted = [Digest::from_bytes(&[0u8; 32]).expect("zero is canonical");
-            SIBLINGS_PER_LEVEL];
+        let mut converted =
+            [Digest::from_bytes(&[0u8; 32]).expect("zero is canonical"); SIBLINGS_PER_LEVEL];
         for (slot, sibling) in siblings.iter().enumerate() {
-            converted[slot] =
-                digest_from_hex(&format!("level {level} sibling {slot}"), sibling)?;
+            converted[slot] = digest_from_hex(&format!("level {level} sibling {slot}"), sibling)?;
         }
         levels.push(converted);
     }
@@ -530,8 +527,7 @@ mod tests {
     /// pinning its own copy.
     #[test]
     fn the_limits_carry_the_pad_and_the_depth_cap() {
-        let limits: serde_json::Value =
-            serde_json::from_str(&wallet_limits_json()).unwrap();
+        let limits: serde_json::Value = serde_json::from_str(&wallet_limits_json()).unwrap();
         assert_eq!(limits["memo_bytes"], qnero_notes::MEMO_BYTES);
         assert_eq!(
             limits["padded_ciphertext_bytes"].as_u64().unwrap() as usize,
