@@ -20,6 +20,30 @@ prover can run. A production host has to send them itself; without them the
 page silently falls back to the single-threaded module, and the settings screen
 says which one it got.
 
+### What a host should send
+
+The built `index.html` carries its own content policy, so a static drop is
+already covered. A host that can send headers should send the same policy plus
+the two directives a `<meta>` element cannot express:
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+Cross-Origin-Resource-Policy: same-origin
+Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval';
+  style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';
+  connect-src 'self' ws: wss:; worker-src 'self' blob:; base-uri 'none';
+  form-action 'none'; frame-ancestors 'none'
+```
+
+The policy is one constant in `vite.config.ts` and both the tag and the header
+come from it, so they cannot drift. `connect-src` stays `ws:`/`wss:` wide
+because the endpoint is chosen at runtime from the settings screen; it still
+refuses every `http(s)` destination, which is every path a compromised
+dependency would exfiltrate through. `'wasm-unsafe-eval'` is what lets the
+prover compile. `'unsafe-inline'` in `style-src` is for the `style` attributes
+React and Radix write, which have no nonce.
+
 The prover is not built by this app. It comes from `crates/qnero-prover-wasm`:
 
 ```
@@ -39,7 +63,7 @@ testnet and nothing about a chain is compiled in.
   "chainName": "Qnero devnet",
   "wasmBase": "wasm/",
   "numLeaves": 6,
-  "expectedProveSeconds": 34
+  "expectedProveSeconds": { "threaded": 11, "single": 38 }
 }
 ```
 
@@ -52,8 +76,11 @@ testnet and nothing about a chain is compiled in.
   length that verifier cannot read, and the refusal arrives after the whole
   proving cost.
 - `expectedProveSeconds` is what this build tells somebody to expect while a
-  payment proves. It comes from the measurement in `docs/BENCH.md`, and a slower
-  machine takes longer.
+  payment proves, per module, from the M10 table in `docs/BENCH.md`. The page
+  prints the figure for the module it is actually running, because the threaded
+  one proves in about a third of the time and a single figure beside a live
+  thread count is wrong for one of the two. A plain number is still read, as
+  both.
 
 `?prover=single` in the URL pins the single-threaded module on an origin that
 could run the threaded one. It is how both rows in `docs/BENCH.md` are measured
@@ -71,7 +98,9 @@ has the bug too.
   restore height, because a scan that started at a height the wallet named
   would tell the node roughly when the wallet was created.
 - **Lock.** PBKDF2-SHA-256 at 600,000 iterations over a 16-byte salt derives
-  one non-extractable AES-256-GCM key. Each note's `rho`, `r`, `nullifier` and
+  one non-extractable AES-256-GCM key. The eight-character floor is enforced
+  in `wallet/crypto.ts`, where the only path to a key is, rather than on the
+  screen that asks for one. Each note's `rho`, `r`, `nullifier` and
   `memo` and the seed itself are sealed under it with a fresh 12-byte IV per
   record per write, bound to their own slot with additional data.
 - **Sync.** Every ciphertext on the chain is read by leaf index in batches and
@@ -116,7 +145,8 @@ M10.
   trust assumption and nothing below softens it.
 - **A locked wallet is only as strong as its passphrase.** 600,000 PBKDF2
   iterations is about a second per guess on this workstation and far less on a
-  machine built for guessing. A short passphrase is a short delay.
+  machine built for guessing. A short passphrase is a short delay, and eight
+  characters is a floor rather than a recommendation.
 - **Zeroing buys one buffer and no more.** A JavaScript `String` is immutable
   and garbage collected: a seed that has ever been a string cannot be wiped,
   and `crypto.subtle.decrypt` hands back a buffer allocated before this code
@@ -150,9 +180,11 @@ The cap is four on purpose. Beyond four the measured return falls off, every
 thread reserves its own stack against a shared memory whose maximum is declared
 at build time, and a wallet that takes every core of the machine it is a tab on
 is a wallet somebody closes. The circuits hold most of a gigabyte of linear
-memory once built and wasm linear memory never shrinks, so the settings screen
-offers stopping the worker by name rather than dropping it after every payment:
-the next payment would pay the circuit build again.
+memory once built and wasm linear memory never shrinks, so the circuits are
+built once per worker and every later payment is answered from that build. The
+settings screen offers stopping the worker by name, which is the only thing
+that gives the memory back; starting it again loads the module afresh and the
+next payment pays the build.
 
 `docs/BENCH.md` carries the numbers for both modules.
 
@@ -180,6 +212,12 @@ drives the real read layer through a recording transport and asserts on the
 calls: no request carries a nullifier, leaves are read as one contiguous range,
 every read of a pass is pinned to one block hash, and nothing outside four
 public-read methods is ever called.
+
+It drives a payment the same way, because the spend path is where the property
+is easiest to lose. A spend needs one Merkle path, and narrowing the leaf read
+to the leaves that path touches would tell the node which leaf is being spent
+while passing the lint fence, which keys on a name. The e2e records the socket
+itself, so the allowlist also covers what `@polkadot/api` asks on its own.
 
 The Playwright suite starts a `--dev --tmp` node at one mining thread, has the
 command-line wallet shield and then pay the address the browser wallet creates,

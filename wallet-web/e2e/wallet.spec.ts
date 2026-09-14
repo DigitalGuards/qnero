@@ -104,6 +104,7 @@ const ALLOWED_RPC = new Set([
   'system_properties',
   'system_version',
   'system_health',
+  'state_call',
   'state_getMetadata',
   'state_getRuntimeVersion',
   'state_subscribeRuntimeVersion',
@@ -120,6 +121,16 @@ const ALLOWED_RPC = new Set([
   'state_getKeysPaged',
   'author_submitExtrinsic',
 ]);
+
+/**
+ * The runtime APIs `state_call` may name.
+ *
+ * `state_call` is on the list because polkadot-js reads this runtime's
+ * metadata through it, and it is also the shape the Merkle-proof fence exists
+ * for: `state_call` with `ZkTreeApi_get_merkle_proof` is one leaf named to the
+ * node. So the method is allowed and the function it carries is not.
+ */
+const ALLOWED_RUNTIME_CALLS = /^(Metadata_|Core_)/;
 
 /** `formatDuration`'s two forms: "980 ms" and "11.3 s". */
 function millisFrom(reading: string): number {
@@ -299,6 +310,13 @@ test.describe('the browser wallet against a dev chain', () => {
     console.log(`rpc methods (${MODE}):`, methods.join(', '));
     for (const method of methods) {
       expect(ALLOWED_RPC.has(method), `${method} is not a method this wallet may call`).toBe(true);
+    }
+    for (const call of rpc.filter((entry) => entry.method === 'state_call')) {
+      const named = (JSON.parse(call.params) as unknown[])[0];
+      expect(
+        typeof named === 'string' && ALLOWED_RUNTIME_CALLS.test(named),
+        `state_call named ${String(named)}, which is not a runtime API this wallet reads`,
+      ).toBe(true);
     }
     // The one call that is only ever asked about a leaf the caller is
     // spending, under any of its spellings.

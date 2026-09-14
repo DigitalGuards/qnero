@@ -1047,19 +1047,35 @@ add-only and never bypasses the chain check. The scan pins every read of a pass
 to one block hash and reads the same four keys per leaf in batches of 64. The
 fee floor, the memo pad, the two-input selection with its tie on the lowest
 leaf index, the conflict-set rule and the anchor-at-the-head rule are the same
-rules, ported line for line.
+rules, ported line for line. So are the four that decide what a balance says
+after something goes wrong: the post-settlement spent latch keys on the
+nullifier, so both members of a conflict set are marked at once
+(`mark_spent`); a selected note the anchor proves the chain does not carry is
+written off where it is met rather than left for a later sync
+(`write_off_missing_note`); a spent note is never marked off chain
+(`mark_off_chain`); and the inclusion walk starts at the anchor block plus one,
+so a block authored during the submission round trip is never skipped.
 
 The property that no request names one of this wallet's own values is asserted
 rather than asserted-in-prose: `wallet-web/tests/privacy.test.ts` drives the
 real read layer through a recording transport and checks the calls themselves,
 because no assertion over an answer can tell a paged set from forty point
-lookups.
+lookups. It drives a payment the same way, since the spend path is where the
+property is easiest to lose to an optimisation: a leaf read narrowed to the
+leaves one path touches names the leaf being spent, and the lint fence would
+not see it, because the fence keys on a name. The Playwright suite records the
+socket, so the allowlist covers the connection itself as well.
 
 **What the browser adds.** Key storage that is not dev grade in the way this
 CLI's is: the seed and each note's `rho`, `r`, `nullifier` and `memo` are
 sealed with AES-256-GCM under a PBKDF2-SHA-256 key at 600,000 iterations, a
 fresh IV per record per write, each ciphertext bound to its own slot with
-additional data. What stays in the clear is deliberate and stated on the page:
+additional data. The eight-character passphrase floor is enforced at the key
+derivation, which is the only path to a key, rather than on the screen that
+asks for one. It also adds a content policy: the built page declares one, and
+`wallet-web/README.md` carries the header a host should send, because "nothing
+but the node you configure" is otherwise a description of the code rather than
+a rule the browser applies. What stays in the clear is deliberate and stated on the page:
 commitment, leaf index, block, value, origin, spent and the checkpoints, which
 is what lets a locked wallet still show a balance and still sync. It is a
 choice rather than an oversight, and a threat model that wants the value graph
@@ -1076,9 +1092,12 @@ index)` and `Shielded::EntryCount` are both exported.
 **What the browser costs.** A payment is a circuit build and two proofs in wasm
 rather than in native code, which `docs/BENCH.md` measures at a 2.8x to 3.6x
 penalty per stage. The wallet prints the expectation beside the elapsed clock
-while it proves, so a slow machine reads as slow rather than as stuck, and the
-circuits stay resident afterwards because dropping them would charge the next
-payment for the build again.
+while it proves, per module rather than one figure for both, so a slow machine
+reads as slow rather than as stuck. The circuits are built once per worker and
+every later payment is answered from that build: wasm linear memory never
+shrinks, so a second build would add its own quarter gigabyte permanently.
+Stopping the worker from the settings screen is the only thing that gives it
+back, and starting it again pays the build.
 
 ## Provenance
 

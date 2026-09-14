@@ -786,6 +786,36 @@ figure here: repeat runs of the threaded row landed at 19.6 s and 24.6 s with
 the proving time moving by half a second, because where the settlement falls
 inside a block interval is luck.
 
+## What a second payment costs, and why it used to cost a gigabyte
+
+The table above is one payment in a fresh tab, which is what the suite
+measures. A wallet is not used that way, and the second payment was where the
+cost was.
+
+The circuits were rebuilt from source on every send. The new set was built
+while the old one was still referenced, wasm linear memory never shrinks, and
+wasm-bindgen releases a replaced handle only at the next garbage collection,
+so every payment added its own quarter gigabyte permanently. Measured in
+headless Chromium against the committed threaded module, doing what the send
+path does three times in one module:
+
+| payment | linear memory after | growth |
+|---|---|---|
+| 1 | 918.1 MiB | |
+| 2 | 1,175.5 MiB | +257.4 MiB |
+| 3 | 1,432.8 MiB | +257.3 MiB |
+
+Three payments in one tab sat at 1.4 GB and climbing, and each of them also
+paid about 4.5 s of circuit build it did not need. A build-only loop gave the
+same slope, 481.1 to 735.9 to 990.9 MiB, which is what identifies the build
+rather than the proof as the term that grows.
+
+The worker answers the build from cache after the first one, so the figure is
+now flat: the M10 rows re-measured after the fix read 11.8 s and 918.4 MiB
+threaded, 39.7 s and 910.2 MiB single threaded, which is the same peak within
+this suite's noise. Terminating the worker is the only thing that gives the
+memory back and the settings screen offers it by name.
+
 ## `wasm-opt -O`, both modules
 
 Measured by running `wasm-bindgen` into a scratch directory and optimising a
@@ -821,4 +851,8 @@ binaryen should still produce a working module.
   constants (64 leaves per query, 1000 keys per page) are the CLI's rather than
   a measured optimum.
 - **The module over a real network.** Everything above is loopback.
+- **A long-lived tab.** The per-payment growth above is closed, and the figure
+  after three payments in one worker is measured. What is not measured is a
+  tab left open for hours over many syncs, where the terms that could grow are
+  the store and the paged nullifier set rather than the circuits.
 
