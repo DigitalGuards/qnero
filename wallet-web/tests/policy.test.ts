@@ -292,3 +292,34 @@ describe('the sideways scroll', () => {
     expect(table).toContain('mm-scroll-x');
   });
 });
+
+// ---------------------------------------------------------------------------
+// The name, which is fixed by decision and spelled one way.
+// ---------------------------------------------------------------------------
+
+describe('the wordmark', () => {
+  /**
+   * One spelling, "Qloak": a capital Q and the rest lower case.
+   *
+   * The spelling is fixed by decision, and until this test nothing in the
+   * one-second gate read it: the header and the tab title passed lint, types,
+   * every unit case and the production build with "QLoak" or "qloak" written
+   * into them, and the whole of the wallet's own suite had no assertion on the
+   * name at all. So the two files a reader meets the name in are read here,
+   * and every spelling of it in them is compared against the one.
+   */
+  it('spells the name one way in the header and the tab title', () => {
+    const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    expect(app).toContain('>Qloak<');
+    expect(html).toContain('<title>Qloak, a Qnero wallet</title>');
+    for (const [file, source] of [
+      ['src/App.tsx', app],
+      ['index.html', html],
+    ] as const) {
+      for (const found of source.matchAll(/qloak/gi)) {
+        expect(`${file}: ${found[0]}`).toBe(`${file}: Qloak`);
+      }
+    }
+  });
+});

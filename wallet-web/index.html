@@ -4,6 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Qloak, a Qnero wallet</title>
+    <!-- The tab mark, written inline so it costs no request and adds no asset.
+         A tab narrowed past its title, a pinned tab and a bookmark are the
+         icon and nothing else, and with none declared both Qnero apps sat
+         there as the browser's blank page glyph and took a 404 on
+         /favicon.ico from the host on every load. A `data:` image is what this
+         page's own content policy already admits, for the QR codes. The mark
+         is a Q in the palette's accent on the deep ground. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23161416'/%3E%3Ccircle cx='15' cy='14' r='7.5' fill='none' stroke='%23e6a145' stroke-width='3'/%3E%3Cpath d='M16.5 19.5 L23 26' fill='none' stroke='%23e6a145' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
     <meta
       name="description"
       content="Qloak is a browser wallet for a Qnero chain. Keys are generated and used in the page, proofs are built on this machine, and nothing is contacted but the node you configure."
