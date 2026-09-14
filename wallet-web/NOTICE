@@ -10,9 +10,14 @@ Files carrying that work
   src/styles/tokens.css   the surface and text ramps, the elevation recipe,
                           the type scale and the tracking, the radii, the
                           control heights
-  src/styles/app.css      the component recipes those tokens build: the action
-                          button, the sunken input, the label-over-value field
-                          row, the panel, the secret box, the status strip
+  src/styles/app.css      the component recipes those tokens build: the sunken
+                          input, the uppercase field label, the balance at 32 px
+                          with its fraction dimmed, the two-part elevation
+  src/components/UI/      the shapes those recipes are used in: the three
+                          button colours and their geometry, the panel, the
+                          label-over-value field row, the yellow notice box
+  src/components/TabBar.tsx
+                          the four-destination tab bar along the bottom
 
 What is carried over is the design system those stylesheets state by
 repetition, and the screen flow: a landing that offers "Create new wallet" and
