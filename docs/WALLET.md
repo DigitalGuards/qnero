@@ -694,7 +694,18 @@ refusal costs nothing:
    note's commitment, and each path's recomputed root against the header again,
    all before any proving.
 
-   The root comparison comes first, and that ordering is what lets an input's
+   The leaf gate runs before any input is examined, and it is the gate a sync
+   refuses a short node with: a node whose tree at the anchor holds fewer
+   leaves than this wallet has already read is behind, and the spend is
+   refused with nothing written off. It cannot fire on a node that has caught
+   up, because a stored leaf index was read below the watermark that recorded
+   it and a tree only grows along one chain. What it stands in front of is the
+   write-off below: every other check here is against the node's own answers,
+   the rebuilt root included, so a losing fork, a rolled-back snapshot or a
+   head the node has not finished executing would otherwise reach the write-off
+   and mark a real, spendable note off chain.
+
+   The root comparison comes next, and that ordering is what lets an input's
    leaf index mean anything: a rebuilt tree that roots at the value the anchor
    header carries **is** the chain's tree at that block, so its leaf count is
    the chain's. An input past the end of it is then one of two different
@@ -1068,8 +1079,13 @@ URL holds a genesis hash naming a chain that is no longer there, and a gate
 compared against it passes. The storage-drift refusal is in `runSync` and
 `spend` as well as on the screens that call them, the way this CLI opens
 `sync_with`, `shield` and `prepare_spend` with `ensure_known_storage`: a rule
-that lives in the page is skipped by every caller that is not the page. And
-every
+that lives in the page is skipped by every caller that is not the page. The
+leaf gate is the third of them, and it is in the spend in both wallets now:
+the write-off that marks a selected note off chain rests on the node being at
+or ahead of every leaf the store has read, and every other check the spend
+makes is against that node's own answers, so a node whose tree is short used to
+reach the write-off and mark a real, spendable note off chain. A sync meeting
+the identical node refuses it by name. And every
 storage value a scan reads is decoded by its declared type and refused by name
 at any other width, the way `Chain::leaves` and `Chain::ciphertext` do, because
 `REQUIRED_STORAGE` compares hashers and a changed value type would otherwise
@@ -1175,6 +1191,16 @@ are cited at each site.
    cannot move under it. What the walk buys is the `origin` label, and nothing
    in the spend path reads it; the refusal that actually protects the
    recipient, a duplicated nullifier, does not depend on it either.
+
+   The walk stops at 100,000 entries, in both wallets. Its length is a number
+   the node answers with and every step is a Poseidon2 hash, so an unbounded
+   walk lets one storage answer decide how long a scan runs, on the thread that
+   holds the seed in the browser. Past the bound a note is labelled `transfer`,
+   which is what the label already says for every note the walk misses, and the
+   browser wallet reports the bound as a warning on the pass. The counter is
+   also decoded at its declared `u64` width and refused by name at any other,
+   the way every other integer a scan reads is: read at whatever width the
+   bytes carried, thirty-two bytes of `0xff` was a walk of 2^256 - 1 steps.
 4. **`POOL_QUANTUM` is the one chain value with no metadata surface.** It is a
    constant of the pallet crate with no `#[pallet::constant]` declaration, so
    the wallet carries a copy. A mismatch surfaces as a `shield` whose dispatch

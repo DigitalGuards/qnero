@@ -32,22 +32,28 @@
  * 5. **The anchor is the current head**, taken fresh per submission. An anchor
  *    at head minus k, or one cached across two spends, is a distinguisher
  *    inside the 256-block window marking both spends as one wallet's.
- * 6. **Check the rebuild before proving**: the rebuilt root against the
- *    header's `zkTreeRoot` first, because that is what makes a leaf index mean
- *    anything, then each leaf against its own commitment, then each path's
- *    recomputed root against the header.
+ * 6. **The node's own tree against this wallet's watermark, then the rebuild
+ *    before proving.** The watermark gate first, the one `runSync` refuses a
+ *    short node with: a note's leaf index is always below the watermark that
+ *    recorded it, so everything below, the phantom write-off included, rests
+ *    on this node being at or ahead of every leaf the store has read. Then the
+ *    rebuilt root against the header's `zkTreeRoot`, because that is what
+ *    makes a leaf index mean anything, then each leaf against its own
+ *    commitment, then each path's recomputed root against the header.
  * 7. **Draw the payment's output slot.** The circuit derives each output's
  *    `rho` from its slot index, so either assignment proves and settles
  *    unchanged, and a fixed assignment would tell every chain reader which of
  *    a settlement's two leaves is the sender's change.
  * 8. **Prove, verify locally, write the change note, then submit.** What that
  *    row is, exactly: a claim that the note exists, so a balance shown before
- *    the next sync includes the change. It seals no randomness, because the
- *    circuit derives the change note's `(rho, r)` from the spend's own
- *    nullifiers and this wallet recovers them by decrypting its own ciphertext
- *    off the chain, which needs only the seed. The order is kept for the
- *    weaker reason: a tab reclaimed between the submit and the write shows a
- *    balance missing its own change until the next sync reaches it.
+ *    the next sync includes the change. It seals no randomness, and what lets
+ *    it is the recovery: the circuit derives the change note's `rho` from its
+ *    output slot, the proving module draws its `r` per output
+ *    (`crates/qnero-prover-wasm/src/request.rs`), and both come back by
+ *    decrypting this wallet's own ciphertext off the chain, which needs only
+ *    the seed. The order is kept for the weaker reason: a tab reclaimed
+ *    between the submit and the write shows a balance missing its own change
+ *    until the next sync reaches it.
  * 9. **And the row goes when the settlement does not.** A submission the pool
  *    refuses, a segment skipped for a stale anchor or a claimed nullifier, and
  *    a settlement nothing carries inside the window all leave a change
@@ -201,7 +207,10 @@ export async function spend(
       'this node has no block zero, so it cannot say which chain it serves. Nothing has been built.',
     );
   }
-  const mismatch = chainMismatchRefusal((await store.meta()).genesisHash, nodeGenesis);
+  // Read once and held: the genesis binding is one field of it, and the leaf
+  // watermark the tree gate below compares against is another.
+  const meta = await store.meta();
+  const mismatch = chainMismatchRefusal(meta.genesisHash, nodeGenesis);
   if (mismatch !== null) {
     throw new Error(mismatch);
   }
@@ -303,6 +312,27 @@ export async function spend(
 
   report({ stage: 'tree', detail: 'rebuilding the commitment tree at the anchor' });
   const shape = await fetchTreeShape(context, head.hash);
+  // The leaf gate, before a single note is looked at, and it is the gate
+  // `runSync` already refuses this node with (`wallet/sync.ts`). Every other
+  // check below is against this node's own answers: the rebuild roots to this
+  // node's own header, so a node whose tree is shorter than what this wallet
+  // has already read passes all of them and still reaches the write-off below,
+  // which then marks a real, canonical, spendable note off chain. A losing
+  // fork, a rolled-back snapshot and a head this node has not finished
+  // executing all have that shape, and none of them is a statement that the
+  // chain dropped a leaf.
+  //
+  // On a node that is not behind it can never fire: a note's `leafIndex` was
+  // read below the watermark that recorded it, and a tree only grows along one
+  // chain, so any head at or above that point holds at least that many leaves.
+  if (shape.leafCount < meta.nextLeaf) {
+    throw new Error(
+      `this node reports ${shape.leafCount} leaves at its head and this wallet has already read ` +
+        `${meta.nextLeaf}. A node on this chain whose leaf count is short has a head it has not ` +
+        'finished executing, so the leaf indices this wallet holds cannot be checked against it. ' +
+        'Nothing has been written off and nothing has been submitted. Sync first.',
+    );
+  }
   const leafHashes = await fetchLeafHashes(context, 0, shape.leafCount, head.hash, (done) => {
     report({ stage: 'tree', detail: `${done} of ${shape.leafCount} leaves` });
   });
@@ -431,10 +461,13 @@ export async function spend(
     value: change.toString(),
     submittedAtBlock: anchor.block_number,
     secret: await store.sealPendingSecret(changeCommitment, {
-      // The change note's `(rho, r)` are derived inside the circuit from the
-      // spend's own nullifiers, and the wallet recovers them by decrypting its
-      // own ciphertext on the next sync. What is recorded here is the claim
-      // that the note exists, so a sync that has not reached it still shows it.
+      // Empty because neither value's only copy is here. The circuit derives
+      // the change note's `rho` from its output slot and the proving module
+      // draws its `r` per output, so `r` is fresh randomness, and it rides in
+      // the ciphertext the settlement publishes: the next scan decrypts this
+      // wallet's own ciphertext with the seed and recovers both. What is
+      // recorded here is the claim that the note exists, so a sync that has
+      // not reached it still shows it.
       rho: '',
       r: '',
       nullifier: '',

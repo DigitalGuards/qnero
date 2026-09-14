@@ -24,6 +24,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ProverClient } from '../src/worker/client';
+import { ENTRY_WALK_LIMIT } from '../src/worker/protocol';
 import { ProverCore, type ModuleLoader, type WasmModule, type WasmProver } from '../src/worker/core';
 
 const LIMITS = {
@@ -47,6 +48,8 @@ interface Counts {
   builds: number;
   /** Every `(value, rho)` pair the digests were asked for, in order. */
   digests: { value: bigint; rho: string }[];
+  /** How many entry hashes the origin walk asked for. */
+  entryRho: number;
 }
 
 /**
@@ -100,7 +103,10 @@ function stubModule(counts: Counts): WasmModule {
         nullifier: 'nn'.repeat(32),
       }),
     // `H(RHO_ENTRY, block, index)`, stubbed as something a test can predict.
-    entryRho: (block: number, index: bigint) => `entry-${block}-${index.toString()}`,
+    entryRho: (block: number, index: bigint) => {
+      counts.entryRho += 1;
+      return `entry-${block}-${index.toString()}`;
+    },
     headerBlockHash: () => '00'.repeat(32),
     treePath: () => '{}',
     treeRoot: () => '00'.repeat(32),
@@ -120,7 +126,7 @@ function stubModule(counts: Counts): WasmModule {
 }
 
 async function started(): Promise<{ core: ProverCore; counts: Counts }> {
-  const counts: Counts = { builds: 0, digests: [] };
+  const counts: Counts = { builds: 0, digests: [], entryRho: 0 };
   const load: ModuleLoader = () => Promise.resolve({ module: stubModule(counts), threads: 1 });
   const core = new ProverCore(load);
   await core.handle({ kind: 'init', wasmBase: 'wasm/', numLeaves: 6, maxThreads: 1 }, () => undefined);
@@ -182,6 +188,31 @@ describe('the shield walk', () => {
       () => undefined,
     );
     expect(answer.value).toBe(true);
+  });
+
+  it('stops at the bound rather than hashing once per unit of a number the node chose', async () => {
+    // `EntryCount` is the node's answer and this loop is synchronous, on the
+    // thread holding the seed. Unbounded, one small reply buys the worker
+    // forever: the scan stops reporting, the sync never commits, and the
+    // settings control that terminates the worker is disabled while a sync
+    // runs, so a reload is the only way out and the same node does it again.
+    // Remove the bound and this test runs until vitest kills it.
+    //
+    // The label is what is given up past the bound, and the sync says so:
+    // `origin` separates a shield from a spend's output in a listing and no
+    // rule selects on it.
+    const { core, counts } = await started();
+    const answer = await core.handle(
+      {
+        kind: 'entryRhoMatches',
+        blockNumber: 7,
+        rho: 'aa'.repeat(32),
+        entryCount: (2n ** 256n - 1n).toString(),
+      },
+      () => undefined,
+    );
+    expect(answer.value).toBe(false);
+    expect(counts.entryRho).toBe(Number(ENTRY_WALK_LIMIT));
   });
 
   it('says no when no entry produces that rho, which is every ordinary payment', async () => {
@@ -263,7 +294,7 @@ describe('a coinbase leaf', () => {
 
 describe("the seed the worker holds", () => {
   it('installs nothing when there is no module to derive with', async () => {
-    const counts: Counts = { builds: 0, digests: [] };
+    const counts: Counts = { builds: 0, digests: [], entryRho: 0 };
     const load: ModuleLoader = () => Promise.resolve({ module: stubModule(counts), threads: 1 });
     const core = new ProverCore(load);
 
@@ -281,7 +312,7 @@ describe("the seed the worker holds", () => {
   });
 
   it('installs nothing when the derivation refuses', async () => {
-    const counts: Counts = { builds: 0, digests: [] };
+    const counts: Counts = { builds: 0, digests: [], entryRho: 0 };
     const load: ModuleLoader = () =>
       Promise.resolve({
         module: {

@@ -24,7 +24,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ChainContext } from '../src/chain/api';
-import { fetchLeafHashes, fetchLeaves } from '../src/chain/reads';
+import { fetchLeafHashes, fetchLeaves, fetchTreeTotals } from '../src/chain/reads';
 import { waitForInclusion } from '../src/chain/submit';
 
 const AT = `0x${'aa'.repeat(32)}`;
@@ -43,6 +43,9 @@ const KEYS = {
   ciphertexts: '0xciphertexts-',
   leafBlocks: '0xleafblocks-',
   coinbaseValues: '0xcoinbase-',
+  leafCount: '0xleafcount',
+  depth: '0xdepth',
+  entryCount: '0xentrycount',
 } as const;
 
 /** A node that answers exactly the values this test hands it. */
@@ -63,15 +66,34 @@ function nodeWith(values: Map<string, string>): ChainContext {
     send,
     api: {
       query: {
-        zkTree: { leaves: entry(KEYS.leaves) },
+        zkTree: {
+          leaves: entry(KEYS.leaves),
+          leafCount: entry(KEYS.leafCount),
+          depth: entry(KEYS.depth),
+        },
         shielded: {
           ciphertexts: entry(KEYS.ciphertexts),
           leafBlocks: entry(KEYS.leafBlocks),
           coinbaseValues: entry(KEYS.coinbaseValues),
+          entryCount: entry(KEYS.entryCount),
         },
       },
     },
   } as unknown as ChainContext;
+}
+
+/** The same node, with the key lists of every request it was handed. */
+function recordingNode(values: Map<string, string>, asked: string[][]): ChainContext {
+  const inner = nodeWith(values);
+  return {
+    ...inner,
+    send: <T,>(method: string, params: unknown[]): Promise<T> => {
+      if (method === 'state_queryStorageAt') {
+        asked.push(params[0] as string[]);
+      }
+      return inner.send<T>(method, params);
+    },
+  };
 }
 
 /** A `Vec<u8>` whose one-byte compact prefix is written by hand. */
@@ -124,6 +146,39 @@ describe('a leaf row', () => {
     const values = new Map<string, string>([[`${KEYS.coinbaseValues}0`, '0x0a000000']]);
     await expect(fetchLeaves(nodeWith(values), 0, 1, AT)).rejects.toThrow(
       /Shielded::CoinbaseValues\(0\) is 4 bytes and this build decodes it as 8/,
+    );
+  });
+});
+
+describe('the chain-wide totals a pass reads once', () => {
+  it('reads the three of them in one request', async () => {
+    const values = new Map<string, string>([
+      [KEYS.leafCount, '0x0800000000000000'],
+      [KEYS.depth, '0x03000000'],
+      [KEYS.entryCount, '0x0200000000000000'],
+    ]);
+    const asked: string[][] = [];
+    const totals = await fetchTreeTotals(recordingNode(values, asked), AT);
+    expect(totals).toEqual({ leafCount: 8, depth: 3, entryCount: 2n });
+    // One call carrying all three keys. The counter used to be fetched again
+    // through an accessor of its own, so every pass that found a leaf asked
+    // this node the identical question twice.
+    expect(asked).toEqual([[KEYS.leafCount, KEYS.depth, KEYS.entryCount]]);
+  });
+
+  it('refuses a shield counter that is not a u64, which is the one number it turns into work', async () => {
+    // `EntryCount` decides how many Poseidon2 hashes the origin walk runs, on
+    // the thread that holds the seed. Read at whatever width the bytes carry,
+    // 32 bytes of 0xff is 2^256 - 1 and the worker spins until the tab is
+    // reloaded, with the control that would stop it disabled while the sync
+    // it belongs to is running.
+    const values = new Map<string, string>([
+      [KEYS.leafCount, '0x0800000000000000'],
+      [KEYS.depth, '0x03000000'],
+      [KEYS.entryCount, `0x${'ff'.repeat(32)}`],
+    ]);
+    await expect(fetchTreeTotals(nodeWith(values), AT)).rejects.toThrow(
+      /Shielded::EntryCount is 32 bytes and this build decodes it as 8/,
     );
   });
 });

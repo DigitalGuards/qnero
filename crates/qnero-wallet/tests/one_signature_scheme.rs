@@ -1,9 +1,11 @@
 //! Repository guard: Qnero has one signature scheme at the transparent entry.
 //!
-//! The consensus rule lives in `chain/runtime/src/extrinsic.rs`: a signed
-//! extrinsic carrying the ML-DSA-65 variant of `DilithiumSignatureScheme` is
-//! refused with `InvalidTransaction::BadSigner`. Its runtime guard is
-//! `chain/runtime/tests/transactions/signature_scheme.rs`.
+//! The consensus rule lives in `chain/runtime/src/extrinsic.rs`, and it is an
+//! allowlist: a signed extrinsic is admitted when its signature is the
+//! ML-DSA-87 variant of `DilithiumSignatureScheme` and refused with
+//! `InvalidTransaction::BadSigner` otherwise, which today means the ML-DSA-65
+//! variant and tomorrow means any variant a subtree merge adds. Its runtime
+//! guard is `chain/runtime/tests/transactions/signature_scheme.rs`.
 //!
 //! This test guards the documentation and the code around that rule: no
 //! Qnero-owned path may present the level-3 scheme as something this chain
@@ -276,17 +278,25 @@ fn the_comparison_table_claims_one_scheme_for_qnero() {
 /// The rule must stay where this guard says it is, and must still be the
 /// refusal. A guard whose exemption list points at a file that refuses nothing
 /// is worse than no guard.
+///
+/// It reads the rule as an allowlist, because that is how the rule is written.
+/// The earlier version of this assertion looked for the spelling
+/// `Dilithium65`, so it held only while the rule was a denylist over an enum
+/// this repository deliberately leaves to upstream: a subtree merge adding a
+/// third variant would have fallen into the catch-all, been admitted, and left
+/// this guard green, since a new variant carries a new name.
 #[test]
 fn the_refusal_rule_is_where_the_guard_says() {
     let rule = repo_root().join("chain/runtime/src/extrinsic.rs");
     let contents = fs::read_to_string(&rule).expect("the consensus rule file exists");
     assert!(
-        contents.contains("DilithiumSignatureScheme::Dilithium65(_)"),
-        "the refusal no longer matches on the level-3 variant"
+        contents
+            .contains("Preamble::Signed(_, DilithiumSignatureScheme::Dilithium87(_), _) => Ok(())"),
+        "the one admitted signed shape is no longer the level-5 variant"
     );
     assert!(
-        contents.contains("InvalidTransaction::BadSigner"),
-        "the refusal no longer answers BadSigner"
+        contents.contains("Preamble::Signed(..) => Err(InvalidTransaction::BadSigner.into())"),
+        "every other signed shape is no longer refused with BadSigner"
     );
 }
 

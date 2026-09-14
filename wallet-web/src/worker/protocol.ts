@@ -52,6 +52,26 @@
 
 import type { Anchor } from '../chain/anchor';
 
+/**
+ * How many shield entries the origin walk hashes before it gives up.
+ *
+ * `entryRhoMatches` runs one Poseidon2 hash per unit of `Shielded::EntryCount`,
+ * and that count is a number the node hands over. Unbounded, one small answer
+ * buys arbitrary synchronous CPU inside the worker that holds the seed, and
+ * the worker is single threaded: the scan stops reporting progress, the sync
+ * never commits, and the settings control that would terminate the worker is
+ * disabled while a sync is running, so only a reload ends it and the same node
+ * does it again on the next pass.
+ *
+ * The bound is affordable because the answer is only ever a label. `origin`
+ * separates a shield from a spend's output in the balance listing and nothing
+ * selects on it, so a note past the bound is labelled `transfer` and the sync
+ * says so in a warning. The count is checked at its declared width where it is
+ * read (`chain/reads.ts`), which is the other half of this: a value of the
+ * wrong width used to decode as whatever the bytes happened to say.
+ */
+export const ENTRY_WALK_LIMIT = 100_000n;
+
 export interface ProverLimits {
   memo_bytes: number;
   ciphertext_fixed_bytes: number;

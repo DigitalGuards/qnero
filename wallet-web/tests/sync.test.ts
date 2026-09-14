@@ -24,6 +24,7 @@ import {
   type SyncCrypto,
 } from '../src/wallet/sync';
 import { STORE_VERSION, type NoteSecret, type StoreMeta, type StoredNote } from '../src/wallet/model';
+import { ENTRY_WALK_LIMIT } from '../src/worker/protocol';
 
 const GENESIS = '11'.repeat(32);
 
@@ -67,6 +68,7 @@ function fakeChain(options: {
   hashAt?: (height: number) => string | null;
   drift?: string[];
   anchorWindow?: number;
+  entryCount?: bigint;
 }): SyncChain {
   const leafCount = options.leafCount ?? options.leaves.length;
   return {
@@ -76,7 +78,8 @@ function fakeChain(options: {
     genesisHash: () => Promise.resolve(options.genesis ?? GENESIS),
     blockHashAt: (height) =>
       Promise.resolve(options.hashAt === undefined ? hashAtHeight(height) : options.hashAt(height)),
-    treeShape: () => Promise.resolve({ leafCount, depth: 3 }),
+    treeShape: () =>
+      Promise.resolve({ leafCount, depth: 3, entryCount: options.entryCount ?? 0n }),
     leaves: (from, to) =>
       Promise.resolve(
         options.leaves
@@ -90,7 +93,6 @@ function fakeChain(options: {
           })),
       ),
     usedNullifiers: () => Promise.resolve(options.settled ?? new Set<string>()),
-    entryCount: () => Promise.resolve(0n),
   };
 }
 
@@ -651,5 +653,35 @@ describe('a pending row', () => {
     expect(result.clearedPending).toEqual(['ab'.repeat(32)]);
     expect(result.report.pendingAbandoned).toBe(1);
     expect(result.report.warnings.join(' ')).toMatch(/never settled inside/);
+  });
+});
+
+describe('the shield counter a pass reads', () => {
+  const mine = note(500n, 'aa');
+  const leaves: FakeLeaf[] = [
+    { index: 0, commitment: mine.commitment, blockNumber: 1, note: mine },
+  ];
+
+  it('says out loud that the origin walk will stop short of it', async () => {
+    // The walk is bounded in the worker because it is one hash per unit of a
+    // number the node chose (`ENTRY_WALK_LIMIT`). Past the bound a shield is
+    // labelled `transfer`, and origin is written once at receipt, so a pass
+    // that quietly gave up would leave a wrong label behind with nothing said
+    // anywhere.
+    const result = await runSync(
+      { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+      fakeChain({ head: 5, leaves, entryCount: ENTRY_WALK_LIMIT + 1n }),
+      fakeCrypto(leaves),
+    );
+    expect(result.report.warnings.join(' ')).toMatch(/origin walk stops at/);
+  });
+
+  it('says nothing at the bound, which is every chain that exists', async () => {
+    const result = await runSync(
+      { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
+      fakeChain({ head: 5, leaves, entryCount: ENTRY_WALK_LIMIT }),
+      fakeCrypto(leaves),
+    );
+    expect(result.report.warnings.join(' ')).not.toMatch(/origin walk/);
   });
 });

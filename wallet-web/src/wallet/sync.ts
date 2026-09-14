@@ -38,6 +38,7 @@
  */
 
 import { normaliseHash } from '../lib/hex';
+import { ENTRY_WALK_LIMIT } from '../worker/protocol';
 import { MAX_CHECKPOINTS, type NoteOrigin, type NoteSecret, type RejectedNote, type StoreMeta, type StoredNote, type SyncCheckpoint } from './model';
 
 /** What a scan needs out of the chain, so a test can supply it. */
@@ -62,7 +63,16 @@ export interface SyncChain {
   head(): Promise<{ number: number; hash: string }>;
   genesisHash(): Promise<string>;
   blockHashAt(height: number): Promise<string | null>;
-  treeShape(at: string): Promise<{ leafCount: number; depth: number }>;
+  /**
+   * `ZkTree::LeafCount`, `ZkTree::Depth` and `Shielded::EntryCount` at one
+   * block.
+   *
+   * The counter rides along with them. All three are chain wide, the whole
+   * pass is pinned to one block hash, and the read layer already bundles them
+   * into a single `state_queryStorageAt` (`chain/reads.ts`), so a second
+   * accessor made the node answer two byte-identical requests per pass.
+   */
+  treeShape(at: string): Promise<{ leafCount: number; depth: number; entryCount: bigint }>;
   leaves(
     from: number,
     to: number,
@@ -78,7 +88,6 @@ export interface SyncChain {
     }[]
   >;
   usedNullifiers(at: string, onProgress?: (seen: number) => void): Promise<Set<string>>;
-  entryCount(at: string): Promise<bigint>;
 }
 
 /** One decrypted output, with the two digests only the seed can produce. */
@@ -479,7 +488,19 @@ export async function runSync(
   const clearedPending: string[] = [];
 
   if (shape.leafCount > watermark) {
-    const entryCount = await chain.entryCount(head.hash);
+    // Read with the tree's shape, in the same call the read layer already
+    // made. The walk it feeds is bounded in the worker, and a chain past that
+    // bound is said out loud: `origin` is written once at receipt and no later
+    // pass revisits it, so a note labelled `transfer` because the walk stopped
+    // short keeps that label until a rescan.
+    const entryCount = shape.entryCount;
+    if (entryCount > ENTRY_WALK_LIMIT) {
+      warnings.push(
+        `this chain has settled ${entryCount} shield entries and the origin walk stops at ` +
+          `${ENTRY_WALK_LIMIT}, so a shield received in this pass may be listed as a transfer. ` +
+          'Origin is a label and no rule selects on it.',
+      );
+    }
 
     // Decryption goes over the boundary in batches, so a scan is one round
     // trip per batch rather than one per leaf.

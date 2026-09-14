@@ -643,8 +643,18 @@ export function App(): ReactNode {
         // whole send rather than `result.proveMillis`: a payment is a circuit
         // build, two proofs, a submission and a wait for a block, and the
         // screen that quotes this prints it beside a clock measuring all five.
-        writeMeasuredSendSeconds(proverThreads, performance.now() - startedAt);
-        setMeasuredSendSeconds(readMeasuredSendSeconds(proverThreads));
+        //
+        // Only when the block actually settled, which is the same expression
+        // the result panel titles itself with. `spend` returns normally on a
+        // settlement that timed out inside the 120-second wait and on one a
+        // segment skipped, so an unsettled send used to store the timeout
+        // itself: about 135 seconds against a real threaded cost of 24, kept
+        // per browser until the next send that did settle. That is the failure
+        // this figure was introduced to remove, arriving from the other side.
+        if (result.inclusion?.settled === true) {
+          writeMeasuredSendSeconds(proverThreads, performance.now() - startedAt);
+          setMeasuredSendSeconds(readMeasuredSendSeconds(proverThreads));
+        }
         await refresh();
       } catch (sendError) {
         setSpendError((sendError as Error).message);

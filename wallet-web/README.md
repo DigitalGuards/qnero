@@ -136,7 +136,15 @@ has the bug too.
   anchor, the header preimage checked against `chain_getBlockHash` before
   anything is proved, the proof built in the worker with its phases named, the
   settlement submitted as a bare unsigned extrinsic, and inclusion matched byte
-  for byte.
+  for byte. The node gates the sync applies apply here too, in the same order
+  and with the same wording: the storage-drift refusal, the genesis binding
+  read live off the node, and the leaf gate, which refuses a node whose tree at
+  the anchor is shorter than what this wallet has already read. That last one
+  is what stands in front of the write-off: a selected note past the end of a
+  tree the anchor confirms is marked off chain, every other check the spend
+  makes is against the same node's answers, and a losing fork or a head the
+  node has not finished executing would otherwise be evidence enough to write
+  off a real, spendable note.
 - **Receive.** The address as text and as a code, and the miner key behind a
   labelled control, because the miner key is not the address and it carries the
   coinbase viewing key.
@@ -238,9 +246,10 @@ nice -n 19 npm run e2e       # starts its own dev node, proves in the browser
 
 The unit tests cover the encryption at rest and what it refuses, the store's
 own contract, the fee floor and the memo pad against a runtime's constants,
-note selection and the conflict-set rule, memo escaping, the node gates and the
-spent reconciliation in both directions, and the lint fence that keeps
-`zkTree_getMerkleProof` out of every spelling it has.
+note selection and the conflict-set rule, memo escaping, the node gates on both
+the sync and the spend, the spent reconciliation in both directions, the widths
+every storage value is decoded at, the bound on the shield-origin walk, and the
+lint fence that keeps `zkTree_getMerkleProof` out of every spelling it has.
 
 `tests/privacy.test.ts` is the one that needs explaining. "The node learns
 nothing" is a property of the request stream: a wallet that asked one point

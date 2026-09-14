@@ -11,12 +11,17 @@
 //! keeps describing both variant encodings, which is what lets a decoder size a
 //! signature blob by its variant index without guessing.
 //!
-//! The refusal of the `Dilithium65` variant is a rule of the chain:
+//! Admitting one of those two is a rule of the chain:
 //!
-//! > A signed extrinsic whose signature is the `Dilithium65` variant is invalid.
-//! > It is refused with [`InvalidTransaction::BadSigner`], before its signature
-//! > is verified, before any transaction extension runs, and before its call is
-//! > dispatched.
+//! > A signed extrinsic is valid only when its signature is the `Dilithium87`
+//! > variant. Every other variant is refused with
+//! > [`InvalidTransaction::BadSigner`], before its signature is verified, before
+//! > any transaction extension runs, and before its call is dispatched.
+//!
+//! The rule is written as an allowlist, so a variant this chain has never seen,
+//! one a later subtree merge adds, is refused by the arm that is already there.
+//! Today the enum carries two variants and the rule refuses exactly one of
+//! them.
 //!
 //! The refusal sits in [`Checkable::check`] for [`QneroUncheckedExtrinsic`],
 //! which is the single seam under both `Executive::validate_transaction` and
@@ -112,16 +117,29 @@ impl QneroUncheckedExtrinsic {
 	///
 	/// `Ok(())` for a bare extrinsic, a general transaction, and a signed
 	/// transaction carrying an ML-DSA-87 signature. `InvalidTransaction::BadSigner`
-	/// for a signed transaction carrying the ML-DSA-65 variant.
+	/// for a signed transaction carrying any other signature variant, which
+	/// today is the ML-DSA-65 one.
+	///
+	/// Written as an allowlist, which is what the rule says in prose. A
+	/// denylist over `DilithiumSignatureScheme` is exhaustive only while that
+	/// enum has the two variants it has now, and this module commits to leaving
+	/// the enum exactly as upstream wrote it, so a subtree merge adding a third
+	/// variant would land in a catch-all and be admitted with both guards
+	/// green. Under the allowlist it is refused at the entry instead. The
+	/// `Preamble` arms are spelled out for the same reason: a new preamble
+	/// variant fails to compile here rather than inheriting an answer.
+	///
+	/// This changes no answer the chain gives today, so it moves no
+	/// `spec_version` of its own.
 	///
 	/// Both callers of this are consensus paths: `check` on the live path and
 	/// `unchecked_into_checked_i_know_what_i_am_doing` on the `try-runtime`
 	/// replay path. Keep them in step.
 	fn ensure_supported_signature_scheme(&self) -> Result<(), TransactionValidityError> {
 		match &self.0.preamble {
-			Preamble::Signed(_, DilithiumSignatureScheme::Dilithium65(_), _) =>
-				Err(InvalidTransaction::BadSigner.into()),
-			_ => Ok(()),
+			Preamble::Signed(_, DilithiumSignatureScheme::Dilithium87(_), _) => Ok(()),
+			Preamble::Signed(..) => Err(InvalidTransaction::BadSigner.into()),
+			Preamble::Bare(..) | Preamble::General(..) => Ok(()),
 		}
 	}
 }

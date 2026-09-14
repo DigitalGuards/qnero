@@ -35,13 +35,7 @@ export function chainAdapter(context: ChainContext): SyncChain {
     treeShape: (at) => fetchTreeTotals(context, at),
     leaves: (from, to, at, onProgress) => fetchLeaves(context, from, to, at, onProgress),
     usedNullifiers: (at, onProgress) => fetchUsedNullifiers(context, at, undefined, onProgress),
-    entryCount: (at) => fetchEntryCount(context, at),
   };
-}
-
-async function fetchEntryCount(context: ChainContext, at: string): Promise<bigint> {
-  const { entryCount } = await fetchTreeTotals(context, at);
-  return entryCount;
 }
 
 export function cryptoAdapter(prover: ProverClient): SyncCrypto {

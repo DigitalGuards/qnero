@@ -1,5 +1,12 @@
 //! Guard for the consensus rule in `runtime/src/extrinsic.rs`: the transparent
-//! entry admits ML-DSA-87 and refuses ML-DSA-65.
+//! entry admits ML-DSA-87 and refuses every other signature variant, which on
+//! today's two-variant enum means ML-DSA-65.
+//!
+//! The tests below enumerate the variants that exist. The rule itself is
+//! written as an allowlist, so a variant added later is refused by the arm
+//! already there rather than by a case anybody remembered to add here;
+//! `crates/qnero-wallet/tests/one_signature_scheme.rs` is what holds the rule
+//! to that shape.
 //!
 //! Both halves are here. An ML-DSA-65 signature is refused with
 //! `InvalidTransaction::BadSigner` on both consensus paths, the one

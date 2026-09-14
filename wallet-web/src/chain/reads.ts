@@ -140,6 +140,13 @@ export async function fetchTreeShape(
  * `Shielded::EntryCount` rides along because a scan reads it once per pass:
  * it is chain wide and the whole scan is pinned to one block, so asking per
  * received note was a round trip each for a field that is only a label.
+ *
+ * The counter is decoded at its declared width, the way every other integer
+ * here is. It is a `u64` on chain and it is the one number the wallet turns
+ * into work: the origin walk hashes once per unit of it, inside the worker
+ * that holds the seed, so a value read at whatever width the bytes happened to
+ * carry is a node answer that spends the session. Thirty-two bytes of 0xff
+ * read as 2^256 - 1 before this. `ENTRY_WALK_LIMIT` is the second half of it.
  */
 export async function fetchTreeTotals(
   context: ChainContext,
@@ -149,11 +156,10 @@ export async function fetchTreeTotals(
   const depth = storage(context, 'zkTree', 'depth').key();
   const entryCount = storage(context, 'shielded', 'entryCount').key();
   const values = await queryAt(context, [leafCount, depth, entryCount], at);
-  const entry = values.get(entryCount);
   return {
     leafCount: leNumber(values.get(leafCount)),
     depth: leNumber(values.get(depth)),
-    entryCount: entry === undefined ? 0n : leBytesToBigInt(hexToBytes(entry)),
+    entryCount: decodeInteger(values.get(entryCount), 'Shielded::EntryCount', 8) ?? 0n,
   };
 }
 

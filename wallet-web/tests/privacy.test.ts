@@ -295,6 +295,21 @@ describe('the request stream a sync makes', () => {
     }
   });
 
+  it('asks for the three chain-wide totals once, in one request', async () => {
+    // They are read together because they are one answer: all three are chain
+    // wide and the pass is pinned to one block. The counter used to have an
+    // accessor of its own that called the same bundle again, so every pass
+    // that found a leaf asked this node two byte-identical questions.
+    const { calls } = await syncOnce();
+    const totals = calls.filter(
+      (call) =>
+        call.method === 'state_queryStorageAt' &&
+        (call.params[0] as string[]).includes(KEYS.entryCount),
+    );
+    expect(totals).toHaveLength(1);
+    expect(totals[0]?.params[0]).toEqual([KEYS.leafCount, KEYS.depth, KEYS.entryCount]);
+  });
+
   it('pins every read of the pass to one block hash', async () => {
     const { calls } = await syncOnce();
     const pinned = calls
@@ -368,15 +383,16 @@ function hashOf(height: number): string {
  * and a settled set holding the two nullifiers the proof published. What the
  * test reads is the list of questions, in order.
  */
-function spendContext(options: { refuseSubmission?: boolean } = {}): {
+function spendContext(options: { refuseSubmission?: boolean; leafCount?: number } = {}): {
   context: ChainContext;
   calls: Call[];
 } {
   const calls: Call[] = [];
+  const leafCount = options.leafCount ?? LEAF_COUNT;
   const values = new Map<string, string>();
-  values.set(KEYS.leafCount, le(BigInt(LEAF_COUNT), 8));
+  values.set(KEYS.leafCount, le(BigInt(leafCount), 8));
   values.set(KEYS.depth, le(3n, 4));
-  for (let index = 0; index < LEAF_COUNT; index += 1) {
+  for (let index = 0; index < leafCount; index += 1) {
     values.set(
       `${KEYS.leaves}${index}`,
       `0x${index === SPEND_LEAF ? SPEND_COMMITMENT : 'cd'.repeat(32)}`,
@@ -537,10 +553,13 @@ const LIMITS = {
 };
 
 /** A store that records what it was told and holds nothing. */
-function spendStore(genesisHash: string | null = GENESIS): WalletStore {
+function spendStore(
+  genesisHash: string | null = GENESIS,
+  meta: Partial<StoreMeta> = {},
+): WalletStore {
   const written: string[] = [];
   return {
-    meta: () => Promise.resolve({ ...freshMeta(), genesisHash }),
+    meta: () => Promise.resolve({ ...freshMeta(), genesisHash, ...meta }),
     sealPendingSecret: () => Promise.resolve({ v: 1, iv: '', ct: '' }),
     commitPending: () => {
       written.push('pending');
@@ -550,8 +569,10 @@ function spendStore(genesisHash: string | null = GENESIS): WalletStore {
       written.push('spent');
       return Promise.resolve();
     },
-    markOffChain: () => {
-      written.push('offChain');
+    markOffChain: (commitment: string) => {
+      // The commitment as well as the call: which note was written off is the
+      // whole content of the assertion below.
+      written.push(`offChain:${commitment}`);
       return Promise.resolve(false);
     },
     dropPending: () => {
@@ -697,6 +718,59 @@ describe('the request stream a payment makes', () => {
       ),
     ).rejects.toThrow(/bound to the chain whose genesis/);
     expect(calls).toEqual([{ method: 'chain_getBlockHash', params: [0] }]);
+    expect(store.written()).toEqual([]);
+  });
+
+  it('refuses a node holding fewer leaves than this wallet has read, writing nothing off', async () => {
+    // The gate `runSync` refuses the identical node with, hoisted into the
+    // spend. Remove it and this test fails with the store carrying
+    // `offChain:<the note>`: every other check in `spend` is against this
+    // node's own answers, so they all pass over a short tree. The rebuild
+    // roots to this node's own header, leaf 37 is then past the end of a
+    // 4-leaf tree, the note's recorded block 1 is below the anchor at 12, and
+    // a real, canonical, spendable note is marked off chain on that evidence.
+    // The refusal even tells the reader to send again, so the next-largest
+    // note goes the same way on the next attempt.
+    //
+    // A losing fork, a rolled-back snapshot and a head this node has not
+    // finished executing all produce this shape with no lie told anywhere.
+    const { context } = spendContext({ leafCount: 4 });
+    const store = spendStore(GENESIS, { nextLeaf: 40, lastSyncedBlock: 5000 }) as WalletStore & {
+      written: () => string[];
+    };
+    await expect(
+      spend(
+        context,
+        spendProver(),
+        store,
+        {
+          to: 'qn1recipient',
+          amount: 300n,
+          memo: '',
+          changeAddress: 'qn1mine',
+          candidates: [
+            {
+              note: {
+                commitment: SPEND_COMMITMENT,
+                // Read at a block this node's head has not reached, which is
+                // what makes the index look phantom against its short tree.
+                leafIndex: 37,
+                blockNumber: 1,
+                value: '1000',
+                origin: 'transfer',
+                spent: false,
+                spentSeenAtBlock: null,
+                onChain: true,
+                secret: { v: 1, iv: '', ct: '' },
+              },
+              secret: { rho: OUR_RHO, r: OUR_R, nullifier: OUR_NULLIFIER, memo: '' },
+            },
+          ],
+        },
+        LIMITS,
+        () => undefined,
+      ),
+    ).rejects.toThrow(/reports 4 leaves at its head and this wallet has already read 40/);
     expect(store.written()).toEqual([]);
   });
 

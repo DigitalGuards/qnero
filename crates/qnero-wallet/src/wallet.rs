@@ -99,6 +99,17 @@ pub enum MerkleSource {
 /// to a timeout is to prove again against a fresh anchor.
 const INCLUSION_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How many shield entries the origin walk hashes before it gives up.
+///
+/// `Shielded::EntryCount` is a `u64` the node answers with, and
+/// [`entry_rho_matches`] runs one Poseidon2 hash per unit of it for every
+/// non-coinbase note a scan receives. Unbounded, a single storage answer
+/// decides how long the sync runs. The bound is affordable because the answer
+/// is a label: `origin` separates a shield from a spend's output in the
+/// listing and no rule selects on it. `wallet-web` holds the same bound in
+/// `src/worker/protocol.ts`.
+const ENTRY_WALK_LIMIT: u64 = 100_000;
+
 pub struct Wallet {
     pub seed_path: PathBuf,
     pub store_path: PathBuf,
@@ -1333,6 +1344,21 @@ impl Wallet {
                 header.zk_tree_root.to_hex()
             );
         }
+        // The watermark gate, which is the one `sync_with` refuses a node
+        // behind this wallet with, repeated here because the write-off below
+        // rests on it. Every other check in this function is against this
+        // node's own answers: the rebuild roots to this node's own header, so
+        // a node whose tree is shorter than what this wallet has already read
+        // passes them all and still reaches `out_of_range`, which hands
+        // `send` the typed error it writes a real, spendable note off on. A
+        // losing fork, a rolled-back snapshot and a head the node has not
+        // finished executing all have that shape, and none of them says the
+        // chain dropped a leaf.
+        if let Some(refusal) =
+            short_tree_refusal(tree.leaf_count(), self.store.next_leaf, anchor_block)
+        {
+            return Err(refusal);
+        }
         for note in selected {
             if note.leaf_index >= tree.leaf_count() {
                 return Err(out_of_range(note, tree.leaf_count(), anchor_block));
@@ -1623,8 +1649,14 @@ fn receive_coinbase(
 /// The count is a parameter, because it is the same for every leaf of one
 /// scan: the scan is pinned to a single block hash, so a per-note read was a
 /// round trip whose answer could never move.
+///
+/// The walk stops at [`ENTRY_WALK_LIMIT`]. The count is a number the node
+/// hands over and this is one Poseidon2 hash per unit of it, per received
+/// note, so an unbounded walk lets one storage answer hold the sync for as
+/// long as it likes. Past the bound a note is labelled `Transfer`, which is
+/// what the answer is used for and nothing else.
 fn entry_rho_matches(block: u32, rho: &Digest, entries: u64) -> bool {
-    (0..entries).any(|index| entry_rho(block, index) == *rho)
+    (0..entries.min(ENTRY_WALK_LIMIT)).any(|index| entry_rho(block, index) == *rho)
 }
 
 /// Poll blocks for the exact extrinsic that was submitted.
@@ -1871,6 +1903,26 @@ impl std::error::Error for NoteNotOnChain {}
 /// race against the block boundary and the answer is to wait; a leaf the chain
 /// no longer carries never becomes foldable, and an operator following that
 /// advice retries forever while `select_notes` keeps picking the same note.
+/// The refusal a node whose tree is shorter than this wallet's own watermark
+/// owes a spend, or `None` when it is at or ahead of every leaf read.
+///
+/// The honest case can never reach it. A stored `leaf_index` was read below
+/// the watermark that recorded it, and a tree only grows along one chain, so
+/// any head at or above that point carries at least that many leaves. What
+/// trips it is a node that is behind, and the answer to that is a sync.
+fn short_tree_refusal(leaf_count: u64, watermark: u64, anchor_block: u32) -> Option<anyhow::Error> {
+    if leaf_count >= watermark {
+        return None;
+    }
+    Some(anyhow!(
+        "this node's tree holds {leaf_count} leaves at the anchor, block {anchor_block}, and this \
+         wallet has already read {watermark}. A node on this chain whose leaf count is short has \
+         a head it has not finished executing, so the leaf indices this wallet holds cannot be \
+         checked against it. Nothing has been written off and nothing has been submitted. Sync \
+         against a node that has caught up, or wait for this one to."
+    ))
+}
+
 fn out_of_range(note: &StoredNote, leaf_count: u64, anchor_block: u32) -> anyhow::Error {
     match note.block_number {
         Some(block) if block < anchor_block => anyhow::Error::new(NoteNotOnChain {
@@ -2153,6 +2205,76 @@ mod tests {
         let unknown = out_of_range(&note(None), 8, 14);
         assert!(unknown.downcast_ref::<NoteNotOnChain>().is_none());
         assert!(format!("{unknown:#}").contains("wait one block"));
+    }
+
+    /// The origin walk stops where the wallet says it does.
+    ///
+    /// Its length is `Shielded::EntryCount`, a number the node answers with,
+    /// and every step is a Poseidon2 hash on the thread running the sync.
+    /// Unbounded, one storage answer decides how long a scan runs. What is
+    /// given up past the bound is a label: `origin` separates a shield from a
+    /// spend's output in a listing and no rule selects on it.
+    #[test]
+    fn the_entry_walk_stops_at_the_bound() {
+        // Found, so the bound is not smaller than it says.
+        let last = entry_rho(7, ENTRY_WALK_LIMIT - 1);
+        assert!(entry_rho_matches(7, &last, u64::MAX));
+
+        // The first entry past the bound, offered with the largest count a
+        // `u64` can carry. Without the bound this is a match.
+        let past = entry_rho(7, ENTRY_WALK_LIMIT);
+        assert!(!entry_rho_matches(7, &past, u64::MAX));
+    }
+
+    /// The gate that stands in front of the write-off above.
+    ///
+    /// Every check a spend makes about a leaf index is against the node's own
+    /// answers, the rebuilt root included, so a node holding fewer leaves than
+    /// this wallet has already read passes all of them and reaches the typed
+    /// error `send` writes a note off on. The store's watermark is the one
+    /// input that does not come from the node, and it is what separates "the
+    /// chain does not carry this leaf" from "this node has not executed it
+    /// yet".
+    #[test]
+    fn a_tree_shorter_than_the_watermark_refuses_the_spend_before_any_note_is_examined() {
+        let note = StoredNote {
+            leaf_index: 37,
+            block_number: Some(1),
+            value: 100,
+            commitment: "ab".repeat(32),
+            nullifier: "cd".repeat(32).into(),
+            rho: "ef".repeat(32).into(),
+            r: "01".repeat(32).into(),
+            memo: String::new(),
+            origin: NoteOrigin::Spend,
+            spent: false,
+            spent_seen_at_block: None,
+            on_chain: true,
+        };
+
+        // A store that has read 40 leaves, against a node whose head holds 4.
+        let refusal = short_tree_refusal(4, 40, 12).expect("a short tree is refused");
+        let text = format!("{refusal:#}");
+        assert!(text.contains("4 leaves"), "{text}");
+        assert!(text.contains("already read 40"), "{text}");
+        assert!(
+            refusal.downcast_ref::<NoteNotOnChain>().is_none(),
+            "a node that is behind is never evidence that the chain dropped a leaf"
+        );
+
+        // What it stands in front of: on the same numbers the per-note branch
+        // hands `send` the error it writes the note off on.
+        assert!(
+            out_of_range(&note, 4, 12)
+                .downcast_ref::<NoteNotOnChain>()
+                .is_some(),
+            "without the gate this node's answer writes off a real note"
+        );
+
+        // At the watermark and above it the gate is silent, which is every
+        // honest node: leaf 37 was read below the watermark that recorded it.
+        assert!(short_tree_refusal(40, 40, 12).is_none());
+        assert!(short_tree_refusal(41, 40, 12).is_none());
     }
 
     /// `N` is resolved from the environment the way the pallet's build script

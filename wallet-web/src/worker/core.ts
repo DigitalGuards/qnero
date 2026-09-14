@@ -21,6 +21,7 @@
  * to `self`, and so a test can hand it a module that counts its own calls.
  */
 
+import { ENTRY_WALK_LIMIT } from './protocol';
 import type {
   BuildAnswer,
   DecryptedNote,
@@ -242,6 +243,13 @@ export class ProverCore {
       }
 
       case 'decryptBatch': {
+        // A note's value crosses this boundary as a JSON number, here and
+        // again as `Number(input.value)` in `proveTransfer`, so both are exact
+        // only below 2^53. The chain's own cap is what makes that safe:
+        // `POOL_QUANTUM` is 1e10 planck and the supply cap is 21,000,000
+        // units, so the whole supply is about 2.1e9 pool quanta, and 2^53 is
+        // four million times that. A chain with a larger quantum or no cap
+        // would need this to carry the value as a string end to end.
         const module = this.requireWasm();
         const seed = this.requireSeed();
         const out: (DecryptedNote | null)[] = [];
@@ -283,13 +291,22 @@ export class ProverCore {
 
       case 'entryRhoMatches': {
         // The whole counter, the way `crates/qnero-wallet/src/wallet.rs` walks
-        // it. A shield predicts `(head + 1, EntryCount)`, so a settled one is
-        // somewhere below the counter read at the head, and a walk bounded to
-        // the newest entries mislabelled every older shield of a restored
-        // wallet.
+        // it, up to `ENTRY_WALK_LIMIT`. A shield predicts
+        // `(head + 1, EntryCount)`, so a settled one is somewhere below the
+        // counter read at the head, and a walk bounded to the newest entries
+        // mislabelled every older shield of a restored wallet.
+        //
+        // The ceiling is the node's: this is one Poseidon2 hash per unit of a
+        // number the node hands over, on the thread that holds the seed, and
+        // the loop is synchronous, so an unbounded one is a node answer that
+        // ends the session. See `ENTRY_WALK_LIMIT`, and `runSync` warns when a
+        // pass reads a counter above it.
         const module = this.requireWasm();
         const wanted = normaliseDigest(request.rho);
-        const entries = BigInt(request.entryCount);
+        const entries =
+          BigInt(request.entryCount) > ENTRY_WALK_LIMIT
+            ? ENTRY_WALK_LIMIT
+            : BigInt(request.entryCount);
         for (let index = 0n; index < entries; index += 1n) {
           if (normaliseDigest(module.entryRho(request.blockNumber, index)) === wanted) {
             return { value: true };
