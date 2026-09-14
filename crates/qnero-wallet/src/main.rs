@@ -406,6 +406,15 @@ fn main() -> Result<()> {
                     }
                 );
             }
+            if let Some(hint) = report.ciphertext_hint() {
+                // A hint rather than a warning: on most passes it is the
+                // ordinary case, and every leaf on the chain that is not this
+                // wallet's reads exactly like a leaf whose ciphertext was
+                // swapped. Printed anyway, because the one operator who needed
+                // it is the one waiting for a payment that never arrives, and
+                // the recovery is a command they cannot guess.
+                println!("hint        {hint}");
+            }
             if let Some(entries) = report.entry_walk_truncated {
                 // Beside the rescan notice, and for the same reason: a pass
                 // that gave up part of what a sync normally decides says so

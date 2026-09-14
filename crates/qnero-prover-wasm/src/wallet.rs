@@ -126,6 +126,7 @@ pub fn block_roots_json(leaf_hashes: &[u8], counts_json: &str) -> Result<String>
     let counts: Vec<u64> =
         serde_json::from_str(counts_json).context("the leaf counts do not parse")?;
     let leaves = leaves_from_bytes(leaf_hashes)?;
+    refuse_padding_leaves(&leaves)?;
     let mut frontier = TreeFrontier::new();
     let mut roots = Vec::with_capacity(counts.len());
     let mut cursor = 0usize;
@@ -153,6 +154,39 @@ pub fn block_roots_json(leaf_hashes: &[u8], counts_json: &str) -> Result<String>
 /// chain hashes rather than to a number copied into TypeScript.
 pub fn digest_logs_size() -> usize {
     DIGEST_LOGS_SIZE
+}
+
+/// The tree's own pad, answered as a leaf the chain appended.
+///
+/// `block_roots_json` is the sync's fold, so every digest it is handed is a
+/// leaf below the count the node reported at that block. The all-zero digest
+/// is what `pallet-zk-tree` reads an unfilled slot as at every level, and
+/// `insert_commitment` refuses an append of it by name (`ZeroCommitment`), so
+/// below the count it is a leaf no chain holds.
+///
+/// It has to be refused before the fold and not after it, because the fold
+/// cannot see it: `TreeFrontier` fills the slots above the last leaf with this
+/// same digest, so pushing pads reaches the root a fold that stopped short
+/// reaches. A node can therefore report a leaf count above the one its own
+/// headers folded, pad the difference, and match every root the caller
+/// compares. The caller would commit a watermark above indices the chain has
+/// not filled and never read the real leaves that land there.
+/// `Chain::leaf_window` and `typing::type_chunk` in `crates/qnero-wallet` and
+/// `fetchLeaves` and `fetchLeafHashes` in `wallet-web/src/chain/reads.ts`
+/// refuse the identical answer.
+fn refuse_padding_leaves(leaves: &[Digest]) -> Result<()> {
+    let empty = qnero_circuit::merkle::empty_digest();
+    for (index, leaf) in leaves.iter().enumerate() {
+        ensure!(
+            *leaf != empty,
+            "leaf {index} is the all-zero digest, which is the tree's own pad for an unfilled \
+             slot and a value `pallet-zk-tree` refuses an append of, so a leaf the node's own \
+             count claims and this digest fills is a leaf the chain never appended. Folding it \
+             moves no root, which is what makes it a way to inflate the leaf count under honest \
+             headers."
+        );
+    }
+    Ok(())
 }
 
 /// Every leaf hash of one pass, as `32 * n` bytes.
@@ -621,6 +655,39 @@ mod tests {
     fn a_memo_past_the_pad_is_refused_with_the_pad_named() {
         assert_eq!(memo_fits("hello").unwrap(), qnero_notes::MEMO_BYTES);
         assert!(memo_fits(&"x".repeat(qnero_notes::MEMO_BYTES + 1)).is_err());
+    }
+
+    /// The tree's own pad, answered as a leaf below the count, refused before
+    /// the fold that cannot see it.
+    ///
+    /// Load bearing in the first assertion: three real leaves and the same
+    /// three with a pad appended reach one root, so a node that reports a leaf
+    /// count above the one its headers folded and pads the difference matches
+    /// every root the caller compares. Take `refuse_padding_leaves` out of
+    /// `block_roots_json` and the padded fold answers the honest root, the
+    /// browser wallet commits a watermark above indices the chain has not
+    /// filled, and the leaves that land there are never read.
+    #[test]
+    fn a_padding_leaf_below_the_count_is_refused_before_the_fold() {
+        let real: Vec<Digest> = (0..3u8)
+            .map(|index| Digest::hash_bytes(&[b"leaf", &[index]]))
+            .collect();
+        let mut padded = real.clone();
+        padded.push(qnero_circuit::merkle::empty_digest());
+        assert_eq!(
+            tree_root_hex(&leaf_bytes(&real), 1).unwrap(),
+            tree_root_hex(&leaf_bytes(&padded), 1).unwrap(),
+            "the pad moves no root, which is the whole of the attack"
+        );
+
+        let honest = block_roots_json(&leaf_bytes(&real), "[3]").unwrap();
+        let error = block_roots_json(&leaf_bytes(&padded), "[4]")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("leaf 3"), "{error}");
+        assert!(error.contains("all-zero digest"), "{error}");
+        // The honest fold still answers, at the count the chain holds.
+        assert!(honest.contains("\""), "{honest}");
     }
 
     /// The node rule this export mirrors is the pallet's, sorted children and

@@ -39,7 +39,7 @@ use qnero_wallet::keys::create_seed;
 use qnero_wallet::memo::pad_memo;
 use qnero_wallet::rpc::RpcClient;
 use qnero_wallet::scale::{identity_map_key, storage_prefix};
-use qnero_wallet::wallet::Wallet;
+use qnero_wallet::wallet::{SyncOptions, Wallet};
 use std::collections::BTreeSet;
 
 use support::{encode_u64, test_metadata, FakeNode, NodeState};
@@ -888,4 +888,244 @@ fn a_chain_three_chunks_ahead_syncs_in_one_command() {
             .block_hash,
         hex::encode(node.state().hash_at(head))
     );
+}
+
+/// The tree's own pad, answered as a leaf below the count the node reports.
+///
+/// `TreeFrontier` fills the slots above the last leaf with `empty_digest()`,
+/// so appending explicit all-zero leaves reaches the root a fold that stopped
+/// short reaches, inside one depth. Both nodes here serve byte-identical
+/// headers for blocks 0 to 9, which is bound A: the only difference is
+/// `ZkTree::LeafCount` and one pad leaf. Without the pad rule every check in
+/// `qnero_wallet::typing` passes, the pass commits `next_leaf` above indices
+/// the chain has not filled, and the real leaves that later land there are
+/// below the watermark and never read.
+///
+/// What makes the pad refusable is that no chain holds one:
+/// `pallet-zk-tree::insert_commitment` refuses an append of the all-zero
+/// digest by name (`ZeroCommitment`) and reads it as an unfilled slot
+/// everywhere else. Take the rule out of `Chain::leaf_window` and
+/// `typing::type_chunk` and this test goes green on a watermark four leaves up
+/// a three-leaf chain.
+#[test]
+fn a_pad_leaf_below_the_reported_count_refuses_the_pass() {
+    let (_seed, mut wallet) = fresh("typing-empty-pad");
+    let address = wallet.address();
+    let mine = note_for(address.pk, 1_000, "pad-paid");
+
+    // The lying node: three real leaves in block 8, plus one `empty_digest()`
+    // leaf it also dates to block 8. The root of four leaves whose fourth is
+    // the pad is the root of three, so block 8's header is the honest one.
+    let mut liar = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_leaf(&mut liar, 0, 8, Digest::hash_bytes(&[b"leaf zero"]), &[]);
+    put_leaf(
+        &mut liar,
+        1,
+        8,
+        mine.commitment(),
+        &ct_for(&address, &mine, 7),
+    );
+    put_leaf(&mut liar, 2, 8, Digest::hash_bytes(&[b"leaf two"]), &[]);
+    // The pad. Nothing on chain appended it, and no key beside it is written:
+    // it sits where block 8's coinbase would, so the fixture answers a
+    // coinbase value there the way a node serving this branch would.
+    liar.put_storage(
+        &identity_map_key("ZkTree", "Leaves", 3),
+        &qnero_circuit::merkle::empty_digest().to_bytes(),
+    );
+    liar.put_storage(
+        &identity_map_key("Shielded", "LeafBlocks", 3),
+        &codec::Encode::encode(&8u32),
+    );
+    liar.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(4));
+
+    // The honest node, at the same height, with the same three leaves.
+    let mut honest = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_leaf(&mut honest, 0, 8, Digest::hash_bytes(&[b"leaf zero"]), &[]);
+    put_leaf(
+        &mut honest,
+        1,
+        8,
+        mine.commitment(),
+        &ct_for(&address, &mine, 7),
+    );
+    put_leaf(&mut honest, 2, 8, Digest::hash_bytes(&[b"leaf two"]), &[]);
+    honest.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+
+    // Same genesis, and the same hash at block 9: the pad moved no header.
+    assert_eq!(liar.genesis_hash(), honest.genesis_hash());
+    assert_eq!(
+        liar.hash_at(9),
+        honest.hash_at(9),
+        "the pad leaf changes no header, so this is bound A: honest headers"
+    );
+
+    let node = FakeNode::start(liar);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let refused = wallet
+        .sync(&chain, &test_metadata())
+        .expect_err("a leaf equal to the tree's pad is refused below the count");
+    let message = format!("{refused:#}");
+    assert!(message.contains("ZkTree::Leaves(3)"), "{message}");
+    assert!(message.contains("all-zero digest"), "{message}");
+    assert_eq!(wallet.store.next_leaf, 0, "nothing has been changed");
+    assert!(wallet.store.notes.is_empty());
+
+    // The honest control still folds: the same three leaves, the count the
+    // chain holds, and the payment arrives.
+    let honest_node = FakeNode::start(honest);
+    let rpc = RpcClient::new(&honest_node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the honest count folds");
+    assert_eq!(report.received, 1);
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+    assert_eq!(wallet.store.next_leaf, 3);
+}
+
+/// A substituted ciphertext hides an incoming payment, and a rescan against a
+/// second node is what brings it back.
+///
+/// This is a bound rather than a refusal, and it is open. `ct_digest` binds a
+/// settlement's ciphertext bytes inside the extrinsic that settles them, at
+/// inclusion, and `Shielded::Ciphertexts(i)` is a storage value nothing on
+/// chain ties to leaf `i`: the commitment the tree authenticates carries no
+/// ciphertext. So a node with honest headers can answer a stranger's bytes at
+/// this wallet's payment, the AEAD does not open, and the leaf reads as
+/// somebody else's, which is the ordinary answer for almost every leaf on the
+/// chain. Every root, every position and every header still checks out.
+///
+/// The checkpoint fork walk does not reach it either: the headers agree, so a
+/// later honest node confirms every checkpoint and the ordinary pass scans
+/// nothing. `--rescan` is the recovery, and this test drives it end to end.
+/// `docs/WALLET.md` states the bound under "What a lying node can and cannot
+/// do" and `docs/DESIGN.md` records the closure as the next wallet milestone.
+#[test]
+fn a_substituted_ciphertext_hides_a_payment_until_a_rescan_reads_the_leaf_again() {
+    let (_seed, mut wallet) = fresh("ct-substituted");
+    let address = wallet.address();
+    let miner_key = wallet.miner_key();
+
+    let leaves = |state: &mut NodeState, ciphertext: &[u8], genesis: &[u8; 32]| {
+        let mine = note_for(address.pk, 1_000, "ct-bound");
+        let mined = miner_key.coinbase_note(genesis, 8, 42).expect("a note");
+        put_leaf(state, 0, 8, Digest::hash_bytes(&[b"leaf zero"]), &[]);
+        put_leaf(state, 1, 8, mine.commitment(), ciphertext);
+        put_coinbase(state, 2, 8, mined.commitment(), 42);
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+    };
+
+    // A well-formed ciphertext of the right length, addressed to somebody
+    // else. `try_transfer` parses it and the AEAD simply does not open.
+    let (_stranger_seed, stranger) = fresh("ct-stranger");
+    let stranger = stranger.address();
+    let decoy = note_for(stranger.pk, 1_000, "decoy");
+    let substituted = ct_for(&stranger, &decoy, 9);
+    let honest_ct = {
+        let mine = note_for(address.pk, 1_000, "ct-bound");
+        ct_for(&address, &mine, 7)
+    };
+
+    let mut liar = NodeState {
+        head_number: 9,
+        miner_key: Some(miner_key.clone()),
+        authored: [8].into_iter().collect(),
+        ..Default::default()
+    };
+    let genesis = liar.genesis_hash();
+    leaves(&mut liar, &substituted, &genesis);
+
+    let mut honest = NodeState {
+        head_number: 9,
+        miner_key: Some(miner_key.clone()),
+        authored: [8].into_iter().collect(),
+        ..Default::default()
+    };
+    leaves(&mut honest, &honest_ct, &genesis);
+    assert_eq!(
+        liar.hash_at(9),
+        honest.hash_at(9),
+        "the ciphertext is in no header, so this is bound A: honest headers"
+    );
+
+    let node = FakeNode::start(liar);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the substitution is not refused, which is the bound");
+    assert_eq!(report.received, 1, "only the mined coinbase arrived");
+    assert_eq!(wallet.store.unspent_total(), 42);
+    assert_eq!(report.rejected, 0);
+    assert_eq!(wallet.store.next_leaf, 3, "the watermark is above the leaf");
+
+    // An ordinary pass against the honest node recovers nothing. Its headers
+    // are the ones this wallet already checkpointed, so no fork is found, and
+    // the scan starts above the leaf that was skipped.
+    let honest_node = FakeNode::start(honest);
+    let rpc = RpcClient::new(&honest_node.url);
+    let chain = Chain::new(&rpc);
+    let ordinary = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the honest node agrees with every checkpoint");
+    assert_eq!(ordinary.received, 0);
+    assert_eq!(wallet.store.unspent_total(), 42);
+
+    // The recovery, end to end: a rescan reads the range again from leaf zero
+    // against the honest node, and the payment arrives.
+    let recovered = wallet
+        .sync_with(&chain, &test_metadata(), SyncOptions { rescan: true })
+        .expect("a rescan reads the range again");
+    assert_eq!(recovered.received, 1, "the payment is back");
+    assert_eq!(wallet.store.unspent_total(), 1_042);
+}
+
+/// A pass that read leaves and took nothing out of them says so.
+///
+/// The one operator-visible signal for the bound above. It is the ordinary
+/// case on most passes, because almost every leaf on the chain is somebody
+/// else's, and it is also exactly what a substituted ciphertext looks like, so
+/// the pass carries the sentence that names the recovery rather than leaving
+/// an operator waiting for a payment with nothing to read.
+#[test]
+fn a_pass_that_receives_nothing_carries_the_ciphertext_hint() {
+    let (_seed, mut wallet) = fresh("ct-hint");
+
+    let mut state = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_leaf(&mut state, 0, 8, Digest::hash_bytes(&[b"leaf zero"]), &[]);
+    put_leaf(&mut state, 1, 8, Digest::hash_bytes(&[b"leaf one"]), &[]);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the sync runs");
+    assert_eq!(report.received, 0);
+    assert!(report.leaves_scanned > 0);
+    assert!(report.scanned_and_received_nothing);
+    let hint = report.ciphertext_hint().expect("the hint is carried");
+    assert!(hint.contains("Shielded::Ciphertexts"), "{hint}");
+    assert!(hint.contains("--rescan"), "{hint}");
+
+    // A pass that scanned nothing at all does not raise it: there was no leaf
+    // to read, so there is nothing a ciphertext could have been swapped at.
+    let idle = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the sync runs");
+    assert_eq!(idle.leaves_scanned, 0);
+    assert!(!idle.scanned_and_received_nothing);
+    assert!(idle.ciphertext_hint().is_none());
 }

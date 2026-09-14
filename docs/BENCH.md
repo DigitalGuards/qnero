@@ -984,12 +984,23 @@ resident and what a chunk costs to enter:
 | headers resident, command line | ~140 KiB | a `VerifiedBlock` is four 32-byte fields and a number |
 | headers resident, browser | ~700 KiB | a `RawChainHeader` is five `0x` hex strings the page holds as `String`s |
 | extra requests | 1 | `chain_getBlockHash` at the chunk's top, for every chunk but the last |
-| leaves read, command line | the chunk's own | `Chain::leaves_up_to_block` stops at the first leaf dated above the chunk's top, so a chunk never holds the whole range's ciphertexts |
+| leaves read, command line | the chunk's own, on an honest node | `Chain::leaves_up_to_block` stops at the first leaf `Shielded::LeafBlocks` dates above the chunk's top, so a chunk holds its own blocks' ciphertexts |
 
 The extra request buys the bound and no guarantee: the chunk's top hash comes
 from the node, and the walk down from it to a hash already trusted is what
 proves it, exactly as the single walk proved the head. Only the last chunk's
 top is the head itself.
+
+The leaves row is a figure for an honest node, and it is written that way
+deliberately. The stop condition is `Shielded::LeafBlocks`, which the node
+answers, so a node that dates the whole range into the chunk's top block makes
+one chunk read the whole range: the memory is spent before the check that
+catches it. What that node does not get is a wrong answer. `typing::type_chunk`
+folds exactly the leaves it was handed and compares against each block's own
+`zkTreeRoot`, so an over-reported range reaches a long fold and the pass stops
+with nothing written. Bounding the read itself would take a per-block ceiling
+on appended leaves, which is a consensus number the wallet cannot read over
+RPC.
 
 Two terms are still per block of the whole range rather than per chunk, in the
 browser alone, and both are small beside a header: the leaf count each block

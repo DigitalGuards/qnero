@@ -206,6 +206,20 @@ describe('a key the node withholds below its own leaf count', () => {
     );
   });
 
+  it("refuses the tree's own pad answered as a leaf below the count", async () => {
+    // Not a withheld answer: a present one the chain cannot have written.
+    // `insert_commitment` refuses an append of the all-zero digest by name,
+    // and the tree reads it as an unfilled slot at every level, so folding one
+    // moves no root and a run of them inflates the leaf count under headers
+    // that are honest. The scan would commit a watermark above indices no
+    // block has filled.
+    const values = leafRow(leafRow(new Map<string, string>(), 0), 2);
+    leafRow(values, 1, { commitment: `0x${'00'.repeat(32)}` });
+    await expect(fetchLeaves(nodeWith(values), 0, 3, AT, 3)).rejects.toThrow(
+      new RegExp(`ZkTree::Leaves\\(1\\) with the all-zero digest at block ${AT}`),
+    );
+  });
+
   it('refuses an absent ciphertext on a leaf that is not a coinbase', async () => {
     // A settled output's ciphertext is written by the call that appends its
     // leaf. Without it the leaf reads as one nobody can open, which is the
@@ -363,16 +377,45 @@ describe('the leaf range a tree is rebuilt from', () => {
       [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
       [`${KEYS.leaves}1`, `0x${'cd'.repeat(33)}`],
     ]);
-    await expect(fetchLeafHashes(nodeWith(values), 0, 2, AT)).rejects.toThrow(
+    await expect(fetchLeafHashes(nodeWith(values), 0, 2, AT, 2)).rejects.toThrow(
       /ZkTree::Leaves\(1\) is 33 bytes, expected 32/,
     );
   });
 
-  it('leaves a missing leaf as the pallet\'s empty digest', async () => {
+  it('leaves a missing leaf above the count as the pallet\'s empty digest', async () => {
+    // Above the count the padding is the pallet's own rule: `get_leaf_hash`
+    // substitutes `empty_hash()` for an unset slot, so a local rebuild pads
+    // the way the chain does. Below the count the same answer is refused, by
+    // the two tests under this one.
     const values = new Map<string, string>([[`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`]]);
-    const bytes = await fetchLeafHashes(nodeWith(values), 0, 2, AT);
+    const bytes = await fetchLeafHashes(nodeWith(values), 0, 2, AT, 1);
     expect(bytes).toHaveLength(64);
     expect([...bytes.slice(32)]).toEqual(Array.from({ length: 32 }, () => 0));
+  });
+
+  it('refuses the tree\'s own pad answered as a leaf below the count', async () => {
+    // The all-zero digest is `tree::empty_hash()`, what the tree reads an
+    // unfilled slot as, and `pallet-zk-tree::insert_commitment` refuses an
+    // append of it by name, so below the count it is a leaf the chain never
+    // wrote. Folding one moves no root, because padding is what a fold already
+    // does above the count, so a node can report a leaf count above the one
+    // its headers folded, pad the difference and match every root this wallet
+    // compares. The pass would then write a watermark above indices the chain
+    // has not filled and never read the leaves that land there.
+    const values = new Map<string, string>([
+      [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
+      [`${KEYS.leaves}1`, `0x${'00'.repeat(32)}`],
+    ]);
+    await expect(fetchLeafHashes(nodeWith(values), 0, 2, AT, 2)).rejects.toThrow(
+      /ZkTree::Leaves\(1\) with the all-zero digest/,
+    );
+  });
+
+  it('refuses a leaf hash the node withholds below the count', async () => {
+    const values = new Map<string, string>([[`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`]]);
+    await expect(fetchLeafHashes(nodeWith(values), 0, 2, AT, 2)).rejects.toThrow(
+      /no ZkTree::Leaves\(1\)/,
+    );
   });
 });
 

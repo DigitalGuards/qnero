@@ -316,7 +316,8 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
         assert_eq!(
             hex::encode(published),
             hex::encode(derived),
-            "block {block} is this wallet's, so the label it publishes is the one this wallet              derives from its own coinbase viewing key"
+            "block {block} is this wallet's, so the label it publishes is the one this wallet \
+             derives from its own coinbase viewing key"
         );
 
         // And the value the wallet rebuilt the note at is the one the node
@@ -329,7 +330,8 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
         assert_eq!(
             coinbase.coinbase_value,
             Some(note.value),
-            "the note this wallet holds for block {block} is rebuilt at the value the chain              published"
+            "the note this wallet holds for block {block} is rebuilt at the value the chain \
+             published"
         );
         checked_blocks += 1;
     }

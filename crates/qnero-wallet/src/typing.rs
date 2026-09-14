@@ -27,6 +27,18 @@
 //!    block `N` and comparing the root against that block's header is what
 //!    makes the block's leaf range a fact rather than a claim.
 //!    `Shielded::LeafBlocks` is the claim, and it is checked against this.
+//!
+//!    **The fold pins a block's leaf set, and it pins the count only together
+//!    with the pad rule below it.** `TreeFrontier` fills the slots above the
+//!    last leaf with `empty_digest()`, so pushing explicit all-zero leaves
+//!    reaches the root a fold that stopped short reaches, inside one depth. A
+//!    node could therefore answer a `ZkTree::LeafCount` above the one its own
+//!    headers folded, hand over pads to make up the difference, and pass every
+//!    root comparison. What closes it is that the pad is not a leaf any chain
+//!    can hold: `pallet-zk-tree::insert_commitment` refuses an append of the
+//!    all-zero digest by name and reads it as an unfilled slot everywhere
+//!    else, so a leaf equal to it below the reported count is refused here and
+//!    in `crate::chain::Chain::leaf_window`, and the count is a fact again.
 //! 3. The coinbase position. `pallet-mining-rewards`' `on_finalize` mints the
 //!    coinbase through `CoinbaseSink`, at pallet index 6, where every shield
 //!    and every settled output was appended during extrinsic execution and
@@ -87,7 +99,7 @@
 //! required value above is what says a withheld one out loud.
 
 use anyhow::{bail, Result};
-use qnero_circuit::merkle::TreeFrontier;
+use qnero_circuit::merkle::{empty_digest, TreeFrontier};
 use qnero_notes::{Digest, MinerKey};
 
 use crate::chain::{LeafRecord, VerifiedBlock};
@@ -215,6 +227,13 @@ pub fn type_chunk(
     }
 
     let mut typed = Vec::with_capacity(scanned.len());
+    // Parsed once, in the fold, and indexed afterwards. The per-position pass
+    // below used to reparse each commitment and fall back to a placeholder
+    // digest on a failure, which only ever stayed dead because the fold
+    // refuses first: a reorder of the two loops made the placeholder live, and
+    // a leaf typed against a digest nothing published is a leaf nobody can
+    // open.
+    let mut folded: Vec<Digest> = Vec::with_capacity(scanned.len());
     let mut cursor = 0usize;
     for (offset, block) in blocks.iter().enumerate().skip(1) {
         let parent = &blocks[offset - 1];
@@ -243,6 +262,33 @@ pub fn type_chunk(
                     record.index
                 )
             })?;
+            // The tree's own pad, at an index the node's own count says the
+            // chain appended. `pallet-zk-tree::insert_commitment` refuses an
+            // append of the all-zero digest by name (`ZeroCommitment`) and
+            // reads it as an unfilled slot everywhere else, so below the count
+            // it is a leaf this chain never wrote. It is refused here and not
+            // only in the read layer because folding it is what makes it
+            // invisible: a pad pushed into the frontier reaches the same root
+            // as a fold that stopped short, so a run of pads at the top of the
+            // tree matches every root the headers carry while the count is
+            // higher than the chain's, and the pass would write a watermark
+            // above indices no block has filled. The real leaves that land
+            // there afterwards are below the watermark and never read.
+            if commitment == empty_digest() {
+                bail!(
+                    "this node answered ZkTree::Leaves({}) with the all-zero digest and dates it \
+                     to block {}, whose header is {}. That digest is the tree's own pad for an \
+                     unfilled slot and `pallet-zk-tree` refuses an append of it, so a leaf the \
+                     count claims and the pad fills is a leaf this chain never appended. Folding \
+                     it moves no root, which is what makes it a way to inflate the leaf count \
+                     under honest headers, and the watermark would go above indices the chain \
+                     has not filled. Nothing has been changed.",
+                    record.index,
+                    block.number,
+                    hex::encode(block.hash)
+                );
+            }
+            folded.push(commitment);
             frontier.push(commitment);
         }
         if frontier.root()? != block.zk_tree_root {
@@ -261,8 +307,14 @@ pub fn type_chunk(
         let label_says_ours = block.author_label == Some(miner.label(&parent.hash));
         for (position, record) in scanned[run_start..cursor].iter().enumerate() {
             let is_last = run_start + position + 1 == cursor;
-            let commitment = Digest::from_bytes(&record.commitment.unwrap_or_default())
-                .unwrap_or_else(|_| Digest::hash_bytes(&[b"unreachable"]));
+            let commitment = *folded.get(run_start + position).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the fold and the typing pass disagree about how many leaves block {} \
+                     appended, at leaf {}",
+                    block.number,
+                    record.index
+                )
+            })?;
             let kind = if is_last {
                 coinbase_position_kind(record, block.number, label_says_ours, &commitment, miner)?
             } else {

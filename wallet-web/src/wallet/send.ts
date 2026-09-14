@@ -333,9 +333,16 @@ export async function spend(
         'Nothing has been written off and nothing has been submitted. Sync first.',
     );
   }
-  const leafHashes = await fetchLeafHashes(context, 0, shape.leafCount, head.hash, (done) => {
-    report({ stage: 'tree', detail: `${done} of ${shape.leafCount} leaves` });
-  });
+  const leafHashes = await fetchLeafHashes(
+    context,
+    0,
+    shape.leafCount,
+    head.hash,
+    shape.leafCount,
+    (done) => {
+      report({ stage: 'tree', detail: `${done} of ${shape.leafCount} leaves` });
+    },
+  );
 
   // The root gate first. Without it a leaf index means nothing at all, and
   // every check after it would be comparing against a tree the anchor does not

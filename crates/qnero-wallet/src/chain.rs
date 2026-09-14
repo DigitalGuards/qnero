@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use codec::Decode;
 use qnero_circuit::chain::MAX_TREE_DEPTH;
 use qnero_circuit::header::{HeaderInputs, DIGEST_LOGS_SIZE};
-use qnero_circuit::merkle::{CommitmentTree, MerklePath, SIBLINGS_PER_LEVEL};
+use qnero_circuit::merkle::{empty_digest, CommitmentTree, MerklePath, SIBLINGS_PER_LEVEL};
 use qnero_notes::Digest;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -277,7 +277,10 @@ impl<'a> Chain<'a> {
         let span = head.number - anchor;
         if span > crate::wallet::HEADER_WALK_LIMIT {
             bail!(
-                "a header walk was asked for blocks {anchor} to {}, which is {span} blocks where                  one walk carries at most {}. The head is a number this node answers with and                  this walk holds one header per unit of it, so the range is climbed in chunks                  rather than in one allocation. Nothing has been changed.",
+                "a header walk was asked for blocks {anchor} to {}, which is {span} blocks where \
+                 one walk carries at most {}. The head is a number this node answers with and this \
+                 walk holds one header per unit of it, so the range is climbed in chunks rather \
+                 than in one allocation. Nothing has been changed.",
                 head.number,
                 crate::wallet::HEADER_WALK_LIMIT
             );
@@ -611,15 +614,22 @@ impl<'a> Chain<'a> {
     /// Leaves are appended in block order, so the leaves of blocks at or below
     /// `top_block` are a prefix of what is left to read: this walks windows up
     /// from `from` and stops at the first leaf `Shielded::LeafBlocks` dates
-    /// above `top_block`. That keeps a chunk's reads proportional to the
-    /// chunk rather than to the whole range, so a chain far ahead of the
-    /// checkpoint never holds every leaf's ciphertext at once.
+    /// above `top_block`.
     ///
-    /// The dating is the node's claim and decides nothing: `crate::typing`
-    /// folds exactly these leaves into the tree and compares against each
-    /// block's own `zkTreeRoot`, so a node that under-reports a chunk's range
-    /// reaches a short fold and a node that over-reports reaches a long one,
-    /// and both are refused by name.
+    /// **The size of the read is a property of an honest node's dating.** On
+    /// one, a chunk holds its own blocks' leaves and a chain far ahead of the
+    /// checkpoint never holds every leaf's ciphertext at once, which is the
+    /// figure `docs/BENCH.md` carries for the chunked walk. The stop condition
+    /// is `Shielded::LeafBlocks`, which the node answers, so a node that dates
+    /// the whole range into the chunk's top block makes one chunk read the
+    /// whole range: the memory is spent first and the refusal comes after it.
+    /// What that node does not get is a wrong answer, and the refusal is by
+    /// name: `crate::typing` folds exactly these leaves and compares against
+    /// each block's own `zkTreeRoot`, so an under-reported chunk range reaches
+    /// a short fold and an over-reported one reaches a long fold, and the pass
+    /// stops with nothing written. Bounding the read itself would need a
+    /// per-block ceiling on appended leaves, which is a consensus number this
+    /// wallet does not have over RPC.
     pub fn leaves_up_to_block(
         &self,
         from: u64,
@@ -680,14 +690,20 @@ impl<'a> Chain<'a> {
             if below_count && ciphertext.is_none() && coinbase_value.is_none() {
                 return Err(withheld_key(index, leaf_count, at, "Shielded::Ciphertexts"));
             }
+            let commitment = commitment
+                .map(|bytes| {
+                    <[u8; 32]>::try_from(bytes.as_slice())
+                        .map_err(|_| anyhow!("ZkTree::Leaves({index}) is not 32 bytes"))
+                })
+                .transpose()?;
+            // The tree's own pad, answered below the count that says the chain
+            // appended this leaf. See `padding_sentinel`.
+            if below_count && commitment == Some(empty_digest().to_bytes()) {
+                return Err(padding_sentinel(index, leaf_count, at));
+            }
             out.push(LeafRecord {
                 index,
-                commitment: commitment
-                    .map(|bytes| {
-                        <[u8; 32]>::try_from(bytes.as_slice())
-                            .map_err(|_| anyhow!("ZkTree::Leaves({index}) is not 32 bytes"))
-                    })
-                    .transpose()?,
+                commitment,
                 // `BoundedVec<u8, _>` encodes as a `Vec<u8>`.
                 ciphertext: ciphertext
                     .map(|bytes| decode_stored_bytes(&bytes, "Shielded::Ciphertexts", index))
@@ -924,6 +940,37 @@ pub(crate) fn withheld_key(index: u64, leaf_count: u64, at: &[u8; 32], key: &str
          leaves. `pallet-shielded` writes that key in the same call that appends the leaf and \
          nothing removes it, so below the count it is an answer withheld rather than an absent \
          one. {cost}, and nothing would read it again. Nothing has been changed.",
+        hex::encode(at)
+    )
+}
+
+/// A leaf answered as the tree's own pad, below the count that says the chain
+/// appended it.
+///
+/// The all-zero digest is `tree::empty_hash()`, what `pallet-zk-tree` reads an
+/// unfilled slot as at every level, and `insert_commitment` refuses an append
+/// of it by name (`ZeroCommitment`), so below its own count the chain never
+/// wrote one. Every real leaf is a note commitment, a Poseidon2 output over
+/// four canonical limbs.
+///
+/// What it buys a node is a leaf count the headers appear to carry. A fold
+/// that pushes the pad reaches the root a fold that stopped short reaches,
+/// because padding is what the fold already does above the count, so a run of
+/// pads at the top of the tree matches every root the headers published while
+/// the count is higher than the chain's. The pass would commit a watermark and
+/// a checkpoint above indices this chain has not filled, and the real leaves
+/// that later land there are below the watermark and never read.
+/// `refuse_padding_leaves` in `crates/qnero-prover-wasm/src/wallet.rs`, behind
+/// the fold `block_roots` is, and `fetchLeaves` and `fetchLeafHashes` in
+/// `wallet-web/src/chain/reads.ts` refuse the identical answer.
+pub(crate) fn padding_sentinel(index: u64, leaf_count: u64, at: &[u8; 32]) -> anyhow::Error {
+    anyhow!(
+        "this node answered ZkTree::Leaves({index}) with the all-zero digest at block {}, where \
+         it reports {leaf_count} leaves. That digest is the tree's own pad for an unfilled slot \
+         and `pallet-zk-tree` refuses an append of it, so below the count it is a leaf this \
+         chain never appended. Folding it moves no root, which is exactly what makes it a way to \
+         inflate the leaf count under honest headers, and the pass would then write a watermark \
+         above indices the chain has not filled. Nothing has been changed.",
         hex::encode(at)
     )
 }

@@ -134,7 +134,12 @@ has the bug too.
   because `pallet-shielded` writes both in the call that appends the leaf and
   removes neither. The chain has no gaps under its own count, so such an answer
   is withheld rather than absent, and stepping over either would hide a payment
-  on that leaf behind a watermark written above it.
+  on that leaf behind a watermark written above it. A commitment answered as
+  the tree's own all-zero pad below that count is refused the same way:
+  `pallet-zk-tree` refuses an append of that digest by name and reads it as an
+  unfilled slot everywhere else, and folding one moves no root, so a run of
+  them would inflate the leaf count under headers that are honest and put the
+  watermark above indices no block has filled.
 - **Which rule opens a leaf.** A coinbase is rebuilt from the miner key and the
   public value the chain hashed into its commitment; everything else is
   trial-decrypted. **The kind is derived only from position, and position is
@@ -170,6 +175,22 @@ has the bug too.
   `docs/WALLET.md` carries the per-position table and the section "What a lying
   node can and cannot do", and the same rules are in the command-line wallet's
   `crates/qnero-wallet/src/typing.rs`.
+- **The one per-leaf value nothing binds is the ciphertext, and that is open.**
+  `Shielded::Ciphertexts(i)` is tied to leaf `i` by nothing on chain: the
+  commitment the tree authenticates carries no ciphertext, and `ct_digest`
+  binds the bytes only inside the settlement extrinsic at inclusion, which a
+  storage-only reader never fetches. A node with honest headers can therefore
+  answer a stranger's well-formed ciphertext at an incoming payment, the AEAD
+  does not open, the leaf reads as somebody else's, and the watermark is
+  written above it with every root and every header still checking out. The
+  checkpoint fork walk does not recover it, because the headers agree. **A
+  rescan against a second node is the recovery**, and a pass that read leaves
+  and received nothing says so on the balance screen. That sentence is the
+  ordinary case on most passes, so it reads as a prompt to check against a
+  second node. `docs/WALLET.md`
+  states the bound and `docs/DESIGN.md` records the closure, reading each
+  block's body and binding a settlement's ciphertexts through its proof's
+  public inputs, as the next wallet milestone.
 - **One scan at a time with a payment**, in both directions: a scan reads every note before it starts and
   commits them at the end, and a payment writes `spent` on those same rows the
   moment it settles, so the Settings screen's rescan is disabled while a
@@ -298,7 +319,9 @@ note selection and the conflict-set rule, memo escaping, the node gates on both
 the sync and the spend, the spent reconciliation in both directions, the widths
 every storage value is decoded at and the tree capacity `ZkTree::LeafCount` is
 bounded by, the refusal of each per-leaf key withheld below that count, one
-test per key on both the read layer and the scan, the merge that
+test per key on both the read layer and the scan, the refusal of the tree's own
+pad answered as a leaf below that count, the substituted ciphertext that
+nothing refuses and the rescan that recovers the payment, the merge that
 keeps a spend's own writes when a scan commits over them, the bound on the
 shield-origin walk, and the lint fence that keeps `zkTree_getMerkleProof` out
 of every spelling it has.

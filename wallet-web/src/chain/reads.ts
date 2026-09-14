@@ -289,6 +289,39 @@ export async function fetchTreeTotals(
   };
 }
 
+/** The pallet's `empty_hash()`: 32 zero bytes, in the hex a node answers. */
+const PADDING_SENTINEL = `0x${'00'.repeat(32)}`;
+
+/**
+ * The tree's own pad, answered as a leaf below the count the node reports at
+ * the same block.
+ *
+ * The all-zero digest is `tree::empty_hash()`, what `pallet-zk-tree` reads an
+ * unfilled slot as at every level, and `insert_commitment` refuses an append
+ * of it by name (`ZeroCommitment`), so below its own count the chain never
+ * wrote one. Every real leaf is a note commitment, a Poseidon2 output.
+ *
+ * What it buys a node is a leaf count its own headers appear to carry. A fold
+ * that pushes the pad reaches the root a fold that stopped short reaches,
+ * because padding is what the fold already does above the count, so a run of
+ * pads at the top of the tree matches every root the headers published while
+ * the count is higher than the chain's. The pass would commit a watermark and
+ * a checkpoint above indices this chain has not filled, and the real leaves
+ * that later land there are below the watermark and never read.
+ * `Chain::leaf_window` and `typing::type_chunk` in the command-line wallet and
+ * `block_roots` in the prover module refuse the identical answer.
+ */
+function paddingSentinel(index: number, leafCount: number, at: string): Error {
+  return new Error(
+    `this node answered ZkTree::Leaves(${index}) with the all-zero digest at block ${at}, where ` +
+      `it reports ${leafCount} leaves. That digest is the tree's own pad for an unfilled slot ` +
+      'and `pallet-zk-tree` refuses an append of it, so below the count it is a leaf this chain ' +
+      'never appended. Folding it moves no root, which is exactly what makes it a way to inflate ' +
+      'the leaf count under honest headers, and the pass would then write a watermark above ' +
+      'indices the chain has not filled. Nothing has been changed.',
+  );
+}
+
 /**
  * Every leaf hash in `[from, to)` at one block, as `32 * n` raw bytes.
  *
@@ -296,15 +329,21 @@ export async function fetchTreeTotals(
  * tree rebuild, which takes bytes, and a 4000-leaf tree is 128 KB either way
  * but 4000 allocations in the string form.
  *
- * A missing entry is the pallet's `empty_hash()`, which is what
- * `tree::get_leaf_hash` substitutes, so a local rebuild pads the way the chain
- * does.
+ * `leafCount` is `ZkTree::LeafCount` read at this same block hash, and it is
+ * what an answer is measured against. Below it every index was appended by one
+ * of `pallet-shielded`'s three writers and carries a commitment, so an absent
+ * answer there is one the node withheld and the all-zero digest there is the
+ * tree's own pad standing in for a leaf the chain never wrote. Both are
+ * refused by name. At or above the count the padding is the pallet's own rule,
+ * which is what `tree::get_leaf_hash` substitutes, so a local rebuild pads the
+ * way the chain does.
  */
 export async function fetchLeafHashes(
   context: ChainContext,
   from: number,
   to: number,
   at: string,
+  leafCount: number,
   onProgress?: (done: number) => void,
 ): Promise<Uint8Array> {
   const leaves = storage(context, 'zkTree', 'leaves');
@@ -318,7 +357,14 @@ export async function fetchLeafHashes(
     const values = await queryAt(context, [...keys.values()], at);
     for (let index = start; index < end; index += 1) {
       const value = values.get(keys.get(index) ?? '');
-      if (value !== undefined) {
+      if (value === undefined) {
+        if (index < leafCount) {
+          throw withheld('ZkTree::Leaves', index, leafCount, at);
+        }
+      } else {
+        if (index < leafCount && value.toLowerCase() === PADDING_SENTINEL) {
+          throw paddingSentinel(index, leafCount, at);
+        }
         // Checked before the write, not after. A longer value would overwrite
         // the head of the next leaf's slot and a shorter one would leave the
         // tail of this one as zeros, which is a valid canonical digest: either
@@ -535,6 +581,9 @@ export async function fetchLeaves(
       }
       if (belowCount && rawCiphertext === undefined && coinbase === undefined) {
         throw withheld('Shielded::Ciphertexts', row.index, leafCount, at);
+      }
+      if (belowCount && rawCommitment?.toLowerCase() === PADDING_SENTINEL) {
+        throw paddingSentinel(row.index, leafCount, at);
       }
       const height = decodeInteger(block, `Shielded::LeafBlocks(${row.index})`, 4);
       out.push({

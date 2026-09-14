@@ -281,6 +281,11 @@ export interface SyncReport {
    * count is a header this wallet is being handed for a block it did not come
    * from, and the checkpoint fork walk is what finds out on the next pass
    * against another node.
+   *
+   * A non-zero count also puts a warning on `warnings`, which the balance
+   * screen renders. The count on its own was read by nothing, so the one
+   * operator-visible signal for that attack lived only in the command-line
+   * wallet.
    */
   coinbaseLabelDisagreed: number;
   relocated: number;
@@ -295,6 +300,18 @@ export interface SyncReport {
   pendingAbandoned: number;
   recordedGenesis: boolean;
   forkedAt: number | null;
+  /**
+   * What the pass gave up or could not decide, in sentences the balance screen
+   * renders.
+   *
+   * A bypassed node gate, the add-only notice a rescan owes, a truncated
+   * origin walk, abandoned pending rows, a coinbase rebuilt under a foreign
+   * label, and the one bound the per-leaf rules do not close: a pass that read
+   * leaves and received nothing is also what a substituted ciphertext looks
+   * like, so the sentence naming the rescan that recovers such a payment goes
+   * here. `docs/WALLET.md`, under "What a lying node can and cannot do",
+   * carries that bound.
+   */
   warnings: string[];
   addOnly: boolean;
 }
@@ -499,7 +516,6 @@ export async function authenticateLeaves(
   let bottomNumber = trusted.number;
   let bottomHash = strip0x(trusted.hash);
   let anchorRoot: string | null = null;
-  let walked = 0;
 
   for (;;) {
     const top = Math.min(bottomNumber + HEADER_WALK_LIMIT, head.number);
@@ -516,7 +532,14 @@ export async function authenticateLeaves(
         raw.push(header);
       },
       (done) => {
-        progress('headers', `${walked + done} of ${head.number - trusted.number + 1} block headers`);
+        // Counted from where the walk stands rather than from a running sum
+        // of the chunks. Each chunk re-fetches the block it stands on, so
+        // adding chunk lengths counted every boundary twice and a multi-chunk
+        // sync reported more headers than the range holds.
+        progress(
+          'headers',
+          `${bottomNumber - trusted.number + done} of ${head.number - trusted.number + 1} block headers`,
+        );
       },
     );
     raw.reverse();
@@ -526,7 +549,6 @@ export async function authenticateLeaves(
           'Nothing has been changed.',
       );
     }
-    walked += raw.length;
 
     const hashes = (await crypto.headerHashes(raw.map((header) => anchorFromHeader(header)))).map(
       strip0x,
@@ -1400,6 +1422,43 @@ export async function runSync(
     warnings.push(
       'rescan: add-only, spent flags and orphans are not reconciled; run a normal sync against ' +
         'a current node afterwards.',
+    );
+  }
+  if (report.coinbaseLabelDisagreed > 0) {
+    // The one operator-visible signal for a node that rebuilt the headers, and
+    // it existed only in the command-line wallet: the field was counted here
+    // and read by nothing. Never on a block a Qnero node built, because the
+    // author label and the note's own randomness come out of one coinbase
+    // viewing key, so a non-zero count is a header this wallet is being handed
+    // for a block it did not come from. The wording is the command-line
+    // wallet's.
+    const notes = report.coinbaseLabelDisagreed === 1 ? 'note' : 'notes';
+    warnings.push(
+      `${report.coinbaseLabelDisagreed} coinbase ${notes} this wallet rebuilt as its own sit in ` +
+        "blocks whose author label is not this wallet's. The reward is taken, because only this " +
+        "wallet's coinbase viewing key derives that commitment. Sync against a second node: a " +
+        'branch built for this wallet alone is what the checkpoint walk finds there.',
+    );
+  }
+  if (report.leavesScanned > 0 && report.received === 0) {
+    // The ordinary case on most passes, because almost every leaf on the chain
+    // is somebody else's, and also exactly what one substituted ciphertext
+    // looks like. `Shielded::Ciphertexts(i)` is the one per-leaf value nothing
+    // on chain binds to leaf `i`: the commitment the tree authenticates
+    // carries no ciphertext, and `ct_digest` binds the bytes only inside the
+    // settlement extrinsic at inclusion, which a storage-only reader never
+    // fetches. So a node with honest headers can answer a stranger's bytes at
+    // an incoming payment, the leaf reads as somebody else's and the watermark
+    // is written above it. The checkpoint fork walk does not recover it,
+    // because the headers agree. The sentence is the command-line wallet's
+    // `CIPHERTEXT_SUBSTITUTION_HINT`, and `docs/WALLET.md` carries the bound.
+    warnings.push(
+      'a pass that reads leaves and receives nothing is the ordinary case, and it is also what ' +
+        'one substituted ciphertext looks like: Shielded::Ciphertexts is the only per-leaf value ' +
+        'nothing on chain binds to its leaf, so a node with honest headers can answer a ' +
+        "stranger's bytes at an incoming payment and the leaf reads as somebody else's. If a " +
+        'payment was expected and is not here, rescan against a second node, which is the ' +
+        'recovery.',
     );
   }
 

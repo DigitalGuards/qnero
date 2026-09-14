@@ -294,6 +294,102 @@ describe('a leaf whose kind the headers decide', () => {
     expect(result.report.coinbaseReceived).toBe(1);
     expect(result.report.receivedValue).toBe(42n);
     expect(result.report.coinbaseLabelDisagreed).toBe(1);
+    // Counted and also said out loud. The count used to be written into the
+    // report and read by nothing, so the one operator-visible signal for a
+    // node that rebuilt the headers existed only in the command-line wallet.
+    // The balance screen renders every warning the pass returns.
+    expect(
+      result.report.warnings.some(
+        (warning) =>
+          warning.includes("author label is not this wallet's") &&
+          warning.includes('second node'),
+      ),
+    ).toBe(true);
+  });
+
+  /**
+   * The bound the per-leaf rules do not close, and the recovery that does.
+   *
+   * `Shielded::Ciphertexts(i)` is the one per-leaf value nothing on chain
+   * binds to leaf `i`. The commitment the tree authenticates carries no
+   * ciphertext, and `ct_digest` binds the bytes only inside the settlement
+   * extrinsic at inclusion, which a storage-only reader never fetches. So a
+   * node with honest headers answers a stranger's bytes at an incoming
+   * payment, the AEAD does not open, the leaf reads as somebody else's, and
+   * the watermark goes above it. Every root, every position and every header
+   * still checks out, and the checkpoint fork walk finds nothing because the
+   * headers agree.
+   *
+   * What the pass owes the operator is the sentence, and what recovers the
+   * payment is a rescan against a second node. `docs/WALLET.md` states the
+   * bound under "What a lying node can and cannot do" and `docs/DESIGN.md`
+   * records the closure as the next wallet milestone.
+   */
+  it('hides a payment behind a substituted ciphertext until a rescan reads the leaf again', async () => {
+    const SUBSTITUTED = new Uint8Array([9, 9, 9]);
+    const rowsWith = (ciphertext: Uint8Array): Leaf[] => [
+      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseQuanta: null },
+      { commitment: MINE.commitment, block: 8, ciphertext, coinbaseQuanta: null },
+      { commitment: 'a2'.repeat(32), block: 8, ciphertext: null, coinbaseQuanta: 7n },
+    ];
+    // A prover that opens the payment only when the bytes beside the leaf are
+    // the ones its sender encrypted, which is what an AEAD does.
+    const opener = (shape: ChainShape): SyncCrypto => ({
+      ...cryptoParts(shape),
+      decryptBatch: (items) =>
+        Promise.resolve(
+          items.map((item) => (item.index === 1 && item.ciphertext[0] === CT[0] ? MINE : null)),
+        ),
+      coinbaseBatch: (items) => Promise.resolve(items.map(() => null)),
+      entryRhoMatches: () => Promise.resolve(false),
+    });
+
+    const lying = rowsWith(SUBSTITUTED);
+    const lyingShape = shapeOf(9, lying);
+    const hidden = await runSync(
+      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
+      chainOf(lyingShape, lying),
+      opener(lyingShape),
+    );
+    expect(hidden.report.received).toBe(0);
+    expect(hidden.meta.nextLeaf).toBe(3);
+    expect(hidden.notes).toHaveLength(0);
+    expect(
+      hidden.report.warnings.some((warning) => warning.includes('Shielded::Ciphertexts')),
+    ).toBe(true);
+
+    // An honest node serving the same headers recovers nothing on an ordinary
+    // pass: no checkpoint moves, so the scan starts above the leaf.
+    const honest = rowsWith(CT);
+    const honestShape = shapeOf(9, honest);
+    const ordinary = await runSync(
+      {
+        meta: metaAfter(hidden),
+        held: [],
+        rejected: [],
+        pending: [],
+        checkpoints: hidden.checkpoints,
+      },
+      chainOf(honestShape, honest),
+      opener(honestShape),
+    );
+    expect(ordinary.report.received).toBe(0);
+
+    // The recovery, end to end.
+    const rescanned = await runSync(
+      {
+        meta: metaAfter(ordinary),
+        held: [],
+        rejected: [],
+        pending: [],
+        checkpoints: ordinary.checkpoints,
+      },
+      chainOf(honestShape, honest),
+      opener(honestShape),
+      { rescan: true },
+    );
+    expect(rescanned.report.received).toBe(1);
+    expect(rescanned.notes).toHaveLength(1);
   });
 
   /** A value that does not rebuild this wallet's own coinbase commitment. */
@@ -449,11 +545,26 @@ describe('the checkpoint a pass records', () => {
       { commitment: 'b2'.repeat(32), block: head - 1, ciphertext: null, coinbaseQuanta: 9n },
     ];
     const shape = shapeOf(head, leaves);
+    // The progress the walk reports, so a multi-chunk sync can be held to a
+    // count the range holds. Each chunk re-fetches the block it stands on, and
+    // a running sum of the chunk lengths therefore counted every boundary
+    // twice: the strip read "3075 of 3073 block headers" at the end.
+    let walked = 0;
     const result = await runSync(
       { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
       chainOf(shape, leaves),
       cryptoOf(shape, { transfersAt: new Set([0]) }),
+      {
+        onProgress: (stage, detail) => {
+          const match = stage === 'headers' ? /^(\d+) of (\d+) block headers$/.exec(detail ?? '') : null;
+          if (match !== null) {
+            walked = Math.max(walked, Number(match[1]));
+            expect(Number(match[1])).toBeLessThanOrEqual(Number(match[2]));
+          }
+        },
+      },
     );
+    expect(walked).toBe(head + 1);
     expect(result.report.received).toBe(1);
     expect(result.checkpoints.map((checkpoint) => checkpoint.blockNumber)).toEqual([
       HEADER_WALK_LIMIT,

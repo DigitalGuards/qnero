@@ -152,9 +152,16 @@ export function chainParts(shape: ChainShape): Pick<SyncChain, 'headers' | 'leaf
   return {
     // Descending, `top` first, which is the order the parent links can be
     // followed in and the order the read layer hands them over in.
-    headers: (anchor, top, onHeader) => {
+    headers: (anchor, top, onHeader, onProgress) => {
+      // `onProgress` counts the headers of this chunk, one-based, the way
+      // `fetchHeaderRange` does: a chunked walk reports its position from the
+      // block it stands on, so the count a test reads is the count an operator
+      // reads.
+      let seen = 0;
       for (let number = top.number; number >= anchor; number -= 1) {
         onHeader(headerAt(shape, bytes, number));
+        seen += 1;
+        onProgress?.(seen);
       }
       return Promise.resolve();
     },

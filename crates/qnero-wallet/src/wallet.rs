@@ -618,7 +618,10 @@ impl Wallet {
                                 // later change to either rule from turning a
                                 // mined reward back into a silent skip.
                                 None if ours => bail!(
-                                    "leaf {} was typed as this wallet's own coinbase for block                                      {block_number} at {value} quanta and the same rebuild does                                      not open it. The two rebuilds are one rule, so this is a                                      build whose halves disagree. Nothing has been changed.",
+                                    "leaf {} was typed as this wallet's own coinbase for block \
+                                     {block_number} at {value} quanta and the same rebuild does \
+                                     not open it. The two rebuilds are one rule, so this is a \
+                                     build whose halves disagree. Nothing has been changed.",
                                     record.index
                                 ),
                                 None => match record
@@ -761,7 +764,8 @@ impl Wallet {
 
         if cursor_leaf != leaf_count {
             bail!(
-                "the blocks this pass walked account for {cursor_leaf} leaves where this node                  reports {leaf_count} at the same block. Nothing has been changed."
+                "the blocks this pass walked account for {cursor_leaf} leaves where this node \
+                 reports {leaf_count} at the same block. Nothing has been changed."
             );
         }
 
@@ -833,6 +837,10 @@ impl Wallet {
         if rewind.is_some() && reconciles {
             report.vanished = self.store.mark_vanished(start, &seen_again);
         }
+
+        // Said out loud rather than left to the operator to notice. See
+        // `SyncReport::scanned_and_received_nothing`.
+        report.scanned_and_received_nothing = report.leaves_scanned > 0 && report.received == 0;
 
         self.store.next_leaf = leaf_count;
         self.store.last_synced_block = head.number;
@@ -2025,6 +2033,22 @@ pub struct SyncReport {
     /// out on the next pass against another node. `docs/WALLET.md`, under
     /// "What a lying node can and cannot do", is the bound.
     pub coinbase_label_disagreed: u64,
+    /// Whether this pass read leaves and took nothing out of them.
+    ///
+    /// Ordinary on most passes: almost every leaf on the chain is somebody
+    /// else's. It is also exactly what one substituted ciphertext looks like,
+    /// and that is why the pass says it out loud. `Shielded::Ciphertexts(i)`
+    /// is the one per-leaf value nothing on chain binds to leaf `i`: the
+    /// commitment carries no ciphertext, and `ct_digest` binds the bytes only
+    /// inside the settlement extrinsic at inclusion, which a storage-only
+    /// reader never fetches. So a node with honest headers can answer a
+    /// stranger's bytes at this wallet's incoming payment, the AEAD does not
+    /// open, the leaf reads as somebody else's and the watermark is written
+    /// above it. The checkpoint fork walk does not recover it, because the
+    /// headers agree; a rescan against a second node does.
+    /// `docs/WALLET.md`, under "What a lying node can and cannot do", carries
+    /// the bound and the closure that would end it.
+    pub scanned_and_received_nothing: bool,
     /// The node gate this sync bypassed, as the refusal it would have been.
     ///
     /// Only `--rescan` produces one, and only for the checkpoint walk: a node
@@ -2034,6 +2058,18 @@ pub struct SyncReport {
     /// about.
     pub bypassed_refusal: Option<String>,
 }
+
+/// What a pass that read leaves and received nothing may also be, in one line.
+///
+/// See [`SyncReport::scanned_and_received_nothing`] for the bound. The
+/// sentence is here so the command-line wallet and `wallet-web` print one
+/// text, the way [`RESCAN_ADD_ONLY`] is shared.
+pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =
+    "a pass that reads leaves and receives nothing is the ordinary case, and it is also what one \
+     substituted ciphertext looks like: Shielded::Ciphertexts is the only per-leaf value nothing \
+     on chain binds to its leaf, so a node with honest headers can answer a stranger's bytes at \
+     an incoming payment and the leaf reads as somebody else's. If a payment was expected and is \
+     not here, run `sync --rescan` against a second node, which is the recovery.";
 
 /// What a rescan does not do, in one line, for the report and the CLI.
 ///
@@ -2049,6 +2085,13 @@ impl SyncReport {
     /// The add-only notice, when this sync was one.
     pub fn rescan_notice(&self) -> Option<&'static str> {
         self.add_only.then_some(RESCAN_ADD_ONLY)
+    }
+
+    /// The substituted-ciphertext hint, when this pass read leaves and took
+    /// nothing out of them.
+    pub fn ciphertext_hint(&self) -> Option<&'static str> {
+        self.scanned_and_received_nothing
+            .then_some(CIPHERTEXT_SUBSTITUTION_HINT)
     }
 }
 
@@ -2144,7 +2187,14 @@ impl core::fmt::Display for NoteNotOnChain {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "this wallet holds a note at leaf {}, recorded at block {}, and the chain's tree at              block {} ends at leaf {}. Block {} has executed block {}, and the rebuilt tree roots              at the value that block's header carries, so this chain does not carry that leaf:              the block the note settled in was orphaned and the settlement has not been              re-included. `send` marks such a note off chain, so it keeps its secrets, leaves the              unspent total and is passed over by the next attempt, which spends what the chain              does carry. Run `sync` against a node at the current head: a sync that meets the              commitment {} again moves the note to the leaf the chain now holds it at and puts it              back.",
+            "this wallet holds a note at leaf {}, recorded at block {}, and the chain's tree at \
+             block {} ends at leaf {}. Block {} has executed block {}, and the rebuilt tree roots \
+             at the value that block's header carries, so this chain does not carry that leaf: the \
+             block the note settled in was orphaned and the settlement has not been re-included. \
+             `send` marks such a note off chain, so it keeps its secrets, leaves the unspent total \
+             and is passed over by the next attempt, which spends what the chain does carry. Run \
+             `sync` against a node at the current head: a sync that meets the commitment {} again \
+             moves the note to the leaf the chain now holds it at and puts it back.",
             self.leaf_index,
             self.recorded_at_block,
             self.anchor_block,
@@ -2241,7 +2291,9 @@ fn out_of_range(note: &StoredNote, leaf_count: u64, anchor_block: u32) -> anyhow
         // the store never recorded one. Both are a tree that is about to carry
         // the leaf.
         _ => anyhow!(
-            "leaf {} is not folded into the tree at block {anchor_block} yet, which holds {}              leaves. A note cannot be minted and spent in the same block; wait one block and              retry.",
+            "leaf {} is not folded into the tree at block {anchor_block} yet, which holds {} \
+             leaves. A note cannot be minted and spent in the same block; wait one block and \
+             retry.",
             note.leaf_index,
             leaf_count
         ),

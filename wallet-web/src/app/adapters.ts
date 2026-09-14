@@ -51,7 +51,10 @@ export function chainAdapter(context: ChainContext, limits: ProverLimits): SyncC
     headers: (anchor, top, onHeader, onProgress) =>
       fetchHeaderRange(context, anchor, top, onHeader, onProgress),
     leafBlocks: (from, to, at) => fetchLeafBlocks(context, from, to, at),
-    leafHashes: (to, at, onProgress) => fetchLeafHashes(context, 0, to, at, onProgress),
+    // `to` is `ZkTree::LeafCount` read at this same block, so it is both the
+    // end of the range and the count an answer is measured against: below it a
+    // leaf that is absent or is the tree's own pad is refused by name.
+    leafHashes: (to, at, onProgress) => fetchLeafHashes(context, 0, to, at, to, onProgress),
   };
 }
 
