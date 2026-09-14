@@ -61,14 +61,20 @@ export function Layout({ current, children }: { current: Route['name']; children
       <div className="frame">
         <nav className="rail" aria-label="Sections">
           {/* The wordmark, in the rail's own type: the name at the UI size
-              in the mono face, the chain it is pointed at under it at label
-              size. "silQ Road, the Qnero explorer" is the full form and it is
-              set where a subtitle has room: the tab title, the readme and the
-              docs. Under the name here is the chain, which is the thing a
-              reader of a page needs to know first. */}
+              in the mono face, what this site is under it, and the chain it is
+              pointed at under that, both at label size. "silQ Road, the Qnero
+              explorer" is the full form and it is set where a subtitle has
+              room: the tab title, the readme and the docs. The descriptor
+              stays on the page because the name on its own says nothing about
+              what a first-time reader is looking at, and a tab title is
+              truncated to about a dozen characters. Under it is the chain,
+              which is the thing a reader of a page needs to know first, and it
+              is a live value: while no chain is connected it says that, so the
+              slot never reads as a second half of the name. */}
           <a className="rail__brand" href={href({ name: 'home' })}>
             silQ Road
-            <span className="rail__chain">{bundle?.config.chainName ?? 'explorer'}</span>
+            <span className="rail__kind">explorer</span>
+            <span className="rail__chain">{bundle?.config.chainName ?? 'no chain'}</span>
           </a>
           <div className="rail__nav">
             {NAV.map((item) => (

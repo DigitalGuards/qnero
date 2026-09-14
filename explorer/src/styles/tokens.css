@@ -70,7 +70,10 @@
   --radius-sm: 3px;
   --radius-md: 5px;
 
-  --rail-width: 95px;
+  /* Wide enough for the wordmark on one line: "silQ Road" measures 70 px at
+     the UI size, and it measures more on a browser with a minimum font size
+     set, which is where 95 px used to break it in two. */
+  --rail-width: 120px;
   --strip-height: 24px;
   /* Reading measure, on the container rather than on the paragraph: a `ch` cap
      tracks the child's font size and an 11px note would stop at half a box. */

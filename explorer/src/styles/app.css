@@ -130,6 +130,20 @@ li a,
   font-size: var(--fs-ui);
   font-weight: 600;
   color: var(--text-primary);
+  /* The name carries a space and the rail is a fixed width, so a reader whose
+     browser sets a minimum font size read it as "silQ" over "Road": four
+     stacked tokens with the chain's own two under them, and no way to tell
+     which two were the name. The name cannot break; the lines under it may. */
+  white-space: nowrap;
+}
+
+.rail__kind {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  font-weight: 400;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .rail__brand:hover {
@@ -142,6 +156,9 @@ li a,
   font-size: var(--fs-label);
   font-weight: 400;
   color: var(--text-muted);
+  /* A chain name is somebody else's string and it wraps, under a wordmark that
+     does not. */
+  white-space: normal;
   word-break: break-word;
 }
 
