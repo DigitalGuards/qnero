@@ -75,13 +75,14 @@ import {
 } from './fee';
 import { normaliseHash } from '../lib/hex';
 import { memoRefusal } from '../lib/memo';
+import { formatStepsAsQnr } from '../lib/units';
 import type { NoteSecret, PendingNote, StoredNote } from './model';
 import { selectNotes } from './select';
 import type { WalletStore } from './store';
 
 export interface SpendRequest {
   to: string;
-  /** Pool quanta. */
+  /** The amount, as a count of pool steps. */
   amount: bigint;
   memo: string;
   /** The wallet's own address, which the change note is written to. */
@@ -265,9 +266,9 @@ export async function spend(
   const fee = request.fee ?? floor;
   if (fee < floor) {
     throw new Error(
-      `this runtime's floor for one slot is ${floor} quanta and this spend offers ${fee}. The ` +
-        'fee is a public input fixed at proving time, so an underpaid one costs the whole proof ' +
-        'and comes back as PayloadUnderpaid.',
+      `this runtime's floor for one slot is ${formatStepsAsQnr(floor)} and this spend offers ` +
+        `${formatStepsAsQnr(fee)}. The fee is a public input fixed at proving time, so an ` +
+        'underpaid one costs the whole proof and comes back as PayloadUnderpaid.',
     );
   }
 

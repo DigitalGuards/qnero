@@ -17,6 +17,7 @@
  * of the two bounds on the memo pad is a refusal and which is a warning.
  */
 
+import { formatStepsAsQnr } from '../lib/units';
 import type { ShieldedConstants } from '../chain/api';
 
 /** The divisor, clamped the way the pallet clamps it. A zero would divide by zero. */
@@ -142,11 +143,12 @@ export function memoPadSeparationWarning(
   return (
     "this runtime's payload fee prices nothing. This wallet pads every memo to " +
     `${memoBytes} bytes, so the pair of ciphertexts a spend publishes is ` +
-    `${2 * paddedCiphertextBytes} bytes and pays ${sent} quanta of payload fee, and a pair ` +
-    `padded to this runtime's cap of ${cap} bytes each pays ${capped}. A settler can pad both ` +
-    `outputs to the cap and write ${2 * Math.max(0, cap - paddedCiphertextBytes)} bytes of ` +
-    'permanent state per slot for what an honest spend pays. It is a property of the chain and ' +
-    `not of this spend, so the spend goes ahead. This runtime charges one quantum per ` +
+    `${2 * paddedCiphertextBytes} bytes and pays ${formatStepsAsQnr(sent)} of payload fee, and ` +
+    `a pair padded to this runtime's cap of ${cap} bytes each pays ${formatStepsAsQnr(capped)}. ` +
+    `A settler can pad both outputs to the cap and write ` +
+    `${2 * Math.max(0, cap - paddedCiphertextBytes)} bytes of permanent state per slot for what ` +
+    'an honest spend pays. It is a property of the chain and not of this spend, so the spend ' +
+    `goes ahead. This runtime charges 0.01 QNR per ` +
     `${constants.ciphertextBytesPerFeeQuantum} ciphertext bytes; ${advice}.`
   );
 }

@@ -88,14 +88,14 @@ interface FakeLeaf {
   commitment: string;
   blockNumber: number;
   note: ScannedNote | null;
-  coinbaseQuanta?: bigint;
+  coinbaseSteps?: bigint;
 }
 
 /** The runtime's `BlockHashWindow`, which is 256 on this chain. */
 const ANCHOR_WINDOW = 256;
 
 /** The four per-leaf keys a node can answer with nothing. */
-type LeafKey = 'commitment' | 'ciphertext' | 'blockNumber' | 'coinbaseQuanta';
+type LeafKey = 'commitment' | 'ciphertext' | 'blockNumber' | 'coinbaseSteps';
 
 /**
  * Every leaf below the count, with all four of its keys.
@@ -151,19 +151,19 @@ function fakeChain(options: {
       const rows = [];
       for (let index = from; index < Math.min(to, leafCount); index += 1) {
         const leaf = declared.get(index);
-        const declaredQuanta = leaf?.coinbaseQuanta;
+        const declaredSteps = leaf?.coinbaseSteps;
         // A block's coinbase is the last leaf it appended and `pallet-shielded`
         // writes the value in the call that appends it, so on a real chain
         // every block's last leaf carries one. A filled-in leaf gets that
         // shape from the block ranges rather than from a fixture's intent,
         // because a fixture whose last leaf carries no value is describing a
         // chain no node can serve and a wallet refuses it by name. A fixture
-        // still overrides it in either direction: naming `coinbaseQuanta` sets
+        // still overrides it in either direction: naming `coinbaseSteps` sets
         // the value, and `withheld` is the node answering nothing for a key the
         // chain wrote.
         const endsItsBlock =
           index + 1 === leafCount || shape.blockOf(index + 1) !== shape.blockOf(index);
-        const quanta = declaredQuanta ?? (endsItsBlock ? BigInt(index + 1) : null);
+        const steps = declaredSteps ?? (endsItsBlock ? BigInt(index + 1) : null);
         rows.push({
           index,
           commitment: withheld('commitment', index) ? null : shape.commitmentAt(index),
@@ -171,13 +171,13 @@ function fakeChain(options: {
           // every other leaf carries one: an unnamed leaf gets bytes nothing
           // can open.
           ciphertext:
-            declaredQuanta !== undefined || withheld('ciphertext', index)
+            declaredSteps !== undefined || withheld('ciphertext', index)
               ? null
               : new Uint8Array([1, 2, 3]),
           blockNumber: withheld('blockNumber', index)
             ? null
             : (options.misdated?.get(index) ?? shape.blockOf(index)),
-          coinbaseQuanta: withheld('coinbaseQuanta', index) ? null : quanta,
+          coinbaseSteps: withheld('coinbaseSteps', index) ? null : steps,
         });
       }
       return Promise.resolve(rows);
@@ -205,7 +205,7 @@ function fakeCrypto(leaves: readonly FakeLeaf[], shape?: ChainShape): SyncCrypto
       Promise.resolve(
         items.map((item) => {
           const leaf = leaves.find(
-            (entry) => entry.index === item.index && entry.coinbaseQuanta !== undefined,
+            (entry) => entry.index === item.index && entry.coinbaseSteps !== undefined,
           );
           return leaf?.note === undefined || leaf.note === null
             ? null
@@ -459,12 +459,12 @@ describe('a key the node withholds inside the scanned range', () => {
     // somebody else's and stepped over.
     const mined = note(25n, 'c0');
     const coinbase: FakeLeaf[] = [
-      { index: 0, commitment: mined.commitment, blockNumber: 3, note: mined, coinbaseQuanta: 25n },
+      { index: 0, commitment: mined.commitment, blockNumber: 3, note: mined, coinbaseSteps: 25n },
     ];
     await expect(
       runSync(
         { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
-        fakeChain({ head: 5, leaves: coinbase, leafCount: 1, withheld: { coinbaseQuanta: [0] } }),
+        fakeChain({ head: 5, leaves: coinbase, leafCount: 1, withheld: { coinbaseSteps: [0] } }),
         fakeCrypto(coinbase),
       ),
     ).rejects.toThrow(/no Shielded::CoinbaseValues for leaf 0/);

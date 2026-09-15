@@ -27,11 +27,34 @@ import { expect, test, type Page } from '@playwright/test';
 import { APP_DIR, headHeight, readFacts, wallet, walletProving } from './devnet';
 
 const PASSPHRASE = 'a passphrase for the test wallet';
-/** What the command-line wallet sends the browser wallet, in pool quanta. */
+/**
+ * What the command-line wallet sends the browser wallet.
+ *
+ * Both wallets take and print QNR, so the figure is written the way a person
+ * types it and `steps` is what the arithmetic below runs in: a balance is
+ * compared exactly, and a QNR string is a decimal.
+ */
+const FUNDING_QNR = '10';
 const FUNDING = 1000n;
 /** What the browser then pays back out. */
+const PAYMENT_QNR = '3';
 const PAYMENT = 300n;
 const MEMO = 'e2e';
+
+/**
+ * A QNR amount off the screen, as the steps it is a multiple of.
+ *
+ * Every amount this wallet renders is `formatStepsAsQnr`, which is two
+ * decimals and a symbol. Reading it back through the same rule is what lets
+ * this suite compare a balance exactly rather than on a rendered string.
+ */
+function stepsFrom(text: string): bigint {
+  const found = /(-?[0-9][0-9,]*)\.([0-9]{2})/.exec(text);
+  if (found === null) {
+    throw new Error(`no QNR amount in ${JSON.stringify(text)}`);
+  }
+  return BigInt(`${found[1]?.replace(/,/g, '') ?? ''}${found[2] ?? ''}`);
+}
 
 interface Measurement {
   mode: 'threaded' | 'single';
@@ -200,8 +223,7 @@ async function syncUntil(page: Page, want: (unspent: bigint) => boolean): Promis
     await page.getByTestId('tab-balance').click();
     await page.getByTestId('do-sync').click();
     await expect(page.getByTestId('do-sync')).toBeEnabled({ timeout: 120_000 });
-    const shown = (await page.getByTestId('balance-unspent').innerText()).replace(/,/g, '');
-    const unspent = BigInt(shown);
+    const unspent = stepsFrom(await page.getByTestId('balance-unspent').innerText());
     if (want(unspent)) {
       return unspent;
     }
@@ -273,25 +295,24 @@ test.describe('the browser wallet against a dev chain', () => {
       '--to',
       address,
       '--amount',
-      String(FUNDING),
+      FUNDING_QNR,
       '--memo',
       'funding the browser wallet',
     ]);
 
     const funded = await syncUntil(page, (unspent) => unspent >= FUNDING);
     expect(funded).toBe(FUNDING);
-    await expect(page.getByTestId('notes-table')).toContainText('1,000');
+    await expect(page.getByTestId('notes-table')).toContainText('10.00 QNR');
 
     // The fee floor is read off the screen rather than computed here: it comes
     // from this runtime's own constants and a second copy of the arithmetic in
     // the test would agree with the wallet and disagree with the chain.
     await page.getByTestId('tab-send').click();
-    const feeShown = (await page.getByTestId('send-fee').innerText()).replace(/[^0-9]/g, '');
-    const fee = BigInt(feeShown);
+    const fee = stepsFrom(await page.getByTestId('send-fee').innerText());
     expect(fee).toBeGreaterThan(0n);
 
     await page.getByTestId('send-to').fill(facts.recipientAddress);
-    await page.getByTestId('send-amount').fill(String(PAYMENT));
+    await page.getByTestId('send-amount').fill(PAYMENT_QNR);
     await page.getByTestId('send-memo').fill(MEMO);
 
     const startedAt = Date.now();
@@ -318,7 +339,7 @@ test.describe('the browser wallet against a dev chain', () => {
 
     // The result leads with what the payment was. The prover's own figures are
     // behind a disclosure, which this opens to read them.
-    await expect(page.getByTestId('send-amount-paid')).toContainText(String(PAYMENT));
+    await expect(page.getByTestId('send-amount-paid')).toContainText('3.00 QNR');
     await expect(page.getByTestId('send-recipient')).toContainText(facts.recipientAddress);
     await page.getByText('What the proof cost').click();
     const proverText = await page.getByTestId('send-prover').innerText();
@@ -337,7 +358,7 @@ test.describe('the browser wallet against a dev chain', () => {
     // the browser: a different language, a different prover, a different store.
     wallet(['--file', facts.recipientSeed, 'sync']);
     const balance = wallet(['--file', facts.recipientSeed, 'balance']);
-    expect(balance).toContain(String(PAYMENT));
+    expect(balance).toContain('3.00 QNR');
     expect(balance).toContain(MEMO);
 
     // And the browser sees its own change, with the input it spent gone.

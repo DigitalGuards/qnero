@@ -402,8 +402,8 @@ export interface LeafRecord {
   /** The ciphertext itself, decoded out of its `Vec<u8>` length prefix. */
   ciphertext: Uint8Array | null;
   blockNumber: number | null;
-  /** Set for exactly the leaves a block's coinbase minted, in pool quanta. */
-  coinbaseQuanta: bigint | null;
+  /** Set for exactly the leaves a block's coinbase minted, as a count of pool steps. */
+  coinbaseSteps: bigint | null;
 }
 
 /**
@@ -601,7 +601,7 @@ export async function fetchLeaves(
         commitment: decodeCommitment(rawCommitment, row.index),
         ciphertext: decodeBytes(rawCiphertext, `Shielded::Ciphertexts(${row.index})`),
         blockNumber: height === null ? null : Number(height),
-        coinbaseQuanta: decodeInteger(coinbase, `Shielded::CoinbaseValues(${row.index})`, 8),
+        coinbaseSteps: decodeInteger(coinbase, `Shielded::CoinbaseValues(${row.index})`, 8),
       });
     }
     onProgress?.(end - from);

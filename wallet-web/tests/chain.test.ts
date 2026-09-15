@@ -147,7 +147,7 @@ describe('a leaf row', () => {
     expect(row?.commitment).toBe(`0x${'cd'.repeat(32)}`);
     expect(row?.ciphertext).toEqual(new Uint8Array([0x00, 0x11, 0x22, 0x33]));
     expect(row?.blockNumber).toBe(9);
-    expect(row?.coinbaseQuanta).toBe(10n);
+    expect(row?.coinbaseSteps).toBe(10n);
   });
 
   it('refuses a leaf that is not 32 bytes, and names it', async () => {
@@ -278,7 +278,7 @@ describe('a key the node withholds below its own leaf count', () => {
     });
     const [row] = await fetchLeaves(nodeWith(values), 0, 1, AT, 1);
     expect(row?.ciphertext).toBeNull();
-    expect(row?.coinbaseQuanta).toBe(10n);
+    expect(row?.coinbaseSteps).toBe(10n);
   });
 
   it('reads a leaf above the count as absent, which is what the range past the end is', async () => {

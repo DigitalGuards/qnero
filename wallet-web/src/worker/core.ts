@@ -249,9 +249,9 @@ export class ProverCore {
         // A note's value crosses this boundary as a JSON number, here and
         // again as `Number(input.value)` in `proveTransfer`, so both are exact
         // only below 2^53. The chain's own cap is what makes that safe:
-        // `POOL_QUANTUM` is 1e10 planck and the supply cap is 21,000,000
-        // units, so the whole supply is about 2.1e9 pool quanta, and 2^53 is
-        // four million times that. A chain with a larger quantum or no cap
+        // the pool step is 1e10 planck and the supply cap is 21,000,000
+        // units, so the whole supply is about 2.1e9 steps, and 2^53 is
+        // four million times that. A chain with a larger step or no cap
         // would need this to carry the value as a string end to end.
         const module = this.requireWasm();
         const seed = this.requireSeed();

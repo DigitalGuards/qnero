@@ -39,13 +39,13 @@ const PADDED = FIXED + MEMO;
 
 describe('the fee floor', () => {
   it('matches the two endpoints the circuit document pins', () => {
-    // Two real ciphertexts (3462 bytes) pay eight quanta; two padded to the
+    // Two real ciphertexts (3462 bytes) pay eight steps of fee; two padded to the
     // cap (4096) pay nine.
     expect(slotFeeFloor(runtime(), FIXED, FIXED)).toBe(8n);
     expect(slotFeeFloor(runtime(), 2048, 2048)).toBe(9n);
   });
 
-  it('rounds a started quantum up to a whole one', () => {
+  it('rounds a started fee bucket up to a whole one', () => {
     expect(slotFeeFloor(runtime(), 1, 0)).toBe(2n);
     expect(slotFeeFloor(runtime(), 512, 0)).toBe(2n);
     expect(slotFeeFloor(runtime(), 513, 0)).toBe(3n);
@@ -113,7 +113,7 @@ describe('the memo pad', () => {
   });
 
   it('names the smaller pad when one would restore the separation', () => {
-    // At 1160 bytes per quantum a pair may reach 3480 bytes, so each
+    // At 1160 bytes to the fee bucket a pair may reach 3480 bytes, so each
     // ciphertext may reach 1740 and the pad is 9.
     const slightly = { ...runtime(), ciphertextBytesPerFeeQuantum: 1160 };
     expect(largestSeparatingPad(slightly, FIXED)).toBe(9);
@@ -159,10 +159,10 @@ describe('note selection', () => {
 
   it('refuses a balance spread over three notes, with the reachable total', () => {
     expect(() => selectNotes([note(100, 0), note(100, 1), note(100, 2)], 250n)).toThrow(
-      /reach 200/,
+      /reach 2\.00 QNR/,
     );
     expect(() => selectNotes([note(100, 0), note(100, 1), note(100, 2)], 250n)).toThrow(
-      /300 held in total/,
+      /3\.00 QNR held in total/,
     );
   });
 

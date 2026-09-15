@@ -16,6 +16,7 @@
  * because "consolidate first" is the only thing a person can do about it.
  */
 
+import { formatStepsAsQnr } from '../lib/units';
 import type { NoteRow, StoredNote } from './model';
 
 /** Input slots in the leaf circuit. */
@@ -93,9 +94,10 @@ export function selectNotes(candidates: readonly StoredNote[], target: bigint): 
   }
   const held = sorted.reduce((sum, note) => sum + BigInt(note.value), 0n);
   throw new Error(
-    `this spend needs ${target} quanta and the ${chosen.length} largest of ${sorted.length} ` +
-      `unspent notes reach ${total} (${held} held in total). A spend has ${MAX_INPUTS} input ` +
-      'slots, so consolidate first: send yourself the largest notes to merge them.',
+    `this spend needs ${formatStepsAsQnr(target)} and the ${chosen.length} largest of ` +
+      `${sorted.length} unspent notes reach ${formatStepsAsQnr(total)} ` +
+      `(${formatStepsAsQnr(held)} held in total). A spend has ${MAX_INPUTS} input slots, so ` +
+      'consolidate first: send yourself the largest notes to merge them.',
   );
 }
 

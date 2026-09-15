@@ -26,9 +26,9 @@ import { Panel, Prose } from '../components/UI/Panel';
 import { Tooltip } from '../components/UI/Tooltip';
 import { PHASES, progressFraction } from './sendPhases';
 import { Num, Table, TableScroll } from '../components/UI/Table';
-import { formatBytes, formatDuration, parseQuanta } from '../lib/format';
+import { formatBytes, formatDuration, parseQnrToSteps } from '../lib/format';
 import { memoByteLength, memoIsPlainAscii, memoRefusal } from '../lib/memo';
-import { formatCount } from '../lib/units';
+import { formatStepsAsQnr } from '../lib/units';
 import type { SpendProgress, SpendResult } from '../wallet/send';
 
 interface SendForm {
@@ -261,7 +261,7 @@ export function SendScreen({
       <form
         onSubmit={(event) => {
           void form.handleSubmit((values) => {
-            onSend(values.to.trim(), parseQuanta(values.amount), values.memo);
+            onSend(values.to.trim(), parseQnrToSteps(values.amount), values.memo);
           })(event);
         }}
       >
@@ -299,28 +299,28 @@ export function SendScreen({
         </Field>
         <Field
           label="Amount"
-          note="quanta"
+          note="QNR"
           htmlFor="send-amount"
-          hint={`${formatCount(reachable)} reachable in one payment`}
+          hint={`${formatStepsAsQnr(reachable)} reachable in one payment`}
           error={form.formState.errors.amount?.message}
         >
           <Input
             id="send-amount"
             data-testid="send-amount"
-            inputMode="numeric"
+            inputMode="decimal"
             autoComplete="off"
             {...form.register('amount', {
               validate: (value) => {
                 let parsed: bigint;
                 try {
-                  parsed = parseQuanta(value);
+                  parsed = parseQnrToSteps(value);
                 } catch (parseError) {
                   return (parseError as Error).message;
                 }
                 if (parsed + feeFloor > reachable) {
                   return (
-                    `one payment reaches ${formatCount(reachable)} quanta and this one needs ` +
-                    `${formatCount(parsed + feeFloor)} including the fee`
+                    `one payment reaches ${formatStepsAsQnr(reachable)} and this one needs ` +
+                    `${formatStepsAsQnr(parsed + feeFloor)} including the fee`
                   );
                 }
                 return true;
@@ -362,7 +362,7 @@ export function SendScreen({
               for. The padding half of it belongs on the memo field's hint,
               which is where a reader is when it matters. */}
           <Tooltip
-            label={`The floor this runtime charges for one slot: a flat minimum plus one quantum
+            label={`The floor this runtime charges for one slot: a flat minimum plus 0.01 QNR
               per block of ciphertext bytes. It is a public input fixed at proving time, so it
               cannot be raised after the proof exists.`}
           >
@@ -374,7 +374,7 @@ export function SendScreen({
             </button>
           </Tooltip>
           <span className="font-mono text-body text-ink" data-testid="send-fee">
-            {formatCount(feeFloor)} quanta
+            {formatStepsAsQnr(feeFloor)}
           </span>
         </div>
 
@@ -437,15 +437,15 @@ function SendResultView({
           <tbody>
             <tr>
               <td>amount</td>
-              <Num testId="send-amount-paid">{formatCount(result.amount)} quanta</Num>
+              <Num testId="send-amount-paid">{formatStepsAsQnr(result.amount)}</Num>
             </tr>
             <tr>
               <td>fee</td>
-              <Num>{formatCount(result.fee)} quanta</Num>
+              <Num>{formatStepsAsQnr(result.fee)}</Num>
             </tr>
             <tr>
               <td>change</td>
-              <Num testId="send-change">{formatCount(result.change)} quanta</Num>
+              <Num testId="send-change">{formatStepsAsQnr(result.change)}</Num>
             </tr>
             <tr>
               <td>{settled ? 'settled in block' : included ? 'included in block' : 'not included'}</td>

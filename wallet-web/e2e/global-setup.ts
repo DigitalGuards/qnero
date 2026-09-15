@@ -11,6 +11,6 @@ import { startDevnet } from './devnet';
 export default async function globalSetup(): Promise<void> {
   const facts = await startDevnet();
   console.log(
-    `dev chain up: ${facts.rpc}, ${facts.shieldedQuanta} quanta shielded in block ${facts.shieldHeight}`,
+    `dev chain up: ${facts.rpc}, ${facts.shieldedQnr} QNR shielded in block ${facts.shieldHeight}`,
   );
 }

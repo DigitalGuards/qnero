@@ -25,7 +25,7 @@ import { Panel } from '../components/UI/Panel';
 import { Pill } from '../components/UI/Address';
 import { Tooltip } from '../components/UI/Tooltip';
 import { Num, Table, TableScroll } from '../components/UI/Table';
-import { formatCount, formatQuantaAsQnr, splitAmountForDisplay } from '../lib/units';
+import { formatCount, formatStepsAsQnr, splitAmountForDisplay } from '../lib/units';
 import { renderMemo } from '../lib/memo';
 import type { Balances, NoteRow, RejectedNote } from '../wallet/model';
 import type { SyncReport } from '../wallet/sync';
@@ -33,15 +33,13 @@ import type { SyncReport } from '../wallet/sync';
 /**
  * The amount, split so the padding can be dimmed and nothing else.
  *
- * A pool quantum is a hundredth of a QNR, so a quanta balance carries exactly
- * two significant decimals and no padding at all: in practice this renders at
- * one weight, which is what MyMonero does for an amount with nothing to pad.
- * See [`splitAmountForDisplay`].
+ * Amounts move in steps of 0.01 QNR, so a shielded balance carries exactly two
+ * significant decimals and no padding at all: in practice this renders at one
+ * weight, which is what MyMonero does for an amount with nothing to pad. See
+ * [`splitAmountForDisplay`].
  */
-function Amount({ quanta, testId }: { quanta: bigint; testId?: string }): ReactNode {
-  const { significant, pad } = splitAmountForDisplay(
-    formatQuantaAsQnr(quanta).replace(' QNR', ''),
-  );
+function Amount({ steps, testId }: { steps: bigint; testId?: string }): ReactNode {
+  const { significant, pad } = splitAmountForDisplay(formatStepsAsQnr(steps).replace(' QNR', ''));
   return (
     <div className="mm-balance text-ink" data-testid={testId}>
       {significant}
@@ -121,10 +119,8 @@ export function BalanceScreen({
   return (
     <div className="space-y-3">
       <Panel>
-        <Amount quanta={balances.unspent} />
-        <p className="mt-1 text-meta text-muted">
-          <span data-testid="balance-unspent">{formatCount(balances.unspent)}</span> quanta unspent
-        </p>
+        <Amount steps={balances.unspent} testId="balance-unspent" />
+        <p className="mt-1 text-meta text-muted">unspent</p>
         {/* The track count follows the content. Fixed at two columns, the
             common case of one visible figure rendered a half-width row and put
             the number in the middle of the panel with the right half empty,
@@ -140,7 +136,7 @@ export function BalanceScreen({
                 term="reachable in one payment"
                 explains="A leaf has two input slots, so one payment can spend at most two notes. A
                   balance spread over more than two is held and not reachable until it is merged."
-                value={formatCount(balances.reachable)}
+                value={formatStepsAsQnr(balances.reachable)}
                 testId="balance-reachable"
               />
             )}
@@ -149,7 +145,7 @@ export function BalanceScreen({
                 term="pending"
                 explains="Written by this wallet and not yet met in the tree: a change note whose
                   settlement has been submitted."
-                value={formatCount(balances.pending)}
+                value={formatStepsAsQnr(balances.pending)}
                 testId="balance-pending"
               />
             )}
@@ -159,7 +155,7 @@ export function BalanceScreen({
                 explains="Held with its secrets, and its leaf is gone: a reorg took the block that
                   carried it and no later block has re-included it. It counts in no balance until it
                   comes back."
-                value={formatCount(balances.offChain)}
+                value={formatStepsAsQnr(balances.offChain)}
                 testId="balance-offchain"
               />
             )}
@@ -197,9 +193,10 @@ export function BalanceScreen({
 
       {balances.reachable < balances.unspent && (
         <Notice>
-          One payment reaches {formatCount(balances.reachable)} of {formatCount(balances.unspent)}{' '}
-          quanta. A leaf has two input slots, so a balance spread over more than two notes is not
-          reachable in one spend: send yourself the largest notes to merge them.
+          One payment reaches {formatStepsAsQnr(balances.reachable)} of{' '}
+          {formatStepsAsQnr(balances.unspent)}. A leaf has two input slots, so a balance spread
+          over more than two notes is not reachable in one spend: send yourself the largest notes
+          to merge them.
         </Notice>
       )}
 
@@ -245,7 +242,7 @@ export function BalanceScreen({
                 <tr>
                   <th>Leaf</th>
                   <th>Block</th>
-                  <th className="text-right">Quanta</th>
+                  <th className="text-right">Amount</th>
                   <th>
                     <Tooltip
                       label="A shield this wallet made is labelled by matching the chain's own
@@ -273,7 +270,7 @@ export function BalanceScreen({
                     <tr key={row.note.commitment}>
                       <Num>{row.note.leafIndex}</Num>
                       <Num>{row.note.blockNumber ?? '-'}</Num>
-                      <Num>{formatCount(BigInt(row.note.value))}</Num>
+                      <Num>{formatStepsAsQnr(BigInt(row.note.value))}</Num>
                       <td>
                         {row.note.origin}
                         {row.conflictMembers > 1 && (
@@ -311,7 +308,7 @@ export function BalanceScreen({
               <thead>
                 <tr>
                   <th>Leaf</th>
-                  <th className="text-right">Quanta</th>
+                  <th className="text-right">Amount</th>
                   <th className="w-full">Reason</th>
                 </tr>
               </thead>
@@ -319,7 +316,7 @@ export function BalanceScreen({
                 {rejected.map((entry) => (
                   <tr key={entry.commitment}>
                     <Num>{entry.leafIndex}</Num>
-                    <Num>{formatCount(BigInt(entry.value))}</Num>
+                    <Num>{formatStepsAsQnr(BigInt(entry.value))}</Num>
                     <td>{entry.reason}</td>
                   </tr>
                 ))}

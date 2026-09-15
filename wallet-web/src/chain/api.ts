@@ -69,9 +69,9 @@ export const REQUIRED_STORAGE: ReadonlyArray<{
 export interface ShieldedConstants {
   /** Anchor window, in blocks. A proof outside it is refused. */
   blockHashWindow: number;
-  /** Flat floor per real leaf slot, in pool quanta. */
+  /** Flat floor per real leaf slot, as a count of pool steps. */
   minLeafFee: bigint;
-  /** Ciphertext bytes one quantum of fee buys. */
+  /** Ciphertext bytes one step of fee buys. */
   ciphertextBytesPerFeeQuantum: number;
   /** Size cap on one ciphertext. Over it the extrinsic fails its SCALE decode. */
   maxCiphertextBytes: number;

@@ -87,7 +87,7 @@ interface Leaf {
   commitment: string;
   block: number;
   ciphertext: Uint8Array | null;
-  coinbaseQuanta: bigint | null;
+  coinbaseSteps: bigint | null;
 }
 
 function shapeOf(head: number, leaves: readonly Leaf[], ours?: ReadonlySet<number>): ChainShape {
@@ -122,7 +122,7 @@ function chainOf(shape: ChainShape, leaves: readonly Leaf[]): SyncChain {
           commitment: leaf.commitment,
           ciphertext: leaf.ciphertext,
           blockNumber: leaf.block,
-          coinbaseQuanta: leaf.coinbaseQuanta,
+          coinbaseSteps: leaf.coinbaseSteps,
         })),
       ),
     usedNullifiers: () => Promise.resolve(new Set<string>()),
@@ -202,9 +202,9 @@ describe('a leaf whose kind the headers decide', () => {
   /** The control: a payment on one leaf, this wallet's mined coinbase on another. */
   it('pays a transfer and a mined coinbase from an honest node', async () => {
     const leaves: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: MINED.commitment, block: 8, ciphertext: null, coinbaseQuanta: 42n },
+      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: MINED.commitment, block: 8, ciphertext: null, coinbaseSteps: 42n },
     ];
     const shape = shapeOf(9, leaves, new Set([8]));
     const result = await runSync(
@@ -225,11 +225,11 @@ describe('a leaf whose kind the headers decide', () => {
    */
   it('refuses a coinbase value below a block’s last leaf', async () => {
     const leaves: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: 1n },
+      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: 1n },
       // Block 8's own coinbase, at the one index of the block that can hold
       // one, so the leaves below it are positions that cannot.
-      { commitment: 'a2'.repeat(32), block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: 'a2'.repeat(32), block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
     const shape = shapeOf(9, leaves);
     await expect(
@@ -243,7 +243,7 @@ describe('a leaf whose kind the headers decide', () => {
     // Without the invented key the payment arrives, which is what the refusal
     // is protecting.
     const honest = leaves.map((leaf, index) =>
-      index === 1 ? { ...leaf, coinbaseQuanta: null } : leaf,
+      index === 1 ? { ...leaf, coinbaseSteps: null } : leaf,
     );
     const result = await runSync(
       { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
@@ -260,8 +260,8 @@ describe('a leaf whose kind the headers decide', () => {
    */
   it('still pays a leaf an invented coinbase value sits on at a foreign coinbase position', async () => {
     const leaves: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: 1n },
+      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: 1n },
     ];
     const shape = shapeOf(9, leaves);
     const result = await runSync(
@@ -296,7 +296,7 @@ describe('a leaf whose kind the headers decide', () => {
           commitment: MINED.commitment,
           block: 7,
           ciphertext: new Uint8Array([9, 9, 9]),
-          coinbaseQuanta: null,
+          coinbaseSteps: null,
         },
       ];
       const shape: ChainShape = { ...shapeOf(9, leaves, ours), unlabelled };
@@ -312,7 +312,7 @@ describe('a leaf whose kind the headers decide', () => {
       if (first === undefined) {
         throw new Error('the fixture has a leaf');
       }
-      const honest = [{ ...first, ciphertext: null, coinbaseQuanta: 42n }];
+      const honest = [{ ...first, ciphertext: null, coinbaseSteps: 42n }];
       const result = await runSync(
         { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
         chainOf(shape, honest),
@@ -336,7 +336,7 @@ describe('a leaf whose kind the headers decide', () => {
    */
   it('finds this wallet’s own reward under a forged foreign label', async () => {
     const leaves: Leaf[] = [
-      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseQuanta: 42n },
+      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseSteps: 42n },
     ];
     const shape = shapeOf(9, leaves, new Set<number>());
     const result = await runSync(
@@ -381,9 +381,9 @@ describe('a leaf whose kind the headers decide', () => {
   it('hides a payment behind a substituted ciphertext until a rescan reads the leaf again', async () => {
     const SUBSTITUTED = new Uint8Array([9, 9, 9]);
     const rowsWith = (ciphertext: Uint8Array): Leaf[] => [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: STRANGER_CT, coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext, coinbaseQuanta: null },
-      { commitment: 'a2'.repeat(32), block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: 'a0'.repeat(32), block: 8, ciphertext: STRANGER_CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext, coinbaseSteps: null },
+      { commitment: 'a2'.repeat(32), block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
 
     const lying = rowsWith(SUBSTITUTED);
@@ -470,17 +470,17 @@ describe('a leaf whose kind the headers decide', () => {
 
     // The chain: leaf 1 is the payment, leaf 2 is block 8's coinbase.
     const honestRows: Leaf[] = [
-      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
     // The liar: the payment's commitment and the coinbase's exchanged, every
     // ciphertext untouched, so `Shielded::Ciphertexts(1)` is still exactly the
     // bytes the chain published.
     const lyingRows: Leaf[] = [
-      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseQuanta: null },
-      { commitment: COINBASE, block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseSteps: null },
+      { commitment: COINBASE, block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
     const shapeFor = (rows: readonly Leaf[]): ChainShape => ({
       ...shapeOf(9, rows),
@@ -547,14 +547,14 @@ describe('a leaf whose kind the headers decide', () => {
     const DECOY_CT = new Uint8Array([7, 7, 7]);
 
     const honestRows: Leaf[] = [
-      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
     const lyingRows: Leaf[] = [
-      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseQuanta: null },
-      { commitment: COINBASE, block: 8, ciphertext: DECOY_CT, coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseSteps: null },
+      { commitment: COINBASE, block: 8, ciphertext: DECOY_CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
     const shapeFor = (rows: readonly Leaf[]): ChainShape => ({
       ...shapeOf(9, rows),
@@ -636,28 +636,28 @@ describe('a leaf whose kind the headers decide', () => {
     // The chain. Leaf 1 is the payment, leaf 7 is the coinbase: six leaves and
     // a group boundary apart.
     const honestRows: Leaf[] = [
-      { commitment: stranger(0), block: 8, ciphertext: strangerCt(0), coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: stranger(2), block: 8, ciphertext: strangerCt(2), coinbaseQuanta: null },
-      { commitment: stranger(3), block: 8, ciphertext: strangerCt(3), coinbaseQuanta: null },
-      { commitment: stranger(4), block: 8, ciphertext: strangerCt(4), coinbaseQuanta: null },
-      { commitment: stranger(5), block: 8, ciphertext: strangerCt(5), coinbaseQuanta: null },
-      { commitment: stranger(6), block: 8, ciphertext: strangerCt(6), coinbaseQuanta: null },
-      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: stranger(0), block: 8, ciphertext: strangerCt(0), coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: stranger(2), block: 8, ciphertext: strangerCt(2), coinbaseSteps: null },
+      { commitment: stranger(3), block: 8, ciphertext: strangerCt(3), coinbaseSteps: null },
+      { commitment: stranger(4), block: 8, ciphertext: strangerCt(4), coinbaseSteps: null },
+      { commitment: stranger(5), block: 8, ciphertext: strangerCt(5), coinbaseSteps: null },
+      { commitment: stranger(6), block: 8, ciphertext: strangerCt(6), coinbaseSteps: null },
+      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
     // The two aligned groups exchanged, and inside the group that lands second
     // the payment is put last. The coinbase commitment lands at leaf 3, where
     // a ciphertext is owed, so the node invents one; it opens for nobody,
     // which is the ordinary reading of almost every leaf.
     const lyingRows: Leaf[] = [
-      { commitment: stranger(4), block: 8, ciphertext: strangerCt(4), coinbaseQuanta: null },
-      { commitment: stranger(5), block: 8, ciphertext: strangerCt(5), coinbaseQuanta: null },
-      { commitment: stranger(6), block: 8, ciphertext: strangerCt(6), coinbaseQuanta: null },
-      { commitment: COINBASE, block: 8, ciphertext: new Uint8Array([9, 9, 9]), coinbaseQuanta: null },
-      { commitment: stranger(0), block: 8, ciphertext: strangerCt(0), coinbaseQuanta: null },
-      { commitment: stranger(2), block: 8, ciphertext: strangerCt(2), coinbaseQuanta: null },
-      { commitment: stranger(3), block: 8, ciphertext: strangerCt(3), coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: stranger(4), block: 8, ciphertext: strangerCt(4), coinbaseSteps: null },
+      { commitment: stranger(5), block: 8, ciphertext: strangerCt(5), coinbaseSteps: null },
+      { commitment: stranger(6), block: 8, ciphertext: strangerCt(6), coinbaseSteps: null },
+      { commitment: COINBASE, block: 8, ciphertext: new Uint8Array([9, 9, 9]), coinbaseSteps: null },
+      { commitment: stranger(0), block: 8, ciphertext: strangerCt(0), coinbaseSteps: null },
+      { commitment: stranger(2), block: 8, ciphertext: strangerCt(2), coinbaseSteps: null },
+      { commitment: stranger(3), block: 8, ciphertext: strangerCt(3), coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
     const shapeFor = (rows: readonly Leaf[]): ChainShape => ({
       ...shapeOf(9, rows),
@@ -731,14 +731,14 @@ describe('a leaf whose kind the headers decide', () => {
     const COINBASE = 'c0'.repeat(32);
 
     const honestRows: Leaf[] = [
-      { commitment: stranger(0), block: 8, ciphertext: strangerCt(0), coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: stranger(2), block: 8, ciphertext: strangerCt(2), coinbaseQuanta: null },
-      { commitment: stranger(3), block: 8, ciphertext: strangerCt(3), coinbaseQuanta: null },
-      { commitment: stranger(4), block: 8, ciphertext: strangerCt(4), coinbaseQuanta: null },
-      { commitment: stranger(5), block: 8, ciphertext: strangerCt(5), coinbaseQuanta: null },
-      { commitment: stranger(6), block: 8, ciphertext: strangerCt(6), coinbaseQuanta: null },
-      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: stranger(0), block: 8, ciphertext: strangerCt(0), coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: stranger(2), block: 8, ciphertext: strangerCt(2), coinbaseSteps: null },
+      { commitment: stranger(3), block: 8, ciphertext: strangerCt(3), coinbaseSteps: null },
+      { commitment: stranger(4), block: 8, ciphertext: strangerCt(4), coinbaseSteps: null },
+      { commitment: stranger(5), block: 8, ciphertext: strangerCt(5), coinbaseSteps: null },
+      { commitment: stranger(6), block: 8, ciphertext: strangerCt(6), coinbaseSteps: null },
+      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
     const honestShape: ChainShape = { ...shapeOf(9, honestRows), rootRule: sortedRootOver };
     const honestBytes = leafBytes(honestShape);
@@ -749,8 +749,8 @@ describe('a leaf whose kind the headers decide', () => {
     const nodeOver = (from: number): string =>
       sortedRootOver(honestBytes.subarray(from * 32, from * 32 + 128), 4);
     const lyingRows: Leaf[] = [
-      { commitment: nodeOver(0), block: 8, ciphertext: new Uint8Array([9, 9, 9]), coinbaseQuanta: null },
-      { commitment: nodeOver(4), block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: nodeOver(0), block: 8, ciphertext: new Uint8Array([9, 9, 9]), coinbaseSteps: null },
+      { commitment: nodeOver(4), block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
     const lyingShape: ChainShape = { ...shapeOf(9, lyingRows), rootRule: sortedRootOver };
 
@@ -830,9 +830,9 @@ describe('a leaf whose kind the headers decide', () => {
    */
   it('warns and keeps scanning when the block holds the opened commitment nowhere', async () => {
     const rows: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: 'a1'.repeat(32), block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: 'a2'.repeat(32), block: 8, ciphertext: null, coinbaseQuanta: 7n },
+      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: 'a1'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: 'a2'.repeat(32), block: 8, ciphertext: null, coinbaseSteps: 7n },
     ];
     const shape: ChainShape = { ...shapeOf(9, rows), rootRule: sortedRootOver };
     // The bytes at leaf 0 open under this wallet's key, and the note they open
@@ -919,7 +919,7 @@ describe('a leaf whose kind the headers decide', () => {
         commitment: `${leaf.toString(16).padStart(2, '0')}a0`.repeat(16),
         block: 8,
         ciphertext: CT,
-        coinbaseQuanta: null,
+        coinbaseSteps: null,
       });
     }
     for (let leaf = 0; leaf < EACH; leaf += 1) {
@@ -927,10 +927,10 @@ describe('a leaf whose kind the headers decide', () => {
         commitment: `${leaf.toString(16).padStart(2, '0')}b0`.repeat(16),
         block: 8,
         ciphertext: OTHER_CT,
-        coinbaseQuanta: null,
+        coinbaseSteps: null,
       });
     }
-    rows.push({ commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseQuanta: 7n });
+    rows.push({ commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseSteps: 7n });
     const shape = shapeOf(9, rows);
     const crypto: SyncCrypto = {
       ...cryptoParts(shape),
@@ -996,10 +996,10 @@ describe('a leaf whose kind the headers decide', () => {
         commitment: `${leaf.toString(16).padStart(2, '0')}a0`.repeat(16),
         block: 8,
         ciphertext: CT,
-        coinbaseQuanta: null,
+        coinbaseSteps: null,
       });
     }
-    rows.push({ commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseQuanta: 7n });
+    rows.push({ commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseSteps: 7n });
     const shape = shapeOf(9, rows);
 
     const result = await runSync(
@@ -1014,7 +1014,7 @@ describe('a leaf whose kind the headers decide', () => {
   /** A value that does not rebuild this wallet's own coinbase commitment. */
   it('refuses a wrong coinbase value on this wallet’s own block', async () => {
     const leaves: Leaf[] = [
-      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseQuanta: 1_000n },
+      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseSteps: 1_000n },
     ];
     const shape = shapeOf(9, leaves, new Set([7]));
     await expect(
@@ -1030,9 +1030,9 @@ describe('a leaf whose kind the headers decide', () => {
   /** A node that moves a leaf from one block to another. */
   it('refuses a leaf dated to a block the headers do not put it in', async () => {
     const leaves: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 7, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: 'a2'.repeat(32), block: 8, ciphertext: CT, coinbaseQuanta: null },
+      { commitment: 'a0'.repeat(32), block: 7, ciphertext: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: 'a2'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
     ];
     const shape: ChainShape = { ...shapeOf(9, leaves), misdated: new Map([[1, 7]]) };
     await expect(
@@ -1047,7 +1047,7 @@ describe('a leaf whose kind the headers decide', () => {
   /** A header that does not hash to the name it was asked for. */
   it('refuses a header that does not hash to its own name', async () => {
     const leaves: Leaf[] = [
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
     ];
     const shape: ChainShape = { ...shapeOf(9, leaves), lyingHeaders: new Set([5]) };
     await expect(
@@ -1062,9 +1062,9 @@ describe('a leaf whose kind the headers decide', () => {
   /** A node that answers a leaf count its own headers do not carry. */
   it('refuses a leaf count the headers do not carry', async () => {
     const leaves: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: 'a2'.repeat(32), block: 8, ciphertext: CT, coinbaseQuanta: null },
+      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: 'a2'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
     ];
     const shape = shapeOf(9, leaves);
     const chain: SyncChain = {
@@ -1160,8 +1160,8 @@ describe('the checkpoint a pass records', () => {
   it('is recorded per chunk when the chain is three chunks ahead', async () => {
     const head = HEADER_WALK_LIMIT * 3;
     const leaves: Leaf[] = [
-      { commitment: MINE.commitment, block: head - 1, ciphertext: CT, coinbaseQuanta: null },
-      { commitment: 'b2'.repeat(32), block: head - 1, ciphertext: null, coinbaseQuanta: 9n },
+      { commitment: MINE.commitment, block: head - 1, ciphertext: CT, coinbaseSteps: null },
+      { commitment: 'b2'.repeat(32), block: head - 1, ciphertext: null, coinbaseSteps: 9n },
     ];
     const shape = shapeOf(head, leaves);
     // The progress the walk reports, so a multi-chunk sync can be held to a
@@ -1230,8 +1230,8 @@ describe('a node that rebuilt the headers', () => {
     // coinbase for block 7 carries a value that rebuilds to nothing, under a
     // label that says another author's.
     const hiddenLeaves: Leaf[] = [
-      { commitment: MINE.commitment, block: 6, ciphertext: null, coinbaseQuanta: 1n },
-      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseQuanta: 999n },
+      { commitment: MINE.commitment, block: 6, ciphertext: null, coinbaseSteps: 1n },
+      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseSteps: 999n },
     ];
     const rebuilt = shapeOf(9, hiddenLeaves, new Set<number>());
     const hidden = await runSync(
@@ -1253,8 +1253,8 @@ describe('a node that rebuilt the headers', () => {
     // it. The payment carries its ciphertext, block 7 carries this wallet's own
     // label, and the coinbase value is the one the chain wrote.
     const honestLeaves: Leaf[] = [
-      { commitment: MINE.commitment, block: 6, ciphertext: CT, coinbaseQuanta: 1n },
-      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseQuanta: 42n },
+      { commitment: MINE.commitment, block: 6, ciphertext: CT, coinbaseSteps: 1n },
+      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseSteps: 42n },
     ];
     const honest: ChainShape = {
       ...shapeOf(9, honestLeaves, new Set([7])),

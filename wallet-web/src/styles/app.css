@@ -178,7 +178,7 @@
    *
    * MyMonero dims the trailing zeros of a twelve-decimal amount, so "10.37"
    * stays bright and the eleven zeros after it recede. The rule is
-   * significance, not the decimal point: a pool quantum is a hundredth of a
+   * significance rather than the decimal point: amounts move in steps of 0.01
    * QNR, so every Qnero balance carries exactly two significant decimals, and
    * dimming everything after the point dimmed 100% of the fractional
    * information. 6.92 QNR read as a bright 6 with the 0.92 as the faintest

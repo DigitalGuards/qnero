@@ -26,8 +26,8 @@ export interface LeafRecord {
   commitment: string | null;
   ciphertextBytes: number | null;
   blockNumber: number | null;
-  /** Set for exactly the leaves a block's coinbase minted, in pool quanta. */
-  coinbaseQuanta: bigint | null;
+  /** Set for exactly the leaves a block's coinbase minted, as a count of pool steps. */
+  coinbaseSteps: bigint | null;
 }
 
 interface StorageChangeSet {
@@ -110,7 +110,7 @@ export async function fetchLeaves(
         commitment: values.get(row.keys[0]) ?? null,
         ciphertextBytes: ciphertextBytes(values.get(row.keys[1])),
         blockNumber: leNumber(values.get(row.keys[2])),
-        coinbaseQuanta: leInt(values.get(row.keys[3])),
+        coinbaseSteps: leInt(values.get(row.keys[3])),
       });
     }
   }

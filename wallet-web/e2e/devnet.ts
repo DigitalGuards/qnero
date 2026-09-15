@@ -61,7 +61,7 @@ export interface DevnetFacts {
   recipientSeed: string;
   recipientAddress: string;
   shieldHeight: number;
-  shieldedQuanta: number;
+  shieldedQnr: string;
 }
 
 export const FACTS_PATH = join(WORK, 'facts.json');
@@ -252,9 +252,9 @@ export async function startDevnet(): Promise<DevnetFacts> {
   wallet(['--file', 'recipient.seed', 'keygen']);
   const recipientAddress = matchAddress(wallet(['--file', 'recipient.seed', 'address']), 'qn1');
 
-  // 2000 quanta, which is the 1000 the browser is funded with plus the fee of
-  // the transfer that funds it and enough change to leave A spendable.
-  const shieldedQuanta = 2000;
+  // 20 QNR, which is the 10 the browser is funded with plus the fee of the
+  // transfer that funds it and enough change to leave A spendable.
+  const shieldedQnr = '20';
   const shielded = walletProving([
     '--file',
     'sender.seed',
@@ -262,7 +262,7 @@ export async function startDevnet(): Promise<DevnetFacts> {
     '--from-dev-account',
     'alice',
     '--amount',
-    String(shieldedQuanta),
+    shieldedQnr,
   ]);
   const shieldHeight = matchNumber(shielded, /included\s+block (\d+)/, 'the shield inclusion block');
 
@@ -273,7 +273,7 @@ export async function startDevnet(): Promise<DevnetFacts> {
     recipientSeed: join(WORK, 'recipient.seed'),
     recipientAddress,
     shieldHeight,
-    shieldedQuanta,
+    shieldedQnr,
   };
   writeFileSync(FACTS_PATH, `${JSON.stringify(facts, null, 2)}\n`);
   return facts;

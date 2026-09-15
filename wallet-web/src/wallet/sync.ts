@@ -39,6 +39,7 @@
 
 import { anchorFromHeader, authorLabelFromHeader, type Anchor, type RawChainHeader } from '../chain/anchor';
 import { bytesToHex, hexToBytes, normaliseHash } from '../lib/hex';
+import { formatStepsAsQnr } from '../lib/units';
 import { ENTRY_WALK_LIMIT } from '../worker/protocol';
 import { MAX_CHECKPOINTS, type NoteOrigin, type NoteSecret, type RejectedNote, type StoreMeta, type StoredNote, type SyncCheckpoint } from './model';
 
@@ -122,7 +123,7 @@ export interface SyncChain {
       commitment: string | null;
       ciphertext: Uint8Array | null;
       blockNumber: number | null;
-      coinbaseQuanta: bigint | null;
+      coinbaseSteps: bigint | null;
     }[]
   >;
   usedNullifiers(at: string, onProgress?: (seen: number) => void): Promise<Set<string>>;
@@ -1286,7 +1287,7 @@ export async function runSync(
           );
         }
         const isCoinbasePosition = typing.coinbasePositions.has(record.index);
-        if (!isCoinbasePosition && record.coinbaseQuanta !== null) {
+        if (!isCoinbasePosition && record.coinbaseSteps !== null) {
           throw new NodeRefusedError(
             `this node answered a Shielded::CoinbaseValues for leaf ${record.index}, which is ` +
               `not the last leaf block ${String(dated)} appended. A block's coinbase is minted ` +
@@ -1296,7 +1297,7 @@ export async function runSync(
               'cannot open it. Nothing has been changed.',
           );
         }
-        if (isCoinbasePosition && record.coinbaseQuanta === null) {
+        if (isCoinbasePosition && record.coinbaseSteps === null) {
           throw new NodeRefusedError(
             `this node answered with no Shielded::CoinbaseValues for leaf ${record.index}, the ` +
               `last leaf of block ${String(dated)} and the one leaf index that block's coinbase ` +
@@ -1355,7 +1356,7 @@ export async function runSync(
         (record) =>
           record.index < shape.leafCount &&
           record.commitment !== null &&
-          record.coinbaseQuanta !== null &&
+          record.coinbaseSteps !== null &&
           typing.coinbasePositions.has(record.index),
       );
       const minted = new Map<number, ScannedNote | null>();
@@ -1365,7 +1366,7 @@ export async function runSync(
           slice.map((record) => ({
             index: record.index,
             blockNumber: typing.blockOf.get(record.index) as number,
-            value: record.coinbaseQuanta as bigint,
+            value: record.coinbaseSteps as bigint,
             genesisHash: genesis,
             // Normalised: the module parses this as hex and `0x` is not hex.
             commitment: normaliseHash(record.commitment as string),
@@ -1420,7 +1421,7 @@ export async function runSync(
 
         let received: ScannedNote | null = null;
         let isCoinbase = false;
-        if (typing.coinbasePositions.has(record.index) && record.coinbaseQuanta !== null) {
+        if (typing.coinbasePositions.has(record.index) && record.coinbaseSteps !== null) {
           // The one leaf index of its block a coinbase can occupy, with the
           // value the chain published. Its value is public, because the chain
           // hashed it into a commitment over an `inner` it cannot open, and the
@@ -1442,10 +1443,10 @@ export async function runSync(
           if (labelSaysOurs && !mined) {
             throw new NodeRefusedError(
               `block ${String(blockNumber)} carries this wallet's own author label and this ` +
-                `node answered ${String(record.coinbaseQuanta)} quanta for its coinbase at leaf ` +
-                `${record.index}, which does not rebuild to the commitment the tree holds. The ` +
-                'value is the one field of a coinbase note the chain decides, and a wrong one ' +
-                "reads the wallet's own reward as nobody's. Nothing has been changed.",
+                `node answered ${formatStepsAsQnr(record.coinbaseSteps)} for its coinbase at ` +
+                `leaf ${record.index}, which does not rebuild to the commitment the tree holds. ` +
+                'The value is the one field of a coinbase note the chain decides, and a wrong ' +
+                "one reads the wallet's own reward as nobody's. Nothing has been changed.",
             );
           }
           if (mined && !labelSaysOurs) {
