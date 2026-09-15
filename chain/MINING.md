@@ -113,7 +113,7 @@ difficulty flat, a faster one raises it by 1/2048 and a much slower one lowers
 it by up to 99/2048.
 
 A chain climbing from the floor of 128 to a live difficulty costs about 13 600
-blocks and about 2.4 days for one 3.5 kH/s rig, against about 8 900 blocks and
+blocks and about 2.4 days for one 900 H/s rig, against about 8 900 blocks and
 0.25 days at a 12 second target. Both numbers grow, and for different reasons.
 The block count grows by half because the difficulty it has to reach is ten
 times higher and every step is a fixed 1/2048 of where it already is. The days

@@ -328,13 +328,20 @@ table.
 |---|---|---|---:|---:|
 | node, in process | light (cache only) | 256 MiB + 2 MiB per VM | 1 | **32.9 H/s** |
 | node, verification | light (cache only) | shared with the above | 1 | ~30 ms per block verified |
-| xmrig 6.21.3 | full (dataset) | 2336 MiB (2080 + 256) | 2 | ~40 shares/s at difficulty 175, so roughly **3.5 kH/s** |
+| xmrig 6.21.3 | full (dataset) | 2336 MiB (2080 + 256) | 2 | **~900 H/s** |
 
-The node is about two orders of magnitude slower per thread than the rig, and
-that is the intended shape: the node hashes once per block it verifies and once
-per share it is offered, so a 2 GiB dataset would cost more memory than the
-rest of the node for nothing. A rig pays the dataset once and gets it back
-immediately.
+The rig's rate is one session's, `docs/OPS-DEV.md` under the split counters:
+334 shares accepted and 0 rejected over a 79-second window, every one of them
+at the block difficulty, which ran from 131 to 270 across the window. That is
+4.2 shares a second, and the product lands where xmrig's own speed line does,
+924.4 H/s over ten seconds and 926.6 H/s at its peak. Both ends of one
+conversation, and no figure here is assembled out of two runs.
+
+The node is more than an order of magnitude slower per thread than the rig,
+32.9 H/s against about 450, and that is the intended shape: the node hashes
+once per block it verifies and once per share it is offered, so a 2 GiB
+dataset would cost more memory than the rest of the node for nothing. A rig
+pays the dataset once and gets it back immediately.
 
 Fixed costs measured alongside:
 
@@ -360,7 +367,7 @@ takes 66 blocks takes 66 blocks either way and ten times as long in seconds.
 | blocks #1 to #14, in process only | 56 s, **4.3 s per block** |
 | difficulty at #1 | 128 |
 | difficulty at #66 | 189 |
-| blocks in the run | 66 in 3 m 48 s, 50 mined in process and 14 by xmrig |
+| blocks in the run | 84 in 4 m 02 s, 74 mined in process and 10 by xmrig |
 
 4.3 s against this chain's 12 s dev target is the retarget climbing: at 32.9 H/s a difficulty
 of 128 is about four seconds, so the chain runs fast and the difficulty rises
@@ -369,7 +376,7 @@ one step per block. The step is one because integer division rounds
 a chain that reaches the difficulty floor can leave it again.
 
 With xmrig attached the same chain produced blocks as fast as the node could
-build templates, which is what a 3.5 kH/s rig against a difficulty of 175
+build templates, which is what a 900 H/s rig against a difficulty of 175
 means: the proof of work stopped being the constraint and block building became
 one.
 

@@ -73,8 +73,8 @@
             <span class="panel__label">What has actually happened</span>
             <p>
               <strong>A stock xmrig mined a local devnet.</strong> That is the whole of the
-              evidence: 66 blocks in 3 minutes 48 seconds on one workstation, 50 of them mined in
-              process and 14 by the rig, on the 12-second dev preset. There is no public chain to
+              evidence: 84 blocks in 4 minutes 2 seconds on one workstation, 74 of them mined in
+              process and 10 by the rig, on the 12-second dev preset. There is no public chain to
               point a rig at, there is nothing to earn, and there is no pool. Every command on this
               page starts a chain of your own.
             </p>
@@ -240,7 +240,7 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
               </p>
               <p>
                 A chain climbing from the floor to a live difficulty costs about 13 600 blocks and
-                about 2.4 days for one 3.5 kH/s rig. The band is dead in both directions and a chain
+                about 2.4 days for one 900 H/s rig. The band is dead in both directions and a chain
                 settles at whichever edge it arrives from: climbing, it stops at the bottom and sits
                 at about 100-second blocks; falling, it stops at the top and sits at about 200. A
                 network that has lost its miners runs at double the target until hash rate comes
@@ -267,8 +267,8 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
             </div>
             <div>
               <span class="figure__label">xmrig 6.21.3, full dataset</span>
-              <span class="figure__value">~3.5 kH/s</span>
-              <span class="figure__note">Two threads, 2336 MiB, about 40 shares a second at difficulty 175</span>
+              <span class="figure__value">~900 H/s</span>
+              <span class="figure__note">Two threads, 2336 MiB. 334 shares accepted and 0 rejected over 79 seconds, at a block difficulty running 131 to 270</span>
             </div>
             <div>
               <span class="figure__label">Argon2d cache fill</span>
@@ -287,15 +287,17 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
             </div>
             <div>
               <span class="figure__label">The run itself</span>
-              <span class="figure__value">66 blocks</span>
-              <span class="figure__note">3 minutes 48 seconds: 50 mined in process, 14 by xmrig. Difficulty 128 at block 1, 189 at block 66</span>
+              <span class="figure__value">84 blocks</span>
+              <span class="figure__note">4 minutes 2 seconds: 74 mined in process, 10 by xmrig. Difficulty 128 at block 1, 189 at block 66</span>
             </div>
           </div>
           <p class="table-note">
-            The node is about two orders of magnitude slower per thread than the rig, and that is
-            the intended shape: the in-process miner exists so a devnet produces blocks with no rig
-            attached. Read the 32.9 H/s figure as one thread of light-mode RandomX on one box. Read
-            the 3.5 kH/s figure as one rig on one box. Neither says anything about a network.
+            The node is more than an order of magnitude slower per thread than the rig, 32.9 H/s
+            against about 450, and that is the intended shape: the in-process miner exists so a
+            devnet produces blocks with no rig attached. Read the 32.9 H/s figure as one thread of
+            light-mode RandomX on one box. Read the 900 H/s figure as one rig on one box, derived
+            from that one session's accepted shares and cross-checked against the rig's own speed
+            line. Neither says anything about a network.
           </p>
         </div>
       </section>
