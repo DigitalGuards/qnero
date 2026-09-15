@@ -9,7 +9,11 @@
  * MyMonero's stylesheet (BSD-3-Clause, see NOTICE). The accent is Qnero's
  * own. The token names and values match the two Qnero apps, so the site,
  * Qloak and silQ Road read as one project: explorer/src/styles/tokens.css
- * is the source of truth for everything below the display sizes.
+ * is the source of truth for everything below the display sizes. Three
+ * tokens here are the site's own and have no counterpart there: in light,
+ * --accent-fill and --accent-on-fill are the amber pair rather than the
+ * apps' #8a4b06 on #ffffff, because the site's filled controls sit on their
+ * own ground; --accent-fill-hover, --mark and --col-self-* exist only here.
  *
  * Dark is the default. A reader whose system asks for light gets the light
  * palette, and the toggle wins over both.
@@ -38,9 +42,13 @@
   --accent: #e6a145;
   --accent-hover: #f2b968;
   --accent-fill: #e6a145;
+  --accent-fill-hover: #f2b968;
   --accent-on-fill: #161416;
+  --mark: #e6a145;
   --band-accent-bg: #1f1a14;
   --band-accent-hover: #2b241a;
+  --col-self-bg: #2c2418;
+  --col-self-hover: #3a2f1c;
 
   --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
   --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
@@ -69,13 +77,22 @@
     /* --accent is dark because it carries link text on a near-white ground.
        --accent-fill is a ground of its own and only owes contrast to its own
        label, so it keeps the amber the favicon and the card lead with:
-       #e6a145 under #161416 measures 8.29:1. */
+       #e6a145 under #161416 measures 8.33:1, and --accent-fill-hover is the
+       lighter amber at 10.40:1. --accent-hover is the wrong token for a filled
+       ground here: #161416 on #6f3c05 measures 2.03:1.
+       --mark is the identity Q, which the favicon and the card paint amber. It
+       is the lightest amber that still clears 4.5:1 on --bg-deep, the ground
+       the header and the hero both give it: 4.77:1. */
     --accent: #8a4b06;
     --accent-hover: #6f3c05;
     --accent-fill: #e6a145;
+    --accent-fill-hover: #f2b968;
     --accent-on-fill: #161416;
+    --mark: #9c5c05;
     --band-accent-bg: #f8f1e4;
     --band-accent-hover: #f0e4cd;
+    --col-self-bg: #f8f1e4;
+    --col-self-hover: #f0e4cd;
 
     --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
     --shadow-float: 0 1px 4px 0 rgba(27, 26, 25, 0.16);
@@ -104,9 +121,13 @@
   --accent: #8a4b06;
   --accent-hover: #6f3c05;
   --accent-fill: #e6a145;
+  --accent-fill-hover: #f2b968;
   --accent-on-fill: #161416;
+  --mark: #9c5c05;
   --band-accent-bg: #f8f1e4;
   --band-accent-hover: #f0e4cd;
+  --col-self-bg: #f8f1e4;
+  --col-self-hover: #f0e4cd;
 
   --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
   --shadow-float: 0 1px 4px 0 rgba(27, 26, 25, 0.16);
@@ -375,9 +396,12 @@ svg {
   color: var(--text-bright);
 }
 
+/* The Q is the identity, and the favicon and the open-graph card both paint it
+   amber. --accent is a link colour and goes dark brown in light, so the mark
+   carries --mark instead and stays amber in both themes. */
 .wordmark .mark,
 h1 .mark {
-  color: var(--accent);
+  color: var(--mark);
 }
 
 .nav {
@@ -581,8 +605,12 @@ h1 .mark {
   font-weight: 600;
 }
 
+/* --accent-hover is a link-text token and is darker than --accent, which is
+   right on a near-white ground and wrong under a near-black label: in light it
+   would put #161416 on #6f3c05 at 2.03:1. The filled hover goes the other way,
+   to the lighter amber, 10.40:1. */
 .btn--primary:hover {
-  background: var(--accent-hover);
+  background: var(--accent-fill-hover);
   color: var(--accent-on-fill);
 }
 
@@ -835,7 +863,7 @@ tbody tr:hover th {
 /* The tint is the only thing naming which of six columns is Qnero's, so it has
    to outlast the hover that lands on the row being read. */
 tbody tr:hover td.col-self {
-  background: var(--band-accent-hover);
+  background: var(--col-self-hover);
 }
 
 .table-note {
@@ -894,8 +922,16 @@ tbody tr:hover td.col-self {
   }
 }
 
+/* --band-accent-bg is tuned against --bg-deep and is invisible on the panel
+   ground a cell sits on: in dark, #1f1a14 over #1d1b1d is 1.009:1. The cell
+   tint is its own token, and the two amber rails carry the mark whatever the
+   ground and whatever the hover does, the way .d-accent strokes the settlement
+   box rather than trusting its fill. */
 .col-self {
-  background: var(--band-accent-bg);
+  background: var(--col-self-bg);
+  box-shadow:
+    inset 1px 0 0 var(--accent-fill),
+    inset -1px 0 0 var(--accent-fill);
 }
 
 /* ---------- figures ---------- */
