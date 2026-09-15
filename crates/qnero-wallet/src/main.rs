@@ -17,7 +17,7 @@ use qnero_wallet::wallet::{
     ChainBinding, EntryRhoCheck, MerkleSource, SyncOptions, Wallet, ENTRY_WALK_LIMIT,
     NUM_LEAF_PROOFS,
 };
-use qnero_wallet::POOL_QUANTUM;
+use qnero_wallet::POOL_STEP;
 
 /// Amounts are in pool quanta. One quantum is 10^10 planck, 0.01 QNR.
 #[derive(Debug, Parser)]
@@ -579,7 +579,7 @@ fn main() -> Result<()> {
             report_binding(&binding);
             println!(
                 "shielding {amount} quanta ({} planck) from {from_dev_account}",
-                u128::from(amount) * POOL_QUANTUM
+                u128::from(amount) * POOL_STEP
             );
             let report = wallet.shield(&chain, &metadata, &from, amount, &memo)?;
             println!("commitment  {}", report.commitment);

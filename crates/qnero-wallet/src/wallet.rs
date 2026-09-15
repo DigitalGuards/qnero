@@ -35,7 +35,7 @@ use crate::store::{
 use crate::typing::{
     check_chunk_appended_nothing, seed_frontier, type_chunk, LeafKind, MinerView, TypedLeaf,
 };
-use crate::POOL_QUANTUM;
+use crate::POOL_STEP;
 
 /// Leaf slots in a private batch. Not a metadata value and not discoverable
 /// over RPC.
@@ -1304,7 +1304,7 @@ impl Wallet {
         ensure_ciphertext_fits(metadata, ciphertext.len(), "shield")?;
 
         let planck = u128::from(quanta)
-            .checked_mul(POOL_QUANTUM)
+            .checked_mul(POOL_STEP)
             .ok_or_else(|| anyhow!("{quanta} quanta overflows the chain's balance type"))?;
         let call = encode_shield_call(metadata, planck, &inner.to_bytes(), &ciphertext);
         let (spec_version, transaction_version) = chain.runtime_version()?;
@@ -1344,10 +1344,10 @@ impl Wallet {
 
         // An extrinsic in a block is not a dispatch that succeeded. A shield
         // whose signer cannot pay, or whose value is not a whole multiple of
-        // `POOL_QUANTUM`, is included and then fails, appends no leaf and
+        // `POOL_STEP`, is included and then fails, appends no leaf and
         // creates no note. Reporting that as a success leaves a pending entry
         // in the store forever and an exit code of zero, and it is also what
-        // would swallow a `POOL_QUANTUM` drift, which `crate::POOL_QUANTUM`
+        // would swallow a `POOL_STEP` drift, which `crate::POOL_STEP`
         // argues is loud precisely because `ValueNotQuantized` would surface.
         let included_hash = chain.block_hash(included_at)?;
         let parent_hash = chain.block_hash(included_at.saturating_sub(1))?;
@@ -1365,7 +1365,7 @@ impl Wallet {
                 "the shield was included in block {included_at} and its dispatch failed: no leaf \
                  in that block carries the commitment {}, so no note was created. The usual \
                  causes are a dev account that cannot pay {} planck and a value that is not a \
-                 whole multiple of POOL_QUANTUM. The pending entry has been dropped.",
+                 whole multiple of POOL_STEP. The pending entry has been dropped.",
                 commitment.to_hex(),
                 planck
             );

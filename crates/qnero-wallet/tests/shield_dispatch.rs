@@ -4,7 +4,7 @@
 //! The regression: `shield` waited for the extrinsic's bytes to appear in a
 //! block and returned `Ok` at that point. An extrinsic in a block is not a
 //! dispatch that succeeded, and a shield whose signer cannot pay, or whose
-//! value is not a whole multiple of `POOL_QUANTUM`, is included and then fails
+//! value is not a whole multiple of `POOL_STEP`, is included and then fails
 //! having appended no leaf. The command printed a commitment, an inclusion
 //! block and an exit code of zero, and left a pending entry in the store that
 //! nothing would ever clear.

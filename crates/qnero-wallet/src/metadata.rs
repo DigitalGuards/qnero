@@ -11,8 +11,8 @@
 //! pallet index, the three call indices and the fee constants out of
 //! `state_getMetadata` on every run regardless.
 //!
-//! The one number that has no metadata surface is `POOL_QUANTUM`; see
-//! [`crate::POOL_QUANTUM`].
+//! The one number that has no metadata surface is `POOL_STEP`; see
+//! [`crate::POOL_STEP`].
 
 use anyhow::{anyhow, bail, Context, Result};
 use codec::Decode;

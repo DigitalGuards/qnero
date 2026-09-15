@@ -37,17 +37,14 @@ pub fn index(config: &Config) -> String {
         .replace("<!--COOLDOWN-->", &format_hours(config.cooldown_hours()))
 }
 
-/// Pool quanta as QNR. One quantum is 0.01 QNR
-/// (`qnero_wallet::POOL_QUANTUM`), so this is two decimal places and no
-/// floating point.
-pub fn format_qnr(quanta: u64) -> String {
-    let whole = quanta / 100;
-    let hundredths = quanta % 100;
-    if hundredths == 0 {
-        format!("{whole}")
-    } else {
-        format!("{whole}.{hundredths:02}")
-    }
+/// A count of pool steps as QNR, in the form a sentence wants.
+///
+/// Amounts move in steps of 0.01 QNR, so the whole precision is two decimal
+/// places and the hundredths are dropped when they are zero: this page says
+/// "10 QNR", which is how a person says it. The arithmetic is
+/// [`qnero_wallet::units`]'s, so the faucet and the wallet round one way.
+pub fn format_qnr(steps: u64) -> String {
+    qnero_wallet::units::qnr_plain(steps)
 }
 
 fn format_hours(hours: f64) -> String {
@@ -78,7 +75,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quanta_read_as_qnr() {
+    fn steps_read_as_qnr() {
         assert_eq!(format_qnr(1_000), "10");
         assert_eq!(format_qnr(1), "0.01");
         assert_eq!(format_qnr(1_234), "12.34");

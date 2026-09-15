@@ -5,22 +5,22 @@ import {
   formatCount,
   formatPlanck,
   formatQnr,
-  formatQuantaAsQnr,
   formatSeconds,
   formatSpan,
+  formatStepsAsQnr,
   PLANCK_PER_QNR,
-  POOL_QUANTUM_PLANCK,
-  quantaToPlanck,
+  POOL_STEP_PLANCK,
+  stepsToPlanck,
 } from '../src/lib/units';
 
 describe('units', () => {
-  it('pins the quantum at a hundredth of a QNR', () => {
+  it('pins the pool step at 0.01 QNR', () => {
     expect(PLANCK_PER_QNR).toBe(1_000_000_000_000n);
-    expect(POOL_QUANTUM_PLANCK).toBe(10_000_000_000n);
-    expect(PLANCK_PER_QNR / POOL_QUANTUM_PLANCK).toBe(100n);
+    expect(POOL_STEP_PLANCK).toBe(10_000_000_000n);
+    expect(PLANCK_PER_QNR / POOL_STEP_PLANCK).toBe(100n);
   });
 
-  it('formats planck as QNR with at least the two decimals a quantum needs', () => {
+  it('formats planck as QNR with at least the two decimals a step needs', () => {
     expect(formatPlanck(0n)).toBe('0.00');
     expect(formatPlanck(PLANCK_PER_QNR)).toBe('1.00');
     expect(formatPlanck(450_000_000_000n)).toBe('0.45');
@@ -36,11 +36,11 @@ describe('units', () => {
     }
   });
 
-  it('keeps quanta and planck apart, which is the easy way to publish a wrong number', () => {
-    expect(quantaToPlanck(45n)).toBe(450_000_000_000n);
-    expect(formatQuantaAsQnr(45n)).toBe('0.45 QNR');
+  it('keeps steps and planck apart, which is the easy way to publish a wrong number', () => {
+    expect(stepsToPlanck(45n)).toBe(450_000_000_000n);
+    expect(formatStepsAsQnr(45n)).toBe('0.45 QNR');
     expect(formatQnr(450_000_000_000n)).toBe('0.45 QNR');
-    expect(formatQuantaAsQnr(1000n)).toBe('10.00 QNR');
+    expect(formatStepsAsQnr(1000n)).toBe('10.00 QNR');
   });
 
   it('formats counts, sizes and times the way a table reads them', () => {

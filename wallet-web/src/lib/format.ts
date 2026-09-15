@@ -1,41 +1,41 @@
 /**
  * Formatting that is the wallet's rather than the chain's.
  *
- * Amounts live in `units.ts`, which the explorer and this wallet share. What
- * is here is the wallet's own vocabulary: pool quanta are what a note is
- * denominated in and what a fee is quoted in, and they are what a person types
- * into the amount field, so they get their own formatters rather than being
- * converted to QNR at every seam and back at the next one.
+ * Amounts live in `units.ts`, which the explorer and this wallet share: every
+ * figure a person reads is QNR, and it is written there once. What is here is
+ * the wallet's own vocabulary, plus the one parse that goes the other way.
+ * Value in the pool moves in steps of 0.01 QNR, so what somebody types has to
+ * land on a step before a proof is built for it, and that is a refusal the
+ * form can make before the click rather than a rounding nobody asked for.
  */
 
-import { formatCount, formatQuantaAsQnr } from './units';
+import { PLANCK_PER_QNR, POOL_STEP_PLANCK, formatCount } from './units';
 
-/** A note or a fee, in the unit the circuit counts in, with its QNR beside it. */
-export function formatQuanta(quanta: bigint): string {
-  return `${formatCount(quanta)} quanta`;
-}
-
-/** The pair every amount in this wallet is shown as: quanta, then QNR under it. */
-export function formatQuantaWithQnr(quanta: bigint): { primary: string; secondary: string } {
-  return { primary: formatCount(quanta), secondary: formatQuantaAsQnr(quanta) };
-}
+/** Pool steps in one QNR. A hundred, and derived rather than written twice. */
+const STEPS_PER_QNR = PLANCK_PER_QNR / POOL_STEP_PLANCK;
 
 /**
- * A whole number of pool quanta out of what somebody typed.
+ * A count of pool steps out of the QNR amount somebody typed.
  *
- * Refuses anything else. A fractional quantum has no representation in a note:
- * `value` is a `u64` of quanta and the circuit range-checks it, so rounding
- * here would build a proof for an amount nobody asked for.
+ * Amounts move in steps of 0.01 QNR, so two decimal places is the whole
+ * precision the pool has: a note's `value` is a count of steps and the circuit
+ * range-checks it, so accepting a third decimal here would build a proof for
+ * an amount nobody asked for.
  */
-export function parseQuanta(input: string): bigint {
+export function parseQnrToSteps(input: string): bigint {
   const trimmed = input.trim();
   if (trimmed.length === 0) {
-    throw new Error('enter an amount in quanta');
+    throw new Error('enter an amount in QNR');
   }
-  if (!/^[0-9]+$/.test(trimmed)) {
-    throw new Error('an amount is a whole number of quanta, with no decimal point');
+  const parts = /^([0-9]+)(?:\.([0-9]*))?$/.exec(trimmed);
+  if (parts === null) {
+    throw new Error('an amount is a number of QNR, such as 12.34');
   }
-  const value = BigInt(trimmed);
+  const fraction = parts[2] ?? '';
+  if (fraction.length > 2) {
+    throw new Error('amounts move in steps of 0.01 QNR, so an amount has at most two decimals');
+  }
+  const value = BigInt(parts[1] as string) * STEPS_PER_QNR + BigInt(fraction.padEnd(2, '0'));
   if (value === 0n) {
     throw new Error('an amount has to be more than zero');
   }

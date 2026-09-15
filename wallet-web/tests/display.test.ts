@@ -2,8 +2,8 @@
  * Two numbers on screen, and what each one was saying wrongly.
  *
  * The balance dimmed everything after the decimal point. MyMonero dims the
- * trailing zeros of a twelve-decimal amount, which is padding; a pool quantum
- * is a hundredth of a QNR, so every Qnero balance carries exactly two
+ * trailing zeros of a twelve-decimal amount, which is padding; amounts here
+ * move in steps of 0.01 QNR, so every Qnero balance carries exactly two
  * significant decimals and the same rule dimmed all of them. A 6.92 QNR
  * balance rendered as a bright 6 with the 0.92 at 3.18:1, the faintest thing
  * on the panel.
@@ -23,7 +23,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { formatQuantaAsQnr, splitAmountForDisplay } from '../src/lib/units';
+import { parseQnrToSteps } from '../src/lib/format';
+import { formatStepsAsQnr, splitAmountForDisplay } from '../src/lib/units';
 import { PHASES, progressFraction } from '../src/screens/sendPhases';
 
 describe('the balance', () => {
@@ -37,9 +38,9 @@ describe('the balance', () => {
     expect(splitAmountForDisplay('12')).toEqual({ significant: '12', pad: '' });
   });
 
-  it('leaves every quanta balance bright, because none of it is padding', () => {
-    for (const quanta of [692n, 1n, 100n, 1000n, 123_456n]) {
-      const text = formatQuantaAsQnr(quanta).replace(' QNR', '');
+  it('leaves every shielded balance bright, because none of it is padding', () => {
+    for (const steps of [692n, 1n, 100n, 1000n, 123_456n]) {
+      const text = formatStepsAsQnr(steps).replace(' QNR', '');
       const split = splitAmountForDisplay(text);
       if (text.endsWith('.00')) {
         // A whole number of QNR: the ".00" is the only padding there is.
@@ -49,6 +50,44 @@ describe('the balance', () => {
         expect(split.significant).toBe(text);
       }
     }
+  });
+});
+
+/**
+ * The amount field, which used to take a count of pool steps.
+ *
+ * It read "1000" for ten QNR, beside a balance that read "10.00 QNR" and a
+ * faucet that pays "10 QNR", so the one number a person types was the one
+ * number on the screen in a unit nothing else used. It takes QNR now, and the
+ * step is what bounds its precision rather than what it counts in.
+ */
+describe('the amount somebody types', () => {
+  it('reads a QNR amount as the steps a note is denominated in', () => {
+    expect(parseQnrToSteps('10')).toBe(1000n);
+    expect(parseQnrToSteps('12.34')).toBe(1234n);
+    expect(parseQnrToSteps('0.01')).toBe(1n);
+    expect(parseQnrToSteps('0.5')).toBe(50n);
+    expect(parseQnrToSteps('  4.11  ')).toBe(411n);
+    expect(parseQnrToSteps('10.00')).toBe(1000n);
+  });
+
+  it('refuses a third decimal, because no note can carry it', () => {
+    expect(() => parseQnrToSteps('0.001')).toThrow(/steps of 0.01 QNR/);
+    expect(() => parseQnrToSteps('12.345')).toThrow(/steps of 0.01 QNR/);
+  });
+
+  it('refuses what is not an amount at all', () => {
+    expect(() => parseQnrToSteps('')).toThrow(/enter an amount in QNR/);
+    expect(() => parseQnrToSteps('ten')).toThrow(/a number of QNR/);
+    expect(() => parseQnrToSteps('-1')).toThrow(/a number of QNR/);
+    // A point with nothing after it is somebody mid-type, so it reads as the
+    // whole number rather than as a refusal under the cursor.
+    expect(parseQnrToSteps('1.')).toBe(100n);
+  });
+
+  it('refuses nothing at all', () => {
+    expect(() => parseQnrToSteps('0')).toThrow(/more than zero/);
+    expect(() => parseQnrToSteps('0.00')).toThrow(/more than zero/);
   });
 });
 

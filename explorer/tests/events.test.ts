@@ -10,7 +10,7 @@ import {
   successfulExtrinsics,
   type EventRecord,
 } from '../src/lib/events';
-import { POOL_QUANTUM_PLANCK, formatQnr } from '../src/lib/units';
+import { POOL_STEP_PLANCK, formatQnr } from '../src/lib/units';
 import settlementFixture from './fixtures/events-settlement.json' with { type: 'json' };
 import shieldFixture from './fixtures/events-shield.json' with { type: 'json' };
 
@@ -38,7 +38,7 @@ describe('shield entries', () => {
   it('is the only place a value and an account meet, so the amount is exact', () => {
     const entry = decodeShieldEntries(shield)[0];
     expect(formatQnr(entry?.valuePlanck ?? 0n)).toBe('10.00 QNR');
-    expect((entry?.valuePlanck ?? 0n) / POOL_QUANTUM_PLANCK).toBe(1000n);
+    expect((entry?.valuePlanck ?? 0n) / POOL_STEP_PLANCK).toBe(1000n);
   });
 
   it('finds none in a block that settled instead', () => {
@@ -73,7 +73,7 @@ describe('settlements', () => {
   it('reads the fee in planck and the author’s share beside it', () => {
     const first = decodeSettlements(settlement)[0];
     expect(first?.feePlanck).toBe(80_000_000_000n);
-    expect((first?.feePlanck ?? 0n) / POOL_QUANTUM_PLANCK).toBe(8n);
+    expect((first?.feePlanck ?? 0n) / POOL_STEP_PLANCK).toBe(8n);
     expect(first?.authorFeePlanck).toBe(40_000_000_000n);
   });
 
