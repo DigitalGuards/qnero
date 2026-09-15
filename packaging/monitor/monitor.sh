@@ -38,8 +38,22 @@ ENV_FILE="${MONITOR_ENV:-$OPS_HOME/.monitor.env}"
 # MONITOR_DOMAIN to no effect, DOMAIN stays at the literal `<domain>`, curl
 # cannot resolve a host with angle brackets, and the one check written to catch
 # a dead proxy latches a red alert on its first tick that never clears.
+#
+# A failed source is fatal, and it has to be, because the failure is silent
+# otherwise. The file is shell, so a value carrying `<` or `>` unquoted is a
+# syntax error, bash stops reading the file at that line, and every setting
+# below it never arrives: the monitor then runs with defaults it was never
+# meant to have and skips MONITOR_EXPECT_GENESIS entirely, which is the one
+# check that catches a node that lost its database and resynced from the spec.
 # shellcheck source=/dev/null
-[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+if [ -f "$ENV_FILE" ]; then
+    if ! . "$ENV_FILE"; then
+        echo "[$(date -Is)] $ENV_FILE could not be sourced. It is shell: a value" >&2
+        echo "containing < or > has to be quoted, and everything after the failing" >&2
+        echo "line never reached this script." >&2
+        exit 2
+    fi
+fi
 
 STATE_DIR="${MONITOR_STATE_DIR:-$OPS_HOME/monitor-state}"
 ALERT_STATE="$STATE_DIR/alerts"
@@ -70,6 +84,12 @@ CERT_WARN_DAYS="${MONITOR_CERT_WARN_DAYS:-30}"
 case "$DOMAIN" in
     *'<'*|*'>'*|'')
         echo "[$(date -Is)] MONITOR_DOMAIN is still the placeholder ($DOMAIN). Set it in $ENV_FILE." >&2
+        exit 2
+        ;;
+esac
+case "$SSL_DIR" in
+    *'<'*|*'>'*)
+        echo "[$(date -Is)] MONITOR_SSL_DIR is still a placeholder ($SSL_DIR). Set it in $ENV_FILE." >&2
         exit 2
         ;;
 esac
