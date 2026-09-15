@@ -1032,13 +1032,13 @@ they arrived with the proof, so binding them costs nothing legitimate.
 `ct_digest` they are bound to at proving time, so it can commit to two
 ciphertexts padded to `MaxCiphertextBytes` as easily as to real ones. What
 prices them is the submission floor in 9.7: the settling slots of a submission
-pay one quantum per started `CiphertextBytesPerFeeQuantum` bytes the submission
+pay one pool step per started `CiphertextBytesPerFeeQuantum` bytes the submission
 carries, a skipped segment's bytes included, on top of `MinLeafFee` for every
 real slot it carries. Without the byte term, one settling segment beside
 fifty-two skipped ones carries up to 1.27 MB of never-pruned payload for the fee
 of six leaf slots; without the slot term, emptying those positions hands the
 same 318 real slots of admission walk and declared weight to every node for one
-quantum.
+pool step.
 
 **One shape at a skipped position is exempt: a pair of zero-length
 ciphertexts.** It carries no bytes, so there is nothing there to bind and
@@ -1226,9 +1226,9 @@ an observer roughly how old the anonymity set its prover used was.
 
 ### 9.7 Fees
 
-Each real slot's fee is a 62-bit field element counted in pool quanta
-(`POOL_QUANTUM = 10^10` planck, the same quantum `pallet-zk-tree` uses for a
-wormhole leaf amount). The pallet sums them in `u128`, which is why the circuit
+Each real slot's fee is a 62-bit field element counted in pool steps
+(`POOL_STEP = 10^10` planck, 0.01 QNR, the same step `pallet-zk-tree` uses for
+a wormhole leaf amount). The pallet sums them in `u128`, which is why the circuit
 does not sum them: six 62-bit fees overflow Goldilocks.
 
 Every real slot must carry at least
@@ -1237,21 +1237,21 @@ Every real slot must carry at least
 MinLeafFee + ceil(ciphertext_bytes / CiphertextBytesPerFeeQuantum)
 ```
 
-quanta, where `ciphertext_bytes` is the two ciphertexts that slot publishes, and
+steps, where `ciphertext_bytes` is the two ciphertexts that slot publishes, and
 both of them have to carry bytes: an emptied position in a segment that settles
 is refused with `EmptyCiphertext` (section 9.3). The runtime sets
 `MinLeafFee = 1` and `CiphertextBytesPerFeeQuantum = 512`, so a
-slot carrying two real `NoteCiphertext`s (3462 bytes) pays eight quanta and a
+slot carrying two real `NoteCiphertext`s (3462 bytes) pays eight steps and a
 slot padded to the cap (two ciphertexts of `MaxCiphertextBytes`, 4096 bytes)
 pays nine. This floor and the submission floor below it are the anti-spam
 mechanism, and they are the only one, for the reason section 8.6 gives.
 
 The payload term exists because the flat floor alone prices permanent state at
-whatever the ciphertext cap allows: one quantum, 0.01 QNR, would buy 4096 bytes
+whatever the ciphertext cap allows: one step, 0.01 QNR, would buy 4096 bytes
 of state that is never pruned and never parsed, and half of every fee comes back
 to a settler that is also the block author. The divisor has to sit below the
 slack between the real ciphertext size and the cap, or the term prices none of
-that slack: at one kilobyte, 3462 and 4096 bytes both round to four quanta, so
+that slack: at one kilobyte, 3462 and 4096 bytes both round to four steps, so
 padding both ciphertexts to the cap buys 634 bytes of permanent state for
 nothing, which is the case the term exists to close.
 `a_slot_pays_for_the_ciphertext_bytes_it_publishes` pins the two endpoints
@@ -1292,8 +1292,8 @@ whatever its outputs carry, and `carried bytes` is the total length of every
 ciphertext in `outputs`, the positions of skipped segments included. Refused
 with `PayloadUnderpaid`. There is no constant to tune: the two parameters are
 the ones the per-slot floor already uses, so a slot costs `MinLeafFee` and a
-byte costs one five-hundred-and-twelfth of a quantum wherever either is carried,
-and the rounding slack over a whole submission is under one quantum.
+byte costs one five-hundred-and-twelfth of a step wherever either is carried,
+and the rounding slack over a whole submission is under one step.
 
 **Why the rule prices slots as well as bytes.** A submission's cost to a node
 has two independent terms and a submitter moves them independently. The
@@ -1326,7 +1326,7 @@ ciphertexts, which binds nothing and adds nothing to the byte term (section
 9.3). Whether the submission still settles is then decided by the floor: a
 full public batch of six-slot inners that loses one inner settles 312 slots
 whose own minimums cover 312 of the 318 the floor asks, so it passes only if
-its settling fees carry six quanta of slack above their own floors. Fees are
+its settling fees carry six steps of slack above their own floors. Fees are
 public inputs fixed by the leaf circuit at proving time, so an aggregator
 cannot raise one after a grief; when the slack is not there its remedy is to
 recompose a fresh public batch without the conflicted inners, which costs one
@@ -1344,7 +1344,7 @@ The far end of that scale is refused unless it is paid for, and that is the
 intended outcome. A submission that settles one slot beside 317 skipped ones
 owes 318 minimums where its one settling slot covers one, so the griefed
 aggregator recomposes the batch for the cost of one proof. The alternative is a block handing out 318 slots of
-admission walk and declared weight for one quantum, which is the cheapest denial
+admission walk and declared weight for one step, which is the cheapest denial
 of service the settlement path has and which no aggregator needs.
 
 Charging a skipped slot its own leaf fee stays unavailable, for the
@@ -1395,8 +1395,8 @@ coinbase item.
 pool at v0. There is no exit.
 
 It burns `value` from the signer, which must be a positive whole number of pool
-quanta, range checks `value / POOL_QUANTUM` to 62 bits, computes
-`cm = H(CM, inner, quanta)` with `qnero_circuit::chain::commitment`, appends
+steps, range checks `value / POOL_STEP` to 62 bits, computes
+`cm = H(CM, inner, steps)` with `qnero_circuit::chain::commitment`, appends
 `cm`, stores the ciphertext against its leaf index and emits it.
 
 Burning is the simpler of the two entries the design left open, and it is the
@@ -1659,7 +1659,7 @@ shielded leaf already uses.
 |---|---|---|---|
 | `ZkTree::Leaves` | leaf index | `cm` | the append, like every other note |
 | `Shielded::LeafBlocks` | leaf index | block number | the mint |
-| `Shielded::CoinbaseValues` | leaf index | value in pool quanta | the mint |
+| `Shielded::CoinbaseValues` | leaf index | value in pool steps | the mint |
 | `Shielded::Ciphertexts` | leaf index | the payload, when there is one | the mint |
 
 `CoinbaseValues` is the only new one, and presence in it is what marks a leaf a
@@ -1672,11 +1672,11 @@ the mint, so it never survives its block. `PendingCoinbaseFee` is the author's
 share of the fees settled so far, which the mint folds into the note's value.
 
 `PendingCoinbaseFee` does normally carry. A note's value is a whole number of
-pool quanta, so a successful mint writes `total % POOL_QUANTUM` straight back
+pool steps, so a successful mint writes `total % POOL_STEP` straight back
 into it (`pallets/shielded/src/lib.rs`, `mint_coinbase`, pinned by
-`sub_quantum_change_stays_for_the_next_coinbase`), and that sub-quantum
-remainder is what a healthy chain shows at the start of most blocks: on the dev
-chain it completes one extra quantum roughly every eighth block. A non-zero
+`sub_step_change_stays_for_the_next_coinbase`), and that sub-step remainder is
+what a healthy chain shows at the start of most blocks: on the dev chain it
+completes one extra step roughly every eighth block. A non-zero
 value there says nothing on its own about whether the previous block minted.
 The second reason it can be non-empty is the one section 10.6 lists: a block
 that mints no note at all leaves the whole share sitting in it.
@@ -1754,7 +1754,7 @@ refuses one until something does and its bytes are priced (section 10.3).
 
 - `inner` is four canonical Goldilocks limbs. Checked at the inherent, because the mint runs in a
   hook and a hook cannot refuse anything.
-- The value is a whole number of pool quanta below `2^62`. The same cap every creation path carries;
+- The value is a whole number of pool steps below `2^62`. The same cap every creation path carries;
   the no-wrap argument behind the balance equation (section 5, constraint 8) holds only while every
   term is below it.
 - The block has an author, through the runtime's one `FindAuthor` seam.
@@ -1803,7 +1803,7 @@ settlement       PoolValue -= fee
                  author share: PendingCoinbaseFee += share
 coinbase mint    total = emission + collected tx fees + PendingCoinbaseFee
                  PoolValue += total
-                 PendingCoinbaseFee = sub-quantum remainder, if any
+                 PendingCoinbaseFee = sub-step remainder, if any
 ```
 
 The emission and the collected fees are value that is in neither book when the

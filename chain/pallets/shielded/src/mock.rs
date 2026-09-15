@@ -107,9 +107,9 @@ impl pallet_zk_tree::Config for Test {
 parameter_types! {
 	/// Half of a settled fee is burned, half goes to the block author.
 	pub const FeeBurnRate: Permill = Permill::from_percent(50);
-	/// One quantum per real leaf slot, which is the runtime default.
+	/// One step per real leaf slot, which is the runtime default.
 	pub static MinLeafFee: u64 = 1;
-	/// One quantum per started 512 bytes of ciphertext, the runtime default.
+	/// One step per started 512 bytes of ciphertext, the runtime default.
 	pub static CiphertextBytesPerFeeQuantum: u32 = 512;
 	/// The runtime's own cap, so a ciphertext the production runtime refuses at
 	/// its SCALE decode cannot pass a test here.

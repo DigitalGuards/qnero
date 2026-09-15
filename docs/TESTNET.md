@@ -499,7 +499,7 @@ first launch cannot quietly be a faucet with no challenge. The rate limits are
 not a substitute: a `qn1` address is minted locally for nothing, so the
 per-address cooldown bounds nobody, and the per-client limit counts an IPv6
 /64, which a requester with two prefixes rotates through. What is left is the
-prover at one drip at a time, which takes a 10M-quanta endowment down in about
+prover at one drip at a time, which takes a 100 000 QNR endowment down in about
 three days of somebody's attention. Set the pair, or set the override and know
 which decision was made.
 
@@ -522,7 +522,7 @@ What the first start does, and what to look for in the log:
    fund a faucet on this chain: `Wallet::shield` always builds the note for the faucet
    itself, and there is no transparent transfer, so shielding moves the endowment into the
    faucet's own notes and `send` is what pays.
-4. It logs `ready, N quanta spendable across M note(s)`.
+4. It logs `ready, N QNR spendable across M note(s)`.
 
 A faucet that cannot fund itself still serves `/status` and refuses claims with
 `drained`. That is deliberate: a process that exits at boot tells an operator
@@ -594,7 +594,7 @@ curl -sS -X POST -H 'content-type: application/json' \
 # -> {"status":"queued","id":N,...}
 curl -sS https://faucet.<domain>/drip/N              # poll until "sent"
 qnero-wallet --node https://rpc.<domain> --file /tmp/probe.seed sync
-# -> received 1 note(s) worth 1000 quanta
+# -> received 1 note(s) worth 10.00 QNR
 ```
 
 **`https://` for the CLI wallet and `wss://` for the two browser apps**, at the

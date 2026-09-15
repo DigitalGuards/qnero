@@ -836,6 +836,19 @@ Decoding that blob needs a SCALE decoder. The cheap check without one is that
 the hex contains the pallet name and its call names, which the smoke run below
 used.
 
+## Reading the runs below
+
+Everything from here down is a transcript: what a command printed on the day
+it ran, pasted unedited so a later reader can compare a fresh run against it.
+
+The runs dated before 2026-09-15 quote amounts as a count of pool steps, under
+the name those steps used to carry. `qnero-wallet` prints QNR now and takes QNR
+on the command line, so "1000 quanta" in a transcript below is what today reads
+as `10.00 QNR`, "8 quanta" of fee is `0.08 QNR`, and `--amount 1000` is
+`--amount 10`. The amounts themselves have not moved: the chain settles the
+same steps of 0.01 QNR it always did. The transcripts are left as they were
+printed, because a record that is edited to match today is no longer a record.
+
 ## The M4 smoke run, 2026-09-12
 
 Recorded so a rerun has something to compare against. Development workstation,

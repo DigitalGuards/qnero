@@ -46,7 +46,7 @@ use sp_runtime::{
 
 use crate::{
 	circuit_config, mock::*, padding_block_hash, weights, Error, Event, Hash256, RealSlot, Segment,
-	SettlementBundle, ShieldedOutput, POOL_QUANTUM,
+	SettlementBundle, ShieldedOutput, POOL_STEP,
 };
 
 // ===========================================================================
@@ -128,14 +128,14 @@ fn one_segment(block_number: u32, slots: Vec<RealSlot>) -> SettlementBundle {
 	}
 }
 
-/// Stand `quanta` of pool value behind a synthetic settlement.
+/// Stand `steps` of pool value behind a synthetic settlement.
 ///
 /// A settled fee leaves the pool, and the pallet refuses a fee larger than the
 /// pool is holding, and refuses the settlement when it is not.
 /// The end-to-end tests shield for real; these hand-built bundles have no
 /// entry, so they seed the counter directly.
-fn fund_pool(quanta: u128) {
-	crate::PoolValue::<Test>::put(quanta * POOL_QUANTUM);
+fn fund_pool(steps: u128) {
+	crate::PoolValue::<Test>::put(steps * POOL_STEP);
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn a_valid_single_segment_bundle_passes_and_counts_its_fee() {
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 3)]);
 		let outputs = vec![output(b"ct-a1", b"ct-a2")];
 		let plan = check(&bundle, &outputs).expect("valid");
-		assert_eq!(plan.fee_quanta, 3);
+		assert_eq!(plan.fee_steps, 3);
 		assert_eq!(plan.slots, 1);
 	});
 }
@@ -230,7 +230,7 @@ fn a_nullifier_repeated_across_two_segments_skips_the_later_one() {
 		let plan = check(&bundle, &outputs).expect("the first segment settles");
 		assert_eq!(plan.settles, vec![true, false]);
 		assert_eq!(plan.slots, 1);
-		assert_eq!(plan.fee_quanta, 3);
+		assert_eq!(plan.fee_steps, 3);
 
 		assert_ok!(Shielded::settle(bundle, outputs));
 		// The first segment's leaves are there and the second's are not, and
@@ -400,10 +400,10 @@ fn settling_appends_two_leaves_per_slot_and_stores_their_ciphertexts() {
 		assert_eq!(Shielded::ciphertext(0).map(|c| c.to_vec()), Some(b"ct-a1".to_vec()));
 		assert_eq!(Shielded::ciphertext(3).map(|c| c.to_vec()), Some(b"ct-b2".to_vec()));
 
-		// Half of the eight-quantum fee burns and half goes to the author,
+		// Half of the eight-step fee burns and half goes to the author,
 		// who is absent here, so the whole fee simply leaves the pool.
 		System::assert_has_event(
-			Event::BatchSettled { segments: 1, slots: 2, fee: 8 * POOL_QUANTUM }.into(),
+			Event::BatchSettled { segments: 1, slots: 2, fee: 8 * POOL_STEP }.into(),
 		);
 	});
 }
@@ -421,7 +421,7 @@ fn the_block_author_fee_share_is_held_for_the_blocks_coinbase_note() {
 		// would assert that the underflow guard is a no-op.
 		assert_ok!(Shielded::shield(
 			RuntimeOrigin::signed(alice()),
-			100 * POOL_QUANTUM,
+			100 * POOL_STEP,
 			note_inner(&shielder_keys().pk(), &entry_rho(1, 0), &Digest::hash_bytes(&[b"r"]))
 				.to_bytes(),
 			b"ct".to_vec(),
@@ -431,19 +431,19 @@ fn the_block_author_fee_share_is_held_for_the_blocks_coinbase_note() {
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 9)]);
 		assert_ok!(Shielded::settle(bundle, vec![output(b"ct-a1", b"ct-a2")]));
 
-		// Nine quanta, burn rounds up against the author: five burned, four
+		// Nine steps, burn rounds up against the author: five burned, four
 		// held for the coinbase note. The author's transparent account is not
 		// touched at all, which is the whole of what v1 changed here.
 		assert_eq!(Balances::balance(&author), 0);
-		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_QUANTUM);
-		System::assert_has_event(Event::AuthorFeeAccrued { amount: 4 * POOL_QUANTUM }.into());
+		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_STEP);
+		System::assert_has_event(Event::AuthorFeeAccrued { amount: 4 * POOL_STEP }.into());
 		// The whole fee left the pool. The burned half is gone; the author's
 		// half is in flight, which is why the supply measure counts both books.
-		assert_eq!(Shielded::pool_value(), 91 * POOL_QUANTUM);
+		assert_eq!(Shielded::pool_value(), 91 * POOL_STEP);
 		assert_eq!(Balances::total_issuance(), issuance_before);
 		assert_eq!(
 			<crate::ShieldedSupply<Test> as frame_support::traits::Get<u128>>::get(),
-			91 * POOL_QUANTUM + 4 * POOL_QUANTUM
+			91 * POOL_STEP + 4 * POOL_STEP
 		);
 	});
 }
@@ -463,7 +463,7 @@ fn a_fee_larger_than_the_pool_is_refused_with_nothing_written() {
 		assert_noop!(Shielded::settle(bundle, outputs), Error::<Test>::PoolUnderflow);
 		assert_eq!(ZkTree::leaf_count(), 0);
 		assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 0);
-		assert_eq!(Shielded::pool_value(), 2 * POOL_QUANTUM);
+		assert_eq!(Shielded::pool_value(), 2 * POOL_STEP);
 	});
 }
 
@@ -487,7 +487,7 @@ fn a_settled_fee_moves_no_transparent_balance() {
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 9)]);
 		assert_ok!(Shielded::settle(bundle, vec![output(b"ct-a1", b"ct-a2")]));
 		assert_eq!(Balances::balance(&author), 0, "the author holds no transparent balance");
-		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_QUANTUM, "the credit did happen");
+		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_STEP, "the credit did happen");
 
 		for record in System::events() {
 			assert!(
@@ -642,7 +642,7 @@ fn a_segment_settled_by_an_earlier_submission_is_skipped_not_fatal() {
 		let plan = check(&batch, &outputs).expect("the batch settles what is left");
 		assert_eq!(plan.settles, vec![false, true]);
 		assert_eq!(plan.slots, 1);
-		assert_eq!(plan.fee_quanta, 5);
+		assert_eq!(plan.fee_steps, 5);
 
 		assert_ok!(Shielded::settle(batch.clone(), outputs.clone()));
 		assert_eq!(ZkTree::leaf_count(), 4);
@@ -697,7 +697,7 @@ fn a_partly_settled_segment_does_not_strand_the_rest_of_the_batch() {
 		let plan = check(&batch, &outputs).expect("the unaffected segments settle");
 		assert_eq!(plan.settles, vec![false, true, true]);
 		assert_eq!(plan.slots, 2);
-		assert_eq!(plan.fee_quanta, 12);
+		assert_eq!(plan.fee_steps, 12);
 
 		assert_ok!(Shielded::settle(batch, outputs));
 		// Four leaves, two per bystander segment. The skipped segment
@@ -722,7 +722,7 @@ fn the_ciphertexts_of_a_skipped_segment_are_still_bound_to_the_proof() {
 		fund_pool(100);
 		let block_hash = anchor(10);
 		let settled = slot("a", b"ct-a1", b"ct-a2", 3);
-		// Twelve quanta, because the skipped position here carries 4096 bytes
+		// Twelve steps, because the skipped position here carries 4096 bytes
 		// and the submission floor makes the settling slot pay for them. That
 		// rule is the subject of `a_submission_pays_for_every_byte_it_carries`;
 		// what this test is about is what happens to those bytes once they are
@@ -784,7 +784,7 @@ fn a_segment_whose_anchor_no_longer_resolves_is_skipped_not_fatal() {
 		assert_eq!(plan.settles, vec![false, true]);
 		assert_eq!(plan.slots, 1);
 		assert_eq!(plan.skipped_slots, 1);
-		assert_eq!(plan.fee_quanta, 5);
+		assert_eq!(plan.fee_steps, 5);
 
 		assert_ok!(Shielded::settle(batch, outputs));
 		// Two leaves, both the surviving segment's, and nothing of the
@@ -860,7 +860,7 @@ fn a_submission_with_no_live_anchor_is_refused_by_the_anchor_rule() {
 /// each side independently, so three skipped slots padded to the ciphertext cap
 /// ride on one settling slot carrying ten bytes while the slot counts stay
 /// inside any ratio a runtime would pick: 12288 bytes of never-pruned payload
-/// for two quanta. Pricing the bytes is what makes that free ride impossible to
+/// for two steps. Pricing the bytes is what makes that free ride impossible to
 /// construct, because a byte costs the same wherever it is carried.
 /// `a_carried_slot_is_paid_for_even_when_its_outputs_are_emptied` is the other
 /// half, where the bytes are gone and the slots remain.
@@ -893,7 +893,7 @@ fn a_submission_pays_for_every_byte_it_carries() {
 		};
 
 		// Three skipped slots at the cap: 12288 bytes beside the settling
-		// slot's ten, which is 25 started quanta, plus a flat minimum for each
+		// slot's ten, which is 25 started steps, plus a flat minimum for each
 		// of the four slots the submission carries. The settling slot's own
 		// per-slot floor is two.
 		let (bundle, outputs) = build(3, 2);
@@ -946,7 +946,7 @@ fn a_segment_skipped_for_a_stale_anchor_is_priced_like_any_other() {
 		};
 
 		// Eight orphaned segments at the cap: 32768 bytes beside the settling
-		// slot's ten, 65 started quanta, plus a flat minimum for each of the
+		// slot's ten, 65 started steps, plus a flat minimum for each of the
 		// nine slots the submission carries.
 		let (bundle, outputs) = build(2);
 		assert_noop!(check(&bundle, &outputs), Error::<Test>::PayloadUnderpaid);
@@ -960,8 +960,8 @@ fn a_segment_skipped_for_a_stale_anchor_is_priced_like_any_other() {
 
 		// Emptying them is the aggregator's move here too, and it removes the
 		// payload term alone: the nine carried slots still owe their flat
-		// minimums, which is ten quanta with the settling slot's one started
-		// byte quantum.
+		// minimums, which is ten steps with the settling slot's one started
+		// byte step.
 		let (bundle, mut outputs) = build(9);
 		for position in outputs.iter_mut().skip(1) {
 			*position = output(b"", b"");
@@ -987,7 +987,7 @@ fn a_segment_skipped_for_a_stale_anchor_is_priced_like_any_other() {
 /// extrinsic declares for it, and an unsigned settlement pays nothing else for
 /// any of that. Without a per-slot term one settling slot commands the whole
 /// walk and the whole declared weight of a full public batch, 318 real slots,
-/// for one quantum.
+/// for one step.
 ///
 /// That is the 52-of-53 grief shape at its limit: participants hand an
 /// aggregator inners that re-spend a note another inner settles, which the
@@ -1025,7 +1025,7 @@ fn a_carried_slot_is_paid_for_even_when_its_outputs_are_emptied() {
 			(SettlementBundle { segments }, outputs)
 		};
 
-		// 318 carried slots at one quantum each, plus the one started quantum
+		// 318 carried slots at one step each, plus the one started step
 		// the settling slot's ten bytes cost. The settling slot's own per-slot
 		// floor is two, and that is all it paid before this term existed.
 		let (bundle, outputs) = build(2);
@@ -1044,7 +1044,7 @@ fn a_carried_slot_is_paid_for_even_when_its_outputs_are_emptied() {
 		assert_eq!(plan.skipped_slots, 317);
 		// Only the settling slot's own ciphertexts are carried.
 		assert_eq!(plan.carried_bytes, 10);
-		assert_eq!(plan.fee_quanta, 319);
+		assert_eq!(plan.fee_steps, 319);
 
 		assert_ok!(Shielded::settle(bundle, outputs));
 		assert_eq!(ZkTree::leaf_count(), 2);
@@ -1062,14 +1062,14 @@ fn a_carried_slot_is_paid_for_even_when_its_outputs_are_emptied() {
 /// `sum(ceil(b_i / q))` is at least `ceil(sum(b_i) / q)`, so the submission
 /// floor can never be the binding one. Three slots carrying a real
 /// `NoteCiphertext` pair each are the case where the two rounding terms are
-/// equal as well, 21 quanta either way, so the floors coincide exactly and a
-/// submission paying the per-slot minimum to the quantum still passes.
+/// equal as well, 21 steps either way, so the floors coincide exactly and a
+/// submission paying the per-slot minimum to the step still passes.
 #[test]
 fn a_single_segment_submission_pays_only_its_per_slot_floors() {
 	new_test_ext().execute_with(|| {
 		fund_pool(100);
 		// 1731 bytes is a `NoteCiphertext` with an empty memo at the chain's
-		// parameter set, so a slot carries 3462 bytes: seven started quanta
+		// parameter set, so a slot carries 3462 bytes: seven started steps
 		// over the flat minimum, a per-slot floor of eight.
 		let real_1 = vec![1u8; 1_731];
 		let real_2 = vec![2u8; 1_731];
@@ -1087,12 +1087,12 @@ fn a_single_segment_submission_pays_only_its_per_slot_floors() {
 		let plan = check(&exact, &outputs).expect("the per-slot floors are the whole floor");
 		assert_eq!(plan.slots, 3);
 		assert_eq!(plan.skipped_slots, 0);
-		assert_eq!(plan.fee_quanta, 24);
+		assert_eq!(plan.fee_steps, 24);
 		// 3 * 1 flat plus ceil(10386 / 512) = 21, which is the sum of the three
 		// per-slot floors exactly.
 		assert_eq!(plan.carried_bytes, 3 * 2 * 1_731);
 
-		// One quantum less on any slot is refused by the per-slot floor, which
+		// One step less on any slot is refused by the per-slot floor, which
 		// is the binding one here.
 		let cheap = one_segment(
 			11,
@@ -1229,7 +1229,7 @@ fn the_shield_weight_carries_the_ciphertext_it_writes() {
 /// The fee floor is linear in the payload, because the payload is what the
 /// settlement writes into permanent state. The chain never parses these bytes
 /// and `Ciphertexts` is never pruned, so a flat floor would buy as much state
-/// as the ciphertext cap allows for one quantum.
+/// as the ciphertext cap allows for one step.
 ///
 /// The endpoints are what matter and they are pinned here: a pair at the
 /// ciphertext cap has to cost strictly more than a pair at the real
@@ -1240,7 +1240,7 @@ fn a_slot_pays_for_the_ciphertext_bytes_it_publishes() {
 	new_test_ext().execute_with(|| {
 		fund_pool(100);
 		// Two 1500-byte ciphertexts: 3000 bytes, six started 512-byte units
-		// over the flat minimum of one quantum.
+		// over the flat minimum of one step.
 		let big_1 = vec![1u8; 1_500];
 		let big_2 = vec![2u8; 1_500];
 		let outputs = vec![output(&big_1, &big_2)];
@@ -1276,7 +1276,7 @@ fn a_slot_pays_for_the_ciphertext_bytes_it_publishes() {
 		let padded_2 = vec![6u8; cap];
 		let padded_outputs = vec![output(&padded_1, &padded_2)];
 
-		// A real padded pair settles at eight quanta.
+		// A real padded pair settles at eight steps.
 		let real = one_segment(13, vec![slot("c", &real_1, &real_2, 8)]);
 		assert_ok!(check(&real, &real_outputs));
 
@@ -1305,11 +1305,11 @@ fn shielder_keys() -> DerivedKeys {
 	}
 }
 
-/// A note for `pk` worth `quanta`, with its `rho` derived by the entry rule.
-fn entry_note(pk: Digest, quanta: u64, block_number: u32, entry_index: u64) -> Note {
+/// A note for `pk` worth `steps`, with its `rho` derived by the entry rule.
+fn entry_note(pk: Digest, steps: u64, block_number: u32, entry_index: u64) -> Note {
 	let rho = entry_rho(block_number, entry_index);
 	let r = Digest::hash_bytes(&[b"qnero-test/entry-r", &entry_index.to_le_bytes()]);
-	Note::new(pk, quanta, rho, r).expect("value under the 62-bit bound")
+	Note::new(pk, steps, rho, r).expect("value under the 62-bit bound")
 }
 
 #[test]
@@ -1322,7 +1322,7 @@ fn shield_burns_the_value_and_appends_the_commitment() {
 
 		assert_ok!(Shielded::shield(
 			RuntimeOrigin::signed(alice()),
-			100 * POOL_QUANTUM,
+			100 * POOL_STEP,
 			inner.to_bytes(),
 			b"a note ciphertext".to_vec(),
 		));
@@ -1330,9 +1330,9 @@ fn shield_burns_the_value_and_appends_the_commitment() {
 		// The chain computed `cm = H(CM, inner, value)` and it is the note's
 		// own commitment.
 		assert_eq!(ZkTree::leaf(0), Some(note.commitment().to_bytes()));
-		assert_eq!(Shielded::pool_value(), 100 * POOL_QUANTUM);
+		assert_eq!(Shielded::pool_value(), 100 * POOL_STEP);
 		assert_eq!(Shielded::entry_count(), 1);
-		assert_eq!(Balances::total_issuance(), issuance_before - 100 * POOL_QUANTUM);
+		assert_eq!(Balances::total_issuance(), issuance_before - 100 * POOL_STEP);
 		assert_eq!(
 			Shielded::ciphertext(0).map(|c| c.to_vec()),
 			Some(b"a note ciphertext".to_vec())
@@ -1344,7 +1344,7 @@ fn shield_burns_the_value_and_appends_the_commitment() {
 		System::assert_has_event(
 			Event::Shielded {
 				who: alice(),
-				value: 100 * POOL_QUANTUM,
+				value: 100 * POOL_STEP,
 				commitment: note.commitment().to_bytes(),
 				leaf_index: 0,
 				entry_index: 0,
@@ -1356,12 +1356,12 @@ fn shield_burns_the_value_and_appends_the_commitment() {
 }
 
 #[test]
-fn shield_refuses_a_value_that_is_not_a_whole_quantum() {
+fn shield_refuses_a_value_that_is_not_a_whole_step() {
 	new_test_ext_with_endowments(vec![(alice(), 1_000 * UNIT)]).execute_with(|| {
 		assert_noop!(
 			Shielded::shield(
 				RuntimeOrigin::signed(alice()),
-				POOL_QUANTUM + 1,
+				POOL_STEP + 1,
 				[1u8; 32],
 				b"ct".to_vec()
 			),
@@ -1380,7 +1380,7 @@ fn shield_refuses_a_value_that_is_not_a_whole_quantum() {
 #[test]
 fn shield_range_checks_the_value_to_62_bits() {
 	new_test_ext_with_endowments(vec![(alice(), u128::MAX / 2)]).execute_with(|| {
-		let over = (u128::from(qnero_circuit::chain::MAX_VALUE) + 1) * POOL_QUANTUM;
+		let over = (u128::from(qnero_circuit::chain::MAX_VALUE) + 1) * POOL_STEP;
 		assert_noop!(
 			Shielded::shield(RuntimeOrigin::signed(alice()), over, [1u8; 32], b"ct".to_vec()),
 			Error::<Test>::ValueOutOfRange
@@ -1394,7 +1394,7 @@ fn shield_refuses_a_non_canonical_inner() {
 		let mut alias = [0u8; 32];
 		alias[..8].copy_from_slice(&pallet_zk_tree::tree::GOLDILOCKS_P.to_le_bytes());
 		assert_noop!(
-			Shielded::shield(RuntimeOrigin::signed(alice()), POOL_QUANTUM, alias, b"ct".to_vec()),
+			Shielded::shield(RuntimeOrigin::signed(alice()), POOL_STEP, alias, b"ct".to_vec()),
 			Error::<Test>::NonCanonicalInner
 		);
 	});
@@ -1412,7 +1412,7 @@ fn two_shields_of_the_same_value_produce_different_commitments() {
 			let inner = note_inner(&keys.pk(), &note.rho, &note.r);
 			assert_ok!(Shielded::shield(
 				RuntimeOrigin::signed(alice()),
-				100 * POOL_QUANTUM,
+				100 * POOL_STEP,
 				inner.to_bytes(),
 				b"ct".to_vec(),
 			));
@@ -1458,7 +1458,7 @@ fn shield_and_prove(anchored_at: u32, fee: u64) -> Spend {
 
 	assert_ok!(Shielded::shield(
 		RuntimeOrigin::signed(alice()),
-		1_000 * POOL_QUANTUM,
+		1_000 * POOL_STEP,
 		inner.to_bytes(),
 		b"the shielded note".to_vec(),
 	));
@@ -1760,7 +1760,7 @@ fn the_cheap_pass_decides_a_settlement_without_hashing_the_payload() {
 		let wrong = vec![output(b"ct-x1", b"ct-x2")];
 		let planned = plan(&bundle, &wrong).expect("the cheap pass passes");
 		assert_eq!(planned.slots, 1);
-		assert_eq!(planned.fee_quanta, 3);
+		assert_eq!(planned.fee_steps, 3);
 		assert_noop!(bind(&bundle, &wrong), Error::<Test>::CiphertextDigestMismatch);
 		assert_noop!(check(&bundle, &wrong), Error::<Test>::CiphertextDigestMismatch);
 
@@ -2017,13 +2017,13 @@ fn a_real_batch_pays_the_block_author_in_a_coinbase_note() {
 			spend.proof,
 			spend.outputs,
 		));
-		// Eight quanta: four burned, four held for this block's coinbase.
+		// Eight steps: four burned, four held for this block's coinbase.
 		assert_eq!(Balances::balance(&author), 0);
-		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_QUANTUM);
+		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_STEP);
 
 		// The emission the miner would have been paid transparently, plus that
 		// share, is the value of one note.
-		assert_ok!(deposit_coinbase(2 * POOL_QUANTUM));
+		assert_ok!(deposit_coinbase(2 * POOL_STEP));
 		let leaf = ZkTree::leaf_count() - 1;
 		assert_eq!(Shielded::coinbase_value(leaf), Some(6));
 		assert_eq!(
@@ -2164,7 +2164,7 @@ fn a_block_mints_one_coinbase_note_worth_the_reward() {
 		let block = System::block_number() as u32;
 		let inner = record_coinbase(block);
 
-		assert_ok!(deposit_coinbase(7 * POOL_QUANTUM));
+		assert_ok!(deposit_coinbase(7 * POOL_STEP));
 
 		// The leaf the chain appended is the commitment over the author's
 		// opaque `inner` and the value the chain decided.
@@ -2174,13 +2174,13 @@ fn a_block_mints_one_coinbase_note_worth_the_reward() {
 		assert_eq!(Shielded::coinbase_value(0), Some(7));
 		assert_eq!(Shielded::ciphertext(0), None, "a derived coinbase stores no ciphertext");
 		assert_eq!(Shielded::leaf_block(0), Some(System::block_number()));
-		assert_eq!(Shielded::pool_value(), 7 * POOL_QUANTUM);
+		assert_eq!(Shielded::pool_value(), 7 * POOL_STEP);
 		System::assert_has_event(
 			Event::CoinbaseMinted {
 				block_number: System::block_number(),
 				leaf_index: 0,
 				inner,
-				value: 7 * POOL_QUANTUM,
+				value: 7 * POOL_STEP,
 				has_ciphertext: false,
 			}
 			.into(),
@@ -2201,12 +2201,12 @@ fn the_coinbase_note_carries_the_block_reward_and_the_author_fee_share() {
 		let block = System::block_number() as u32;
 		let inner = record_coinbase(block);
 
-		// Nine quanta of fee: five burned, four to the author.
+		// Nine steps of fee: five burned, four to the author.
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 9)]);
 		assert_ok!(Shielded::settle(bundle, vec![output(b"ct-a1", b"ct-a2")]));
-		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_QUANTUM);
+		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_STEP);
 
-		assert_ok!(deposit_coinbase(7 * POOL_QUANTUM));
+		assert_ok!(deposit_coinbase(7 * POOL_STEP));
 
 		let leaf = ZkTree::leaf_count() - 1;
 		assert_eq!(Shielded::coinbase_value(leaf), Some(11));
@@ -2214,7 +2214,7 @@ fn the_coinbase_note_carries_the_block_reward_and_the_author_fee_share() {
 		assert_eq!(pallet_zk_tree::Leaves::<Test>::get(leaf), Some(expected));
 		assert_eq!(Shielded::pending_coinbase_fee(), 0);
 		// The pool lost the whole fee and gained the coinbase note: 100 - 9 + 11.
-		assert_eq!(Shielded::pool_value(), 102 * POOL_QUANTUM);
+		assert_eq!(Shielded::pool_value(), 102 * POOL_STEP);
 	});
 }
 
@@ -2236,10 +2236,10 @@ fn a_zero_reward_still_mints_the_author_fee_already_in_the_pool() {
 		let block = System::block_number() as u32;
 		let inner = record_coinbase(block);
 
-		// Nine quanta of fee: five burned, four to the author.
+		// Nine steps of fee: five burned, four to the author.
 		let bundle = one_segment(10, vec![slot("a", b"ct-a1", b"ct-a2", 9)]);
 		assert_ok!(Shielded::settle(bundle, vec![output(b"ct-a1", b"ct-a2")]));
-		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_QUANTUM);
+		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_STEP);
 
 		// No emission and no collected fees: exactly what a late-life block
 		// hands over.
@@ -2253,7 +2253,7 @@ fn a_zero_reward_still_mints_the_author_fee_already_in_the_pool() {
 		);
 		assert_eq!(Shielded::pending_coinbase_fee(), 0);
 		// 100 in, 9 of fee out, 4 back as the note.
-		assert_eq!(Shielded::pool_value(), 95 * POOL_QUANTUM);
+		assert_eq!(Shielded::pool_value(), 95 * POOL_STEP);
 	});
 }
 
@@ -2308,10 +2308,10 @@ fn a_coinbase_inner_that_is_not_four_canonical_limbs_is_refused() {
 fn a_block_with_no_coinbase_inherent_hands_the_reward_back() {
 	new_test_ext().execute_with(|| {
 		set_author_preimage([3u8; 32]);
-		assert_eq!(deposit_coinbase(7 * POOL_QUANTUM), Err(7 * POOL_QUANTUM));
+		assert_eq!(deposit_coinbase(7 * POOL_STEP), Err(7 * POOL_STEP));
 		assert_eq!(ZkTree::leaf_count(), 0);
 		assert_eq!(Shielded::pool_value(), 0);
-		System::assert_has_event(Event::CoinbaseDeferred { amount: 7 * POOL_QUANTUM }.into());
+		System::assert_has_event(Event::CoinbaseDeferred { amount: 7 * POOL_STEP }.into());
 	});
 }
 
@@ -2331,17 +2331,17 @@ fn the_previous_blocks_payload_is_cleared_before_the_next_inherent() {
 	});
 }
 
-/// Sub-quantum change cannot vanish: a note's value is a whole number of pool
-/// quanta and the remainder waits for the next block.
+/// Sub-step change cannot vanish: a note's value is a whole number of pool
+/// steps and the remainder waits for the next block.
 #[test]
-fn sub_quantum_change_stays_for_the_next_coinbase() {
+fn sub_step_change_stays_for_the_next_coinbase() {
 	new_test_ext().execute_with(|| {
 		set_author_preimage([3u8; 32]);
 		record_coinbase(1);
-		assert_ok!(deposit_coinbase(7 * POOL_QUANTUM + 3));
+		assert_ok!(deposit_coinbase(7 * POOL_STEP + 3));
 		assert_eq!(Shielded::coinbase_value(0), Some(7));
 		assert_eq!(Shielded::pending_coinbase_fee(), 3);
-		assert_eq!(Shielded::pool_value(), 7 * POOL_QUANTUM);
+		assert_eq!(Shielded::pool_value(), 7 * POOL_STEP);
 	});
 }
 
@@ -2429,7 +2429,7 @@ fn a_coinbase_payload_has_no_builder_and_is_refused() {
 
 		// The empty field is the one a node publishes, and it still works.
 		assert_ok!(Shielded::coinbase(RuntimeOrigin::none(), inner, Vec::new()));
-		assert_ok!(deposit_coinbase(3 * POOL_QUANTUM));
+		assert_ok!(deposit_coinbase(3 * POOL_STEP));
 		assert_eq!(Shielded::coinbase_value(0), Some(3));
 		assert_eq!(Shielded::ciphertext(0), None, "no payload, no stored bytes");
 		System::assert_has_event(
@@ -2437,7 +2437,7 @@ fn a_coinbase_payload_has_no_builder_and_is_refused() {
 				block_number: System::block_number(),
 				leaf_index: 0,
 				inner,
-				value: 3 * POOL_QUANTUM,
+				value: 3 * POOL_STEP,
 				has_ciphertext: false,
 			}
 			.into(),

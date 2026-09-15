@@ -114,16 +114,16 @@ pub const UNSIGNED_SETTLEMENT_PRIORITY: u64 = 1;
 /// `ProofTooLarge` on a live chain with no default test saying so first.
 pub const MAX_PROOF_BYTES: usize = 512 * 1024;
 
-/// One pool quantum in planck: the unit a note value is counted in.
+/// One pool step in planck: value in the pool moves in steps of 0.01 QNR.
 ///
 /// A note commits its value as a single field element, and the chain's balance
 /// is `u128` planck at twelve decimals, so the two are related by a fixed
-/// quantum. It is the same quantum `pallet-zk-tree` uses for a wormhole leaf's
-/// amount, which is what lets one tree hold both without two notions of "one
-/// unit"; `SHIELDED_QUANTUM_MATCHES_ZK_TREE` asserts that.
-pub const POOL_QUANTUM: u128 = 10_000_000_000;
+/// step. It is `pallet-zk-tree`'s own `AMOUNT_SCALE_DOWN_FACTOR`, which is
+/// what lets one tree hold a shielded note and a wormhole leaf without two
+/// notions of "one unit"; the assertion below is what holds them together.
+pub const POOL_STEP: u128 = 10_000_000_000;
 
-const _: () = assert!(POOL_QUANTUM == pallet_zk_tree::tree::AMOUNT_SCALE_DOWN_FACTOR);
+const _: () = assert!(POOL_STEP == pallet_zk_tree::tree::AMOUNT_SCALE_DOWN_FACTOR);
 
 /// The depth the tree may grow to and the depth the circuit can prove are one
 /// number, and it is held here because the two crates that carry it never see
@@ -221,7 +221,7 @@ pub struct RealSlot {
 	pub nullifiers: [Hash256; 2],
 	/// Both output note commitments, which become two tree leaves.
 	pub commitments: [Hash256; 2],
-	/// The slot's fee, in pool quanta.
+	/// The slot's fee, in pool steps.
 	pub fee: u64,
 	/// The digest the chain recomputes from the submitted ciphertexts.
 	pub ct_digest: Hash256,
@@ -435,7 +435,7 @@ pub mod pallet {
 		#[pallet::constant]
 		type BlockHashWindow: Get<BlockNumberFor<Self>>;
 
-		/// Minimum fee, in pool quanta, that every real leaf slot must carry.
+		/// Minimum fee, in pool steps, that every real leaf slot must carry.
 		///
 		/// The anti-spam mechanism. One note of any value spent with a dummy in
 		/// the other slot mints two spendable notes, so nothing else bounds how
@@ -457,7 +457,7 @@ pub mod pallet {
 		#[pallet::constant]
 		type MinLeafFee: Get<u64>;
 
-		/// Bytes of note ciphertext one quantum of fee buys, on top of
+		/// Bytes of note ciphertext one step of fee buys, on top of
 		/// [`Config::MinLeafFee`].
 		///
 		/// A flat per-slot floor prices a slot's permanent state at whatever
@@ -471,7 +471,7 @@ pub mod pallet {
 		/// A runtime owes one property when it picks a value: the divisor has
 		/// to sit below the slack between a real `NoteCiphertext` and
 		/// [`Config::MaxCiphertextBytes`], or both round to the same number of
-		/// quanta and padding to the cap is free, which is the whole of what
+		/// steps and padding to the cap is free, which is the whole of what
 		/// this term exists to price.
 		///
 		/// The same divisor prices the submission as a whole. The settling fees
@@ -563,7 +563,7 @@ pub mod pallet {
 	/// coinbase note that pays it.
 	///
 	/// A settled fee leaves [`PoolValue`] whole; the burned share is gone and
-	/// this is the rest. It is planck, always a whole number of pool quanta,
+	/// this is the rest. It is planck, always a whole number of pool steps,
 	/// and it is value the pool still stands behind, so [`ShieldedSupply`]
 	/// counts it. A block that mints no coinbase leaves it here for the next
 	/// one.
@@ -571,7 +571,7 @@ pub mod pallet {
 	#[pallet::getter(fn pending_coinbase_fee)]
 	pub type PendingCoinbaseFee<T: Config> = StorageValue<_, BalanceOf<T>, ValueQuery>;
 
-	/// Value of the coinbase note at a leaf index, in pool quanta.
+	/// Value of the coinbase note at a leaf index, in pool steps.
 	///
 	/// A coinbase note's value is public, which is what lets the chain compute
 	/// `cm = H(CM, inner, value)` from an opaque `inner` it never checks. The
@@ -718,7 +718,7 @@ pub mod pallet {
 		/// The settlement would take the tree past the depth the circuit can
 		/// prove.
 		TreeFull,
-		/// A shielded value is not a positive whole number of pool quanta.
+		/// A shielded value is not a positive whole number of pool steps.
 		ValueNotQuantized,
 		/// The `inner` of a shield or a coinbase is not four canonical
 		/// Goldilocks limbs.
@@ -876,18 +876,18 @@ pub mod pallet {
 
 			let value_u128: u128 = value.try_into().map_err(|_| Error::<T>::ValueOutOfRange)?;
 			ensure!(
-				value_u128 > 0 && value_u128.is_multiple_of(POOL_QUANTUM),
+				value_u128 > 0 && value_u128.is_multiple_of(POOL_STEP),
 				Error::<T>::ValueNotQuantized
 			);
 			// The 62-bit range check. Every value that enters the pool outside a
 			// spend proof has to carry it, or the no-wrap argument behind the
 			// circuit's balance equation does not hold for the notes created
 			// this way.
-			let quanta = u64::try_from(value_u128 / POOL_QUANTUM)
+			let steps = u64::try_from(value_u128 / POOL_STEP)
 				.map_err(|_| Error::<T>::ValueOutOfRange)?;
-			ensure!(quanta <= qnero_circuit::chain::MAX_VALUE, Error::<T>::ValueOutOfRange);
+			ensure!(steps <= qnero_circuit::chain::MAX_VALUE, Error::<T>::ValueOutOfRange);
 
-			let commitment = qnero_circuit::chain::commitment(&inner, quanta)
+			let commitment = qnero_circuit::chain::commitment(&inner, steps)
 				.ok_or(Error::<T>::NonCanonicalInner)?;
 			let stored: BoundedVec<u8, T::MaxCiphertextBytes> =
 				ciphertext.clone().try_into().map_err(|_| Error::<T>::CiphertextTooLarge)?;
@@ -901,7 +901,7 @@ pub mod pallet {
 			// from it. A settled fee mints the author's share back.
 			// `Expendable`: a shielder moving its whole balance into the pool is
 			// the ordinary case on a chain whose policy is that value lives in
-			// the pool, and refusing to let the last quantum leave would make
+			// the pool, and refusing to let the last step leave would make
 			// the transparent account a permanent dust holder.
 			T::Currency::burn_from(
 				&who,
@@ -944,7 +944,7 @@ pub mod pallet {
 		/// ciphertext is what carries `(rho, r)` to a recipient who cannot
 		/// derive them, and **it is usually empty**. A Qnero node cannot build
 		/// one, because it cannot link an ML-KEM implementation beside the one
-		/// its own post-quantum transport pins, so it derives the note from a
+		/// its own post-step transport pins, so it derives the note from a
 		/// miner key its operator configured instead
 		/// (`qnero_note_core::coinbase_r`). An empty field is therefore the
 		/// ordinary case here, unlike a settling slot, where it would mean a
@@ -1165,9 +1165,9 @@ pub mod pallet {
 	/// so the two cannot disagree.
 	#[derive(Clone, Debug, PartialEq, Eq)]
 	pub struct PlannedSettlement {
-		/// Summed fee of every slot that will settle, in pool quanta. A skipped
+		/// Summed fee of every slot that will settle, in pool steps. A skipped
 		/// segment contributes nothing.
-		pub fee_quanta: u128,
+		pub fee_steps: u128,
 		/// Real leaf slots that will settle.
 		pub slots: u32,
 		/// Real leaf slots of the segments this submission skips.
@@ -1188,7 +1188,7 @@ pub mod pallet {
 		/// skipped.
 		///
 		/// This is what the settling fees have to cover, at
-		/// [`Config::CiphertextBytesPerFeeQuantum`] bytes per quantum, on top
+		/// [`Config::CiphertextBytesPerFeeQuantum`] bytes per step, on top
 		/// of [`Config::MinLeafFee`] for every real slot the submission
 		/// carries, [`PlannedSettlement::skipped_slots`] included. The bound
 		/// reads bytes and slots, so it holds however a submitter splits its
@@ -1388,7 +1388,7 @@ pub mod pallet {
 			let min_fee = T::MinLeafFee::get();
 
 			let mut claimed = alloc::collections::BTreeSet::new();
-			let mut fee_quanta: u128 = 0;
+			let mut fee_steps: u128 = 0;
 			let mut slots: u32 = 0;
 			let mut skipped_slots: u32 = 0;
 			// The first anchor failure of the walk, kept so that a submission
@@ -1537,7 +1537,7 @@ pub mod pallet {
 						Error::<T>::FeeBelowMinimum
 					);
 
-					fee_quanta = fee_quanta
+					fee_steps = fee_steps
 						.checked_add(slot.fee as u128)
 						.ok_or(Error::<T>::ValueOutOfRange)?;
 					slots = slots.checked_add(1).ok_or(Error::<T>::ValueOutOfRange)?;
@@ -1564,7 +1564,7 @@ pub mod pallet {
 
 			// The submission floor. The slots that settle pay
 			// [`Config::MinLeafFee`] for every real slot the submission
-			// carries, settling and skipped alike, plus one quantum per started
+			// carries, settling and skipped alike, plus one step per started
 			// [`Config::CiphertextBytesPerFeeQuantum`] bytes of payload, the
 			// bytes of its skipped segments included.
 			//
@@ -1596,13 +1596,13 @@ pub mod pallet {
 			// not do is hand a block 317 slots of walk and weight for the
 			// price of one, which is what emptying the outputs alone bought.
 			let carried_bytes = Self::carried_bytes(outputs);
-			let payload_quanta = carried_bytes.div_ceil(Self::bytes_per_fee_quantum());
+			let payload_steps = carried_bytes.div_ceil(Self::bytes_per_fee_quantum());
 			let submission_floor = u128::from(slots)
 				.checked_add(u128::from(skipped_slots))
 				.and_then(|carried| carried.checked_mul(u128::from(min_fee)))
-				.and_then(|flat| flat.checked_add(u128::from(payload_quanta)))
+				.and_then(|flat| flat.checked_add(u128::from(payload_steps)))
 				.ok_or(Error::<T>::ValueOutOfRange)?;
-			ensure!(fee_quanta >= submission_floor, Error::<T>::PayloadUnderpaid);
+			ensure!(fee_steps >= submission_floor, Error::<T>::PayloadUnderpaid);
 
 			// Two commitments per slot, plus at most one wormhole leaf for the
 			// author's fee share.
@@ -1617,11 +1617,11 @@ pub mod pallet {
 			// pallet's own books on the way past, with nothing on chain to say
 			// the two stopped agreeing.
 			ensure!(
-				PoolValue::<T>::get() >= Self::fee_planck(fee_quanta)?,
+				PoolValue::<T>::get() >= Self::fee_planck(fee_steps)?,
 				Error::<T>::PoolUnderflow
 			);
 
-			Ok(PlannedSettlement { fee_quanta, slots, skipped_slots, carried_bytes, settles })
+			Ok(PlannedSettlement { fee_steps, slots, skipped_slots, carried_bytes, settles })
 		}
 
 		/// Why a segment's block anchor does not resolve, or `None` when it
@@ -1741,7 +1741,7 @@ pub mod pallet {
 				.fold(0u64, |total, output| total.saturating_add(Self::output_bytes(output)))
 		}
 
-		/// Bytes of ciphertext one quantum of fee buys.
+		/// Bytes of ciphertext one step of fee buys.
 		///
 		/// `integrity_test` refuses a zero divisor; the clamp keeps a
 		/// misconfigured runtime from dividing by zero on a live block. Both
@@ -1751,23 +1751,23 @@ pub mod pallet {
 			u64::from(T::CiphertextBytesPerFeeQuantum::get().max(1))
 		}
 
-		/// The fee one real leaf slot must carry, in pool quanta: the flat
-		/// floor plus one quantum per started
+		/// The fee one real leaf slot must carry, in pool steps: the flat
+		/// floor plus one step per started
 		/// [`Config::CiphertextBytesPerFeeQuantum`] bytes of ciphertext.
 		///
 		/// The payload term is what prices the permanent state a slot adds.
 		/// `Ciphertexts` is never pruned, the chain never parses these bytes,
 		/// and a settler can fill both fields to
 		/// [`Config::MaxCiphertextBytes`] with anything it likes, so a flat
-		/// floor buys as much state as the cap allows for one quantum.
+		/// floor buys as much state as the cap allows for one step.
 		fn fee_floor(min_fee: u64, ciphertext_bytes: u64) -> u64 {
 			min_fee.saturating_add(ciphertext_bytes.div_ceil(Self::bytes_per_fee_quantum()))
 		}
 
-		/// A fee in pool quanta as a balance in planck.
-		fn fee_planck(fee_quanta: u128) -> Result<BalanceOf<T>, Error<T>> {
-			fee_quanta
-				.checked_mul(POOL_QUANTUM)
+		/// A fee in pool steps as a balance in planck.
+		fn fee_planck(fee_steps: u128) -> Result<BalanceOf<T>, Error<T>> {
+			fee_steps
+				.checked_mul(POOL_STEP)
 				.ok_or(Error::<T>::ValueOutOfRange)?
 				.try_into()
 				.map_err(|_| Error::<T>::ValueOutOfRange)
@@ -1821,7 +1821,7 @@ pub mod pallet {
 				}
 			}
 
-			let fee = Self::account_fee(plan.fee_quanta)?;
+			let fee = Self::account_fee(plan.fee_steps)?;
 			Self::deposit_event(Event::BatchSettled {
 				segments: plan.settles.iter().filter(|settles| **settles).count() as u32,
 				slots: plan.slots,
@@ -1843,11 +1843,11 @@ pub mod pallet {
 		/// privacy the author is paid in notes like everyone else, and the only
 		/// thing that knows who the author is is the payload its own node
 		/// supplied.
-		fn account_fee(fee_quanta: u128) -> Result<BalanceOf<T>, DispatchError> {
-			if fee_quanta == 0 {
+		fn account_fee(fee_steps: u128) -> Result<BalanceOf<T>, DispatchError> {
+			if fee_steps == 0 {
 				return Ok(Zero::zero());
 			}
-			let fee = Self::fee_planck(fee_quanta)?;
+			let fee = Self::fee_planck(fee_steps)?;
 
 			// `check_settlement` already refused a fee above the pool, so this
 			// subtraction cannot fail. It is checked so that a future entry
@@ -1857,12 +1857,12 @@ pub mod pallet {
 			PoolValue::<T>::put(pool);
 
 			// Rounds against the author.
-			let burn_quanta = T::FeeBurnRate::get().mul_ceil(fee_quanta);
-			let author_quanta = fee_quanta.saturating_sub(burn_quanta);
-			if author_quanta == 0 {
+			let burn_steps = T::FeeBurnRate::get().mul_ceil(fee_steps);
+			let author_steps = fee_steps.saturating_sub(burn_steps);
+			if author_steps == 0 {
 				return Ok(fee);
 			}
-			let author_amount = Self::fee_planck(author_quanta)?;
+			let author_amount = Self::fee_planck(author_steps)?;
 			PendingCoinbaseFee::<T>::mutate(|pending| {
 				*pending = pending.saturating_add(author_amount)
 			});
@@ -1892,9 +1892,9 @@ pub mod pallet {
 		/// author's share of this block's settled fees comes with it.
 		///
 		/// Returns the credit when there is no note to mint it into, and the
-		/// caller holds it for the next block. Sub-quantum change stays in
+		/// caller holds it for the next block. Sub-step change stays in
 		/// [`PendingCoinbaseFee`] for the same reason: a note's value is a
-		/// whole number of pool quanta, and nothing is allowed to vanish
+		/// whole number of pool steps, and nothing is allowed to vanish
 		/// between the two books.
 		fn mint_coinbase(minted: BalanceOf<T>) -> Result<(), BalanceOf<T>> {
 			let Some(payload) = PendingCoinbase::<T>::take() else {
@@ -1913,19 +1913,19 @@ pub mod pallet {
 			let Ok(total_planck) = TryInto::<u128>::try_into(total) else {
 				return Err(minted);
 			};
-			let quanta_u128 = total_planck / POOL_QUANTUM;
-			let change = total_planck % POOL_QUANTUM;
-			let Ok(quanta) = u64::try_from(quanta_u128) else {
+			let steps_u128 = total_planck / POOL_STEP;
+			let change = total_planck % POOL_STEP;
+			let Ok(steps) = u64::try_from(steps_u128) else {
 				return Err(minted);
 			};
 			// The 62-bit cap, on this creation path like every other. The
 			// emission cannot reach it at any supply this chain has, and the
 			// check is here because what it protects is the argument behind the
 			// circuit's balance equation.
-			if quanta == 0 || quanta > qnero_circuit::chain::MAX_VALUE {
+			if steps == 0 || steps > qnero_circuit::chain::MAX_VALUE {
 				return Err(minted);
 			}
-			let Some(commitment) = qnero_circuit::chain::commitment(&payload.inner, quanta) else {
+			let Some(commitment) = qnero_circuit::chain::commitment(&payload.inner, steps) else {
 				// Refused at the inherent, so unreachable here.
 				return Err(minted);
 			};
@@ -1933,7 +1933,7 @@ pub mod pallet {
 				return Err(minted);
 			};
 			let Ok(value) =
-				TryInto::<BalanceOf<T>>::try_into(quanta_u128.saturating_mul(POOL_QUANTUM))
+				TryInto::<BalanceOf<T>>::try_into(steps_u128.saturating_mul(POOL_STEP))
 			else {
 				return Err(minted);
 			};
@@ -1951,7 +1951,7 @@ pub mod pallet {
 				Ciphertexts::<T>::insert(leaf_index, &payload.ciphertext);
 			}
 			LeafBlocks::<T>::insert(leaf_index, block_number);
-			CoinbaseValues::<T>::insert(leaf_index, quanta);
+			CoinbaseValues::<T>::insert(leaf_index, steps);
 			PoolValue::<T>::mutate(|pool| *pool = pool.saturating_add(value));
 			PendingCoinbaseFee::<T>::put(change);
 

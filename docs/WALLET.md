@@ -154,10 +154,14 @@ value in, and the CLI only offers the dev chain's well-known accounts for it.
 
 ## Amounts
 
-Every amount on the command line is in **pool quanta**. One quantum is
-`10^10` planck, 0.01 QNR. Note values and fees are counted in quanta and
-range checked to 62 bits; the chain's transparent balance is `u128` planck.
-`shield --amount 1000` burns `10^13` planck and creates a note of 1000 quanta.
+Every amount on the command line is in **QNR**, and so is every amount this
+wallet prints. Value in the pool moves in steps of 0.01 QNR, so an amount has
+at most two decimal places and `--amount 12.345` is refused rather than
+rounded. `shield --amount 10` creates a note worth 10 QNR.
+
+Underneath, a note's value is a count of those steps, range checked to 62
+bits, and the chain's transparent balance is `u128` planck at twelve decimals.
+Both are developer detail: nothing a person reads is quoted in either.
 
 ## Commands
 
@@ -205,7 +209,7 @@ Prints the `qn1...` address for the seed. It is about 2600 characters, because
 an ML-KEM-1024 encapsulation key is 1568 bytes of it. Wallets exchange it as a
 QR code or a copy-paste string.
 
-### `shield --from-dev-account <alice|bob|charlie> --amount N [--memo TEXT]`
+### `shield --from-dev-account <alice|bob|charlie> --amount QNR [--memo TEXT]`
 
 Signs and submits `shield(value, inner, ciphertext)` from a dev account. The
 wallet draws the note's randomness, derives `rho` by the entry rule, computes
@@ -242,7 +246,7 @@ an open issue, listed below.
 
 The dispatch is then confirmed. An extrinsic in a block is not a dispatch that
 succeeded: a shield the runtime refused, because the dev account cannot pay or
-the value is not a whole multiple of `POOL_QUANTUM`, is included and appends no
+the value is not a whole multiple of `POOL_STEP`, is included and appends no
 leaf. So after inclusion the wallet reads the leaves the block appended and
 looks for its own commitment among them, prints the leaf index it landed at,
 and turns an absent one into an error that drops the pending entry.
@@ -467,7 +471,7 @@ block's leaf count, and serving a header that does not hash to its own name are
 each refused by name.
 
 The one thing this does not pin is a block that mints no coinbase at all.
-`pallet-shielded::mint_coinbase` refuses a credit below one pool quantum, so a
+`pallet-shielded::mint_coinbase` refuses a credit below one pool step, so a
 block whose emission plus its share of the fees rounds to nothing appends no
 coinbase leaf and its last leaf would then be an ordinary shield or settled
 output with no value beside it, which these rules refuse. That is unreachable
@@ -1097,7 +1101,7 @@ The store keeps the raw bytes: serde_json escapes control characters on the way
 to the file, and a wallet that rewrote what it received could not show an
 operator what was actually sent.
 
-### `send --to <qn1...> --amount N [--fee F] [--memo TEXT] [--no-sync] [--merkle-rpc]`
+### `send --to <qn1...> --amount QNR [--fee QNR] [--memo TEXT] [--no-sync] [--merkle-rpc]`
 
 Syncs, then spends up to two notes into a payment and a change note.
 
@@ -1111,7 +1115,7 @@ refusal costs nothing:
    is the leak the padding closes. The floor is
    `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)`, and for the
    single real slot a wallet submits it equals the whole-submission floor. At
-   the current runtime that is 8 quanta for two outputs. `--fee`
+   the current runtime that is 0.08 QNR for two outputs. `--fee`
    defaults to it and a lower one is refused with the arithmetic spelled out:
    the fee is a public input of the proof, fixed at proving time, so it cannot
    be raised afterwards and the chain would refuse the settlement with
@@ -1717,7 +1721,7 @@ are cited at each site.
    also decoded at its declared `u64` width and refused by name at any other,
    the way every other integer a scan reads is: read at whatever width the
    bytes carried, thirty-two bytes of `0xff` was a walk of 2^256 - 1 steps.
-4. **`POOL_QUANTUM` is the one chain value with no metadata surface.** It is a
+4. **`POOL_STEP` is the one chain value with no metadata surface.** It is a
    constant of the pallet crate with no `#[pallet::constant]` declaration, so
    the wallet carries a copy. A mismatch surfaces as a `shield` whose dispatch
    failed, because the runtime refuses a value that is not a whole multiple

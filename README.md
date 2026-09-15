@@ -55,7 +55,7 @@ One workstation, 20 cores, WSL2. `docs/BENCH.md` is the log.
 - Public batch at n = 53: proof 237544 bytes, prove 29 s, a 2.2x margin under `MAX_PROOF_BYTES` of 524288, 318 real slots.
 - Verify is flat in what a proof wraps: 2.2 ms for a leaf, 4.2 ms for a private batch, 6.04 ms for the public-batch check, all native. A private batch verifies in 14.1 ms of browser wasm against 3.7 ms for the same call natively, 3.8x, and the module's very first verify costs 20.5 ms because V8 has yet to tier that code up. Neither is `WASM_VERIFY_FACTOR = 5`, which governs the runtime's own wasmtime executor and stays unmeasured.
 - In a browser, single threaded: a payment is 33.6 s of wasm and 910.4 MiB of peak linear memory, on top of 12.1 s of circuit build once per worker. Natively on one thread the same batch is 9.82 s, so wasm costs about 3.3x. There is no phone in these figures: a desktop core under headless Chromium is the proxy, and the stated 2-to-4 factor is a floor, because its low end is a peak single-core score ratio that leaves out both throttling and mobile browser engines. A phone therefore lands at 67 to 134 s per payment or worse. The memory fits a 6 GB device and the single-threaded clock misses the 60 s target, so threads are the measured gap.
-- An address `qn1...` is 2571 characters, mostly its 1568-byte ML-KEM-1024 key. Amounts are pool quanta of 10^10 planck, 0.01 QNR; a `send` defaults to a fee of 8 quanta and takes 6.47 to 7.81 s to prove, and emission at genesis supply is 411 quanta a block against a 120-second target.
+- An address `qn1...` is 2571 characters, mostly its 1568-byte ML-KEM-1024 key. Amounts move in steps of 0.01 QNR; a `send` defaults to a fee of 0.08 QNR and takes 6.47 to 7.81 s to prove, and emission at genesis supply is 4.11 QNR a block against a 120-second target.
 
 ## How it compares
 
@@ -102,9 +102,9 @@ nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
 
 ```
 export RAYON_NUM_THREADS=4
-./target/release/qnero-wallet shield --from-dev-account alice --amount 100
+./target/release/qnero-wallet shield --from-dev-account alice --amount 1
 ./target/release/qnero-wallet sync
-./target/release/qnero-wallet send --to qn1... --amount 5
+./target/release/qnero-wallet send --to qn1... --amount 0.05
 ```
 
 RPC is the Substrate default, port 9944. A `send` picks two notes largest-first, rebuilds Merkle paths locally and proves the batch itself. `docs/OPS-DEV.md` carries the build preconditions and the end-to-end transcripts; `docs/WALLET.md` is the wallet's reference.
@@ -166,7 +166,7 @@ M1 through M10 and M12 are done, through the wallet CLI, v1 mandatory privacy, R
 
 - Key storage is dev grade: 32 bytes of hex in a `0600` file, no passphrase or encryption, beside a note store holding every `rho` and `r` in clear text.
 - Weights are unbenchmarked, and admission work is unpaid per gossiped blob: a settlement walk and a verify each, with no rate limit.
-- `N` and `POOL_QUANTUM` are undiscoverable over RPC, so a runtime and a wallet built apart diverge silently, the chain refusing the proof after its cost is paid.
+- `N` and `POOL_STEP` are undiscoverable over RPC, so a runtime and a wallet built apart diverge silently, the chain refusing the proof after its cost is paid.
 - The real-transfer count is public: a padding slot publishes zero commitments, which the chain needs to append correctly.
 - One transfer per submission today: six slots, one filled, so 150908 bytes carries one transfer, about 22 KB each when full.
 
