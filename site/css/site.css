@@ -46,7 +46,6 @@
   --accent-on-fill: #161416;
   --mark: #e6a145;
   --band-accent-bg: #1f1a14;
-  --band-accent-hover: #2b241a;
   --col-self-bg: #2c2418;
   --col-self-hover: #3a2f1c;
 
@@ -90,7 +89,6 @@
     --accent-on-fill: #161416;
     --mark: #9c5c05;
     --band-accent-bg: #f8f1e4;
-    --band-accent-hover: #f0e4cd;
     --col-self-bg: #f8f1e4;
     --col-self-hover: #f0e4cd;
 
@@ -125,7 +123,6 @@
   --accent-on-fill: #161416;
   --mark: #9c5c05;
   --band-accent-bg: #f8f1e4;
-  --band-accent-hover: #f0e4cd;
   --col-self-bg: #f8f1e4;
   --col-self-hover: #f0e4cd;
 
@@ -385,7 +382,10 @@ svg {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--accent);
+  /* A 7px dot carries no text and owes no text contrast, so it takes the fill
+     token and stays the one identity amber in both themes. `--accent` is for
+     text and focus rings, where the darker light value is the correct one. */
+  background: var(--accent-fill);
   transform: translateY(-1px);
 }
 
@@ -592,11 +592,14 @@ h1 .mark {
   margin-bottom: var(--space-3);
 }
 
+/* Balanced for the same reason .band h2 is: a lede sits directly under a 52px
+   h1, so a one-word second line is the most conspicuous line on the page. */
 .hero .lede {
   font-size: var(--fs-lede);
   color: var(--text-primary);
   max-width: 46ch;
   margin-bottom: var(--space-4);
+  text-wrap: balance;
 }
 
 .hero .sub {
@@ -702,7 +705,9 @@ h1 .mark {
 
 .status-panel {
   max-width: var(--measure);
-  border-left: 3px solid var(--accent);
+  /* Same rule as the strip's dot: a 3px rail is not text. This is the amber the
+     comparison table's column rails already use. */
+  border-left: 3px solid var(--accent-fill);
 }
 
 .status-panel p {
@@ -724,8 +729,13 @@ h1 .mark {
 /* Six boxes read as two rows of three, which an auto-fit track turns into four
    and a hole. Same reason as .figures--3. */
 @media (min-width: 900px) {
+  /* Sized to their own content. Stretched to the row's tallest card, the three
+     short ones in this grid each end with about a third of an empty bordered
+     panel under their last line, which is loudest in light mode where a white
+     card sits on a near-white band. An uneven row bottom is the cheaper cost. */
   .cards--3 {
     grid-template-columns: repeat(3, 1fr);
+    align-items: start;
   }
 }
 
@@ -742,6 +752,7 @@ h1 .mark {
 
 .card h3 {
   font-size: var(--fs-h3);
+  text-wrap: balance;
 }
 
 .card p {
