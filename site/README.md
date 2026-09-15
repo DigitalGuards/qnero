@@ -10,6 +10,7 @@ site/
   index.html          how-it-works.html   wallet.html     mine.html
   explorer.html       docs.html           about.html      404.html
   css/site.css        one stylesheet, tokens first
+  js/theme.js         the stored theme, applied before the first paint
   js/site.js          the theme toggle, and nothing else
   img/favicon.svg     img/favicon-32.png  img/og.png
   robots.txt          sitemap.xml         NOTICE
@@ -43,7 +44,13 @@ server {
         internal;
     }
 
-    location ~* \.(css|js|svg|png)$ {
+    # `svg` and `png` only. `css/site.css` and the two scripts carry no
+    # fingerprint and no version query, and there is no build step to give them
+    # one, so a long max-age serves a returning reader new HTML against a
+    # stylesheet their browser will not re-fetch for a week. They fall through
+    # to nginx's ETag and Last-Modified, which revalidate on every load and cost
+    # one 304.
+    location ~* \.(svg|png)$ {
         add_header Cache-Control "public, max-age=604800";
     }
 
@@ -57,7 +64,10 @@ Every host, path and certificate above is a placeholder. The site makes no
 outbound request, so no content policy of its own is required; a host that
 sends one can send `default-src 'none'; style-src 'self'; script-src 'self';
 img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
-and the pages still render.
+and the pages still render, with the stored theme intact. That policy is the
+reason there is no inline script and no inline style anywhere in the eight
+files: `script-src 'self'` would block an inline theme bootstrap and discard a
+reader's choice on every load, silently and with no visible failure.
 
 Redirect `www` to the apex, and serve `404.html` for anything missing.
 
@@ -73,6 +83,9 @@ in the repository is exactly what is served.
 site, silQ Road and Qloak read as one project. Dark is the default. The light
 palette is redefined under `prefers-color-scheme: light` and again under
 `[data-theme='light']`, so the toggle wins in both directions.
+
+Every page carries `<link rel="stylesheet">` and two `<script src>` tags and
+no inline block of either, which is what keeps the content policy above true.
 
 Every claim and every number on these pages comes from `README.md`,
 `docs/DESIGN.md`, `docs/BENCH.md`, `docs/CIRCUIT.md` or `chain/MINING.md`. A
@@ -102,9 +115,20 @@ grep -rnP '\x{2014}' site/ && echo 'em dash found'
 ```
 
 The link checker walks every internal link and asset reference and reports
-anything missing. The `qnero.io` subdomains are labelled "testnet, coming
-online" on the pages and answer nothing yet, which is why they are written as
-plain text on the page and carry no link.
+anything missing, asserts that `sitemap.xml` lists exactly the pages that
+exist, and resolves every absolute `qnero.io` URL in a meta tag against disk.
+
+**The M11 hosts are linked now.** `wallet.qnero.io`, `explorer.qnero.io`,
+`rpc.qnero.io` and `faucet.qnero.io` appear as links with "testnet, coming
+online" beside each one, which is what the site was asked for. They answer
+nothing until M11 deploys, so every one of those anchors carries
+`data-m11-host`: that marker is the single grep that finds all six on the day
+they go live, and the checker fails a subdomain link that arrives without it,
+so a new one cannot be added without the label. Removing the labels at M11 is
+`grep -rn data-m11-host site/`, and nothing else has to change.
+
+`sitemap.xml` carries a hand-written `lastmod` on each page. Bump it when the
+content changes; nothing derives it, because nothing builds.
 
 ## Licence
 
