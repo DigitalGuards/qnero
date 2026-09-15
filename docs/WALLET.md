@@ -299,11 +299,40 @@ is the difference between a first sync that finishes and one somebody watches.
 first checkpoint, with the leaf count the chain held at that block as the
 store's first watermark, and every rule that already stands on a checkpoint
 stands on this one: the header walk takes it as its trusted bottom, the
-checkpoint fork walk rewinds through it, and the first sync folds the leaves
-under it and compares against the `zkTreeRoot` the birthday block's own header
-published, which is what turns the recorded leaf count from a claim into a
-fact of that block. Nothing in the sync knows a birthday from a checkpoint an
-earlier pass wrote, which is the point.
+checkpoint fork walk rewinds through it, and the first sync that has leaves to
+scan folds the leaves under the watermark and compares against the `zkTreeRoot`
+the birthday block's own header published. Nothing in the sync knows a birthday
+from a checkpoint an earlier pass wrote, which is the point.
+
+**What that fold settles about the count, exactly.** A recorded count that is
+too **high** is refused by it: the leaves under it would have to fold to the
+root that block published, and a node that does not have them cannot produce
+them. That is the direction that costs notes, and it is the one the fold
+covers. A count that is too **low** it does not pin, and Bound A below says
+why: the fold of `m` level-1 node values equals the fold of the `4m` leaves
+under them, so a per-block root comparison passes against the honest chain's
+own header at a count below the real one. Low is the safe direction, and it is
+the direction a birthday is rounded in: the pass reads more than it had to
+rather than less.
+
+**And the fold runs only on a pass that has leaves to scan.** A birthday whose
+count equals the count the node reports at its head leaves nothing to fold, and
+what checks the birthday then is the roots the chunk's own headers carry: every
+block above the walk's bottom has to publish the bottom block's own root, since
+a moved root over an unchanged count is a node answering a count its own
+headers do not carry.
+
+**A count recorded too high is refused, and the refusal says so by name.** It
+reaches the leaf gate as a node whose tree is shorter than this wallet's
+watermark, which is the shape of a node that is behind, and the advice for that
+shape is to point at a node that has caught up. No node ever has: the watermark
+is what is wrong, and every honest node repeats the refusal. So while the
+watermark is still the number the birthday recorded, every refusal that rests
+on it names the birthday block and the rescan that drops the watermark to zero
+and keeps every note: `sync --rescan` in the command-line wallet, the rescan on
+Qloak's Settings screen. That is three places in each wallet, because a spend
+repeats the leaf gate for itself: the sync's leaf gate, the chunk check above,
+and the gate a payment makes before it writes anything off.
 
 **It is the node's claim, exactly like every checkpoint.** The block hash was
 read from one node at one moment and nothing verified it, so a wallet created
@@ -347,14 +376,15 @@ wallet has `--restore-height` on `restore`. Three answers and what each costs:
 
 **What a full scan costs, as a projection rather than a promise.** At the
 public chain's 120 s target a year is 262 980 blocks. At the pipelined rate
-`docs/BENCH.md` measured against the live testnet, 665 to 815 headers a second
-in the browser and 426 in the command-line wallet, the header walk over that
-year is five to ten minutes. Both wallets quote 400 headers a second when they
+`docs/BENCH.md` measured against the live testnet, 707 to 752 headers a second
+in the browser and 948 in the command-line wallet, the header walk over that
+year is five to six minutes. Both wallets quote 400 headers a second when they
 estimate one, which is under every measured figure on purpose: an estimate that
 overstates the wait is the one to be wrong in. Before this walk was pipelined
-the same range was 57 to 64 headers a second in the browser, which is 68 to 77
+the same range was 59 to 67 headers a second in the browser, which is 65 to 74
 minutes, and over HTTP it could not finish at all, because the node's front end
-answers `429 Too Many Requests` after about eighty requests in a window.
+answers `429 Too Many Requests` after about eighty requests in a window: a
+sequential walk gave up 63 headers into a 326-block chain.
 
 That is the **header** term. A year of blocks is also a year of coinbase
 leaves, one per block, each with a commitment, a block, a value and a rebuild,
@@ -503,7 +533,21 @@ implementation in each wallet, `crates/qnero-wallet/src/typing.rs` and
    is answered around rather than refused, because that is an older
    implementation and not a lie: the hash list falls back to one height per
    call and the batch to one request per call, and the walk is then exactly
-   what it was.
+   what it was. Both shapes of that answer are worked around, the one-hash
+   answer and the `-32602 Invalid params` an implementation whose parameter is
+   a single number gives, and each is asked once per command rather than once
+   per page.
+
+   **A request that did not complete is not that answer.** A rate limit, a
+   gateway with no upstream, a dropped socket: none of them says anything
+   about parameter shapes, and reading one as "this node takes no batches"
+   would put the rest of the sync on one request per call, which is
+   sixty-four times the requests into the endpoint that had just refused one.
+   This chain's public endpoint answers `429 Too Many Requests` after about
+   eighty requests in a window, so that is the live case and not a
+   hypothetical. Those come back to the operator as errors, with the first
+   line of the node's own body quoted, and the wallet goes on assuming the
+   batching it had.
 
    **The hashes decide nothing.** They are addresses, and three local checks
    are what make the range a chain, which is what the descending walk got by

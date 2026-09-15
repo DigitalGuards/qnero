@@ -1056,8 +1056,12 @@ command-line wallet. `docs/WALLET.md` carries what is verified locally in place
 of the parent-link walk, which is the same set of equalities.
 
 Both harnesses run the old walk and the new one against **one node in one
-process** and assert they build the same chain, so the comparison is not across
-two builds:
+process**, so the comparison is not across two builds, and both compare the two
+walks' output rather than counting them: the Rust harness walks the parent
+links of the pipelined chain and checks its top against the head, and the
+browser harness compares the two walks header for header, number, parent hash
+and tree root. A pipelined walk that assembled a different range of the same
+length would otherwise report a clean twelvefold.
 
 - `crates/qnero-wallet/tests/header_walk_bench.rs`, ignored by default:
   `cargo test -j 2 --release -p qnero-wallet --test header_walk_bench --
@@ -1069,50 +1073,73 @@ two builds:
 
 ### Against the live testnet
 
-`rpc.qnero.io`, from the development workstation, with the chain at 285 to 292
+`rpc.qnero.io`, from the development workstation, with the chain at 324 to 326
 blocks over the runs. This is the case the change is for: a real wide-area
 round trip through a CDN.
 
 The command-line wallet cannot speak HTTPS at all in this build, because `ureq`
-is compiled with no TLS backend, so its rows are measured through a local
-HTTP-to-HTTPS forwarder on loopback that adds a process hop and keeps one
-TLS connection per worker thread. The wide-area round trip, which is the term
-being measured, is unchanged by it. The browser wallet's rows are its own read
-layer over `wss://rpc.qnero.io` with no forwarder.
+is compiled with no TLS backend, so its rows go through a loopback
+HTTP-to-HTTPS forwarder: a twenty-line Node script that reads each request
+body, posts it to the endpoint over one keep-alive TLS connection and passes
+the answer and its status back. That adds a process hop on loopback and leaves
+the wide-area round trip, which is the term being measured, as it is. The
+browser wallet's rows are its own read layer over `wss://rpc.qnero.io` with no
+forwarder.
+
+**Where each number comes from.** The `Headers`, `Wall` and `Headers/s` columns
+are printed by the two harnesses named above. The `Requests` column is printed
+by them too: `RpcClient::requests()` counts the HTTP requests the command-line
+wallet sends, batch arrays counting once, and the browser harness counts the
+calls through `ChainContext.send`. The forwarder logs one line per request with
+the status it got back, which is the second count for the command-line rows and
+where the 429s below are read off.
 
 | Wallet | Walk | Headers | Wall | Headers/s | Requests |
 |---|---|---|---|---|---|
-| command line | sequential | 79 of 290, then refused | 5.45 s | 14 | 83, then HTTP 429 |
-| command line | pipelined | 290 | 0.68 s | 426 | 10 |
-| browser | sequential | 292 | 5.10 s | 57 | 292 |
-| browser | pipelined | 292 | 0.44 s | 665 | 294 |
+| command line | sequential | 63 of 326, then refused | 1.39 s | 45 | 65, then HTTP 429 |
+| command line | pipelined | 326 | 0.34 s | 948 | 9 |
+| browser | sequential | 325 | 5.26 s | 62 | 325 |
+| browser | pipelined | 325 | 0.45 s | 727 | 327 |
 
-Three browser runs over about ten minutes, as the chain moved from 289 to 294
-blocks: 0.39 s, 0.44 s and 0.36 s pipelined, which is 747, 665 and 815 headers
-a second, against 4.60 s, 5.10 s and 4.57 s sequential, which is 63, 57 and 64.
-The ratio is 11.6x to 12.6x across the three.
+Three browser runs back to back at block 324: 0.45 s, 0.43 s and 0.46 s
+pipelined, which is 727, 752 and 707 headers a second, against 5.26 s, 4.88 s
+and 5.50 s sequential, which is 62, 67 and 59. The ratio is 11.3x to 12.0x
+across the three.
 
 **The two wallets win it in different ways, and the table says so.** The
-browser makes the same 292 requests either way: what it buys is 32 of them in
-flight on one socket instead of one. The command-line wallet makes 10 requests
-instead of 290, because a batch array of 64 headers is one HTTP request.
+browser makes the same 325 requests either way: what it buys is 32 of them in
+flight on one socket instead of one. The command-line wallet makes 9 requests
+instead of 326, because a batch array of 64 headers is one HTTP request.
 
 **The command-line wallet's sequential walk cannot finish at all.** The node's
 front end rate-limits HTTP requests, answering `429 Too Many Requests` after
-about 80 in a window, so a sequential walk over any chain longer than that is
-refused partway through whatever the wallet does. A full fresh sync with the
-previous build ends the same way:
+about eighty in a window, so a sequential walk over any chain longer than that
+is refused partway through whatever the wallet does. A full fresh sync of the
+whole chain, `qnero-wallet --node <endpoint> --file <seed> sync` against a
+store with nothing in it:
 
 | Build | Fresh sync of the whole chain | Wall | Requests |
 |---|---|---|---|
-| before | refused: `chain_getHeader returned a body that is not JSON` | 5.55 s | 83, then HTTP 429 |
-| after | 295 leaves through block 290 | 1.69 s | 21 |
+| `9b1b765`, before the walk | refused: `chain_getHeader failed against <endpoint>: status code 429` | 1.42 s | 67, the last one a 429 |
+| after | 330 leaves through block 325 | 0.68 s | 23 |
 
-That refusal is also why `RpcClient` now quotes the start of a body it cannot
-parse. The old message said only that the body was not JSON, which reads as a
-decoding bug in the wallet; it now reads `<html> <head><title>429 Too Many
-Requests</title></head> …`, which is the node telling the operator what
-happened.
+The before row wants that commit built, which is what it was measured from: a
+worktree at `9b1b765` and its own `qnero-wallet` binary, against the same
+endpoint through the same forwarder, minutes apart from the row under it.
+
+Rate limiting is also what the pipelined walk stops running into. Run
+immediately after the sequential walk above had spent the window on 65
+requests, the pipelined walk went through it in 9: 326 headers in 0.35 s. On
+this endpoint the sequential walk is the request pattern the limiter refuses,
+and the pipelined walk fits inside the window the limiter allows.
+
+Two shapes of refusal reach an operator here, and the wallet quotes both. A
+forwarder that passes the status through gives `status code 429`; something in
+front that answers `200` with an HTML page gives a body that is not JSON, and
+`RpcClient` quotes the head of it, so the message reads `<html>
+<head><title>429 Too Many Requests</title></head> …` rather than saying only
+that the body was unreadable, which sent an operator looking for a decoding bug
+in the wallet.
 
 The WebSocket endpoint does not rate-limit the same way, which is why the
 browser's sequential row completes where the command-line wallet's does not.
@@ -1122,18 +1149,25 @@ browser's sequential row completes where the command-line wallet's does not.
 The round trip is microseconds here, so this is the floor: what is left is
 request handling rather than waiting.
 
-| Chain | Walk | Headers | Wall | Headers/s |
-|---|---|---|---|---|
-| 3 x `HEADER_WALK_LIMIT` fixture | sequential | 3075 | 1.67 s | 1836 |
-| 3 x `HEADER_WALK_LIMIT` fixture | pipelined | 3073 | 0.67 s | 4571 |
+| Chain | Walk | Headers | Wall | Headers/s | Requests |
+|---|---|---|---|---|---|
+| 3 x `HEADER_WALK_LIMIT` fixture | sequential | 3073 | 1.65 s | 1860 | 3078 |
+| 3 x `HEADER_WALK_LIMIT` fixture | pipelined | 3073 | 0.65 s | 4752 | 66 |
 
-Repeated once: 1.69 s and 0.68 s. The three-chunk fixture is the 3072-block
-chain the round asked for; a `--dev --tmp` node at one mining thread was at 206
-blocks after twenty minutes on this workstation and 3072 would have been six
-hours of mining for a number the fixture already serves.
+Repeated once: 1.64 s and 0.64 s. Both rows count the blocks in the range
+rather than the fetches each walk made, because both walks re-fetch the block
+each chunk stands on; the harness prints one denominator for the two so the
+rates are over the same thing.
 
-A full fresh sync against that dev node, 206 blocks and 206 leaves, is 0.10 s
-before and 0.05 s after, which is the same 2x.
+The three-chunk fixture is the 3072-block chain the round asked for; a `--dev
+--tmp` node at one mining thread was at 206 blocks after twenty minutes on this
+workstation and 3072 would have been six hours of mining for a number the
+fixture already serves.
+
+A full fresh sync against that dev node, 206 blocks and 206 leaves, was 0.10 s
+before and 0.05 s after. That pair is a hand-run one-off from the day of the
+change: no harness produces it, and the dev chain it ran against is gone. The
+live-testnet sync rows above are the reproducible before and after.
 
 ### What this projects to a year-old chain
 
@@ -1142,10 +1176,10 @@ alone, at the rates above:
 
 | Where | At the measured rate | Header walk over a year of blocks |
 |---|---|---|
-| browser, live testnet, sequential | 57 to 64 headers/s | 68 to 77 minutes |
-| browser, live testnet, pipelined | 665 to 815 headers/s | 5 to 7 minutes |
-| command line, live testnet, pipelined | 426 headers/s | 10 minutes |
-| command line, live testnet, sequential | 14 headers/s | it cannot finish: the node refuses it after about 80 requests |
+| browser, live testnet, sequential | 59 to 67 headers/s | 65 to 74 minutes |
+| browser, live testnet, pipelined | 707 to 752 headers/s | 6 minutes |
+| command line, live testnet, pipelined | 948 headers/s | 5 minutes |
+| command line, live testnet, sequential | 45 headers/s | it cannot finish: the node refuses it after about 80 requests |
 
 Both wallets quote 400 headers/s when they estimate a full scan
 (`MEASURED_HEADERS_PER_SECOND`, held equal by a test), which is under every

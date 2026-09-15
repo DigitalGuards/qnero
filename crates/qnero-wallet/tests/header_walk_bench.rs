@@ -19,6 +19,13 @@
 //! the two are measured against one node in one process rather than compared
 //! across two builds. Both are asserted to produce the same chain, which is
 //! the claim the pipelining rests on.
+//!
+//! Both are also counted the same way. A range longer than one chunk is
+//! climbed in chunks, and every chunk re-fetches the block it stands on, so
+//! the walks fetch a handful of blocks twice; a row that reported the fetches
+//! for one walk and the heights for the other put two rates over two different
+//! denominators. What is printed is the number of blocks in the range, for
+//! both, with the requests each one made beside it.
 
 mod support;
 
@@ -109,6 +116,7 @@ fn the_header_walk_before_and_after() {
     let run_sequential = only != "pipelined";
 
     let mut pipelined = Vec::new();
+    let before_pipelined = rpc.requests();
     let started = Instant::now();
     for (bottom, top) in chunks.iter().filter(|_| run_pipelined) {
         let chunk_head = ChainHead {
@@ -127,13 +135,15 @@ fn the_header_walk_before_and_after() {
     let after = started.elapsed();
     if run_pipelined {
         println!(
-            "pipelined  {} headers in {:.2} s, {:.0} headers/s",
+            "pipelined  {} headers in {:.2} s, {:.0} headers/s, {} requests",
             head.number + 1,
             after.as_secs_f64(),
-            rate(head.number, after)
+            rate(head.number, after),
+            rpc.requests() - before_pipelined
         );
     }
 
+    let before_sequential = rpc.requests();
     let started = Instant::now();
     let mut sequential_failed = None;
     let mut walked = 0usize;
@@ -148,17 +158,22 @@ fn the_header_walk_before_and_after() {
         }
     }
     let before = started.elapsed();
+    let requests = rpc.requests() - before_sequential;
     match sequential_failed.filter(|_| run_sequential) {
         Some(error) => println!(
-            "sequential gave up after {walked} headers in {:.2} s, {:.0} headers/s: {error}",
+            "sequential gave up after {walked} headers in {:.2} s, {:.0} headers/s, {requests} \
+             requests: {error}",
             before.as_secs_f64(),
             walked as f64 / before.as_secs_f64().max(f64::MIN_POSITIVE)
         ),
         None if run_sequential => println!(
-            "sequential {} headers in {:.2} s, {:.0} headers/s",
-            walked,
+            // The blocks in the range, the way the pipelined row counts them.
+            // `walked` is fetches, and the chunk boundaries are fetched twice
+            // by both walks.
+            "sequential {} headers in {:.2} s, {:.0} headers/s, {requests} requests",
+            head.number + 1,
             before.as_secs_f64(),
-            walked as f64 / before.as_secs_f64().max(f64::MIN_POSITIVE)
+            rate(head.number, before)
         ),
         None => {}
     }

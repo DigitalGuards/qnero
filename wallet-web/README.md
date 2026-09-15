@@ -132,6 +132,14 @@ has the bug too.
   store's first checkpoint, so it is the node's claim like every checkpoint and
   the fork walk rewinds through it; the screen says what was recorded and whose
   claim it is.
+
+  The leaf count beside it is the same kind of claim and nothing checks it when
+  it is written. The first sync that has leaves to scan folds the leaves under
+  it against that block's own `zkTreeRoot`, which refuses a count recorded too
+  high; while the watermark is still that number, any refusal resting on it
+  names the birthday and the rescan on the Settings screen, because a watermark
+  that was wrong when it was written is not a node being behind and no other
+  node can satisfy it.
 - **Restore from a seed.** The 64 hex characters, and one optional field: "the
   chain height when this wallet was created, leave empty to scan everything".
   Empty reads the whole chain from leaf zero, which is always correct, and the
@@ -148,7 +156,11 @@ has the bug too.
   leave it empty if you are not sure. A date is converted by counting back from
   the node's head at the chain's own target block time and then dropped a whole
   epoch, because that conversion is arithmetic over a block time that holds on
-  average.
+  average, and it needs a node to count back from: with none connected the
+  field says that rather than calling the date unreadable, and a block number
+  works either way. Something that is neither a number nor a date is refused
+  where it is typed rather than submitted as an empty field, because the
+  difference between the two is reading the whole chain by accident.
 - **Lock.** PBKDF2-SHA-256 at 600,000 iterations over a 16-byte salt derives
   one non-extractable AES-256-GCM key. The eight-character floor is enforced
   in `wallet/crypto.ts`, where the only path to a key is, rather than on the
