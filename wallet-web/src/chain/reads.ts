@@ -385,7 +385,10 @@ export async function fetchBirthday(
     throw new Error(`this node has no block at height ${blockNumber}`);
   }
   const shape = await fetchTreeShape(context, blockHash, maxTreeDepth);
-  return { blockNumber, blockHash, nextLeaf: shape.leafCount };
+  // Normalised, because this becomes a checkpoint and every other checkpoint
+  // is written that way: one spelling in the store is one spelling the fork
+  // walk compares.
+  return { blockNumber, blockHash: normaliseHash(blockHash), nextLeaf: shape.leafCount };
 }
 
 /**
