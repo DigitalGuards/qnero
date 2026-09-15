@@ -22,8 +22,8 @@ no font.
 BSD-3-Clause clause 3 forbids using the copyright holder's or contributors'
 names to endorse or promote products derived from this software. The MyMonero
 name and logo appear nowhere in this site as a badge, an endorsement or a
-lineage claim. The credit in the footer and the block on the about page are
-statements of provenance.
+lineage claim. The block on the about page is a statement of provenance, and
+the footer of every page links to it.
 
 Full licence text:
 https://github.com/mymonero/mymonero-web-js/blob/master/LICENSE.txt

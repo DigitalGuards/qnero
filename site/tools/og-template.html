@@ -75,6 +75,12 @@
       .facts > div {
         flex: 1 1 0;
       }
+      /* The privacy value is the longest of the four and is the one that has to
+         match the at-a-glance row on the home page word for word, so its column
+         takes the room it needs and the other three still set one line each. */
+      .facts > div:first-child {
+        flex: 1.45 1 0;
+      }
       .facts b {
         display: block;
         font-family: ui-monospace, 'DejaVu Sans Mono', monospace;
@@ -109,7 +115,7 @@
       <p>Monero's principles, rebuilt without elliptic curves.</p>
     </div>
     <div class="facts">
-      <div><b>Privacy</b>Mandatory, every spend a proof</div>
+      <div><b>Privacy</b>Mandatory for user transfers</div>
       <div><b>Consensus</b>RandomX, stock rx/0</div>
       <div><b>Block time</b>120 seconds</div>
       <div><b>Supply</b>21M QNR cap</div>
