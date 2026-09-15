@@ -537,9 +537,20 @@ row) and every literal in `genesis_config_presets/mod.rs` was minted with
 **And replace or delete the placeholder allocation.** `mainnet_vesting::VESTING`
 is one row paying `mainnet_vesting::PLACEHOLDER`, an address generated with
 `qnero-node key qnero` to stand in for an allocation nobody has decided on.
-Shipping it would mint 2% of the supply to an account held by nothing. Either
-name a real beneficiary there or remove the row and set `GENESIS_ALLOCATION` to
-the seed endowments alone. Section 7.1 is the reasoning.
+Shipping it would mint 2% of the supply to an account held by nothing, and
+`Vesting::claim` is the only call that can move the pot, so those 419 940 QNR
+would be stranded for good and would depress every block's coinbase forever,
+because emission is `(MAX_SUPPLY - issued) / EmissionDivisor` over both books.
+Either name a real beneficiary there or remove the row and set
+`GENESIS_ALLOCATION` to the seed endowments alone. Section 7.1 is the reasoning.
+
+Until then the preset refuses to build. `mainnet_vesting::FINALIZED` is `false`,
+so `require_finalized` panics, `mainnet_config_genesis` refuses with it,
+`preset_names` leaves `mainnet` off the list and `build-spec --chain mainnet`
+produces no file. Flipping the bool alone does not lift the refusal either: a
+compile-time assert beside `VESTING` rejects `FINALIZED == true` while any row
+still names `PLACEHOLDER`, so what unblocks the build is deciding the
+allocation.
 
 Two consequences worth writing down. The vendored `sc-cli` fork still offers
 `--scheme dilithium65` on its key commands, and that tree stays as upstream
@@ -597,8 +608,12 @@ than answered. When it needs answering the options are Monero's own: a larger
 block, or a dynamic size with a penalty above a rolling median.
 
 **What it cost.** The emission divisor was rescaled from 50 000 000 to
-5 000 000 so the supply against wall clock is exactly what it was, ten blocks'
-worth of geometric decay folded into one. Every constant derived from the target
+5 000 000 so the supply against wall clock is what it was, ten blocks' worth of
+geometric decay folded into one. To 9.0e-8 relative: the exact factor is
+`1 - (1 - 1/50 000 000)^10`, a divisor of 5 000 000.45, and the rounded value
+runs that fraction ahead of the 12 s curve, which is far below the pool
+quantization every payout already goes through. `configs/mod.rs` carries the
+arithmetic beside the constant. Every constant derived from the target
 kept its duration and changed its block count, and every constant chosen as a
 block count kept its count and gained a new duration; `runtime/tests/block_time.rs`
 is the list, one test for each kind. The initial difficulty moved from 100 000 to
@@ -613,7 +628,28 @@ what makes it safe for the scheduler to derive its timestamp bucket from: a
 target that moved under a running chain would strand every task already queued
 at an old bucket boundary. `QPoWApi::get_target_block_time` is how the client,
 both wallets and the explorer read it, and none of them carries the interval as
-a constant.
+a constant. The method moved `QPoWApi` to version 2, so a client can ask
+`has_api_with` whether a node has a target to give before it asks for one.
+
+**How far the storage target reaches.** Three readers, and the list is the whole
+list: the retarget in `pallets/qpow`, `TimestampBucketSize` in the scheduler, and
+`MinDelayPeriodMoment` in reversible transfers. Everything else that is
+denominated in the interval reads `TARGET_BLOCK_TIME_MS`, the compile-time
+constant. That means `MINUTES`, `HOURS` and `DAYS` and every window built on
+them, `UndecidingTimeout`, `DefaultDelay`, `HighSecurityTxWindowBlocks`,
+`MaxExpiryDuration` and the governance tracks, and it means `EmissionDivisor`.
+The line is drawn at metadata. Each of those is a `#[pallet::constant]` whose
+purpose is to be readable out of metadata by a client deciding what a governance
+period costs or what the supply schedule is, and a value that changed with a
+storage read is a value no metadata could state. The consequence is that a chain
+running at another cadence keeps the public chain's block counts: on the 12 s
+`dev` chain `DAYS` is 720 blocks, which is 2.4 hours, the quota window and the
+default reversal delay are 2.4 hours each, and emission per second is ten times
+the public schedule's. That is a property of dev chains, and a chain spec that
+sets `qPoW.targetBlockTime` to a third value has to carry a runtime with a
+matching `EmissionDivisor` if its supply curve is to mean anything.
+`runtime/tests/block_time.rs` pins both halves, one test for the readers that
+follow the chain and one for the readers that do not.
 
 ## 8. Milestones
 

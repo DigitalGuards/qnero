@@ -256,11 +256,11 @@ mod tests {
 	/// The whole allocation is one row to one address, and that is the point:
 	/// there is one thing to delete when the allocation question is settled.
 	///
-	/// It reads the SS58 tables through `accounts` instead of through
-	/// `treasurers`, `tech_collective` and `treasury_account`, because those
-	/// three refuse while `FINALIZED` is `false`, and refusing is their whole
-	/// job. What they would have added over this is the refusal itself, which
-	/// `refuses_to_build_until_finalized` asserts on its own.
+	/// It reads the SS58 tables through `accounts`, because `treasurers`,
+	/// `tech_collective` and `treasury_account` all refuse while `FINALIZED` is
+	/// `false`, and refusing is their whole job. What they would have added over
+	/// this is the refusal itself, which `refuses_to_build_until_finalized`
+	/// asserts on its own.
 	#[test]
 	fn the_allocation_is_one_placeholder_row() {
 		assert_eq!(VESTING.len(), 1);

@@ -493,6 +493,20 @@ move it afterwards; when it is unset the pallet falls back to
 `runtime/src/genesis_config_presets/mod.rs` asserts both halves, so neither can
 drift silently.
 
+**What the storage target reaches, and what it does not.** Three readers follow
+it: the retarget, `TimestampBucketSize` in the scheduler and
+`MinDelayPeriodMoment` in reversible transfers. Everything else denominated in
+the interval reads the compile-time `TARGET_BLOCK_TIME_MS`, because it is
+`#[pallet::constant]` metadata a client reads a governance period or a supply
+schedule out of. So on the `dev` chain `MINUTES`, `HOURS` and `DAYS` keep the
+public chain's block counts and mean a tenth of their names: `DAYS` is 720
+blocks, which is 2.4 hours there, and the quota window, the default reversal
+delay and the multisig expiry cap all shrink with it. `EmissionDivisor` is the
+same kind of constant, so a `dev` chain emits at ten times the public per-second
+rate. A spec that sets `qPoW.targetBlockTime` to anything but 120 000 for a
+chain whose supply curve has to mean something needs a runtime carrying a
+matching divisor. `runtime/tests/block_time.rs` pins both halves.
+
 **Reading it.** Everything that quotes a wait, estimates a hash rate or turns a
 block count into a duration reads the chain rather than a constant. Over JSON-RPC
 that is one `state_call`:
@@ -516,6 +530,9 @@ edit the one field and start from the file:
 
 The difficulty stays the `dev` preset's floor of 128, which is what keeps a
 single machine finding blocks; only the cadence the retarget aims at changes.
+The emission divisor does not follow that edit, so such a chain pays a 120 s
+block the reward a 12 s block earns. It is a cadence smoke test and nothing
+should read a supply figure off it.
 
 ### The proof of work: RandomX, and what to point at it
 
@@ -3373,8 +3390,10 @@ does.
   green, because the pot's endowment is computed from the schedule totals and so covers a payee
   nobody can sign for. Every beneficiary is checked against a per-preset table now.
 - **The genesis allocation is not a note, and five sentences said it was.** `mainnet_vesting`
-  mints 5,670,000 QNR at genesis as transparent balances and every planck of it reaches its holder
-  through `Vesting::claim`. "Value enters circulation in exactly one place" is true of value created
+  minted 5,670,000 QNR at genesis as transparent balances at the time of this review, and every
+  planck of it reaches its holder through `Vesting::claim`. The allocation is 420,000 QNR now, of
+  which 419,940 is the one placeholder vesting row and 60 is the seed endowments; DESIGN 7.1 and
+  7.3 carry it. "Value enters circulation in exactly one place" is true of value created
   after genesis, which is what DESIGN 7.1, the pillar list, the M6 row, CIRCUIT section 10, the
   runtime's `NoTransferProofNeeded` comment, `qp-coinbase` and the `--rewards-miner-key` help now
   say.

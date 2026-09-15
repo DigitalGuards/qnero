@@ -1167,7 +1167,8 @@ rule is what should refuse it.
 
 A settleable segment must name a block that is already finished
 (`block_number < current`), inside `BlockHashWindow` (256 blocks in the runtime,
-about 51 minutes), present in `frame_system::BlockHash`, and whose hash equals
+about 8.5 hours at the public chain's 120 s target), present in
+`frame_system::BlockHash`, and whose hash equals
 the segment's `block_hash` public input. The public input arrives as four
 canonical Goldilocks limbs and the chain's header hash is a Poseidon2 output
 stored in the same 32-byte little-endian-per-limb form, so the comparison is
