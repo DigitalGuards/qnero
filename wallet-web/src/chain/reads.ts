@@ -446,9 +446,14 @@ export async function fetchHeaderRange(
  * Three public reads: the head, the hash of the epoch block, and the leaf
  * count that block's state carried. None of them names this wallet.
  *
- * The leaf count becomes the watermark, and it is checked on the first sync
- * rather than trusted here: the fold of the leaves under it has to reach the
- * `zkTreeRoot` the epoch block's own header published.
+ * The leaf count becomes the watermark, and nothing here checks it. The first
+ * sync that has leaves to scan folds the leaves under it and compares against
+ * the `zkTreeRoot` the epoch block's own header published, which refuses a
+ * count recorded too **high** and does not pin one that is too low; a pass
+ * with nothing above the watermark to scan is left with the roots the chunk's
+ * own headers carry. `wallet/model.ts` and `docs/WALLET.md` carry what that
+ * settles and what it does not, and both refusals a too-high count trips name
+ * this birthday and the rescan that drops it.
  */
 export async function fetchBirthday(
   context: ChainContext,

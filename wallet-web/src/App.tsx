@@ -29,6 +29,7 @@ import { Navigate, Route, Routes, useNavigate } from 'react-router';
 
 import { loadConfig, type WalletConfig } from './chain/config';
 import { blockHashAt, fetchBirthday, fetchHead } from './chain/reads';
+import { normaliseHash } from './lib/hex';
 import { chainAdapter, cryptoAdapter } from './app/adapters';
 import { readEndpoint, writeEndpoint } from './app/endpoint';
 import { readMeasuredSendSeconds, writeMeasuredSendSeconds } from './app/proverMode';
@@ -470,7 +471,11 @@ export function App(): ReactNode {
                   blockHash: read.blockHash,
                   nextLeaf: read.nextLeaf,
                 },
-                genesisHash: genesis,
+                // Normalised, like the birthday's own block hash beside it and
+                // like the genesis every sync records: one spelling in the
+                // store is one spelling every later comparison reads, and the
+                // refusals that quote this field quote what was stored.
+                genesisHash: normaliseHash(genesis),
               };
               setBirthdayNotice(
                 `This wallet starts at block ${read.blockNumber}, where the chain held ` +

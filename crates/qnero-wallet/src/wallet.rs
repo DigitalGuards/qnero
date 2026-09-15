@@ -447,9 +447,15 @@ impl Wallet {
     /// coarse public epoch rather than the moment this wallet was made.
     ///
     /// Three reads, all public: the head, the hash of the epoch block, and the
-    /// leaf count that block's state carried. The leaf count is the watermark,
-    /// and it is checked on the first sync: the fold of the leaves under it has
-    /// to reach the `zkTreeRoot` the epoch block's own header published.
+    /// leaf count that block's state carried. The leaf count becomes the
+    /// watermark and nothing here checks it. The first sync that has leaves to
+    /// scan folds the leaves under it and compares against the `zkTreeRoot`
+    /// the epoch block's own header published, which refuses a count recorded
+    /// too **high** and does not pin one that is too low; a pass with nothing
+    /// above the watermark to scan is left with the roots the chunk's own
+    /// headers carry. Both refusals a too-high count trips name this birthday
+    /// and the rescan, because no other node can satisfy a watermark that was
+    /// wrong when it was written: see [`birthday_watermark_note`].
     ///
     /// The genesis binding is written here as well, because this is an
     /// operation that commits: a birthday is a statement about one chain, and a
@@ -619,9 +625,13 @@ impl Wallet {
         } else {
             stance.watermark(self.store.next_leaf)
         };
-        if let Some(refusal) =
-            short_tree_refusal(leaf_count, watermark, head.number, SYNC_SHORT_TREE)
-        {
+        if let Some(refusal) = short_tree_refusal(
+            leaf_count,
+            watermark,
+            head.number,
+            SYNC_SHORT_TREE,
+            self.store.unscanned_birthday(watermark),
+        ) {
             return Err(refusal);
         }
 
@@ -1083,7 +1093,20 @@ impl Wallet {
                 // has to carry the bottom block's own root: a moved root over
                 // an unchanged leaf count is a node answering a count its own
                 // headers do not carry.
-                check_chunk_appended_nothing(&blocks)?;
+                check_chunk_appended_nothing(&blocks).map_err(|error| {
+                    // Reached by a birthday count that is one too high as
+                    // readily as by a lying node: nothing was appended between
+                    // the watermark and this node's head, so the fold never
+                    // runs and this comparison is what is left. The sentence
+                    // is added rather than the refusal reworded, because what
+                    // the node did is still what the refusal describes.
+                    match self.store.unscanned_birthday(start) {
+                        Some(block) => {
+                            anyhow!("{error:#} {}", birthday_watermark_note(block))
+                        }
+                        None => error,
+                    }
+                })?;
             }
 
             checkpoints.push((top, hex::encode(top_hash), cursor_leaf));
@@ -1953,6 +1976,7 @@ impl Wallet {
             self.store.next_leaf,
             anchor_block,
             SPEND_SHORT_TREE,
+            self.store.unscanned_birthday(self.store.next_leaf),
         ) {
             return Err(refusal);
         }
@@ -2711,6 +2735,7 @@ fn short_tree_refusal(
     watermark: u64,
     block: u32,
     context: ShortTree,
+    unscanned_birthday: Option<u32>,
 ) -> Option<anyhow::Error> {
     if leaf_count >= watermark {
         return None;
@@ -2719,13 +2744,40 @@ fn short_tree_refusal(
         read_at,
         consequence,
     } = context;
+    // The closing advice, which is the part a wrong watermark makes useless.
+    // Finding a node that has caught up works for every node that is behind
+    // and for nothing else, so where the watermark itself is the unchecked
+    // number the sentence is replaced rather than appended to.
+    let close = match unscanned_birthday {
+        Some(birthday) => birthday_watermark_note(birthday),
+        None => "Point --node at a node that has caught up, or wait for this one to.".to_string(),
+    };
     Some(anyhow!(
         "this node's tree holds {leaf_count} leaves at {read_at}, block {block}, and this wallet \
          has already read {watermark}. A tree only grows along one chain, so a node whose tree is \
          shorter than that watermark is behind this wallet and the leaves it is missing are ones \
-         it has not executed yet. {consequence} Point --node at a node that has caught up, or \
-         wait for this one to."
+         it has not executed yet. {consequence} {close}"
     ))
+}
+
+/// What a refusal standing on an unchecked birthday watermark adds.
+///
+/// Both refusals a too-high birthday count trips read, correctly, as a node
+/// that is behind this wallet, and both told the operator to find a node that
+/// has caught up. No node ever has: the watermark is the thing that is wrong,
+/// the wallet repeats the refusal against every honest node it is pointed at,
+/// and the one recovery goes unnamed. So when the watermark is still the count
+/// a node answered at the birthday block, the refusal says which number is the
+/// claim and what drops it. See [`store::WalletStore::unscanned_birthday`] and
+/// `docs/WALLET.md`, under "Where a wallet starts reading".
+fn birthday_watermark_note(block: u32) -> String {
+    format!(
+        "This wallet's watermark is still the leaf count one node answered for block {block} when \
+         the wallet was made, and no sync of this wallet has checked it against a header yet. A \
+         count recorded too high is this wallet ahead of the chain rather than a node behind it, \
+         and no node ever satisfies it: `sync --rescan` drops the watermark to zero, keeps every \
+         note, and reads the chain again."
+    )
 }
 
 /// What a caller of [`short_tree_refusal`] contributes to the sentence.
@@ -3120,7 +3172,7 @@ mod tests {
 
         // A store that has read 40 leaves, against a node whose head holds 4.
         let refusal =
-            short_tree_refusal(4, 40, 12, SPEND_SHORT_TREE).expect("a short tree is refused");
+            short_tree_refusal(4, 40, 12, SPEND_SHORT_TREE, None).expect("a short tree is refused");
         let text = format!("{refusal:#}");
         assert!(text.contains("4 leaves"), "{text}");
         assert!(text.contains("already read 40"), "{text}");
@@ -3140,8 +3192,16 @@ mod tests {
 
         // At the watermark and above it the gate is silent, which is every
         // honest node: leaf 37 was read below the watermark that recorded it.
-        assert!(short_tree_refusal(40, 40, 12, SPEND_SHORT_TREE).is_none());
-        assert!(short_tree_refusal(41, 40, 12, SPEND_SHORT_TREE).is_none());
+        assert!(short_tree_refusal(40, 40, 12, SPEND_SHORT_TREE, None).is_none());
+        assert!(short_tree_refusal(41, 40, 12, SPEND_SHORT_TREE, None).is_none());
+
+        // The same numbers with the watermark still standing on a birthday: a
+        // count nothing has checked, which no other node can satisfy either.
+        let birthday_side = short_tree_refusal(4, 40, 12, SPEND_SHORT_TREE, Some(2048))
+            .expect("a short tree is refused");
+        let birthday_text = format!("{birthday_side:#}");
+        assert!(birthday_text.contains("block 2048"), "{birthday_text}");
+        assert!(birthday_text.contains("--rescan"), "{birthday_text}");
 
         // One implementation, two callers. The sync's version of the same
         // refusal differs in the two clauses it passes and in nothing else,
@@ -3155,6 +3215,7 @@ mod tests {
                 read_at: "its head",
                 consequence: "Nothing has been changed.",
             },
+            None,
         )
         .expect("a short tree is refused on the sync path too");
         let sync_text = format!("{sync_side:#}");

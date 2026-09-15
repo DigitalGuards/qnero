@@ -9,8 +9,9 @@
 //!
 //! The birthday is a checkpoint and nothing more: the sync reads it exactly as
 //! it reads a checkpoint an earlier pass wrote, so the fork walk rewinds
-//! through it and the first sync folds the leaves under it against the
-//! `zkTreeRoot` of the block it names. It is the node's claim, and a restore
+//! through it and the first sync that has leaves to scan folds the leaves
+//! under it against the `zkTreeRoot` of the block it names, which refuses a
+//! count recorded too high and does not pin one that is too low. It is the node's claim, and a restore
 //! height is the operator's claim on top of that. Both are recorded rounded
 //! **down** to a multiple of `BIRTHDAY_EPOCH`, so what every later node is told
 //! is a coarse public epoch and never the moment the wallet was made.
@@ -24,7 +25,7 @@ use qnero_wallet::memo::pad_memo;
 use qnero_wallet::rpc::RpcClient;
 use qnero_wallet::scale::{identity_map_key, storage_prefix};
 use qnero_wallet::store::{birthday_epoch_of, BIRTHDAY_EPOCH};
-use qnero_wallet::wallet::Wallet;
+use qnero_wallet::wallet::{SyncOptions, Wallet};
 
 use support::{encode_u64, test_metadata, FakeNode, NodeState};
 
@@ -148,6 +149,93 @@ fn a_wallet_created_at_a_head_skips_the_history_under_it_and_is_paid_after_it() 
         "the walk fetched {} headers for a 50-block range above the birthday",
         state.calls("chain_getHeader")
     );
+}
+
+/// A birthday whose leaf count came back too high, and what the refusals say.
+///
+/// The count is the one part of a birthday that is neither checked where it is
+/// written nor recoverable by the fork walk: the block hash can be disagreed
+/// with by an honest node, and a count is a number this wallet then carries as
+/// its watermark. A node that answers `ZkTree::LeafCount` as of its best block
+/// rather than as of the block asked about inflates every new wallet's, which
+/// is the hazard `tests/support/mod.rs` writes its own answer around.
+///
+/// Both refusals it trips are correct about the node and useless as advice:
+/// they read as a node that is behind, and no node is ever ahead enough. So
+/// each names the birthday and the rescan that drops it.
+#[test]
+fn a_birthday_count_recorded_too_high_names_itself_and_the_rescan() {
+    let (seed, wallet) = fresh("birthday-too-many-leaves");
+    let address = wallet.address();
+    drop(wallet);
+    let (state, _mine) = chain_with_a_payment(&address);
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+
+    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+    wallet
+        .record_birthday(&chain, None)
+        .expect("a head is a birthday");
+    assert_eq!(wallet.store.next_leaf, 3);
+
+    // The same store with the count a lying or confused node would have given
+    // it: ten leaves at a block that held three.
+    let inflate = |wallet: &mut Wallet, count: u64| {
+        wallet.store.next_leaf = count;
+        wallet.store.checkpoints[0].next_leaf = count;
+        if let Some(birthday) = wallet.store.birthday.as_mut() {
+            birthday.next_leaf = count;
+        }
+    };
+    inflate(&mut wallet, 10);
+
+    let refused = wallet
+        .sync(&chain, &test_metadata())
+        .expect_err("a watermark above every leaf there is refuses the pass");
+    let text = format!("{refused:#}");
+    assert!(text.contains("already read 10"), "{text}");
+    assert!(
+        text.contains(&format!("block {}", 2 * BIRTHDAY_EPOCH)),
+        "{text}"
+    );
+    assert!(text.contains("--rescan"), "{text}");
+    // It repeats: no node has more leaves than this chain has.
+    let again = format!(
+        "{:#}",
+        wallet
+            .sync(&chain, &test_metadata())
+            .expect_err("and again, against the same honest node")
+    );
+    assert!(again.contains("--rescan"), "{again}");
+
+    // One too high is the other refusal, and it is the likelier one: the pass
+    // has no leaf to scan, so the fold never runs and what is left is the
+    // roots the chunk's headers carry.
+    inflate(&mut wallet, 4);
+    let roots = format!(
+        "{:#}",
+        wallet
+            .sync(&chain, &test_metadata())
+            .expect_err("a count its own headers do not carry refuses the pass")
+    );
+    assert!(
+        roots.contains("a moved root over an unchanged count"),
+        "{roots}"
+    );
+    assert!(
+        roots.contains(&format!("block {}", 2 * BIRTHDAY_EPOCH)),
+        "{roots}"
+    );
+    assert!(roots.contains("--rescan"), "{roots}");
+
+    // And the recovery the sentence names works: the watermark goes to zero,
+    // the whole tree is read again and the payment above the birthday arrives.
+    let report = wallet
+        .sync_with(&chain, &test_metadata(), SyncOptions { rescan: true })
+        .expect("a rescan reads the chain again");
+    assert_eq!(report.scanned_from, 0);
+    assert_eq!(report.received, 1);
 }
 
 #[test]

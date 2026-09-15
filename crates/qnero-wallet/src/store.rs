@@ -148,9 +148,18 @@ pub struct WalletStore {
     /// did, so a wallet that records where it started never walks or scans the
     /// history below it. What that saves is the header walk under the birthday
     /// and every ciphertext under its leaf count; what it does not save is the
-    /// leaf hashes under the watermark, which the first sync still reads to
-    /// seed the fold, and that read is what checks this recorded leaf count
-    /// against the birthday block's own `zkTreeRoot`.
+    /// leaf hashes under the watermark, which the first sync that has leaves
+    /// to scan still reads to seed the fold, and that read is what compares
+    /// this recorded leaf count against the birthday block's own `zkTreeRoot`.
+    ///
+    /// That fold refuses a count recorded too **high**, which is the direction
+    /// that costs notes. It does not pin one that is too low: Bound A holds
+    /// here as everywhere, since the fold of `m` level-1 node values equals
+    /// the fold of the `4m` leaves under them. And it runs only when there are
+    /// leaves above the watermark to scan; a pass with none is left with the
+    /// roots the chunk's own headers carry. See `docs/WALLET.md`, under "Where
+    /// a wallet starts reading", and [`WalletStore::unscanned_birthday`], which
+    /// is what makes the refusals name this number while it is still a claim.
     ///
     /// **It is the node's claim, like every checkpoint.** The block hash here
     /// was read from one node at one moment and nothing verified it, so a
@@ -618,8 +627,9 @@ impl WalletStore {
     /// leaves is the store's first watermark, so every rule that already
     /// stands on a checkpoint stands on this one: the header walk takes it as
     /// its trusted bottom, the fork walk rewinds through it, and the first
-    /// sync folds the leaves under it against the `zkTreeRoot` of the block it
-    /// names. Nothing else in the sync knows a birthday from a checkpoint an
+    /// sync that has leaves to scan folds the leaves under it against the
+    /// `zkTreeRoot` of the block it names, which refuses a count recorded too
+    /// high. Nothing else in the sync knows a birthday from a checkpoint an
     /// earlier pass wrote, which is the point.
     ///
     /// Refused on a store that has already read a leaf or already carries one:
@@ -638,6 +648,24 @@ impl WalletStore {
         self.checkpoints = vec![checkpoint.clone()];
         self.birthday = Some(checkpoint);
         Ok(())
+    }
+
+    /// The birthday block whose leaf count `watermark` still is, if it is one.
+    ///
+    /// Every other checkpoint's `next_leaf` is a count a scan of this wallet's
+    /// produced, with the fold against each block's `zkTreeRoot` behind it. A
+    /// birthday's is a count one node answered for one block at the moment the
+    /// wallet was made, and until a pass has leaves to scan above it nothing
+    /// has checked it. While the watermark is still that number, the refusals
+    /// that rest on it are resting on that claim, and they say so: a watermark
+    /// that was too high to begin with is not a node being behind, no other
+    /// node ever satisfies it, and the recovery is a rescan rather than
+    /// another endpoint.
+    pub fn unscanned_birthday(&self, watermark: u64) -> Option<u32> {
+        self.birthday
+            .as_ref()
+            .filter(|birthday| birthday.next_leaf == watermark)
+            .map(|birthday| birthday.block_number)
     }
 
     /// Load, or start a fresh store when the file does not exist.

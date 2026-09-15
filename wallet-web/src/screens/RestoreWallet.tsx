@@ -17,7 +17,10 @@
  * remembers when they made it and not what block the chain was on. It is
  * converted by counting back from the node's head at the chain's own target
  * block time, and then a whole epoch is given away on top, because the
- * conversion is arithmetic over a block time that only holds on average.
+ * conversion is arithmetic over a block time that only holds on average. So a
+ * date needs a node and a number does not, and this screen is reachable with
+ * no node connected: that case says what is missing rather than calling the
+ * date unreadable.
  */
 
 import type { ReactNode } from 'react';
@@ -31,7 +34,24 @@ import { BIRTHDAY_EPOCH, birthdayEpochOf } from '../wallet/model';
 import { fullScanEstimate } from '../wallet/sync';
 
 /**
- * A block number or a date, as a height, or `null` for neither.
+ * What was typed in the restore-height field.
+ *
+ * Four answers rather than a height or `null`, because `null` meant two
+ * different things to the caller and one of them was reported as the other. A
+ * date is readable or not on its own; whether this wallet can turn it into a
+ * height also depends on there being a node to count back from, and a screen
+ * that answered "this wallet cannot read that" to a perfectly good date while
+ * the socket was down was blaming the wrong side.
+ */
+export type RestoreField =
+  | { kind: 'empty' }
+  | { kind: 'height'; value: number }
+  /** A date, with no head to count it back from. */
+  | { kind: 'no-head' }
+  | { kind: 'neither' };
+
+/**
+ * A block number or a date, as a height.
  *
  * A bare number is a height. Anything `Date.parse` reads is a date, turned
  * into a height by counting back from the head at the chain's own target block
@@ -39,24 +59,32 @@ import { fullScanEstimate } from '../wallet/sync';
  * over a block time that holds on average and not block by block. Both are
  * then rounded down to the epoch where they are recorded.
  */
-export function heightFromRestoreField(
+export function readRestoreField(
   typed: string,
   head: number | null,
   targetBlockTimeMs: number | null,
-): number | null {
+): RestoreField {
   const trimmed = typed.trim();
   if (trimmed === '') {
-    return null;
+    return { kind: 'empty' };
   }
   if (/^[0-9]+$/.test(trimmed)) {
-    return Number(trimmed);
+    return { kind: 'height', value: Number(trimmed) };
   }
   const when = Date.parse(trimmed);
-  if (Number.isNaN(when) || head === null || targetBlockTimeMs === null || targetBlockTimeMs <= 0) {
-    return null;
+  if (Number.isNaN(when)) {
+    return { kind: 'neither' };
+  }
+  if (head === null || targetBlockTimeMs === null || targetBlockTimeMs <= 0) {
+    return { kind: 'no-head' };
   }
   const back = Math.ceil((Date.now() - when) / targetBlockTimeMs);
-  return Math.max(head - back - BIRTHDAY_EPOCH, 0);
+  return { kind: 'height', value: Math.max(head - back - BIRTHDAY_EPOCH, 0) };
+}
+
+/** The height a restore starts at, or `null` for a scan of the whole chain. */
+export function restoreHeightOf(field: RestoreField): number | null {
+  return field.kind === 'height' ? field.value : null;
 }
 
 interface RestoreForm {
@@ -88,15 +116,18 @@ export function RestoreWallet({
   // React compiler can reason about, and it re-renders this field alone.
   const typed = useWatch({ control: form.control, name: 'seed' }).replace(/\s+/g, '');
   const typedHeight = useWatch({ control: form.control, name: 'restoreHeight' });
-  const height = heightFromRestoreField(typedHeight, head, targetBlockTimeMs);
+  const field = readRestoreField(typedHeight, head, targetBlockTimeMs);
   const heightHint =
-    typedHeight.trim() === ''
+    field.kind === 'empty'
       ? head === null
         ? 'empty scans the whole chain from block zero'
         : `empty scans the whole chain: ${fullScanEstimate(head)}`
-      : height === null
-        ? 'that is neither a block number nor a date this wallet can read'
-        : `recorded as block ${birthdayEpochOf(height)}, the epoch below it`;
+      : field.kind === 'height'
+        ? `recorded as block ${birthdayEpochOf(field.value)}, the epoch below it`
+        : field.kind === 'no-head'
+          ? 'that reads as a date, and a date becomes a height by counting back from a node' +
+            ' head. Connect to a node, or give a block number.'
+          : 'that is neither a block number nor a date this wallet can read';
 
   return (
     <Panel title="Use an existing wallet">
@@ -113,7 +144,7 @@ export function RestoreWallet({
             onRestore(
               values.seed.replace(/\s+/g, '').toLowerCase(),
               values.passphrase,
-              heightFromRestoreField(values.restoreHeight, head, targetBlockTimeMs),
+              restoreHeightOf(readRestoreField(values.restoreHeight, head, targetBlockTimeMs)),
             );
           })(event);
         }}
@@ -140,6 +171,7 @@ export function RestoreWallet({
           label="Restore height (optional)"
           htmlFor="restore-height"
           hint={heightHint}
+          error={form.formState.errors.restoreHeight?.message}
         >
           <Input
             id="restore-height"
@@ -147,7 +179,15 @@ export function RestoreWallet({
             autoComplete="off"
             spellCheck={false}
             placeholder="the chain height when this wallet was created, leave empty to scan everything"
-            {...form.register('restoreHeight')}
+            {...form.register('restoreHeight', {
+              // Refused rather than taken as "scan everything". A typo in this
+              // field used to submit as an empty one, and the difference
+              // between the two is a wallet that reads the whole chain when
+              // somebody meant to name a block.
+              validate: (value) =>
+                readRestoreField(value, head, targetBlockTimeMs).kind !== 'neither' ||
+                'give a block number, a date such as 2026-03-14, or nothing at all',
+            })}
           />
         </Field>
         <Prose>

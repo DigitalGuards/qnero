@@ -1005,4 +1005,58 @@ describe('the wallet birthday', () => {
     expect(result.report.received).toBe(1);
     expect(result.notes[0]?.note.commitment).toBe(mine.commitment);
   });
+
+  /**
+   * A birthday whose leaf count came back too high, and what the refusals say.
+   *
+   * The count is the one part of a birthday the fork walk cannot reach: the
+   * block hash is a claim an honest node disagrees with, and the count is a
+   * number this wallet carries as its watermark with nothing checking it until
+   * a pass has leaves to scan above it. A node that answers `ZkTree::LeafCount`
+   * as of its best block rather than as of the block asked about inflates every
+   * new wallet's.
+   *
+   * Both refusals it trips are right about the node and useless as advice:
+   * each reads as a node that is behind, and no node is ever ahead enough. So
+   * each names the birthday and the rescan that drops it.
+   */
+  it('names the birthday and the rescan when its own count is too high', async () => {
+    const mine = note(700n, 'b9');
+    const leaves: FakeLeaf[] = [
+      { index: 0, commitment: 'a0'.repeat(32), blockNumber: 4, note: null },
+      { index: 1, commitment: 'a1'.repeat(32), blockNumber: 4, note: null },
+      { index: 2, commitment: 'a2'.repeat(32), blockNumber: 4, note: null },
+      { index: 3, commitment: mine.commitment, blockNumber: 12, note: mine },
+    ];
+    const chain = fakeChain({ head: 14, leaves });
+    const crypto = fakeCrypto(leaves, shapeOf({ head: 14, leafCount: 4, leaves }));
+    const inputWith = (nextLeaf: number): Parameters<typeof runSync>[0] => {
+      const birthday = { blockNumber: 8, blockHash: hashAtHeight(8), nextLeaf };
+      return {
+        meta: meta({ birthday, lastSyncedBlock: 8, nextLeaf }),
+        held: [],
+        rejected: [],
+        pending: [],
+        checkpoints: [birthday],
+      };
+    };
+
+    // Far too high: the leaf gate, which reads as a node whose head is behind.
+    await expect(runSync(inputWith(10), chain, crypto)).rejects.toThrow(
+      /already read 10.*block 8 when the wallet was made.*rescan on the Settings screen/s,
+    );
+
+    // One too high, which is the likelier one: the pass has no leaf to scan,
+    // so the fold never runs and what is left is the roots the chunk's headers
+    // carry.
+    await expect(runSync(inputWith(4), chain, crypto)).rejects.toThrow(
+      /a moved root over an unchanged count.*block 8 when the wallet was made.*rescan on the Settings screen/s,
+    );
+
+    // And the recovery the sentence names works: the watermark goes to zero,
+    // the tree is read again and the payment above the birthday arrives.
+    const result = await runSync(inputWith(10), chain, crypto, { rescan: true });
+    expect(result.report.received).toBe(1);
+    expect(result.notes[0]?.note.commitment).toBe(mine.commitment);
+  });
 });

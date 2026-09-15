@@ -143,6 +143,40 @@ export function birthdayEpochOf(height: number): number {
   return height - (height % BIRTHDAY_EPOCH);
 }
 
+/**
+ * The birthday block whose leaf count `watermark` still is, if it is one.
+ *
+ * Every other checkpoint's `nextLeaf` is a count a scan of this wallet's
+ * produced, with the fold against each block's `zkTreeRoot` behind it. A
+ * birthday's is a count one node answered for one block at the moment the
+ * wallet was made, and until a pass has leaves to scan above it nothing has
+ * checked it. While the watermark is still that number, the refusals that rest
+ * on it are resting on that claim.
+ */
+export function unscannedBirthday(birthday: SyncCheckpoint | null, watermark: number): number | null {
+  return birthday !== null && birthday.nextLeaf === watermark ? birthday.blockNumber : null;
+}
+
+/**
+ * What a refusal standing on an unchecked birthday watermark adds.
+ *
+ * Both refusals a too-high birthday count trips read, correctly, as a node
+ * that is behind this wallet, and both told the operator to find a node that
+ * has caught up. No node ever has: the watermark is the thing that is wrong,
+ * the wallet repeats the refusal against every honest node it is pointed at,
+ * and the one recovery goes unnamed. The command-line wallet carries the same
+ * sentence with its own spelling of the rescan.
+ */
+export function birthdayWatermarkNote(block: number): string {
+  return (
+    `This wallet's watermark is still the leaf count one node answered for block ${block} when ` +
+    'the wallet was made, and no sync of this wallet has checked it against a header yet. A ' +
+    'count recorded too high is this wallet ahead of the chain rather than a node behind it, ' +
+    'and no node ever satisfies it: the rescan on the Settings screen drops the watermark to ' +
+    'zero, keeps every note, and reads the chain again.'
+  );
+}
+
 /** The plaintext head of the store. */
 export interface StoreMeta {
   id: 'store';
@@ -166,9 +200,16 @@ export interface StoreMeta {
    * did, so a wallet that records where it started never walks or scans the
    * history below it. What that saves is the header walk under the birthday
    * and every ciphertext under its leaf count; what it does not save is the
-   * leaf hashes under the watermark, which the first sync still reads to seed
-   * the fold, and that read is what checks this recorded leaf count against
-   * the birthday block's own `zkTreeRoot`.
+   * leaf hashes under the watermark, which the first sync that has leaves to
+   * scan still reads to seed the fold, and that read is what compares this
+   * recorded leaf count against the birthday block's own `zkTreeRoot`.
+   *
+   * That fold refuses a count recorded too **high**, which is the direction
+   * that costs notes. It does not pin one that is too low, which is Bound A,
+   * and it runs at all only on a pass with leaves above the watermark to
+   * scan; a pass with none is left with the roots the chunk's own headers
+   * carry. `unscannedBirthday` is what makes both refusals name this number
+   * while nothing has checked it.
    *
    * **It is the node's claim, like every checkpoint.** Nothing verified this
    * hash when it was written, so a wallet created against a node serving a

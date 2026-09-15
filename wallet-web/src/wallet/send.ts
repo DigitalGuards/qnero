@@ -76,7 +76,7 @@ import {
 import { normaliseHash } from '../lib/hex';
 import { memoRefusal } from '../lib/memo';
 import { formatStepsAsQnr } from '../lib/units';
-import type { NoteSecret, PendingNote, StoredNote } from './model';
+import { birthdayWatermarkNote, unscannedBirthday, type NoteSecret, type PendingNote, type StoredNote } from './model';
 import { selectNotes } from './select';
 import type { WalletStore } from './store';
 
@@ -327,11 +327,19 @@ export async function spend(
   // read below the watermark that recorded it, and a tree only grows along one
   // chain, so any head at or above that point holds at least that many leaves.
   if (shape.leafCount < meta.nextLeaf) {
+    // A watermark that is still a birthday's own count was never checked
+    // against a header, so "sync first" is advice no node can take: the
+    // sentence says whose number it is and what drops it.
+    const birthdayBlock = unscannedBirthday(meta.birthday, meta.nextLeaf);
     throw new Error(
       `this node reports ${shape.leafCount} leaves at its head and this wallet has already read ` +
         `${meta.nextLeaf}. A node on this chain whose leaf count is short has a head it has not ` +
         'finished executing, so the leaf indices this wallet holds cannot be checked against it. ' +
-        'Nothing has been written off and nothing has been submitted. Sync first.',
+        'Nothing has been written off and nothing has been submitted. ' +
+        // Syncing works for every node that is behind and for nothing else, so
+        // where the watermark itself is the unchecked number the advice is
+        // replaced rather than followed by a contradiction.
+        (birthdayBlock === null ? 'Sync first.' : birthdayWatermarkNote(birthdayBlock)),
     );
   }
   const leafHashes = await fetchLeafHashes(

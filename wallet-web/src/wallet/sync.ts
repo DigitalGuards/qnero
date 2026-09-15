@@ -41,7 +41,7 @@ import { anchorFromHeader, authorLabelFromHeader, type Anchor, type RawChainHead
 import { bytesToHex, hexToBytes, normaliseHash } from '../lib/hex';
 import { formatStepsAsQnr } from '../lib/units';
 import { ENTRY_WALK_LIMIT } from '../worker/protocol';
-import { MAX_CHECKPOINTS, type NoteOrigin, type NoteSecret, type RejectedNote, type StoreMeta, type StoredNote, type SyncCheckpoint } from './model';
+import { birthdayWatermarkNote, MAX_CHECKPOINTS, unscannedBirthday, type NoteOrigin, type NoteSecret, type RejectedNote, type StoreMeta, type StoredNote, type SyncCheckpoint } from './model';
 
 /**
  * What a pass that read leaves and received nothing may also be, in one line.
@@ -605,6 +605,13 @@ export async function authenticateLeaves(
   watermark: number,
   leafCount: number,
   progress: (stage: string, detail?: string) => void,
+  /**
+   * The birthday block the watermark still stands on, when it does. A chunk
+   * that appended nothing is checked by the roots alone, and that check is
+   * what an unchecked birthday count one too high trips, so the refusal says
+   * whose number it is.
+   */
+  birthdayBlock: number | null = null,
 ): Promise<LeafTyping> {
   const scans = leafCount > watermark;
   const commitments = scans
@@ -733,7 +740,8 @@ export async function authenticateLeaves(
               `${trusted.number}, and their headers carry different tree roots ` +
               `(${strip0x(header.zkTreeRoot)} against ${anchorRoot}). The tree is folded once ` +
               'per block and only ever grows, so a moved root over an unchanged count is a node ' +
-              'answering a leaf count its own headers do not carry. Nothing has been changed.',
+              'answering a leaf count its own headers do not carry. Nothing has been changed.' +
+              (birthdayBlock === null ? '' : ` ${birthdayWatermarkNote(birthdayBlock)}`),
           );
         }
         continue;
@@ -1180,10 +1188,12 @@ export async function runSync(
   // the watermark would be written back down. A rescan cannot trip it by
   // construction, with no exemption written into the gate.
   if (shape.leafCount < watermark) {
+    const birthdayBlock = unscannedBirthday(input.meta.birthday, watermark);
     throw new NodeRefusedError(
       `this node reports ${shape.leafCount} leaves at its head and this wallet has already read ` +
         `${watermark}. A node on this chain whose leaf count is short has a head it has not ` +
-        'finished executing. Nothing has been changed.',
+        'finished executing. Nothing has been changed.' +
+        (birthdayBlock === null ? '' : ` ${birthdayWatermarkNote(birthdayBlock)}`),
     );
   }
 
@@ -1269,6 +1279,7 @@ export async function runSync(
     watermark,
     shape.leafCount,
     progress,
+    unscannedBirthday(input.meta.birthday, watermark),
   );
 
   if (shape.leafCount > watermark) {

@@ -19,7 +19,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { ChainContext } from '../src/chain/api';
 import { fetchBirthday } from '../src/chain/reads';
-import { heightFromRestoreField } from '../src/screens/RestoreWallet';
+import { readRestoreField, restoreHeightOf } from '../src/screens/RestoreWallet';
 import { deriveKey, newSalt, bytesToHex } from '../src/wallet/crypto';
 import { BIRTHDAY_EPOCH, birthdayEpochOf, STORE_VERSION } from '../src/wallet/model';
 import { createStore, openDatabase, DB_NAME } from '../src/wallet/store';
@@ -131,13 +131,17 @@ describe('reading a birthday off a node', () => {
 
 describe('the restore field', () => {
   it('reads a bare number as a height', () => {
-    expect(heightFromRestoreField('197000', 200_000, 120_000)).toBe(197_000);
-    expect(heightFromRestoreField('  4200 ', 200_000, 120_000)).toBe(4200);
+    expect(readRestoreField('197000', 200_000, 120_000)).toEqual({
+      kind: 'height',
+      value: 197_000,
+    });
+    expect(readRestoreField('  4200 ', 200_000, 120_000)).toEqual({ kind: 'height', value: 4200 });
   });
 
   it('reads nothing at all as a full scan', () => {
-    expect(heightFromRestoreField('', 200_000, 120_000)).toBeNull();
-    expect(heightFromRestoreField('   ', 200_000, 120_000)).toBeNull();
+    expect(readRestoreField('', 200_000, 120_000).kind).toBe('empty');
+    expect(readRestoreField('   ', 200_000, 120_000).kind).toBe('empty');
+    expect(restoreHeightOf(readRestoreField('', 200_000, 120_000))).toBeNull();
   });
 
   it('counts a date back from the head and then gives away an epoch', () => {
@@ -145,7 +149,7 @@ describe('the restore field', () => {
     const blockMs = 120_000;
     const days = 30;
     const when = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    const height = heightFromRestoreField(when, head, blockMs);
+    const height = restoreHeightOf(readRestoreField(when, head, blockMs));
     const blocksInThirtyDays = (days * 24 * 60 * 60 * 1000) / blockMs;
     expect(height).not.toBeNull();
     // Below the arithmetic answer by a whole epoch, because the conversion is
@@ -155,8 +159,21 @@ describe('the restore field', () => {
     expect(height as number).toBeGreaterThan(0);
   });
 
-  it('reads neither a number nor a date as nothing, which is a full scan', () => {
-    expect(heightFromRestoreField('soon after I made it', 200_000, 120_000)).toBeNull();
+  it('reads neither a number nor a date as neither, which is a full scan', () => {
+    const field = readRestoreField('soon after I made it', 200_000, 120_000);
+    expect(field.kind).toBe('neither');
+    expect(restoreHeightOf(field)).toBeNull();
+  });
+
+  it('says a readable date has no head to count back from rather than calling it unreadable', () => {
+    // The restore screen is reachable with no node connected, and a date is
+    // the one entry that needs one. Reporting it as a date this wallet cannot
+    // read blamed the wrong side, and the value still became a full scan.
+    const field = readRestoreField('2026-03-14', null, null);
+    expect(field.kind).toBe('no-head');
+    expect(restoreHeightOf(field)).toBeNull();
+    // A block number wants no head at all.
+    expect(readRestoreField('4200', null, null)).toEqual({ kind: 'height', value: 4200 });
   });
 });
 
