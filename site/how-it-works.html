@@ -88,7 +88,7 @@
             <div class="prose">
               <h3>A note, and the tree it lives in</h3>
               <p>
-                A note commits as <code>cm = H(CM, H(NOTE, pk, rho, r), v)</code>. Commitments are
+                A note commits as <code class="code--wrap">cm = H(CM, H(NOTE, pk, rho, r), v)</code>. Commitments are
                 appended to a 4-ary Poseidon Merkle tree, and each block header carries the tree
                 root. The anonymity set is the tree: every note ever appended. Ring size 16 with
                 decoys has no equivalent here.
@@ -109,48 +109,50 @@
         <div class="wrap">
           <span class="band__label">02 / The circuit</span>
           <h2>Up to 2 inputs, exactly 2 outputs, a public fee</h2>
-          <figure class="diagram" tabindex="0" aria-label="Up to 2 inputs, exactly 2 outputs, a public fee, scrollable diagram">
-            <svg viewBox="0 0 944 232" role="img" aria-labelledby="flow-title flow-desc">
-              <title id="flow-title">From a note to a settled block</title>
-              <desc id="flow-desc">
-                Five steps left to right: your notes, a leaf proof, a private batch of six leaf
-                proofs, an optional public batch of fifty-three private batches, and settlement on
-                chain. The first four steps are proved locally. Only the last is in the block.
-              </desc>
-              <text class="d-meta" x="8" y="20">ONE TRANSFER, THREE PROVING LAYERS, ONE SETTLEMENT</text>
-              <rect class="d-surface" x="8" y="42" width="160" height="92" rx="5" />
-              <text class="d-label" x="88" y="72" text-anchor="middle">Your notes</text>
-              <text class="d-meta" x="88" y="94" text-anchor="middle">up to 2 inputs</text>
-              <text class="d-meta" x="88" y="110" text-anchor="middle">2 outputs, 1 fee</text>
-              <rect class="d-surface" x="200" y="42" width="160" height="92" rx="5" />
-              <text class="d-label" x="280" y="72" text-anchor="middle">Leaf proof</text>
-              <text class="d-meta" x="280" y="94" text-anchor="middle">320 gates</text>
-              <text class="d-meta" x="280" y="110" text-anchor="middle">105500 bytes</text>
-              <rect class="d-surface" x="392" y="42" width="160" height="92" rx="5" />
-              <text class="d-label" x="472" y="72" text-anchor="middle">Private batch</text>
-              <text class="d-meta" x="472" y="94" text-anchor="middle">N = 6, ZK</text>
-              <text class="d-meta" x="472" y="110" text-anchor="middle">150908 bytes</text>
-              <rect class="d-surface" x="584" y="42" width="160" height="92" rx="5" />
-              <text class="d-label" x="664" y="72" text-anchor="middle">Public batch</text>
-              <text class="d-meta" x="664" y="94" text-anchor="middle">n = 53, optional</text>
-              <text class="d-meta" x="664" y="110" text-anchor="middle">237544 bytes</text>
-              <rect class="d-accent" x="776" y="42" width="160" height="92" rx="5" />
-              <text class="d-label" x="856" y="72" text-anchor="middle">Settlement</text>
-              <text class="d-meta" x="856" y="94" text-anchor="middle">pallet-shielded</text>
-              <text class="d-meta" x="856" y="110" text-anchor="middle">nullifiers + leaves</text>
-              <path class="d-line" d="M174 88 H 192" />
-              <path class="d-arrow" d="M192 84 l 8 4 l -8 4 z" />
-              <path class="d-line" d="M366 88 H 384" />
-              <path class="d-arrow" d="M384 84 l 8 4 l -8 4 z" />
-              <path class="d-line" d="M558 88 H 576" />
-              <path class="d-arrow" d="M576 84 l 8 4 l -8 4 z" />
-              <path class="d-line" d="M750 88 H 768" />
-              <path class="d-arrow" d="M768 84 l 8 4 l -8 4 z" />
-              <path class="d-line" d="M8 168 V 160 H 744 V 168" stroke-dasharray="3 3" />
-              <text class="d-meta" x="376" y="186" text-anchor="middle">PROVED IN YOUR WALLET, OR BY AN AGGREGATOR</text>
-              <path class="d-line" d="M776 168 V 160 H 936 V 168" />
-              <text class="d-meta" x="856" y="186" text-anchor="middle">IN THE BLOCK</text>
-            </svg>
+          <figure class="diagram">
+            <div class="diagram__scroll" tabindex="0" role="group" aria-labelledby="flow-title">
+              <svg viewBox="0 0 944 232" role="img" aria-labelledby="flow-title flow-desc">
+                <title id="flow-title">From a note to a settled block</title>
+                <desc id="flow-desc">
+                  Five steps left to right: your notes, a leaf proof, a private batch of six leaf
+                  proofs, an optional public batch of fifty-three private batches, and settlement on
+                  chain. The first four steps are proved locally. Only the last is in the block.
+                </desc>
+                <text class="d-meta" x="8" y="20">ONE TRANSFER, THREE PROVING LAYERS, ONE SETTLEMENT</text>
+                <rect class="d-surface" x="8" y="42" width="160" height="92" rx="5" />
+                <text class="d-label" x="88" y="72" text-anchor="middle">Your notes</text>
+                <text class="d-meta" x="88" y="94" text-anchor="middle">up to 2 inputs</text>
+                <text class="d-meta" x="88" y="110" text-anchor="middle">2 outputs, 1 fee</text>
+                <rect class="d-surface" x="200" y="42" width="160" height="92" rx="5" />
+                <text class="d-label" x="280" y="72" text-anchor="middle">Leaf proof</text>
+                <text class="d-meta" x="280" y="94" text-anchor="middle">320 gates</text>
+                <text class="d-meta" x="280" y="110" text-anchor="middle">105500 bytes</text>
+                <rect class="d-surface" x="392" y="42" width="160" height="92" rx="5" />
+                <text class="d-label" x="472" y="72" text-anchor="middle">Private batch</text>
+                <text class="d-meta" x="472" y="94" text-anchor="middle">N = 6, ZK</text>
+                <text class="d-meta" x="472" y="110" text-anchor="middle">150908 bytes</text>
+                <rect class="d-surface" x="584" y="42" width="160" height="92" rx="5" />
+                <text class="d-label" x="664" y="72" text-anchor="middle">Public batch</text>
+                <text class="d-meta" x="664" y="94" text-anchor="middle">n = 53, optional</text>
+                <text class="d-meta" x="664" y="110" text-anchor="middle">237544 bytes</text>
+                <rect class="d-accent" x="776" y="42" width="160" height="92" rx="5" />
+                <text class="d-label" x="856" y="72" text-anchor="middle">Settlement</text>
+                <text class="d-meta" x="856" y="94" text-anchor="middle">pallet-shielded</text>
+                <text class="d-meta" x="856" y="110" text-anchor="middle">nullifiers + leaves</text>
+                <path class="d-line" d="M174 88 H 192" />
+                <path class="d-arrow" d="M192 84 l 8 4 l -8 4 z" />
+                <path class="d-line" d="M366 88 H 384" />
+                <path class="d-arrow" d="M384 84 l 8 4 l -8 4 z" />
+                <path class="d-line" d="M558 88 H 576" />
+                <path class="d-arrow" d="M576 84 l 8 4 l -8 4 z" />
+                <path class="d-line" d="M750 88 H 768" />
+                <path class="d-arrow" d="M768 84 l 8 4 l -8 4 z" />
+                <path class="d-line" d="M8 168 V 160 H 744 V 168" stroke-dasharray="3 3" />
+                <text class="d-meta" x="376" y="186" text-anchor="middle">PROVED IN YOUR WALLET, OR BY AN AGGREGATOR</text>
+                <path class="d-line" d="M776 168 V 160 H 936 V 168" />
+                <text class="d-meta" x="856" y="186" text-anchor="middle">IN THE BLOCK</text>
+              </svg>
+            </div>
             <figcaption>
               The public batch is an aggregator's non-ZK bundle and is optional. A wallet submits a
               private batch on its own today.

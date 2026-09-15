@@ -236,10 +236,13 @@ a:hover {
 /* A hyphen is a line-break opportunity, so `--stratum-port` in prose becomes
    `--stratum-` and `port`, and on a page whose content is command-line flags
    that reads as two flags. No `word-break` value stops it in Chromium, so a
-   chip does not wrap at all: every chip on this site is short enough to sit on
-   one line at 400 px, measured. The clone is the backstop, so a chip that ever
-   does break keeps one shape across the break, so the fragments read as one
-   chip. */
+   chip does not wrap at all. A chip that holds a space and is long enough to
+   push a 320 px page sideways takes .code--wrap, which breaks at its spaces
+   only; a hyphen inside such a chip is still safe, because `word-break:
+   normal` leaves the break to the spaces. tools/check-chips.mjs measures every
+   chip against its parent at 320, 400 and 1280 px, so a long one fails a run.
+   The clone is the backstop, so a chip that does break keeps one shape across
+   it and the fragments read as one chip. */
 code {
   font-family: var(--font-mono);
   font-size: 0.875em;
@@ -251,6 +254,11 @@ code {
   white-space: nowrap;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
+}
+
+.code--wrap {
+  white-space: normal;
+  word-break: normal;
 }
 
 pre {
@@ -265,7 +273,11 @@ pre {
 
 /* A command that clips is a command that gets pasted broken, and an overlay
    scrollbar says nothing at rest. These wrap instead: every block already uses
-   `\` continuations, so a wrapped line still reads as one command. */
+   `\` continuations, so a wrapped line still reads as one command. A hanging
+   indent was measured and rejected: `text-indent` does not apply to an inline
+   `code`, `each-line` is unimplemented in Chromium, and on a block it would
+   inset every line after the first, so an unindented second command would read
+   as a wrap of the first. */
 pre code {
   font-size: var(--fs-body);
   line-height: 1.6;
@@ -479,10 +491,13 @@ h1 .mark {
   margin-bottom: var(--space-2);
 }
 
+/* Balanced so the two headings that cannot fit the 24ch measure in two lines
+   do not leave a single word alone on a third. */
 .band h2 {
   font-size: var(--fs-h2);
   margin-bottom: var(--space-3);
   max-width: 24ch;
+  text-wrap: balance;
 }
 
 .band__intro {
@@ -639,7 +654,8 @@ h1 .mark {
   font-size: var(--fs-ui);
 }
 
-.card__foot .hostline {
+.card__foot.hostline,
+.card .hostline {
   margin-bottom: 0;
   margin-top: var(--space-2);
 }
@@ -1014,8 +1030,14 @@ tbody tr:hover td.col-self {
 
 /* ---------- diagram ---------- */
 
+/* The caption is a sibling of the scroller, never inside it: a reader who
+   scrolls the diagram to its right end would otherwise drag the sentence that
+   explains it off the left edge. */
 .diagram {
   margin: 0 0 var(--space-4);
+}
+
+.diagram__scroll {
   overflow-x: auto;
   scrollbar-width: thin;
   background:
