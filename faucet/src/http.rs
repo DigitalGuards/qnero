@@ -106,6 +106,12 @@ async fn app_js() -> Response {
 /// the node answered recently, and the spendable balance is above the floor. A
 /// faucet that is up and drained is a faucet that refuses every claim, which
 /// is an outage worth paging for even though the process is running.
+///
+/// The balance comes back twice, like every amount this service returns.
+/// `balanceQuanta` is the count of pool steps the deployed monitor already
+/// selects on by name and `balanceQnr` is the same figure in QNR, which is
+/// what an alert reason should quote: a bare 48992 in a page reads as a
+/// balance a hundred times what the faucet holds.
 async fn health(State(state): State<AppState>) -> Response {
     let now = now_secs();
     let ready = state.shared.is_ready();
@@ -119,6 +125,7 @@ async fn health(State(state): State<AppState>) -> Response {
         "nodeFresh": fresh,
         "funded": funded,
         "balanceQuanta": spendable,
+        "balanceQnr": page::format_qnr(spendable),
         "chainHead": state.shared.chain_head.load(Ordering::Relaxed),
     });
     let code = if ok {
@@ -158,6 +165,7 @@ async fn status(State(state): State<AppState>) -> Response {
         "queued": queued,
         "queueCapacity": state.config.queue_depth,
         "paidQuanta": paid,
+        "paidQnr": page::format_qnr(paid),
         "chainHead": state.shared.chain_head.load(Ordering::Relaxed),
         "address": state.shared.address.get(),
         "genesis": state.shared.genesis.get(),

@@ -265,7 +265,12 @@ faucet_code="$(curl -s -o /dev/null -w '%{http_code}' -m 6 "$FAUCET/health")"
 if [ "$faucet_code" = "200" ]; then
     check_debounced "faucet" ok "" "the faucet is healthy again"
 else
-    reason="$(curl -s -m 6 "$FAUCET/health" | jq -c '{ready, nodeFresh, funded, balanceQuanta}' 2>/dev/null)"
+    # `balanceQnr` is the same figure with a unit a person reads: a bare
+    # 48992 in a page reads as a hundred times what the faucet holds. It is
+    # null against a faucet older than this field, which costs the reason
+    # nothing, so `balanceQuanta` stays selected beside it.
+    reason="$(curl -s -m 6 "$FAUCET/health" \
+        | jq -c '{ready, nodeFresh, funded, balanceQuanta, balanceQnr}' 2>/dev/null)"
     check_debounced "faucet" fail "the faucet answered $faucet_code on /health ${reason:-}" ""
 fi
 

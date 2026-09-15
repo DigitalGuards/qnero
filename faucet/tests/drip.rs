@@ -197,10 +197,21 @@ async fn status_and_health_report_a_working_faucet() {
     assert_eq!(body["cooldownHours"], serde_json::json!(24.0));
     assert_eq!(body["chainHead"], serde_json::json!(42));
     assert_eq!(body["queued"], serde_json::json!(0));
+    // Every amount comes back twice, which is what `README.md` promises a
+    // reader of this API. The paid total is the one that had no QNR sibling,
+    // so a probe reading it alone took 1000 for a thousand QNR.
+    assert_eq!(body["balanceQuanta"], serde_json::json!(100_000));
+    assert_eq!(body["balanceQnr"], serde_json::json!("1000"));
+    assert_eq!(body["paidQuanta"], serde_json::json!(0));
+    assert_eq!(body["paidQnr"], serde_json::json!("0"));
 
     let (status, body, _) = request("GET", format!("{}/health", harness.base), None, None).await;
     assert_eq!(status, 200);
     assert_eq!(body["status"], serde_json::json!("ok"));
+    // And the balance the deployed monitor jq-selects out of this body, in
+    // both spellings, so an alert reason can quote the one with a unit on it.
+    assert_eq!(body["balanceQuanta"], serde_json::json!(100_000));
+    assert_eq!(body["balanceQnr"], serde_json::json!("1000"));
 }
 
 /// A faucet that is up and cannot pay is an outage, and `/health` has to say
