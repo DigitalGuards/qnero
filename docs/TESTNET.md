@@ -182,16 +182,20 @@ no second copy. Confirm the seed and the address belong together before genesis
 is cut, using the node's own derivation rather than the faucet's:
 
 ```bash
-(umask 077; printf '%s%064d' "$(cat <seed-path>)" 0 > /tmp/seed64)
-chain/target/release/qnero-node key qnero --scheme standard --no-derivation --seed < /tmp/seed64
-shred -u /tmp/seed64
+seed64=$(mktemp)
+printf '%s%064d' "$(cat <seed-path>)" 0 > "$seed64"
+chain/target/release/qnero-node key qnero --scheme standard --no-derivation --seed < "$seed64"
+shred -u "$seed64"
 ```
 
-The `umask 077` is the point of the subshell. Without it that file is created
-0644 under a stock umask, and for the second or so between writing it and
-shredding it, the key to the entire genesis endowment is readable by every
-account on the machine. There is no recovery from a leak: the address is fixed
-in genesis and the chain has to be relaunched.
+`mktemp` rather than a fixed path, and the reason is the path rather than the
+mode. `/tmp/seed64` is a predictable name in a world-writable directory: a file
+already sitting there, or a symlink pointing at one somebody else can read, is
+written through at whatever mode and ownership it already has, and `shred` then
+destroys their copy rather than closing anything. A `umask` cannot help with
+that. What goes through this file is the key to the entire genesis endowment,
+and there is no recovery from the leak: the address is fixed in genesis and the
+chain has to be relaunched.
 
 `Dilithium87Pair::from_seed` reads the first 32 bytes of whatever it is handed,
 so padding a 32-byte seed to the 64 that command wants derives the same pair.
@@ -228,7 +232,7 @@ The `sudo` and the `chown` are both load-bearing:
   `Restart=always` turns that into a crash loop whose message names neither the file nor the
   permission. Section 6's checklist is where a reinstall that drops the ownership is caught.
 
-Three things that script handles and a hand-rolled command gets wrong:
+Four things that script handles and a hand-rolled command gets wrong:
 
 - **The peer id prints on stderr**, so a naive `> file` loses it. Recover it later with
   `qnero-node key inspect-node-key --file /etc/qnero/node-key`.
@@ -238,6 +242,10 @@ Three things that script handles and a hand-rolled command gets wrong:
 - **A bootnode's identity must never rotate.** Its peer id is published in other people's
   spec files. Never `--unsafe-force-node-key-generation`, and never let the node generate one
   into its base path, where a base-path wipe would silently change the network's entry point.
+- **It refuses an apex hostname.** `<domain>` is proxied and p2p is raw TCP, so a multiaddr
+  pointing at the apex blackholes every dial, and the symptom turns up days later on somebody
+  else's machine. Pass `node.<domain>`. `QNERO_ALLOW_APEX=1` is there for a zone that really
+  is not proxied.
 
 Pass the key as `--node-key-file`. Never `--node-key <hex>`: argv is
 world-readable in `ps`.
@@ -250,17 +258,26 @@ host's copy:
 
 ```bash
 PEER_ID=$(qnero-node key inspect-node-key --file /etc/qnero/node-key)
+spec=$(mktemp)
 jq --arg addr "/dns/node.<domain>/tcp/30333/p2p/$PEER_ID" '.bootNodes = [$addr]' \
-   /etc/qnero/qnero-testnet.json > /tmp/spec.json
-sudo install -m 0644 -o root -g root /tmp/spec.json /etc/qnero/qnero-testnet.json
-rm -f /tmp/spec.json
+   /etc/qnero/qnero-testnet.json > "$spec"
+sudo install -m 0644 -o root -g root "$spec" /etc/qnero/qnero-testnet.json
+rm -f "$spec"
 ```
+
+Three things this is not. It is not `generate-bootnode-key.sh`, which would
+mint a second identity if it were pointed at a path with no key on it; the peer
+id is **read** out of the key that is already there. It is not run on the
+workstation, where `/etc/qnero/node-key` does not exist. And the hostname is
+`node.<domain>` rather than `<domain>`, because the apex is proxied and a
+proxied record blackholes p2p. `deploy-testnet.sh spec` prints this exact
+command after every spec copy.
 
 The committed copy in this repository keeps an empty `bootNodes`, because the
 peer id of a node that does not exist yet is not a thing a repository can know.
 `deploy-testnet.sh spec` copies the committed file over the host's, so **the
-bootnode entry has to be put back after every spec copy**, and the script says
-so when it runs. If the list is ever written back into the repository copy, the
+bootnode entry has to be put back after every spec copy**, and the script
+prints the command above when it runs. If the list is ever written back into the repository copy, the
 reproducibility test compares everything except `bootNodes` and validates the
 multiaddr shape, so it keeps working.
 
@@ -339,6 +356,13 @@ done
 sudo sed -i -e 's/<domain>/<the real domain>/g' -e 's|<user>|<the real account>|g' \
   /etc/nginx/sites-available/qnero-* /etc/nginx/conf.d/00-qnero-common.conf
 sudo mkdir -p /var/www/<domain> /var/www/wallet.<domain> /var/www/explorer.<domain>
+
+# The trusted-proxy list, WITHOUT which every limit below counts the CDN
+# rather than callers. 00-qnero-common.conf includes this file, so nginx -t
+# fails while it is missing rather than reloading a configuration whose limits
+# have quietly become global.
+sudo ./scripts/fetch-real-ip-ranges.sh /etc/nginx/qnero-real-ip.conf
+grep -c '^set_real_ip_from' /etc/nginx/qnero-real-ip.conf    # a dozen or more
 # Ubuntu ships /etc/nginx/sites-enabled/default, which also declares
 # `listen 80 default_server`, and so does qnero-10-default. Two of them is
 # `nginx -t` failing with "a duplicate default server for 0.0.0.0:80" and the
@@ -349,15 +373,31 @@ sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-The webroots stay root-owned. `deploy-testnet.sh` stages each tree under the
-deploy account's own `/tmp` and finishes with one `sudo rsync`, so nothing has
-to be chowned to the account that ships builds.
+The webroots stay root-owned. `deploy-testnet.sh` stages each tree into an
+`mktemp -d` of the deploy account's own and finishes with one
+`sudo rsync --chown=root:root`, so nothing under `/var/www` is writable by the
+account that ships builds. That `--chown` is the whole of it: `rsync -a`
+implies `-o -g`, so without it the replace would hand the deploy account
+ownership of everything nginx serves, Qloak's bundle included.
 
-Also fill in the CDN's published address ranges in the `set_real_ip_from` lines
-of `00-qnero-common.conf`. Without them every faucet claim reads as coming from
-the CDN and the per-client limit is one global limit.
+**Why the `set_real_ip_from` list is a precondition rather than a nicety.**
+Until nginx has it, the realip module never rewrites `$remote_addr`, every
+request arrives from one of a handful of CDN edge addresses, and all three
+limit zones count the whole internet as one caller:
 
-Four rules those files encode, each of which cost an outage somewhere:
+- `limit_conn rpc_conn 16` on `rpc.<domain>` becomes sixteen concurrent WebSockets for
+  everybody at once. The seventeenth wallet or explorer tab in the world gets 429 while
+  the node sits idle, and an operator testing from one machine sees nothing wrong.
+- `limit_req zone=rpc_calls` becomes 240 calls a minute shared by everybody.
+- `limit_req zone=faucet_claim` becomes 6 claims a minute shared by everybody, so one
+  abusive client locks every other claimant out.
+
+Measured on nginx 1.24.0 with these files: twelve callers carrying twelve
+distinct `CF-Connecting-IP` headers got eight 200s and four 429s with no list,
+and twelve 200s with one. That is why the include is unconditional and why the
+generator runs before `nginx -t` above rather than after it.
+
+Five rules those files encode, each of which cost an outage somewhere:
 
 - **`listen 443 ssl http2`, never `http2 on;`.** The separate directive is nginx 1.25+.
 - **Never pin `ssl_ciphers`.** OpenSSL 3.5 plus a CDN's TLS 1.2 origin pulls plus an ECC
@@ -371,6 +411,13 @@ Four rules those files encode, each of which cost an outage somewhere:
   payment instead of 11.2 s, with no error anywhere. Caching in those files is done with
   `expires`, which does not have this behaviour, and the two locations that do declare
   headers repeat the full set.
+- **The explorer's policy carries `script-src 'self' 'wasm-unsafe-eval'`, and it is not
+  decoration.** `@polkadot/api` awaits `cryptoWaitReady()` when its socket connects and
+  `@polkadot/wasm-crypto-init` ships the wasm-only builder, so a policy that refuses
+  WebAssembly makes that call resolve **false** rather than throw: `ApiPromise` never emits
+  `ready` and silQ Road reports the endpoint as unreachable while the node is answering
+  normally. Nothing static catches it, since `nginx -t` reads syntax and the root URL
+  returns 200 either way, which is why section 10 loads the page and looks for a block.
 
 ## 8. The stratum port
 
@@ -405,6 +452,17 @@ The shielded spending key is created by the faucet itself on first start, at
 mode 0600, with its note store beside it. Back up both: losing the store costs
 a full rescan and the record of which notes are spent; losing the seed costs
 the notes.
+
+**The Turnstile pair is a precondition and the service enforces it.** `serve`
+refuses to start with an empty `QNERO_FAUCET_TURNSTILE_SECRET` unless
+`QNERO_FAUCET_ALLOW_NO_CAPTCHA=1` is set in the same environment file, so a
+first launch cannot quietly be a faucet with no challenge. The rate limits are
+not a substitute: a `qn1` address is minted locally for nothing, so the
+per-address cooldown bounds nobody, and the per-client limit counts an IPv6
+/64, which a requester with two prefixes rotates through. What is left is the
+prover at one drip at a time, which takes a 10M-quanta endowment down in about
+three days of somebody's attention. Set the pair, or set the override and know
+which decision was made.
 
 ```bash
 sudo systemctl enable --now qnero-faucet
@@ -468,8 +526,19 @@ curl -sS -H 'content-type: application/json' \
 curl -sS https://faucet.<domain>/status
 ```
 
-**The explorer.** Open `https://explorer.<domain>/`, confirm the head block
-number matches the node's and that a block page renders.
+**The explorer, in a browser rather than with curl.** A root-URL 200 proves
+only that files are being served, and the one failure mode that matters here
+looks exactly like a healthy page until the socket should have connected: if
+the policy is missing `'wasm-unsafe-eval'`, `cryptoWaitReady()` resolves false,
+`ApiPromise` never emits `ready`, and after fifteen seconds the page says the
+node did not answer. So load `https://explorer.<domain>/`, wait for the status
+strip to read **connected**, confirm the head block number matches the node's,
+and open a block page. Check the header is what shipped:
+
+```bash
+curl -sSI https://explorer.<domain>/ | grep -i content-security-policy
+# ... script-src 'self' 'wasm-unsafe-eval' ...
+```
 
 **Qloak.** Open `https://wallet.<domain>/`, check the settings screen says the
 **threaded** prover. If it says single-threaded, the isolation headers are not
@@ -491,6 +560,34 @@ qnero-wallet --node wss://rpc.<domain> --file /tmp/probe.seed sync
 
 A drip is about ten seconds of proving and then up to one block, so two minutes
 end to end is the expected time.
+
+**Each caller gets its own share of the limits.** This is the check that catches a
+`set_real_ip_from` list that was never written, and it needs two source
+addresses, because from one machine a global limit and a per-caller limit look
+identical:
+
+```bash
+# on the host, before anything else: the list is there and it is not comments
+grep -c '^set_real_ip_from' /etc/nginx/qnero-real-ip.conf
+
+# from two different machines at once, each opening several sockets
+for i in $(seq 1 6); do
+  curl -sS -o /dev/null -w '%{http_code}\n' -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"system_health","params":[]}' \
+    https://rpc.<domain> &
+done; wait
+```
+
+Every one of those should be 200. A 429 from the second machine while the first
+is idle means `$remote_addr` is still the CDN.
+
+**The webroots are still root-owned**, which is what stops the deploy account
+rewriting the page that handles seeds:
+
+```bash
+ls -ld /var/www/wallet.<domain> && ls -l /var/www/wallet.<domain>/assets | head -3
+# every line root root
+```
 
 **A rig from a second machine.**
 
@@ -534,6 +631,14 @@ monitor and the appearance of one:
   any default is resolved, so an unedited one stops the monitor in a way the cron log shows.
   The alternative is what a placeholder actually does: `curl` cannot resolve a host with
   angle brackets, so the nginx check fails on the first tick, alerts once, and never clears.
+- **It exits 2 when the env file cannot be sourced at all**, and the template's placeholders
+  are quoted so that it can be. The file is shell: `MONITOR_DOMAIN=<domain>` unquoted is an
+  assignment followed by two redirection operators, bash stops reading the file at that line,
+  and everything below it silently never arrives. An operator who filled in the domain and
+  the genesis hash but left one shipped line alone would lose `MONITOR_EXPECT_GENESIS`, and
+  the check that catches a node which resynced from the spec would be skipped with no message
+  at all. Keep a value containing `<` or `>` in quotes, and let the script stop if you do
+  not.
 - **A recovery really clears the key.** An alert fires once when a check starts failing and
   once when it recovers, and the state file empties as checks recover, so the all-clear is an
   empty file and a check that has recovered can alert again.

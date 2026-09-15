@@ -5441,3 +5441,330 @@ parallel `cargo test`, because they drive 250 ms intervals against 1 000 ms and
 `chain/node/src/stratum`, and the fix is to drive those two on paused tokio
 time rather than on the wall clock, which is a change to a subsystem this
 milestone has no other reason to rebuild.
+
+## The M11 third pass: a page that could never connect, limits that counted the CDN, and a third rehearsal, 2026-09-15
+
+A second review of the preparation returned eleven findings. Ten were applied
+and one was folded into another. The shape of this pass is worth naming,
+because it is the same shape as the last one: the three most expensive findings
+are all configuration that parses, tests green and does nothing, and each of
+them fails by blaming a component that is healthy.
+
+### The explorer's policy refused the one thing the explorer needs
+
+`packaging/nginx/40-explorer.conf` shipped `default-src 'self'` with no
+`script-src` at all, so a browser refuses `WebAssembly.instantiate`. What
+follows from that is the whole finding. `@polkadot/api` awaits
+`cryptoWaitReady()` when its provider connects, `@polkadot/wasm-crypto-init`
+resolves to the wasm-only builder in a browser with no asm.js fallback, and
+`cryptoWaitReady()` resolves **false** rather than throwing. In
+`ApiPromise`'s connect handler that false is `cryptoReady`, and `_isReady` is
+set only when it is true, so `ready` is never emitted, the `ApiPromise.create`
+in `explorer/src/chain/api.ts` never settles, and after fifteen seconds the page
+says the node did not answer. silQ Road would have shipped as a page that can
+never connect to any chain on any browser, and the message it prints sends
+whoever reads it to debug a node that is fine.
+
+Nothing caught it, and the reason each layer did not is the useful part.
+`nginx -t` reads syntax. The built `index.html` carries no `<meta>` policy, so a
+local `vite preview` has no policy at all. A root-URL probe answers 200 whether
+the page works or not. So the fix is three things rather than one:
+
+- The policy gains `script-src 'self' 'wasm-unsafe-eval'`, in both copies in the vhost, in
+  `explorer/README.md`, and as the shape the external watchdog asserts.
+- `vite.config.ts` now serves `vite preview` under that same policy, with only `connect-src`
+  differing because the suite talks to a dev node on loopback. The Playwright suite runs
+  against `vite preview`, so from here it runs under the real policy.
+- `explorer/tests/csp.test.ts` asserts every copy of the policy the repository ships carries
+  the directive, which is a check that runs inside the ordinary `npm test` gate.
+
+Both directions were measured. Under the shipped policy the full Playwright
+suite passes, ten of ten. With `'wasm-unsafe-eval'` removed from the preview
+header and nothing else changed, the first test fails at the status strip:
+
+```
+- unexpected value "connectingws://127.0.0.1:9944theme: system"
+- unexpected value "connection failedws://127.0.0.1:9944ws://127.0.0.1:9944 did not answer
+  in 15 seconds. The node may be down, or this page may be configured with the wrong
+  endpoint.theme: system"
+```
+
+The node was answering throughout. That sentence is what an operator would have
+been given to work from.
+
+### Three rate limits that counted the CDN instead of the caller
+
+`00-qnero-common.conf` enabled `real_ip_header CF-Connecting-IP` with every
+`set_real_ip_from` line commented out. The realip module is inert without a
+trusted-proxy list, so `$remote_addr` stays the CDN's edge address on every
+proxied name and all three limit zones key on a handful of addresses. The
+faucet cost was written down in the runbook. The RPC cost was not, and it is
+worse: `limit_conn rpc_conn` was a cap on the number of WebSockets the entire
+internet could hold open at once, so past that number every wallet and explorer
+tab in the world is answered 429 while the node sits idle. An operator testing
+from one machine sees nothing wrong, which is the property that makes this kind
+of finding expensive.
+
+Measured here on nginx 1.24.0 with the shipped files, a slow upstream and
+`limit_conn rpc_conn 2`:
+
+```
+four concurrent callers, four distinct /64s, with the trusted-proxy list:      200 200 200 200
+the same four callers with the list removed:                                   429 429 200 200
+```
+
+Filling the list in was an instruction in the runbook, placed after the
+`nginx -t && systemctl reload nginx` line that ends the section's command
+block. An operator working top to bottom reloads first and reads second. So the
+list is no longer an instruction:
+
+```nginx
+include /etc/nginx/qnero-real-ip.conf;
+```
+
+A missing file fails `nginx -t` with the path in the message, which is a far
+better failure than a limit that silently became global.
+`scripts/fetch-real-ip-ranges.sh` writes that file from the CDN's published
+lists, refuses to write a suspiciously short one, and accepts `file://` URLs for
+a host that fetches its copy from somewhere else.
+
+### An IPv6 /64 is one client, in both places that count one
+
+Both the nginx zones and the faucet's ledger keyed on the whole address, and an
+ordinary residential or cloud client is handed a /64. That is 2^64 keys for one
+requester, so the documented three-claims-per-client bound cost nothing to
+defeat, and the recipient side is no help either, since `qn1` addresses are
+minted locally for free. What was left bounding a drain was the prover at one
+drip at a time, which empties the endowment in about three days.
+
+nginx now derives a `$limit_key` that groups IPv6 to its /64, and
+`store::client_key` does the same before the ledger hashes a client. The nginx
+map is three expressions because nginx writes IPv6 compressed and the /64 can
+only be read off the text when four groups are written out; the other two
+expressions key on the text before the zero run, which is always a prefix of
+the network part, so they group wider than a /64 and never narrower. Measured
+against the running server:
+
+```
+203.0.113.7                 -> 203.0.113.7
+2001:db8:1:2:3:4:5:6        -> 2001:db8:1:2
+2001:db8:1:2::9             -> 2001:db8:1:2      the same key, which is the point
+2a02:1234:5678:9abc::1      -> 2a02:1234:5678:9abc
+2001:db8::1                 -> 2001:db8          wider, because the /64 is not in the text
+::ffff:203.0.113.9          -> 203.0.113.9
+::1                         -> (empty, and nginx does not count an empty key)
+```
+
+Grouping is not a defence on its own, and the faucet now says so by refusing to
+start. `serve` stops with the reason when `QNERO_FAUCET_TURNSTILE_SECRET` is
+empty unless `QNERO_FAUCET_ALLOW_NO_CAPTCHA=1` is set, so a first launch cannot
+quietly be a public faucet with no challenge.
+
+### The monitor's env file was not valid shell
+
+`MONITOR_DOMAIN=<domain>` is an assignment followed by two redirection
+operators. Bash reports a syntax error and stops reading the file at that line,
+and `[ -f "$ENV_FILE" ] && . "$ENV_FILE"` never looked at the result. So an
+operator who filled in the domain and the genesis hash and left one shipped line
+alone lost every setting below it, including `MONITOR_EXPECT_GENESIS`, and the
+genesis check is gated on that variable being non-empty. It was skipped with no
+message at all: the one check that catches a node which lost its database and
+resynced from the spec, silently absent, on the deployment whose empty-tree case
+it exists to catch.
+
+Both halves are fixed. The template quotes its placeholders and derives
+`MONITOR_SSL_DIR` from `MONITOR_DOMAIN` so there is no second place to forget,
+and the script exits 2 when the source fails. Against the rehearsal node:
+
+```
+correct genesis   no genesis alert
+wrong genesis     red  "the node serves genesis 0x439dee7c...d900 and this deployment is 0xdeadbeef"
+one unquoted placeholder left in the file:
+                  broken.env: line 33: syntax error near unexpected token `newline'
+                  broken.env could not be sourced. It is shell: a value
+                  containing < or > has to be quoted, and everything after the failing
+                  line never reached this script.
+                  exit 2
+```
+
+### A drip that could be paid twice
+
+The claim row is written before the proof and cleared by `mark_sent` after
+`Wallet::send` returns. A process that dies in between leaves a row that still
+says `queued` and a payment that may already be in a block, and
+`recover_queued_claims` re-queued exactly that row at the next start. One crash,
+two payments to one address, one claim in the ledger and a `paidQuanta` that is
+wrong. `Restart=always` makes that crash five seconds old, and `TimeoutStopSec`
+expiring into a SIGKILL, or `MemoryMax` landing on a proof that peaks near a
+gigabyte, are ordinary ways to get there.
+
+The worker now marks the row immediately before the send, and a row that carries
+that mark is failed as `interrupted` rather than re-queued. `interrupted` is
+also the one failure that holds the address cooldown and the client's window,
+because the faucet cannot tell a payment that landed from one that did not, and
+paying twice is the worse of the two mistakes. The requester is told the claim
+failed and that the address can claim again after the cooldown. Driven live in
+the rehearsal below.
+
+### The deploy script sent the operator to mint a second identity
+
+After every spec copy, `deploy-testnet.sh` printed
+`./scripts/generate-bootnode-key.sh /etc/qnero/node-key <domain>`, and the
+runbook sent the operator to that message. Three things go wrong from following
+it. It runs on the workstation, where `/etc/qnero/node-key` does not exist, so
+the script takes its generate branch and, under the sudo the runbook has already
+trained the operator to use, mints a brand new Dilithium identity into the
+workstation's `/etc/qnero` and prints a peer id no running node has. It writes
+nothing into the spec, so `bootNodes` stays empty. And the hostname is the
+proxied apex rather than `node.<domain>`, which blackholes p2p. Each of the
+three ends the same way: a published testnet nobody can join, with the symptom
+appearing only when a second operator tries.
+
+The script now prints the jq edit the runbook documents, run on the host and
+naming the p2p hostname, and `generate-bootnode-key.sh` refuses an apex
+hostname outright with `QNERO_ALLOW_APEX=1` for a zone that really is not
+proxied. `localhost` and address literals still pass, which is what a rehearsal
+on one workstation dials.
+
+### Three smaller ones
+
+**`sudo rsync -a` was chowning the webroots to the deploy account.** `-a`
+implies `-o -g`, and running as root they take effect, so every file staged
+under the deploy account landed in `/var/www` owned by it, along with the
+webroot itself. The runbook said the opposite in as many words. Reproduced with
+rsync 3.2.7, a root-owned destination and a file staged as an ordinary user:
+
+```
+sudo rsync -a --delete stage/ web/                    web/ and web/app.js both owned by the staging account
+sudo rsync -a --delete --chown=root:root stage/ web/  both root root
+```
+
+**The staging path was fixed and in `/tmp`.** `/tmp/qnero-deploy/var/www/...`
+is predictable and world-writable ground, and the second hop reads it as root.
+It is an `mktemp -d` on the host now.
+
+**`/tmp/seed64` in two documents.** `umask 077` sets the mode of a file the
+command creates and does nothing about a file or a symlink already sitting at a
+fixed path, and what goes through that file is the key to the entire genesis
+endowment. Both copies use `mktemp`.
+
+### The third rehearsal
+
+Same shape as the previous two, from the committed raw spec, genesis
+`0x439dee7cb5609728e54aa60ef8bed2924196c4a3d837f2c8a7e64685df69d900`. Node A is
+the seed with `--node-key-file`, `--mining-threads 1` and the stratum port on
+30333/3333/9944; node B is a plain full node on 30334/9945 dialing
+`/dns/localhost/tcp/30333/p2p/QmSvDLagG23qX2yALD9aWWhVxaz5oEE1r2PamWWGTCEpaK`,
+which is the multiaddr `generate-bootnode-key.sh` printed, through its new
+hostname guard's `localhost` exemption.
+
+B had A as a peer 5 seconds after its own start, at the same genesis. Block 1
+arrived 75 seconds after A started and B imported it 3 seconds later. xmrig
+6.21.3 at `nice -n 19 --threads=2` sealed every one of the 45 blocks the run
+produced, and the difficulty climbed from 5 000 to 5 086 while it ran.
+`scripts/probe-node.sh` against both, genesis pinned and a height floor of 5:
+
+```
+# node A                             # node B
+peers                  1             peers                  1
+isSyncing              false         isSyncing              false
+height                 36            height                 36
+genesis                0x439d…d900   genesis                0x439d…d900
+target block time      120000 ms     target block time      120000 ms
+stratum                open          stratum                open
+
+all checks passed                    all checks passed
+```
+
+**The faucet refused to start first**, which is the new precondition working:
+
+```
+Error: QNERO_FAUCET_TURNSTILE_SECRET is empty, so every claim would be answered with no
+challenge at all. The address cooldown bounds nobody, since addresses are free to mint,
+and the per-client limit counts an IPv6 /64, which a client with several prefixes simply
+rotates. Set the Turnstile pair, or set QNERO_FAUCET_ALLOW_NO_CAPTCHA=1 to say
+deliberately that this faucet does not need one
+```
+
+With the override set it started, built its circuits in 6.20 s before the
+listener opened, and funded itself by shielding 50 000 quanta of the genesis
+endowment into leaf 6 in block 7. A drip to a wallet created seconds earlier
+proved in 14.86 s and settled in block 13, 19.01 s after it left the queue. The
+recipient wallet, synced against **node B** rather than the miner:
+
+```
+scanned leaves 0..16 at block 13
+received 1 note(s) worth 1000 quanta
+unspent total 1000 quanta
+
+      leaf        quanta    block    state  memo
+        13          1000       13  unspent  qnero testnet faucet
+```
+
+**The per-client limit, live.** Five claims to five fresh addresses, four of
+them from one /64:
+
+```
+2001:db8:aa:bb:1:2:3:4                 202 queued
+2001:db8:aa:bb::99                     202 queued
+2001:db8:aa:bb:ffff:ffff:ffff:ffff     202 queued
+2001:db8:aa:bb:dead:beef:dead:beef     429 client-limit
+2001:db8:aa:cc::1                      202 queued
+```
+
+Three addresses inside one /64 spend that /64's allowance and the fourth is
+refused, while a different /64 is a different client. Before this pass all five
+were different clients and the limit bounded nothing.
+
+**The interrupted drip, live.** A claim was submitted and the faucet was killed
+with SIGKILL five seconds later, mid-proof and past the submission mark, which
+is the `MemoryMax` and `TimeoutStopSec` shape. On restart:
+
+```
+faucet      claim 6 was interrupted mid-drip and is NOT being paid again. Its payment may
+            have settled; check qn1qxxfd7af... before refunding it by hand.
+
+GET /drip/6 -> {"status":"failed","reason":"interrupted","includedAt":null,...}
+POST /drip  -> 429 address-cooldown
+               "this address has already been paid. It can claim again in 23 hours"
+
+/status     -> paidQuanta 5000, balance 44960     unchanged by the interrupted claim
+```
+
+That address held 0 notes afterwards, so this particular drip really had not
+settled, and the requester waits out the cooldown for a payment nobody made.
+That is the cost of the decision and it is the right way round: the faucet
+cannot tell the two cases apart, and the other way round pays twice.
+
+Stopping, in reverse order, each by its pidfile: xmrig, the faucet, node B, node
+A. All four stopped on SIGTERM, the faucet through its graceful path
+(`stopping`, then `the worker's queue closed, stopping`). Afterwards no
+`qnero-node`, `qnero-faucet` or `xmrig` process remained and all eight ports
+(9944, 9945, 30333, 30334, 3333, 8080, 9615, 9616) were closed.
+
+### Gates
+
+```
+# the repository root
+cargo fmt --all -- --check                                        0
+nice -n 19 cargo clippy -j 2 --workspace --all-targets            0, no warnings
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+                                                                  40 binaries, 0 failed
+nice -n 19 cargo test -j 2 --release -p qnero-faucet              30 + 14 passed
+
+# the chain workspace, which this pass does not touch
+cargo +nightly fmt --all -- --check                               0
+
+# the web properties
+explorer: lint, typecheck, test, build                            0, 104 unit tests
+explorer: npm run e2e (Playwright, under the shipped policy)      10 passed
+wallet-web: lint, typecheck, test                                 0
+site: node site/tools/check-links.mjs                             no broken links
+
+# the nginx set, against the host's own version
+nginx -t (nginx/1.24.0, seven files, placeholders filled)         test is successful
+nginx -t with the real-ip include missing                         fails, and names the file
+```
+
+The stratum test flake noted at the end of the previous pass is still open and
+still pre-existing. This pass touches nothing in `chain/node/src/stratum`.
