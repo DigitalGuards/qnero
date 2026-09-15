@@ -114,7 +114,7 @@
               <h3>Sync</h3>
               <p>
                 Every ciphertext on the chain is read by leaf index in batches and tried against
-                this wallet's viewing key in the worker. Coinbase notes are rebuilt from the miner
+                this wallet's viewing key in the worker. Mining rewards are rebuilt from the miner
                 key. The whole settled nullifier set is paged and spent status is decided locally.
                 The node is told nothing about which leaves or which nullifiers belong to this
                 wallet.
@@ -202,9 +202,9 @@
               <li>
                 <strong>IndexedDB is evictable, and the seed is what recovers from that.</strong>
                 The wallet asks for persistent storage and reports the answer. Write the seed down.
-                Every note re-derives from it, because every note's plaintext is on the chain inside
-                its ciphertext, so an eviction costs a full rescan and the record of which notes are
-                spent. Without the seed it costs the wallet.
+                Everything this wallet holds re-derives from it, because each transfer's plaintext
+                is on the chain inside its ciphertext, so an eviction costs a full rescan and the
+                record of what has been spent. Without the seed it costs the wallet.
               </li>
               <li>
                 <strong>The store keeps the value graph in the clear.</strong> Four fields are

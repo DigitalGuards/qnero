@@ -98,7 +98,7 @@
               </p>
               <p>
                 The miner key is secret-bearing and cannot spend. Its holder can pick that miner's
-                coinbase notes out of the tree, so keep it with the seed. A node without one refuses
+                rewards out of the tree, so keep it with the seed. A node without one refuses
                 to start.
               </p>
             </div>
@@ -140,7 +140,7 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
               <h3>Nothing is paid to the login</h3>
               <p>
                 The <code>-u</code> login is a worker label. This is a solo-mining endpoint: every
-                block the rig finds pays a shielded note to the key in
+                block the rig finds pays its reward to the key in
                 <code>--rewards-miner-key</code>, whatever the login says.
               </p>
               <p>
@@ -350,8 +350,8 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
             <div class="card">
               <h3>Faucet</h3>
               <p>
-                Testnet coin for a wallet that has none. A transfer needs a note in the pool, and a
-                faucet drip is how the first one arrives without a rig.
+                Testnet coin for a wallet that has none. A transfer needs funds in the pool, and a
+                faucet drip is how the first of them arrives without a rig.
               </p>
               <p class="card__foot hostline">
                 <a href="https://faucet.qnero.io/">faucet.qnero.io</a>
@@ -362,7 +362,7 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
               <h3>Stratum</h3>
               <p>
                 Mining stays solo. The endpoint a rig connects to is the one your own node opens
-                with <code>--stratum-port</code>, and the reward is a note for the key that node was
+                with <code>--stratum-port</code>, and the reward is paid to the key that node was
                 started with.
               </p>
             </div>
