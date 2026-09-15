@@ -59,7 +59,7 @@ mod tests;
 ///   the target: a sustained 10 transfers/sec chain-wide exhausts it in ~13 years. And the ceiling
 ///   is both, because it is a per-block ceiling read as a rate: `docs/DESIGN.md` 7.4 puts
 ///   permanently saturated blocks at 318 settlements each, which is ~2.6/sec at 120 s where it was
-///   ~26/sec at 12 s, so saturation now gives ~52 years where the 12 s figure was ~2.5. Each +1 of
+///   ~26/sec at 12 s, so saturation now gives ~52 years where the 12 s figure was ~5.1. Each +1 of
 ///   circuit depth quadruples capacity.
 /// - Observability: `LeafCount` is public storage, so exhaustion is visible years in advance; alert
 ///   well before 4^16 leaves.

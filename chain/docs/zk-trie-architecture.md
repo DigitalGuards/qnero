@@ -83,13 +83,14 @@ on-chain verifier reject them. Existing funds are never lost and nullifier state
 untouched -- wormhole proof *generation* simply halts until the circuit is updated.
 
 **The plan is to do a circuit update when (long before) that happens.** Rough timeline
-to exhaustion at 12-second blocks:
+to exhaustion at the 120 s target (the block-count row scales with the target, the
+rate rows do not):
 
 | Sustained leaf rate | Time to 4.3 B leaves |
 |---|---|
-| 1 leaf/block (mining-reward floor) | ~1,600 years |
+| 1 leaf/block (mining-reward floor) | ~16,000 years |
 | 10 transfers/sec chain-wide | ~13 years |
-| ~50 transfers/sec (permanently full blocks) | ~2.5 years |
+| ~2.6 transfers/sec (permanently full blocks, 318 settlements each) | ~52 years |
 
 `LeafCount` is public storage, so the approach is observable years ahead; each +1 of
 circuit depth quadruples capacity (e.g. 16 → 20 buys ~256× the runway).

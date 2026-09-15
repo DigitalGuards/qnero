@@ -59,9 +59,10 @@ pub trait WeightInfo {
 // `QPoW::TargetBlockTimeMs`, so `on_finalize` touches five keys where this file
 // declared four and every block did a read its weight never paid for. The read
 // is declared here; the `ref_time` and `proof_size` figures are still the
-// measured ones from the run in the header, which is conservative for a single
-// 8-byte value under the overlay. `benchmarking.rs` no longer warms that key in
-// its setup, so a regeneration measures the read and blesses five.
+// measured ones from the run in the header, so `proof_size` under-declares the
+// new key by its own proof entry (about 503 bytes) until the weights are
+// regenerated. `benchmarking.rs` no longer warms that key in its setup, so a
+// regeneration measures the read and blesses five.
 
 
 /// Weights for `pallet_qpow` using the Substrate node and recommended hardware.
