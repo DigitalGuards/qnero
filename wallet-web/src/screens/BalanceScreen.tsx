@@ -246,7 +246,7 @@ export function BalanceScreen({
             <Table testId="notes-table">
               <thead>
                 <tr>
-                  <th>Leaf</th>
+                  <th>Entry</th>
                   <th>Block</th>
                   <th className="text-right">Amount</th>
                   <th>
@@ -313,7 +313,7 @@ export function BalanceScreen({
             <Table>
               <thead>
                 <tr>
-                  <th>Leaf</th>
+                  <th>Entry</th>
                   <th className="text-right">Amount</th>
                   <th className="w-full">Reason</th>
                 </tr>

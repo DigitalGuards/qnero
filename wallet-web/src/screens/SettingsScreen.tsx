@@ -215,7 +215,7 @@ export function SettingsScreen({
           </Button>
           <Button disabled={busy || spending} data-testid="rescan" onClick={onRescan}>
             <RotateCcw className="size-3.5" aria-hidden />
-            Rescan from leaf zero
+            Rescan from the start
           </Button>
         </div>
         {spending && (

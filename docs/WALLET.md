@@ -1675,6 +1675,38 @@ shrinks, so a second build would add its own quarter gigabyte permanently.
 Stopping the worker from the settings screen is the only thing that gives it
 back, and starting it again pays the build.
 
+**What each wallet's sentences say.** Qloak's screens speak the vocabulary a
+person holding QNR already has, which is Monero's: a thing you send or receive
+is a payment, a received amount you hold is an incoming transfer, the sum is
+your balance, and a change output is the change from your own payment. A
+nullifier is the spend marker a settlement publishes, and what the tree holds
+is an entry. On Qnero every payment is private by construction, so "shielded"
+appears only where the page explains what the chain does and never as an
+adjective on an amount. The words note, output, commitment and nullifier are on
+no Qloak screen, in no notice and in no error sentence a spend or a sync can
+raise. Code identifiers, type names and these docs keep the circuit's words,
+because that is where the circuit is.
+
+`leaf` is the one exception on a screen and it is deliberate, because a leaf
+index is what a reader hands a second node and the substitution detector has
+nothing else to name. It survives in three places: the four per-leaf
+substitution warnings and the ciphertext hint, the last-sync detail table and
+the sync progress counters, and the settings copy explaining what a scan reads
+off the chain. Where a leaf index was only a label for a position it is gone.
+The balance table and the rejected table head that column "Entry", and the
+settings button reads "Rescan from the start".
+
+The command-line wallet keeps the circuit's words outside the sentences the
+parity test binds. `CIPHERTEXT_SUBSTITUTION_HINT` and the four per-leaf
+warnings are held byte for byte identical across the two wallets, so those
+moved together and read the same in both. Everything else `qnero-wallet`
+prints, the `balance` table and the `sync` and `send` lines, still says note,
+output and nullifier, because its reader is an operator running a node beside
+it and those are the words the chain, the pallet and `docs/CIRCUIT.md` use.
+That divergence is a decision rather than drift. A sweep that changes it should
+move the whole command surface in one pass, so the CLI never speaks half of
+each vocabulary.
+
 ## Provenance
 
 `quantus-cli` 2.2.2 was read while this was written and **no code was copied

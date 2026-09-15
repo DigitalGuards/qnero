@@ -1618,7 +1618,7 @@ fn the_per_leaf_warnings_are_capped_and_the_rest_are_counted() {
     let moved: Vec<&String> = report
         .warnings
         .iter()
-        .filter(|warning| warning.contains("commitment answered beside it"))
+        .filter(|warning| warning.contains("tree entry answered beside it"))
         .collect();
     let skipped: Vec<&String> = report
         .warnings
@@ -1885,7 +1885,7 @@ fn a_cross_group_swap_onto_the_coinbase_position_hides_a_payment_until_a_rescan(
     // whole leaf range, at every level of the fold.
     let hint = report.ciphertext_hint().expect("the hint is carried");
     assert!(
-        hint.contains("inside its block's own leaf range"),
+        hint.contains("where a leaf sits inside its block's own range"),
         "the hint states the bound over the block's range: {hint}"
     );
     assert!(hint.contains("at every level"), "{hint}");

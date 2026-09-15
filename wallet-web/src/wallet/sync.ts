@@ -669,7 +669,7 @@ export async function authenticateLeaves(
         if (strip0x(header.zkTreeRoot) !== anchorRoot) {
           throw new NodeRefusedError(
             `this node reports the same leaf count at block ${block} as at block ` +
-              `${trusted.number}, and their headers carry different commitment-tree roots ` +
+              `${trusted.number}, and their headers carry different tree roots ` +
               `(${strip0x(header.zkTreeRoot)} against ${anchorRoot}). The tree is folded once ` +
               'per block and only ever grows, so a moved root over an unchanged count is a node ' +
               'answering a leaf count its own headers do not carry. Nothing has been changed.',
@@ -954,11 +954,11 @@ export async function readNodeStance(
     new NodeRefusedError(
       `this node's head is block ${head.number} and this wallet has synced through block ` +
         `${lastSyncedBlock} on the chain this node is serving. This node is behind this wallet: ` +
-        'it answers every question with less than the wallet already knows, so notes it has not ' +
-        'seen settled would come back into the balance and the next send would select an input ' +
-        'the chain has already consumed. Nothing has been changed. Point the wallet at a node ' +
-        'that has caught up, wait for this one to, or rescan to drop this watermark and walk ' +
-        "this node's tree from leaf zero.",
+        'it answers every question with less than the wallet already knows, so transfers it has ' +
+        'not seen settled would come back into the balance and the next send would select an ' +
+        'input the chain has already consumed. Nothing has been changed. Point the wallet at a ' +
+        'node that has caught up, wait for this one to, or rescan to drop this watermark and ' +
+        "walk this node's tree from leaf zero.",
     );
 
   for (let index = checkpoints.length - 1; index >= 0; index -= 1) {
@@ -1126,9 +1126,9 @@ export async function runSync(
     );
   }
 
-  progress('nullifiers', 'paging the settled set');
+  progress('spend markers', 'paging the settled set');
   const settled = await chain.usedNullifiers(head.hash, (seen) => {
-    progress('nullifiers', `${seen} settled nullifiers`);
+    progress('spend markers', `${seen} settled spend markers`);
   });
 
   // The working set, keyed by commitment. Every held note starts here and the
@@ -1195,7 +1195,7 @@ export async function runSync(
       `this wallet has read ${watermark} leaves and carries no checkpoint that ends on them, ` +
         'so there is no block hash it already trusts for the header walk to stand on. Run a ' +
         'rescan, which starts the walk at the genesis this store is bound to and keeps every ' +
-        'note. Nothing has been changed.',
+        'transfer. Nothing has been changed.',
     );
   }
   // What kind of note each leaf holds, decided from the headers rather than
@@ -1274,7 +1274,7 @@ export async function runSync(
         ).slice(2);
         if (record.commitment !== null && normaliseHash(record.commitment) !== authenticated) {
           throw new NodeRefusedError(
-            `this node answered ZkTree::Leaves(${record.index}) with two different commitments ` +
+            `this node answered ZkTree::Leaves(${record.index}) with two different tree entries ` +
               'in one pass, at one block hash. The tree the headers authenticate carries ' +
               `${authenticated}. Nothing has been changed.`,
           );
@@ -1291,7 +1291,7 @@ export async function runSync(
           throw new NodeRefusedError(
             `this node answered a Shielded::CoinbaseValues for leaf ${record.index}, which is ` +
               `not the last leaf block ${String(dated)} appended. A block's coinbase is minted ` +
-              'in on_finalize, after every shield and every settled output, so it is always ' +
+              'in on_finalize, after every shield and every settled payment, so it is always ' +
               "that block's last leaf. A coinbase value anywhere else is an answer the chain " +
               'never wrote, and taking it would send a payment down the coinbase rebuild, which ' +
               'cannot open it. Nothing has been changed.',
@@ -1315,7 +1315,7 @@ export async function runSync(
           throw new NodeRefusedError(
             `this node answered with no Shielded::Ciphertexts(${record.index}), which the ` +
               `headers put below the last leaf of block ${String(dated)} and so cannot be a ` +
-              'coinbase. Every shield and every settled output stores its ciphertext in the ' +
+              'coinbase. Every shield and every settled payment stores its ciphertext in the ' +
               'call that appends the leaf and nothing removes it, so an absent one there is an ' +
               'answer withheld. Reading it as a leaf nobody can open would skip a payment and ' +
               'write a watermark above it. Nothing has been changed.',
@@ -1444,8 +1444,8 @@ export async function runSync(
             throw new NodeRefusedError(
               `block ${String(blockNumber)} carries this wallet's own author label and this ` +
                 `node answered ${formatStepsAsQnr(record.coinbaseSteps)} for its coinbase at ` +
-                `leaf ${record.index}, which does not rebuild to the commitment the tree holds. ` +
-                'The value is the one field of a coinbase note the chain decides, and a wrong ' +
+                `leaf ${record.index}, which does not rebuild to the entry the tree holds. ` +
+                'The value is the one field of a coinbase payment the chain decides, and a wrong ' +
                 "one reads the wallet's own reward as nobody's. Nothing has been changed.",
             );
           }

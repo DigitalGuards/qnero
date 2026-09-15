@@ -154,9 +154,9 @@ export function chainMismatchRefusal(
   }
   return (
     `this wallet is bound to the chain whose genesis is ${storeGenesis} and this node serves ` +
-    `${nodeGenesis}. Every note it holds is an index into the other chain's tree, so nothing ` +
-    'has been built and nothing has been written off. Point the wallet at a node on its own ' +
-    'chain.'
+    `${nodeGenesis}. Every transfer it holds is an index into the other chain's tree, so ` +
+    'nothing has been built and nothing has been written off. Point the wallet at a node on ' +
+    'its own chain.'
   );
 }
 
@@ -283,7 +283,7 @@ export async function spend(
       (candidate) => candidate.note.commitment === note.commitment,
     );
     if (held === undefined) {
-      throw new Error('a selected note lost its secrets between selection and proving');
+      throw new Error('a selected transfer lost its secrets between selection and proving');
     }
     return held;
   });
@@ -311,7 +311,7 @@ export async function spend(
     );
   }
 
-  report({ stage: 'tree', detail: 'rebuilding the commitment tree at the anchor' });
+  report({ stage: 'tree', detail: 'rebuilding the tree at the anchor' });
   const shape = await fetchTreeShape(context, head.hash, limits.max_tree_depth);
   // The leaf gate, before a single note is looked at, and it is the gate
   // `runSync` already refuses this node with (`wallet/sync.ts`). Every other
@@ -375,18 +375,18 @@ export async function spend(
         // the same phantom on every retry.
         await store.markOffChain(held.note.commitment);
         throw new Error(
-          `note ${held.note.commitment} is recorded at leaf ${held.note.leafIndex}, which is ` +
-            `past the end of a ${shape.leafCount}-leaf tree the anchor confirms, and it was ` +
-            `recorded at block ${held.note.blockNumber}, below the anchor. This chain does not ` +
-            'carry it, so it is marked off chain. Send again: the next selection will not offer ' +
-            'it. To look for it again, rescan from Settings against a second node: an ordinary ' +
-            'sync starts at the watermark, so a leaf below it is never read again.',
+          `the transfer ${held.note.commitment} is recorded at leaf ${held.note.leafIndex}, ` +
+            `which is past the end of a ${shape.leafCount}-leaf tree the anchor confirms, and ` +
+            `it was recorded at block ${held.note.blockNumber}, below the anchor. This chain ` +
+            'does not carry it, so it is marked off chain. Send again: the next selection will ' +
+            'not offer it. To look for it again, rescan from Settings against a second node: ' +
+            'an ordinary sync starts at the watermark, so a leaf below it is never read again.',
         );
       }
       throw new Error(
-        `note ${held.note.commitment} sits at leaf ${held.note.leafIndex} and the tree at the ` +
-          `anchor holds ${shape.leafCount}. A note cannot be minted and spent in the same ` +
-          'block: wait one block and send again.',
+        `the transfer ${held.note.commitment} sits at leaf ${held.note.leafIndex} and the ` +
+          `tree at the anchor holds ${shape.leafCount}. A payment cannot be received and spent ` +
+          'in the same block: wait one block and send again.',
       );
     }
     const path = await prover.treePath(copyOf(leafHashes), shape.depth, held.note.leafIndex);
@@ -400,10 +400,10 @@ export async function spend(
       // also the recovery for a leaf a node moved inside its own group of
       // four (`docs/WALLET.md`, "What bound A does not cover").
       throw new Error(
-        `leaf ${held.note.leafIndex} carries ${path.leaf} on this chain and this wallet holds a ` +
-          `note committing to ${held.note.commitment}. Rescan from Settings, against a second ` +
-          'node where there is one: this leaf is below the watermark, so an ordinary sync starts ' +
-          'above it and never reads it again.',
+        `leaf ${held.note.leafIndex} carries ${path.leaf} on this chain and this wallet holds ` +
+          `a transfer whose tree entry is ${held.note.commitment}. Rescan from Settings, ` +
+          'against a second node where there is one: this leaf is below the watermark, so an ' +
+          'ordinary sync starts above it and never reads it again.',
       );
     }
     if (path.root.toLowerCase() !== anchor.zk_tree_root.toLowerCase()) {

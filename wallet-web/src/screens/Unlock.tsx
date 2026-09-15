@@ -34,10 +34,10 @@ export function Unlock({
     <Panel title="Unlock">
       <Prose>
         <p>
-          This browser holds a wallet. Its balance, its list of transfers and the leaf each one
-          sits on are readable without the passphrase, which is what lets a locked wallet still show
-          a balance; the spend key, every transfer&apos;s randomness and every memo are encrypted
-          with it, and spending needs it.
+          This browser holds a wallet. Its balance, its list of transfers and the position
+          each one sits at are readable without the passphrase, which is what lets a locked
+          wallet still show a balance; the spend key, every transfer&apos;s randomness and every
+          memo are encrypted with it, and spending needs it.
         </p>
       </Prose>
       {/* Shortened here, where the address identifies which wallet this

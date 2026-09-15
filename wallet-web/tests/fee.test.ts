@@ -177,7 +177,7 @@ describe('note selection', () => {
   });
 
   it('says so when the wallet holds nothing', () => {
-    expect(() => selectNotes([], 1n)).toThrow(/no unspent notes/);
+    expect(() => selectNotes([], 1n)).toThrow(/nothing unspent/);
   });
 
   it('reaches at most two notes, which is what a leaf has slots for', () => {

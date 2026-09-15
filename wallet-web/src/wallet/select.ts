@@ -90,14 +90,14 @@ export function selectNotes(candidates: readonly StoredNote[], target: bigint): 
   }
 
   if (sorted.length === 0) {
-    throw new Error('this wallet holds no unspent notes');
+    throw new Error('this wallet holds nothing unspent');
   }
   const held = sorted.reduce((sum, note) => sum + BigInt(note.value), 0n);
   throw new Error(
     `this spend needs ${formatStepsAsQnr(target)} and the ${chosen.length} largest of ` +
-      `${sorted.length} unspent notes reach ${formatStepsAsQnr(total)} ` +
-      `(${formatStepsAsQnr(held)} held in total). A spend has ${MAX_INPUTS} input slots, so ` +
-      'consolidate first: send yourself the largest notes to merge them.',
+      `${sorted.length} incoming transfers reach ${formatStepsAsQnr(total)} ` +
+      `(${formatStepsAsQnr(held)} held in total). One payment has ${MAX_INPUTS} input slots, so ` +
+      'consolidate first: send yourself the largest ones to merge them.',
   );
 }
 

@@ -20,7 +20,7 @@ import type { SpendProgress } from '../wallet/send';
  */
 export const PHASES: { key: SpendProgress['stage']; label: string; weight: number }[] = [
   { key: 'fee', label: 'fee floor', weight: 0.01 },
-  { key: 'select', label: 'choosing notes', weight: 0.01 },
+  { key: 'select', label: 'choosing what to spend', weight: 0.01 },
   { key: 'build', label: 'building the circuits', weight: 0.2 },
   { key: 'anchor', label: 'anchoring to the head', weight: 0.02 },
   { key: 'tree', label: 'rebuilding the tree', weight: 0.03 },

@@ -638,7 +638,7 @@ export async function fetchUsedNullifiers(
   let cursor: string | null = null;
   for (;;) {
     if (stillWanted?.() === false) {
-      throw new Error('the sync was abandoned while paging the settled nullifier set');
+      throw new Error('the sync was abandoned while paging the settled spend markers');
     }
     const keys: string[] = await context.send<string[]>('state_getKeysPaged', [
       prefix,
@@ -652,7 +652,7 @@ export async function fetchUsedNullifiers(
     for (const key of keys) {
       const raw = key.slice(rawOffset);
       if (raw.length !== 64) {
-        throw new Error(`a UsedNullifiers key carries a ${raw.length / 2}-byte nullifier`);
+        throw new Error(`a UsedNullifiers key carries a ${raw.length / 2}-byte spend marker`);
       }
       out.add(raw.toLowerCase());
     }

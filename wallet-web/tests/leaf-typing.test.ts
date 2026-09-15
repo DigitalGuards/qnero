@@ -1024,7 +1024,7 @@ describe('a leaf whose kind the headers decide', () => {
         // The rebuild does not open it, which is what a wrong value looks like.
         cryptoOf(shape, {}),
       ),
-    ).rejects.toThrow(/does not rebuild to the commitment the tree holds/);
+    ).rejects.toThrow(/does not rebuild to the entry the tree holds/);
   });
 
   /** A node that moves a leaf from one block to another. */
