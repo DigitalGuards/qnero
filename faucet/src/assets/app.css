@@ -1,0 +1,258 @@
+/*
+ * Qnero testnet faucet.
+ *
+ * The tokens are site/css/site.css's, copied because the faucet is its own
+ * origin: a cross-origin stylesheet would be one more request and one more
+ * directive in the content policy. Dark is the default and a reader whose
+ * system asks for light gets the light palette, exactly as the site does.
+ */
+
+:root {
+  --bg-deep: #161416;
+  --bg-body: #272527;
+  --bg-panel: #1d1b1d;
+  --bg-raised: #383638;
+  --border: #494749;
+  --border-strong: #6d6b6d;
+
+  --text-primary: #fcfbfc;
+  --text-secondary: #9e9c9e;
+  --text-muted: #909090;
+
+  --accent: #e6a145;
+  --accent-fill: #e6a145;
+  --accent-fill-hover: #f2b968;
+  --accent-on-fill: #161416;
+  --mark: #e6a145;
+  --ok: #7fc08a;
+  --bad: #e88b7d;
+
+  --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
+
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --space-2: 8px;
+  --space-3: 15px;
+  --space-4: 20px;
+  --space-5: 32px;
+  --gutter: 20px;
+  --measure: 36em;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+    'Open Sans', 'Helvetica Neue', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono',
+    'Liberation Mono', monospace;
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-deep: #f4f2f0;
+    --bg-body: #fbfaf9;
+    --bg-panel: #ffffff;
+    --bg-raised: #f0eeec;
+    --border: #d8d4d0;
+    --border-strong: #8f8a86;
+
+    --text-primary: #1b1a19;
+    --text-secondary: #55514e;
+    --text-muted: #6a6460;
+
+    --accent: #8a4b06;
+    --mark: #9c5c05;
+    --ok: #1f6b33;
+    --bad: #9d3320;
+
+    --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
+
+    color-scheme: light;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 1rem;
+  line-height: 1.55;
+  font-variant-numeric: tabular-nums;
+}
+
+.wrap {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.head {
+  background: var(--bg-body);
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-3) 0;
+}
+
+.head .wrap {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.mark {
+  font-family: var(--font-mono);
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--mark);
+}
+
+.head__name {
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.main {
+  padding: var(--space-5) var(--gutter) calc(var(--space-5) * 2);
+}
+
+h1 {
+  font-size: clamp(1.6rem, 1.3rem + 1.4vw, 2.1rem);
+  line-height: 1.2;
+  margin: 0 0 var(--space-3);
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 0 0 var(--space-2);
+}
+
+p {
+  max-width: var(--measure);
+}
+
+.lede {
+  font-size: 1.15rem;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-3);
+}
+
+.note,
+.meta {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.meta {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: var(--space-4);
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.05em 0.35em;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-raised);
+  padding: var(--space-4);
+  margin: var(--space-4) 0;
+}
+
+.panel--quiet {
+  background: transparent;
+  box-shadow: none;
+}
+
+.label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: var(--space-2);
+}
+
+.input {
+  display: block;
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.button {
+  margin-top: var(--space-3);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-on-fill);
+  background: var(--accent-fill);
+  border: 1px solid var(--accent-fill);
+  border-radius: var(--radius-sm);
+  padding: 9px 18px;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--accent-fill-hover);
+  border-color: var(--accent-fill-hover);
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.cf-turnstile {
+  margin-top: var(--space-3);
+}
+
+.result {
+  min-height: 1.55em;
+  font-size: 13px;
+  margin: 0;
+}
+
+.result--ok {
+  color: var(--ok);
+}
+
+.result--bad {
+  color: var(--bad);
+}
+
+.list {
+  margin: 0;
+  padding-left: 1.2em;
+  max-width: var(--measure);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.list li + li {
+  margin-top: var(--space-2);
+}

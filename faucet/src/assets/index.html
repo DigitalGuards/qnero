@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Qnero testnet faucet</title>
+    <meta
+      name="description"
+      content="Ten QNR of Qnero testnet funds, paid as a shielded note to a qn1 address."
+    />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="head">
+      <div class="wrap">
+        <span class="mark">Q</span>
+        <span class="head__name">Qnero testnet faucet</span>
+      </div>
+    </header>
+
+    <main class="wrap main">
+      <h1>Testnet funds</h1>
+      <p class="lede">
+        This pays <strong><!--DRIP_QNR--> QNR</strong> (<!--DRIP_QUANTA--> pool quanta) as a
+        shielded note to one <code>qn1</code> address, once per address per <!--COOLDOWN-->.
+      </p>
+
+      <p class="note">
+        Qnero has no transparent transfer, so a drip is a shielded payment and a shielded payment
+        is a zero-knowledge proof. The faucet proves one at a time: it takes about ten seconds to
+        prove and then up to one block, which is two minutes, to settle. The page waits for both.
+      </p>
+
+      <form id="form" class="panel" autocomplete="off">
+        <label class="label" for="address">Your address</label>
+        <input
+          id="address"
+          name="address"
+          class="input"
+          type="text"
+          inputmode="text"
+          spellcheck="false"
+          placeholder="qn1..."
+          required
+        />
+        <!--TURNSTILE_WIDGET-->
+        <button id="submit" class="button" type="submit">Request funds</button>
+      </form>
+
+      <p id="result" class="result" role="status" aria-live="polite"></p>
+
+      <section class="panel panel--quiet">
+        <h2>What it does not do</h2>
+        <ul class="list">
+          <li>It pays one address at a time and refuses a second claim inside the cooldown.</li>
+          <li>
+            It cannot pay transparent QNR. There is no transparent transfer on this chain, so the
+            note lands in the shielded pool and a wallet has to scan for it.
+          </li>
+          <li>
+            These tokens are worth nothing. The network may be reset without notice, which takes
+            every balance on it with it.
+          </li>
+        </ul>
+      </section>
+
+      <p id="status" class="meta"></p>
+    </main>
+
+    <script src="/app.js"></script>
+    <!--TURNSTILE_SCRIPT-->
+  </body>
+</html>

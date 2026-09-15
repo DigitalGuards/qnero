@@ -1,0 +1,35 @@
+[package]
+name = "qnero-faucet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qnero testnet faucet: one shielded drip per address, behind a rate limit"
+
+[[bin]]
+name = "qnero-faucet"
+path = "src/main.rs"
+
+[dependencies]
+qnero-wallet = { workspace = true }
+qnero-notes = { workspace = true }
+qnero-prover = { workspace = true }
+anyhow = { workspace = true, features = ["std"] }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+blake2 = { workspace = true }
+bs58 = "0.5"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+# HTTPS, for the one outbound call this binary makes: Turnstile's siteverify.
+# rustls rather than the system OpenSSL, because the binary is built on a
+# workstation and copied to the host, and a self-contained TLS stack is one
+# fewer shared library that has to match on both ends.
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
