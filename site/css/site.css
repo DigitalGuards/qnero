@@ -217,8 +217,8 @@ a:hover {
    that reads as two flags. No `word-break` value stops it in Chromium, so a
    chip does not wrap at all: every chip on this site is short enough to sit on
    one line at 400 px, measured. The clone is the backstop, so a chip that ever
-   does break keeps one shape across the break instead of painting a complete
-   box on each fragment. */
+   does break keeps one shape across the break, so the fragments read as one
+   chip. */
 code {
   font-family: var(--font-mono);
   font-size: 0.875em;
