@@ -46,7 +46,16 @@ export function Table({
   );
 }
 
-/** A right-aligned numeric cell, tabular so columns of digits line up. */
+/**
+ * A right-aligned numeric cell, tabular so columns of digits line up.
+ *
+ * It never wraps. The memo column takes every pixel of slack (`w-full`), so
+ * each amount cell collapses to the width of its own header, and an amount is
+ * "10.00 QNR" now rather than a bare count: without the rule the cell breaks
+ * at the space and renders the symbol on a second line under the digits,
+ * which is the opposite of what a column of decimal points is for. `.num` in
+ * the explorer's stylesheet carries the same rule for the same reason.
+ */
 export function Num({
   children,
   className,
@@ -57,7 +66,10 @@ export function Num({
   testId?: string;
 }): ReactNode {
   return (
-    <td data-testid={testId} className={cn('text-right font-mono tabular-nums', className)}>
+    <td
+      data-testid={testId}
+      className={cn('text-right font-mono tabular-nums whitespace-nowrap', className)}
+    >
       {children}
     </td>
   );

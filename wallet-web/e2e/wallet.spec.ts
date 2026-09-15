@@ -302,7 +302,23 @@ test.describe('the browser wallet against a dev chain', () => {
 
     const funded = await syncUntil(page, (unspent) => unspent >= FUNDING);
     expect(funded).toBe(FUNDING);
+    // The headline balance reads as one amount to anything that takes its
+    // text rather than looks at it: a screen reader, a copy-paste, this
+    // probe. Its symbol sits in a span of its own, so the space before it has
+    // to be in the markup and cannot be the margin that spaces it on screen.
+    await expect(page.getByTestId('balance-unspent')).toHaveText(/^10\.00 QNR$/);
     await expect(page.getByTestId('notes-table')).toContainText('10.00 QNR');
+
+    // And the amount column never wraps. The memo column takes every pixel of
+    // slack, so an amount cell is as narrow as its own header, and an amount
+    // that carries a symbol broke at the space and rendered "QNR" on a second
+    // line under the digits.
+    const amountWrap = await page
+      .getByTestId('notes-table')
+      .locator('tbody tr td:nth-child(3)')
+      .first()
+      .evaluate((cell) => getComputedStyle(cell).whiteSpace);
+    expect(amountWrap).toBe('nowrap');
 
     // The fee floor is read off the screen rather than computed here: it comes
     // from this runtime's own constants and a second copy of the arithmetic in

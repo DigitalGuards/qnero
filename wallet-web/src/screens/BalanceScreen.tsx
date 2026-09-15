@@ -44,7 +44,11 @@ function Amount({ steps, testId }: { steps: bigint; testId?: string }): ReactNod
     <div className="mm-balance text-ink" data-testid={testId}>
       {significant}
       {pad !== '' && <span className="mm-balance-fraction">{pad}</span>}
-      <span className="ml-2 text-ui font-normal text-muted">QNR</span>
+      {/* A real space, because the margin is only an optical gap. Without it
+          the element's text is "10.00QNR" to anything that reads it rather
+          than looks at it: a screen reader, a copy-paste, the `balance-unspent`
+          probe in the end-to-end suite. */}{' '}
+      <span className="text-ui font-normal text-muted">QNR</span>
     </div>
   );
 }
