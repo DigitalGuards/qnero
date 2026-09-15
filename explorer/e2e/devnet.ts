@@ -189,14 +189,14 @@ export async function startDevnet(): Promise<DevnetFacts> {
 
   const proving = { RAYON_NUM_THREADS: '4' };
   const shielded = wallet(
-    ['--file', 'a.seed', 'shield', '--from-dev-account', 'alice', '--amount', '1000'],
+    ['--file', 'a.seed', 'shield', '--from-dev-account', 'alice', '--amount', '10'],
     proving,
   );
   const shieldHeight = matchNumber(shielded, /included\s+block (\d+)/, 'the shield inclusion block');
   const shieldLeaf = matchNumber(shielded, /leaf\s+(\d+)/, "the shield's leaf");
 
   const sent = wallet(
-    ['--file', 'a.seed', 'send', '--to', bAddress, '--amount', '300'],
+    ['--file', 'a.seed', 'send', '--to', bAddress, '--amount', '3'],
     proving,
   );
   const settlementHeight = matchNumber(sent, /inclusion\s+block (\d+)/, 'the settlement block');
@@ -205,8 +205,8 @@ export async function startDevnet(): Promise<DevnetFacts> {
     rpc: `ws://127.0.0.1:${RPC_PORT}`,
     shieldHeight,
     shieldLeaf,
-    // 1000 pool quanta, at 10^10 planck each and 12 decimals, rendered with the
-    // two decimals every amount on the site carries.
+    // The shield above, rendered the way every amount on the site is: two
+    // decimals, because value in the pool moves in steps of 0.01 QNR.
     shieldQnr: '10.00 QNR',
     settlementHeight,
   };
