@@ -226,8 +226,11 @@ pub mod pallet {
 		/// This prevents proposals from being created with extremely far expiry dates
 		/// that would lock deposits and bloat storage for extended periods.
 		///
-		/// Example: If set to 100_000 blocks (~2 weeks at 12s blocks),
-		/// a proposal created at block 1000 cannot have expiry > 101_000.
+		/// Example: if set to N blocks, a proposal created at block 1000 cannot
+		/// have expiry > 1000 + N. The runtime passes `14 * DAYS`, which is
+		/// 10_080 blocks at its 120 s target. A block count sized for one target
+		/// means another duration at the next one, which is why the runtime passes
+		/// a multiple of `DAYS` here and no literal.
 		#[pallet::constant]
 		type MaxExpiryDuration: Get<BlockNumberFor<Self>>;
 

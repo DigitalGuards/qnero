@@ -54,6 +54,16 @@ pub trait WeightInfo {
 	fn on_finalize() -> Weight;
 }
 
+// Hand-edited after the 120 s target landed, and the edit is one read.
+// `adjust_difficulty` calls `Self::target_block_time()`, which reads
+// `QPoW::TargetBlockTimeMs`, so `on_finalize` touches five keys where this file
+// declared four and every block did a read its weight never paid for. The read
+// is declared here; the `ref_time` and `proof_size` figures are still the
+// measured ones from the run in the header, which is conservative for a single
+// 8-byte value under the overlay. `benchmarking.rs` no longer warms that key in
+// its setup, so a regeneration measures the read and blesses five.
+
+
 /// Weights for `pallet_qpow` using the Substrate node and recommended hardware.
 pub struct SubstrateWeight<T>(PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
@@ -65,13 +75,15 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 	/// Proof: `QPoW::LastBlockTime` (`max_values`: Some(1), `max_size`: Some(8), added: 503, mode: `MaxEncodedLen`)
 	/// Storage: `QPoW::LastBlockDuration` (r:0 w:1)
 	/// Proof: `QPoW::LastBlockDuration` (`max_values`: Some(1), `max_size`: Some(8), added: 503, mode: `MaxEncodedLen`)
+	/// Storage: `QPoW::TargetBlockTimeMs` (r:1 w:0)
+	/// Proof: `QPoW::TargetBlockTimeMs` (`max_values`: Some(1), `max_size`: Some(8), added: 503, mode: `MaxEncodedLen`)
 	fn on_finalize() -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `680`
 		//  Estimated: `1549`
 		// Minimum execution time: 106_000_000 picoseconds.
 		Weight::from_parts(109_000_000, 1549)
-			.saturating_add(T::DbWeight::get().reads(4_u64))
+			.saturating_add(T::DbWeight::get().reads(5_u64))
 			.saturating_add(T::DbWeight::get().writes(3_u64))
 	}
 }
@@ -86,13 +98,15 @@ impl WeightInfo for () {
 	/// Proof: `QPoW::LastBlockTime` (`max_values`: Some(1), `max_size`: Some(8), added: 503, mode: `MaxEncodedLen`)
 	/// Storage: `QPoW::LastBlockDuration` (r:0 w:1)
 	/// Proof: `QPoW::LastBlockDuration` (`max_values`: Some(1), `max_size`: Some(8), added: 503, mode: `MaxEncodedLen`)
+	/// Storage: `QPoW::TargetBlockTimeMs` (r:1 w:0)
+	/// Proof: `QPoW::TargetBlockTimeMs` (`max_values`: Some(1), `max_size`: Some(8), added: 503, mode: `MaxEncodedLen`)
 	fn on_finalize() -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `680`
 		//  Estimated: `1549`
 		// Minimum execution time: 106_000_000 picoseconds.
 		Weight::from_parts(109_000_000, 1549)
-			.saturating_add(RocksDbWeight::get().reads(4_u64))
+			.saturating_add(RocksDbWeight::get().reads(5_u64))
 			.saturating_add(RocksDbWeight::get().writes(3_u64))
 	}
 }

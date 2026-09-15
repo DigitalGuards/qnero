@@ -45,21 +45,27 @@ mod tests;
 /// NOTE (known, accepted limitation): this is intentionally *larger* than the depth the
 /// wormhole circuits accept. The circuits fix `MAX_DEPTH = 16` (`qp-zk-circuits-common`,
 /// `zk_merkle.rs`) because every leaf proof pays the proving cost of a full
-/// `MAX_DEPTH`-level Merkle path regardless of the tree's current depth — keeping it at
+/// `MAX_DEPTH`-level Merkle path regardless of the tree's current depth, so keeping it at
 /// 16 keeps proving fast for everyone. If the tree ever grows past depth 16
 /// (4^16 ≈ 4.3 billion leaves), Merkle proofs gain a 17th sibling level and the prover
 /// and verifier reject them, so wormhole proof generation halts until a circuit update
 /// raises `MAX_DEPTH` and a runtime upgrade embeds the regenerated verifiers.
 ///
-/// This is a deliberate "fix it when we get close" trade-off, not an oversight:
-/// - Timeline: at one leaf per block (the mining-reward floor, 12s blocks) depth 16 lasts ~1,600
-///   years; at a sustained 10 transfers/sec chain-wide it lasts ~13 years; even permanently
-///   saturated blocks (~50 tps) give ~2.5 years. Each +1 of circuit depth quadruples capacity.
+/// This is a deliberate "fix it when we get close" trade-off, and the timeline is the argument:
+/// - Timeline, one leaf per transfer, against 4^16 = 4.3 billion leaves. Two of these three terms
+///   are rates and one is a block count, which is the distinction that matters when the target
+///   block time moves. A block count: at one leaf per block, the mining-reward floor, depth 16
+///   lasts ~16,000 years at the 120 s target where it lasted ~1,600 at 12 s. A rate, unchanged by
+///   the target: a sustained 10 transfers/sec chain-wide exhausts it in ~13 years. And the ceiling
+///   is both, because it is a per-block ceiling read as a rate: `docs/DESIGN.md` 7.4 puts
+///   permanently saturated blocks at 318 settlements each, which is ~2.6/sec at 120 s where it was
+///   ~26/sec at 12 s, so saturation now gives ~52 years where the 12 s figure was ~2.5. Each +1 of
+///   circuit depth quadruples capacity.
 /// - Observability: `LeafCount` is public storage, so exhaustion is visible years in advance; alert
 ///   well before 4^16 leaves.
 /// - The update itself: bump `MAX_DEPTH` in `qp-zk-circuits-common`, release the circuit crates,
 ///   let `pallets/wormhole/build.rs` regenerate the embedded verifier binaries, regenerate proof
-///   fixtures, re-benchmark, and ship a runtime upgrade — days of engineering inside a normal
+///   fixtures, re-benchmark, and ship a runtime upgrade: days of engineering inside a normal
 ///   release cycle. Old proofs are invalidated by the circuit change; nullifier state is
 ///   unaffected, so nothing can double-spend across the upgrade.
 pub const MAX_TREE_DEPTH: u8 = 32;

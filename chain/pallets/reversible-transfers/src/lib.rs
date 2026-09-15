@@ -238,7 +238,9 @@ pub mod pallet {
 		type MaxHighSecurityTxsPerWindow: Get<u32>;
 
 		/// Length of the high-security extrinsic quota window, in blocks.
-		/// At the runtime's 12s target this is one day (`DAYS`).
+		/// `DAYS` in the runtime, so one day at whatever target that runtime's
+		/// `TARGET_BLOCK_TIME_MS` names, which is 720 blocks at the public 120 s
+		/// target.
 		#[pallet::constant]
 		type HighSecurityTxWindowBlocks: Get<BlockNumberFor<Self>>;
 

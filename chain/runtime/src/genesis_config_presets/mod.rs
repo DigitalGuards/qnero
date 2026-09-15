@@ -683,9 +683,10 @@ pub fn planck_config_genesis() -> Value {
 	)
 }
 
-/// Mainnet genesis: the 2% placeholder TGE mint from `mainnet_vesting` — its one vesting
+/// Mainnet genesis: the 2% placeholder TGE mint from `mainnet_vesting`, which is its one vesting
 /// row, the `SEED` endowments for the treasurers and the tech collective, and the treasury
-/// multisig derived from the treasurers. Refuses to build until `mainnet_vesting::FINALIZED`.
+/// multisig derived from the treasurers. Refuses to build until `mainnet_vesting::FINALIZED`,
+/// which is `false` while that row pays a placeholder address.
 pub fn mainnet_config_genesis() -> Value {
 	let treasury_signers = mainnet_vesting::treasurers();
 	let tech_collective = mainnet_vesting::tech_collective();

@@ -30,7 +30,13 @@ mod benchmarks {
 		// Set timestamp
 		let now = 100000u64;
 		pallet_timestamp::Pallet::<T>::set_timestamp(now);
-		<LastBlockTime<T>>::put(now.saturating_sub(QPoW::<T>::target_block_time()));
+		// The runtime constant and not `QPoW::target_block_time()`: the accessor
+		// reads `TargetBlockTimeMs`, and reading it here would put the key in
+		// the overlay before the measured block, so the measurement would miss
+		// the read `adjust_difficulty` makes and re-bless a weight one read
+		// short. Genesis writes the storage value to this constant on the
+		// public presets, so the seeded delta is the same either way.
+		<LastBlockTime<T>>::put(now.saturating_sub(<T as Config>::TargetBlockTime::get()));
 
 		#[block]
 		{

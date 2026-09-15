@@ -143,6 +143,23 @@ fn chain_spec(id: &str) -> Option<serde_json::Value> {
 	Some(serde_json::from_str(&output.stdout).expect("build-spec writes a JSON chain spec"))
 }
 
+/// Whether the runtime will build the `mainnet` preset at all.
+///
+/// `preset_names` is the runtime's own list and it omits `mainnet` while
+/// `mainnet_vesting::FINALIZED` is `false`, which it is: the allocation table
+/// still pays a placeholder address nobody holds a key for, so `build-spec
+/// --chain mainnet` refuses: a spec built from that table would mint 2% of the
+/// supply into an account that can never spend it. The refusal is the flag
+/// doing its job. The two `mainnet` ids keep their rows in the list below, so
+/// this guard covers them again the moment an allocation is decided.
+fn the_mainnet_preset_builds() -> bool {
+	use qnero_runtime::genesis_config_presets::{preset_names, MAINNET_RUNTIME_PRESET};
+
+	preset_names()
+		.iter()
+		.any(|listed| AsRef::<str>::as_ref(listed) == MAINNET_RUNTIME_PRESET)
+}
+
 /// Everything a spec says about itself, with the genesis dropped.
 ///
 /// The genesis is the runtime wasm as hex and carries whatever byte sequences
@@ -197,6 +214,13 @@ fn no_chain_spec_this_node_builds_says_quantus() {
 		"mainnet",
 		"mainnet_live_spec",
 	] {
+		if id.starts_with("mainnet") && !the_mainnet_preset_builds() {
+			eprintln!(
+				"the runtime does not list the mainnet preset, so --chain {id} builds no spec; \
+				 skipping it here until the genesis allocation is decided"
+			);
+			continue;
+		}
 		let Some(spec) = chain_spec(id) else { return };
 
 		assert_eq!(

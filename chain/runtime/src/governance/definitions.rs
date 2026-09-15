@@ -142,8 +142,8 @@ impl TechCollectiveTracksInfo {
 		// block is the shortest period a block-denominated track can express,
 		// and doubling these three windows on a chain whose blocks are ten times
 		// longer is the honest reading of "as short as the lane can be". Proposals dispatch with
-		// `CustomOrigin::FastUpgrade`, which is honored only by `system.authorize_upgrade` —
-		// never arbitrary Root — so the short windows cannot be leveraged for anything but
+		// `CustomOrigin::FastUpgrade`, which is honored only by `system.authorize_upgrade`,
+		// never by arbitrary Root, so the short windows cannot be leveraged for anything but
 		// publishing an upgrade hash (the wasm itself is applied permissionlessly and
 		// version-checked). The 80%/80% constant curves require 8-of-10 ayes from the genesis
 		// collective (support counts all members, so 8 ayes are needed regardless of

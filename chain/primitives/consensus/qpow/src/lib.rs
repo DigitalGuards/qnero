@@ -25,6 +25,13 @@ sp_api::decl_runtime_apis! {
 	/// wasm has no way to set. Verification is the client's, in
 	/// `sc-consensus-randomx`, and the runtime is the oracle it asks for the
 	/// difficulty and the seed schedule.
+	///
+	/// Version 2 added `get_target_block_time` at spec 104. The version is what
+	/// a client branches on: `has_api_with` answers 1 for a node that still runs
+	/// spec 103 and cannot say what its target is. Calling the method there
+	/// answers "function not found" from the executor, an error about a missing
+	/// symbol, which says nothing a client can act on.
+	#[api_version(2)]
 	pub trait QPoWApi {
 		/// Get the max possible reorg depth
 		fn get_max_reorg_depth() -> u32;

@@ -106,7 +106,11 @@ impl_opaque_keys! {
 // `TargetBlockTimeMs` so one binary can still serve a 12 s dev chain. That is a
 // consensus change and a metadata change (a new storage item, a new genesis
 // field, a new `QPoWApi` method), so `spec_version` moves; the signed extrinsic
-// encoding is untouched, so `transaction_version` stays at 7.
+// encoding is untouched, so `transaction_version` stays at 7. That new method
+// also moves `QPoWApi` to version 2, so a client can ask `has_api_with` whether
+// a node answers `get_target_block_time` before calling it and reading a
+// "function not found" back: a spec-103 node declares version 1, and the answer
+// is that it has no target to give.
 // `the_runtime_identity_is_pinned` in `tests/call_filter.rs` is the tripwire.
 //
 // Bump `impl_version` when the emitted wasm changes under an unchanged
@@ -152,6 +156,17 @@ pub const TARGET_BLOCK_TIME_MS: u64 = 120_000;
 /// `MINUTES` is floored at one block, so at a 120 s target it means two minutes:
 /// one block is the shortest wait a block-denominated period can express. Read
 /// every `n * MINUTES` below with that in mind.
+///
+/// All three derive from [`TARGET_BLOCK_TIME_MS`], the compile-time constant,
+/// and never from the chain's genesis-configured
+/// `pallet_qpow::TargetBlockTimeMs`. So `DAYS` is 720 blocks on every chain this
+/// binary runs, and on the 12 s `dev` chain those 720 blocks come to 2.4 hours:
+/// a governance period, a reversal delay and a quota window each mean a tenth of
+/// what their names say there. That is deliberate. These
+/// feed `#[pallet::constant]` items whose whole purpose is to be readable out of
+/// metadata, and a window that changed with a storage read is a window no
+/// metadata could state. `docs/DESIGN.md` 7.4 lists what the storage target does
+/// reach: the retarget, `TimestampBucketSize` and `MinDelayPeriodMoment`.
 pub const MINUTES: BlockNumber = {
 	let per_minute = (60_000u64 / TARGET_BLOCK_TIME_MS) as BlockNumber;
 	if per_minute == 0 {

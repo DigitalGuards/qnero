@@ -370,6 +370,18 @@ impl pallet_mining_rewards::Config for Runtime {
 	// runs that fraction ahead of the 12 s one, which is far below the pool
 	// quantization every payout already goes through. The curve decays toward
 	// `MaxSupply` and never arrives, so what happens at the tail is still open.
+	//
+	// It is a compile-time constant while the target it is sized against is
+	// genesis-configured chain state, and that asymmetry is deliberate and
+	// narrow. A `#[pallet::constant]` is what a client reads the emission
+	// schedule out of metadata, and a schedule that changed with a storage read
+	// would be a schedule no metadata could state. What follows from it is that
+	// the divisor does not follow a spec that picks another target: the `dev`
+	// preset's 12 s chain emits at ten times the public per-second rate, and any
+	// spec setting `qPoW.targetBlockTime` to something other than 120 000 has to
+	// set this too, through a runtime upgrade, or its supply-versus-time curve
+	// is wrong by that ratio. `docs/DESIGN.md` 7.4 says which readers the
+	// storage target does reach.
 	type EmissionDivisor = ConstU128<5_000_000>;
 	type Unit = MiningUnit;
 }
@@ -402,6 +414,16 @@ parameter_types! {
 /// instead of [`TargetBlockTime`]. The pallet accessor falls back to the
 /// constant when storage is unset, which covers benchmarks, mocks and any chain
 /// whose genesis predates the storage item.
+///
+/// **This reads storage, so it panics outside an externalities environment.**
+/// Every other name in this module is a pure `parameter_types!` constant the
+/// node calls natively (`node/src/zktree_rpc.rs` takes `BlockHashCount` that
+/// way, `node/src/command.rs` takes `TreasuryPalletId`), and this one and
+/// [`TimestampBucketSize`] are the two that cannot be called like that: the
+/// answer is a fact about a chain, and a binary holds no chain. A native caller
+/// wanting the interval asks the runtime through
+/// `QPoWApi_get_target_block_time`, which is what the client, both wallets and
+/// the explorer use.
 pub struct ChainTargetBlockTime;
 impl Get<u64> for ChainTargetBlockTime {
 	fn get() -> u64 {
@@ -419,6 +441,9 @@ impl Get<u64> for ChainTargetBlockTime {
 /// an old bucket boundary. As a `#[pallet::constant]` this now reports the
 /// chain's own value in metadata rather than the runtime default, which is the
 /// value a client wanting to round a delay needs.
+///
+/// **Reads storage through [`ChainTargetBlockTime`], so it panics outside an
+/// externalities environment.** Never call it from the node.
 pub struct TimestampBucketSize;
 impl Get<u64> for TimestampBucketSize {
 	fn get() -> u64 {

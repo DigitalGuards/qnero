@@ -99,3 +99,35 @@ fn the_timestamp_bucket_follows_the_chain_target() {
 		assert_eq!(TimestampBucketSize::get(), 24_000, "a dev chain keeps its 24 s buckets");
 	});
 }
+
+/// How far the storage target reaches, said as a test because the reach is
+/// partial and the partial half is easy to read as a whole one.
+///
+/// The genesis-configured target is what the retarget aims at, what
+/// [`TimestampBucketSize`] doubles and what `MinDelayPeriodMoment` equals. It is
+/// not what `MINUTES`, `HOURS` and `DAYS` derive from: those come from
+/// `TARGET_BLOCK_TIME_MS`, the compile-time constant, so every window
+/// denominated in them keeps the public chain's block count on a chain running
+/// at another cadence. On the 12 s `dev` chain that makes each of them mean a
+/// tenth of the wall clock its name claims, and the emission divisor is the
+/// same kind of constant for the same reason. All three are metadata: a client
+/// reads a governance period and a supply schedule out of metadata, and a value
+/// that changed with a storage read is a value no metadata could state.
+/// `docs/DESIGN.md` 7.4 and `docs/OPS-DEV.md` carry the same sentence.
+#[test]
+fn the_storage_target_does_not_reach_the_day_denominated_windows() {
+	sp_io::TestExternalities::default().execute_with(|| {
+		pallet_qpow::TargetBlockTimeMs::<qnero_runtime::Runtime>::put(12_000u64);
+
+		assert_eq!(ChainTargetBlockTime::get(), 12_000, "the chain runs at the dev cadence");
+		assert_eq!(
+			HighSecurityTxWindowBlocks::get(),
+			720,
+			"the quota window keeps the public chain's block count, which at 12 s is 2.4 hours"
+		);
+		assert_eq!(DefaultDelay::get(), BlockNumberOrTimestamp::BlockNumber(720));
+		assert_eq!(UndecidingTimeout::get(), 32_400);
+		assert_eq!(MaxExpiryDuration::get(), 10_080);
+		assert_eq!(DAYS, 720, "`DAYS` is the compile-time constant's day, on every chain");
+	});
+}

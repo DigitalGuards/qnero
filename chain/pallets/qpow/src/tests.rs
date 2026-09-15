@@ -327,50 +327,114 @@ fn max_timestamp_drift_does_not_bias_difficulty_down() {
 const PUBLIC_TARGET: u64 = 120_000;
 const DEV_TARGET: u64 = 12_000;
 
-/// A chain that starts at the difficulty floor has to climb to a live
-/// difficulty on the retarget alone, and at a 120 s target every step costs ten
-/// times the wall clock it cost at 12 s. This pins how long that takes.
+/// One rig of a fixed hash rate, driven to wherever the retarget takes it.
 ///
-/// The model is one rig of a fixed hash rate: difficulty is expected hashes per
-/// block, so the observed block time is `difficulty / hash_rate`, and the
-/// retarget is fed that. What it converges to is the bottom of its own neutral
-/// band. The Homestead band is one to two divisors wide, so at a 120 s target
-/// (100 s divisor) a climbing chain settles at 100 s blocks and stops there,
-/// which is inside the band by construction and is the honest answer to "does
-/// it converge".
+/// Difficulty is expected hashes per block, so the observed block time is
+/// `difficulty / hash_rate`, and the retarget is fed that. Returns the blocks
+/// it took to settle, the difficulty it settled on, the block time there and
+/// the wall clock the run covered.
+fn settle(start: U512, hash_rate: u64, target: u64, max_blocks: u32) -> (u32, U512, u64, u64) {
+	let mut difficulty = start;
+	let mut blocks = 0u32;
+	let mut block_time_ms = 0u64;
+	let mut wall_clock_ms = 0u64;
+	while blocks < max_blocks {
+		block_time_ms = (difficulty.low_u64().saturating_mul(1_000) / hash_rate).max(1);
+		let next = QPow::calculate_difficulty(difficulty, block_time_ms, target);
+		blocks += 1;
+		wall_clock_ms = wall_clock_ms.saturating_add(block_time_ms);
+		if next == difficulty {
+			break;
+		}
+		difficulty = next;
+	}
+	(blocks, difficulty, block_time_ms, wall_clock_ms)
+}
+
+/// A chain that starts at the difficulty floor has to climb to a live
+/// difficulty on the retarget alone, and a chain that loses hash rate has to
+/// come back down the same way. This pins both, and the second half is where
+/// the band is not symmetric with intuition.
+///
+/// The Homestead band is one to two divisors wide, so at a 120 s target (a 100 s
+/// divisor) it is 100 s to 200 s and it is dead in both directions. A chain
+/// climbing into it stops at the bottom, at 100 s blocks; a chain falling into
+/// it stops at the top, at 200 s blocks, and stays there. Both are inside the
+/// band by construction, and the target itself is the middle of it. `chain/MINING.md` says the same
+/// thing to an operator.
+///
+/// The climb's cost is worth stating in both units, because one of them is not
+/// ten times the 12 s figure. At 120 s it is 13 628 blocks and 2.40 days; at
+/// 12 s it is 8 857 blocks and 0.25 days. The block count grows by half because
+/// the settle difficulty is ten times higher and every step is a fixed 1/2048
+/// fraction. The wall clock grows by ten for the same reason, the difficulty:
+/// the whole climb runs far below the target, so multiplying the block count by
+/// 120 s would overstate it by a factor of eight.
 #[test]
 fn a_chain_at_the_floor_converges_to_the_target_band() {
 	new_test_ext().execute_with(|| {
 		/// A small testnet rig: about two modern cores in full mode.
 		const HASH_RATE: u64 = 3_500;
-		/// Measured: 13_628 blocks, which at 120 s is 18.9 days.
+		/// Measured: 13_628 blocks and 2.40 days of wall clock.
 		const MAX_BLOCKS: u32 = 14_000;
+		let band = PUBLIC_TARGET * 10 / 12..PUBLIC_TARGET * 20 / 12;
 
-		let mut difficulty = QPow::get_min_difficulty();
-		let mut blocks = 0u32;
-		let mut block_time_ms = 0u64;
-		while blocks < MAX_BLOCKS {
-			// Observed block time for this difficulty at a fixed hash rate.
-			block_time_ms = (difficulty.low_u64().saturating_mul(1_000) / HASH_RATE).max(1);
-			let next = QPow::calculate_difficulty(difficulty, block_time_ms, PUBLIC_TARGET);
-			blocks += 1;
-			if next == difficulty {
-				break;
-			}
-			difficulty = next;
-		}
+		let (blocks, difficulty, block_time_ms, wall_clock_ms) =
+			settle(QPow::get_min_difficulty(), HASH_RATE, PUBLIC_TARGET, MAX_BLOCKS);
 
 		assert!(
 			(13_000..MAX_BLOCKS).contains(&blocks),
 			"climb from the floor took {blocks} blocks, expected about 13_628"
 		);
+		let days = wall_clock_ms / (24 * 60 * 60 * 1_000);
+		assert_eq!(days, 2, "the climb covers about 2.4 days: it runs far below the target");
 		assert!(
-			(PUBLIC_TARGET * 10 / 12..PUBLIC_TARGET * 20 / 12).contains(&block_time_ms),
+			band.contains(&block_time_ms),
 			"settled block time {block_time_ms}ms is outside the retarget's neutral band"
 		);
 		// The band's lower edge is `hash_rate * divisor`, and the climb stops on
 		// the first step that lands inside it.
 		assert!(difficulty >= U512::from(HASH_RATE * (PUBLIC_TARGET * 10 / 12) / 1_000));
+
+		// The same climb at the `dev` preset's target, for the comparison the
+		// docs quote: fewer blocks, because the settle difficulty is ten times
+		// lower and each step is the same fraction of it.
+		let (dev_blocks, _, dev_block_time_ms, _) =
+			settle(QPow::get_min_difficulty(), HASH_RATE, DEV_TARGET, MAX_BLOCKS);
+		assert!(
+			(8_500..9_500).contains(&dev_blocks),
+			"the 12 s climb took {dev_blocks} blocks, expected about 8_857"
+		);
+		assert!((DEV_TARGET * 10 / 12..DEV_TARGET * 20 / 12).contains(&dev_block_time_ms));
+		assert!(dev_blocks < blocks, "a ten times higher settle difficulty costs more steps");
+
+		// Now take nine tenths of the hash rate away. The chain falls through
+		// the band from above and stops at its top edge, so a network that lost
+		// its miners holds 200 s blocks for good, with no drift back toward 120.
+		// Monotonic all the way down: no oscillation, no overshoot.
+		let mut falling = difficulty;
+		let mut steps = 0u32;
+		let mut fell_to = 0u64;
+		while steps < 2_000 {
+			let observed = (falling.low_u64().saturating_mul(1_000) / (HASH_RATE / 10)).max(1);
+			let next = QPow::calculate_difficulty(falling, observed, PUBLIC_TARGET);
+			steps += 1;
+			fell_to = observed;
+			if next == falling {
+				break;
+			}
+			assert!(next < falling, "the fall must be monotonic, {next} is not below {falling}");
+			falling = next;
+		}
+		assert!(
+			(1_000..2_000).contains(&steps),
+			"the fall took {steps} blocks, expected about 1_555"
+		);
+		assert!(band.contains(&fell_to), "settled at {fell_to}ms, outside the band");
+		assert!(
+			fell_to > PUBLIC_TARGET,
+			"a chain falling into the band settles at its top edge, about 200 s"
+		);
 	});
 }
 

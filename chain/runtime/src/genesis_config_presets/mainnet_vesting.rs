@@ -1,4 +1,4 @@
-//! Mainnet genesis allocation — the audit surface for the 2% placeholder mint.
+//! Mainnet genesis allocation: the audit surface for the 2% placeholder mint.
 //!
 //! How to audit this file:
 //! 1. [`GENESIS_ALLOCATION`] is 2% of [`MAX_SUPPLY`] (420 000 QNR). Every coin of it is either the
@@ -19,7 +19,7 @@
 //!    The vesting pot additionally receives its existential deposit from `genesis_template`, the
 //!    only issuance outside the 2%.
 //! 5. The treasury multisig is derived from [`TREASURERS`] and holds no genesis balance at all.
-//! 6. Accounts are SS58 addresses only — no personal names.
+//! 6. Accounts are SS58 addresses only, and carry no personal names.
 //! 7. Every address below must be an ML-DSA-87 account, minted with `qnero-node key qnero`. An SS58
 //!    literal carries no trace of its scheme, so nothing here can assert it; the entry refuses an
 //!    ML-DSA-65 signature, which would strand such an account and everything vested to it for good.
@@ -31,8 +31,12 @@
 //! to addresses this project has no relationship with is not an allocation it can defend, so the
 //! placeholder is 2% and the open question is whether it survives at all.
 //!
-//! Flip [`FINALIZED`] only after every `REPLACE_WITH_` placeholder is filled. Until then the
-//! `mainnet` preset refuses to build.
+//! [`FINALIZED`] is `false`, so the `mainnet` preset refuses to build and `preset_names` does not
+//! list it. That is the flag's whole job: the one [`VESTING`] row pays an address nobody holds a
+//! key for, and a `mainnet` spec built from it would strand 2% of [`MAX_SUPPLY`] for good, because
+//! `Vesting::claim` is the only call that can move the pot. Flipping the bool is not enough on its
+//! own either: a compile-time assert below refuses `FINALIZED == true` while any row still names
+//! [`PLACEHOLDER`], so answering the allocation question is what unblocks the build.
 
 use super::{account_from_ss58, days_ms, Multisig, VestingScheduleTuple};
 use crate::{AccountId, MAX_SUPPLY, UNIT};
@@ -57,8 +61,14 @@ const TREASURY_NONCE: u64 = 0;
 /// Whatever of the 2% the seed endowments do not take, vesting to [`PLACEHOLDER`].
 pub const PLACEHOLDER_AMOUNT: u128 = GENESIS_ALLOCATION - SEEDED_ACCOUNTS * SEED;
 
-/// Flip to `true` only when every placeholder below is a launch address.
-pub const FINALIZED: bool = true;
+/// Whether this table is a launch allocation.
+///
+/// `false`, and it stays `false` until the allocation question is answered. [`require_finalized`]
+/// panics on it, so `treasurers`, `tech_collective`, `treasury_account`, `seed_balances` and
+/// `schedules` all refuse, `mainnet_config_genesis` refuses with them, and `preset_names` leaves
+/// `mainnet` off the list a spec can be built from. The bool on its own is a weak guard, so
+/// [`vesting_names_the_placeholder`] backs it at compile time.
+pub const FINALIZED: bool = false;
 
 /// Treasury multisig signers.
 pub const TREASURERS: [&str; 10] = [
@@ -125,12 +135,48 @@ const _: () = assert!(VESTING.len() <= pallet_vesting::MAX_GENESIS_SCHEDULES as 
 const _: () = assert!(vesting_total() == PLACEHOLDER_AMOUNT);
 const _: () = assert!(vesting_total() + SEEDED_ACCOUNTS * SEED == GENESIS_ALLOCATION);
 
+/// Whether `who` is [`PLACEHOLDER`], answerable at compile time.
+const fn is_placeholder(who: &str) -> bool {
+	let who = who.as_bytes();
+	let placeholder = PLACEHOLDER.as_bytes();
+	if who.len() != placeholder.len() {
+		return false;
+	}
+	let mut i = 0;
+	while i < who.len() {
+		if who[i] != placeholder[i] {
+			return false;
+		}
+		i += 1;
+	}
+	true
+}
+
+/// Whether any [`VESTING`] row still pays [`PLACEHOLDER`].
+const fn vesting_names_the_placeholder() -> bool {
+	let mut i = 0;
+	while i < VESTING.len() {
+		if is_placeholder(VESTING[i].0) {
+			return true;
+		}
+		i += 1;
+	}
+	false
+}
+
+// [`FINALIZED`] made structural. A bool is exactly as good as the attention of whoever last edited
+// it, and what it guards is 2% of the supply minted to an address this project generated as a stand
+// in and kept no secret for. Flipping the bool while a row still names [`PLACEHOLDER`] breaks the
+// build here, which is the cheap place for it to break.
+const _: () = assert!(!FINALIZED || !vesting_names_the_placeholder());
+
 fn require_finalized() {
 	if !FINALIZED {
 		panic!(
-			"mainnet allocation is not finalized — fill every REPLACE_WITH_ placeholder in \
-			 genesis_config_presets/mainnet_vesting.rs and flip FINALIZED before building this \
-			 chain spec"
+			"mainnet allocation is not finalized: VESTING in \
+			 genesis_config_presets/mainnet_vesting.rs pays a placeholder address nobody holds a \
+			 key for. Name a real beneficiary, or delete the row and drop GENESIS_ALLOCATION to \
+			 the seed endowments, then flip FINALIZED"
 		);
 	}
 }
@@ -209,6 +255,12 @@ mod tests {
 
 	/// The whole allocation is one row to one address, and that is the point:
 	/// there is one thing to delete when the allocation question is settled.
+	///
+	/// It reads the SS58 tables through `accounts` instead of through
+	/// `treasurers`, `tech_collective` and `treasury_account`, because those
+	/// three refuse while `FINALIZED` is `false`, and refusing is their whole
+	/// job. What they would have added over this is the refusal itself, which
+	/// `refuses_to_build_until_finalized` asserts on its own.
 	#[test]
 	fn the_allocation_is_one_placeholder_row() {
 		assert_eq!(VESTING.len(), 1);
@@ -218,10 +270,18 @@ mod tests {
 		assert_eq!((start, end), (GRANT_UNLOCK_DELAY_DAYS, GRANT_END_DAYS));
 		assert_eq!(GRANT_UNLOCK_DELAY_DAYS, 365);
 		assert_eq!(GRANT_UNLOCK_PERIOD_DAYS, 3 * 365);
+
 		let placeholder = account_from_ss58(PLACEHOLDER);
-		assert!(treasurers().iter().all(|who| *who != placeholder));
-		assert!(tech_collective().iter().all(|who| *who != placeholder));
-		assert_ne!(placeholder, treasury_account());
+		let treasurers = accounts(&TREASURERS, "treasurers");
+		let collective = accounts(&TECH_COLLECTIVE, "tech collective members");
+		let treasury = Multisig::<crate::Runtime>::derive_multisig_address(
+			&treasurers,
+			TREASURY_THRESHOLD,
+			TREASURY_NONCE,
+		);
+		assert!(treasurers.iter().all(|who| *who != placeholder));
+		assert!(collective.iter().all(|who| *who != placeholder));
+		assert_ne!(placeholder, treasury);
 	}
 
 	#[test]
@@ -249,6 +309,21 @@ mod tests {
 		use super::super::{tech_referendum_cost, treasury_signer_seed};
 		assert!(treasury_signer_seed(TREASURERS.len() as u32) <= SEED);
 		assert!(tech_referendum_cost() <= SEED);
+	}
+
+	/// The flag and the table cannot both stand. `FINALIZED` is a bool, and a bool is worth what
+	/// the last editor's attention was worth, so the compile-time assert beside `VESTING` refuses
+	/// `true` while any row still pays `PLACEHOLDER`. This is the runtime half of the same
+	/// statement: while the placeholder stands, every entry point into this table refuses.
+	#[test]
+	fn the_placeholder_row_blocks_every_entry_point() {
+		if vesting_names_the_placeholder() {
+			assert!(std::panic::catch_unwind(schedules).is_err());
+			assert!(std::panic::catch_unwind(treasurers).is_err());
+			assert!(std::panic::catch_unwind(tech_collective).is_err());
+			assert!(std::panic::catch_unwind(treasury_account).is_err());
+			assert!(std::panic::catch_unwind(seed_balances).is_err());
+		}
 	}
 
 	#[test]
