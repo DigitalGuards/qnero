@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::metadata::{SHIELDED_PALLET, ZK_TREE_PALLET};
-use crate::rpc::{decode_hash, decode_hex, decode_u32_hex, hex_0x, RpcClient};
+use crate::rpc::{decode_hash, decode_hex, decode_u32_hex, hex_0x, RpcClient, RpcError};
 use crate::scale::{blake2_128_concat_map_key, identity_map_key, storage_prefix};
 
 /// The chain head, and the hash every read of one sync pass is pinned to.
@@ -164,13 +164,41 @@ pub struct ChainMerklePath {
     pub root: Digest,
 }
 
+/// Whether this node answers `chain_getBlockHash` over a list of numbers, as
+/// far as this command knows.
+///
+/// The same three states and the same reason as
+/// [`BatchSupport`](crate::rpc::BatchSupport): asked once by asking, and then
+/// remembered. A walk pages the heights, so a node that will not answer a list
+/// would otherwise be probed once per page of every chunk of every sync, each
+/// probe a wasted round trip.
+///
+/// `Refused` is only ever what a node **answered**: a hash where a list was
+/// asked for, a list of the wrong length, or a JSON-RPC error. A request that
+/// did not complete leaves this `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListSupport {
+    Unknown,
+    Taken,
+    Refused,
+}
+
 pub struct Chain<'a> {
     pub rpc: &'a RpcClient,
+    hash_lists: std::cell::Cell<ListSupport>,
 }
 
 impl<'a> Chain<'a> {
     pub fn new(rpc: &'a RpcClient) -> Self {
-        Self { rpc }
+        Self {
+            rpc,
+            hash_lists: std::cell::Cell::new(ListSupport::Unknown),
+        }
+    }
+
+    /// What this command has learned about `chain_getBlockHash` over a list.
+    pub fn list_support(&self) -> ListSupport {
+        self.hash_lists.get()
     }
 
     pub fn head(&self) -> Result<ChainHead> {
@@ -212,37 +240,71 @@ impl<'a> Chain<'a> {
     /// What makes the range a chain is the parent links checked over the
     /// headers they fetch, in [`Chain::header_chain`].
     ///
+    /// A node that does not answer a list is asked once per command rather
+    /// than once per page of heights: see [`ListSupport`].
+    ///
     /// `None` is an ordinary answer for a height this node has no block at.
     pub fn block_hashes_at(&self, numbers: &[u32]) -> Result<Vec<Option<[u8; 32]>>> {
         if numbers.is_empty() {
             return Ok(Vec::new());
         }
-        let listed: Value = self
-            .rpc
-            .call("chain_getBlockHash", json!([numbers]))
-            .with_context(|| {
-                format!(
-                    "no block hashes for the {} heights from {}",
-                    numbers.len(),
-                    numbers.first().copied().unwrap_or_default()
-                )
-            })?;
-        if let Some(answers) = listed.as_array() {
-            if answers.len() == numbers.len() {
-                return answers
-                    .iter()
-                    .map(|answer| match answer {
-                        Value::Null => Ok(None),
-                        Value::String(hash) => decode_hash(hash).map(Some),
-                        other => bail!("chain_getBlockHash answered {other} inside a list"),
-                    })
-                    .collect();
+        if self.hash_lists.get() != ListSupport::Refused {
+            match self.try_hash_list(numbers)? {
+                Some(hashes) => {
+                    self.hash_lists.set(ListSupport::Taken);
+                    return Ok(hashes);
+                }
+                None => self.hash_lists.set(ListSupport::Refused),
             }
         }
         numbers
             .iter()
             .map(|number| self.block_hash_at_height(*number))
             .collect()
+    }
+
+    /// One attempt at the list form. `Ok(None)` is a node that does not take
+    /// it.
+    ///
+    /// Two shapes of "does not take it", because two kinds of node answer
+    /// differently. One reads the parameter as a single number, ignores the
+    /// rest and answers one hash, which is a list this wallet cannot read as
+    /// one. Another deserializes the parameter as `Option<NumberOrHex>`, fails
+    /// on an array and answers `-32602 Invalid params`, which arrives as a
+    /// [`RpcError`]: the node answered, and what it said is that it does not
+    /// implement this. Both are older implementations rather than lies, and
+    /// both are answered around.
+    ///
+    /// A request that did not complete is neither, and it is returned: the
+    /// caller is not made to re-ask 256 heights one at a time through an
+    /// endpoint that is refusing or unreachable.
+    fn try_hash_list(&self, numbers: &[u32]) -> Result<Option<Vec<Option<[u8; 32]>>>> {
+        let listed: Value = match self.rpc.call("chain_getBlockHash", json!([numbers])) {
+            Ok(listed) => listed,
+            Err(error) if error.downcast_ref::<RpcError>().is_some() => return Ok(None),
+            Err(error) => {
+                return Err(error.context(format!(
+                    "no block hashes for the {} heights from {}",
+                    numbers.len(),
+                    numbers.first().copied().unwrap_or_default()
+                )))
+            }
+        };
+        let Some(answers) = listed.as_array() else {
+            return Ok(None);
+        };
+        if answers.len() != numbers.len() {
+            return Ok(None);
+        }
+        answers
+            .iter()
+            .map(|answer| match answer {
+                Value::Null => Ok(None),
+                Value::String(hash) => decode_hash(hash).map(Some),
+                other => bail!("chain_getBlockHash answered {other} inside a list"),
+            })
+            .collect::<Result<Vec<Option<[u8; 32]>>>>()
+            .map(Some)
     }
 
     pub fn block_hash(&self, number: u32) -> Result<[u8; 32]> {
@@ -294,7 +356,10 @@ impl<'a> Chain<'a> {
     /// paged at [`HASH_PAGE`], and the headers are then fetched by hash in
     /// JSON-RPC batch arrays of [`HEADER_BATCH`]. A node that takes neither
     /// gets one request per call and the walk is what it always was; see
-    /// [`Chain::block_hashes_at`] and [`RpcClient::call_many`].
+    /// [`Chain::block_hashes_at`] and [`RpcClient::call_many`]. One answer per
+    /// call is `call_many`'s contract, and it is what makes the headers line
+    /// up with the heights they were asked for; the count is checked where
+    /// they are collected, before any of them is indexed against a hash.
     ///
     /// **Exactly what the descending walk verified is verified here, locally,
     /// and nothing about which values are trusted changes.** The hashes are
@@ -395,6 +460,19 @@ impl<'a> Chain<'a> {
                 );
             }
         }
+        // Here rather than after the loop below, which is the only place it
+        // can be violated: what guarantees one header per height is
+        // `RpcClient::call_many`'s contract of one answer per call, and a page
+        // that came back short would be indexed against `hashes` before any
+        // count taken afterwards could say so.
+        if raws.len() != span + 1 {
+            bail!(
+                "this node answered {} headers for blocks {anchor} to {}. Nothing has been \
+                 changed.",
+                raws.len(),
+                head.number
+            );
+        }
 
         let mut blocks = Vec::with_capacity(span + 1);
         for (offset, raw) in raws.iter().enumerate() {
@@ -442,14 +520,6 @@ impl<'a> Chain<'a> {
                 )?,
                 author_label: raw.author_label()?,
             });
-        }
-        if blocks.len() != span + 1 {
-            bail!(
-                "this node answered {} headers for blocks {anchor} to {}. Nothing has been \
-                 changed.",
-                blocks.len(),
-                head.number
-            );
         }
         Ok(blocks)
     }

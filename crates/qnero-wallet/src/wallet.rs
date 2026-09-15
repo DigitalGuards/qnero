@@ -732,14 +732,19 @@ impl Wallet {
         //
         // The head is a number this node answers with, so a single walk over
         // the whole distance let one answer decide how much this wallet
-        // allocates. Each chunk is fetched downward by `parentHash` from its
-        // own top to the block below its bottom, every header rehashed, the
-        // leaves the node dates into it folded and checked against the roots
-        // those headers carry, and its top then becomes the bottom the next
-        // chunk is authenticated against. Only the top of the last chunk is
-        // the head itself, so every chunk below it learns its top's hash from
-        // `chain_getBlockHash` and then proves it by walking down to a hash
-        // already trusted.
+        // allocates. Each chunk is fetched by `Chain::header_chain`, which
+        // turns its heights into hashes with `chain_getBlockHash` over a list
+        // paged at `HASH_PAGE` and then fetches the headers by hash in batch
+        // arrays of `HEADER_BATCH`, and makes three local checks over the
+        // answers: every header carries the number it was asked for, every
+        // header rehashes to the hash it was fetched by, and every header
+        // names as its parent the hash answered for the height below it. The
+        // leaves the node dates into the chunk are then folded and checked
+        // against the roots those headers carry, and the chunk's top becomes
+        // the bottom the next chunk is authenticated against. Only the top of
+        // the last chunk is the head itself, so every chunk below it learns
+        // its top's hash from `chain_getBlockHash` and then proves it by
+        // chaining down to a hash already trusted.
         //
         // Checkpoints are collected here and written with the watermark at the
         // end of the pass, so the store never carries a checkpoint for a range

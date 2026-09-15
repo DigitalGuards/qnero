@@ -31,6 +31,7 @@ import {
   fetchTreeShape,
   fetchTreeTotals,
   HEADER_SPAN_LIMIT,
+  HEADERS_IN_FLIGHT,
 } from '../src/chain/reads';
 import { HEADER_WALK_LIMIT } from '../src/wallet/sync';
 import { waitForInclusion } from '../src/chain/submit';
@@ -529,15 +530,25 @@ function headerNode(options: {
   head: number;
   /** Answers a list of numbers with one hash, the way an older node does. */
   refuseHashLists?: boolean;
+  /**
+   * Answers a list of numbers with a JSON-RPC error, the way a node whose
+   * parameter is one number rather than Substrate's list-or-value does: the
+   * array fails to deserialize and the node says `-32602 Invalid params`.
+   */
+  errorHashLists?: boolean;
   /** A height whose header carries a number that is not the one asked for. */
   misnumbered?: number;
   /** A height whose header names a parent that is not the hash below it. */
   brokenParent?: number;
+  /** A height this node refuses to answer a header for at all. */
+  refuseHeaderAt?: number;
 }): {
   context: ChainContext;
   calls: { method: string; params: unknown[] }[];
   /** The heights this node answered a header for, in the order it answered. */
   answered: number[];
+  /** The most `chain_getHeader` requests this node ever had outstanding. */
+  peakInFlight: () => number;
 } {
   const calls: { method: string; params: unknown[] }[] = [];
   const hashAt = (height: number): string => `0x${String(height).padStart(64, '0')}`;
@@ -551,6 +562,8 @@ function headerNode(options: {
     digest: { logs: [] },
   });
   const answered: number[] = [];
+  let inFlight = 0;
+  let peak = 0;
   const send = async <T,>(method: string, params: unknown[]): Promise<T> => {
     calls.push({ method, params });
     // One hop, so a caller with many requests in flight has them all issued
@@ -559,6 +572,13 @@ function headerNode(options: {
     if (method === 'chain_getBlockHash') {
       const asked = params[0] as number | number[] | undefined;
       if (Array.isArray(asked)) {
+        if (options.errorHashLists === true) {
+          // What a node answers, rather than a socket that failed: a JSON-RPC
+          // error object, with the code polkadot-js carries on the rejection.
+          throw Object.assign(new Error('-32602: Invalid params: expected a block number'), {
+            code: -32602,
+          });
+        }
         if (options.refuseHashLists === true) {
           return hashAt(asked[0] ?? options.head) as T;
         }
@@ -567,6 +587,8 @@ function headerNode(options: {
       return hashAt(asked ?? options.head) as T;
     }
     if (method === 'chain_getHeader') {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
       const height = Number(String(params[0]).replace(/^0x0*/, '') || '0');
       // Deliberately out of order. A node with 32 requests outstanding answers
       // them as it pleases, and a walk that assembled the range by arrival
@@ -575,11 +597,20 @@ function headerNode(options: {
         await Promise.resolve();
       }
       answered.push(height);
+      inFlight -= 1;
+      if (options.refuseHeaderAt === height) {
+        throw new Error(`this node will not answer for block ${height}`);
+      }
       return headerAt(height) as T;
     }
     throw new Error(`this fixture answers no ${method}`);
   };
-  return { context: { send } as unknown as ChainContext, calls, answered };
+  return {
+    context: { send } as unknown as ChainContext,
+    calls,
+    answered,
+    peakInFlight: () => peak,
+  };
 }
 
 describe('the header walk', () => {
@@ -610,6 +641,76 @@ describe('the header walk', () => {
     expect((hashCalls[0]?.params[0] as number[]).length).toBe(256);
     expect((hashCalls[1]?.params[0] as number[]).length).toBe(44);
     expect(calls.filter((call) => call.method === 'chain_getHeader').length).toBe(301);
+  });
+
+  it('keeps no more requests in flight than the pool it declares', async () => {
+    // The bound this page states, asserted rather than described. A walk that
+    // issued every height at once would keep all seven other cases green while
+    // putting a thousand requests on one socket, and every answer resident
+    // with them.
+    const { context, peakInFlight } = headerNode({ head: 300 });
+    let seen = 0;
+    await fetchHeaderRange(context, 0, { number: 300, hash: hashAt(300) }, () => {
+      seen += 1;
+    });
+    expect(seen).toBe(301);
+    expect(peakInFlight()).toBe(HEADERS_IN_FLIGHT);
+  });
+
+  it('reports no more headers once a walk has been refused', async () => {
+    // The requests that were in flight when one worker refused are answered
+    // afterwards, and a walk that counted them called back after its caller
+    // had the error. In `runSync` that callback is a rendered line, so the
+    // page painted header progress over its own refusal banner.
+    const { context } = headerNode({ head: 200, refuseHeaderAt: 3 });
+    const reported: number[] = [];
+    await expect(
+      fetchHeaderRange(
+        context,
+        0,
+        { number: 200, hash: hashAt(200) },
+        () => undefined,
+        (done) => {
+          reported.push(done);
+        },
+      ),
+    ).rejects.toThrow(/will not answer for block 3/);
+    const afterRefusal = reported.length;
+    // Every request that was outstanding at the refusal settles here.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reported.length).toBe(afterRefusal);
+  });
+
+  it('asks one height at a time when the node answers a list with an error', async () => {
+    // A node whose `chain_getBlockHash` parameter is one number rather than
+    // Substrate's list-or-value fails to deserialize the array and answers
+    // `-32602 Invalid params`. That is an older implementation and not a lie,
+    // so it is answered around rather than refused.
+    const { context, calls } = headerNode({ head: 4, errorHashLists: true });
+    const seen: number[] = [];
+    await fetchHeaderRange(context, 0, { number: 4, hash: hashAt(4) }, (header) => {
+      seen.push(Number(BigInt(header.number)));
+    });
+    expect(seen).toEqual([0, 1, 2, 3, 4]);
+    const hashCalls = calls.filter((call) => call.method === 'chain_getBlockHash');
+    expect(hashCalls.length).toBe(5);
+    expect(hashCalls.slice(1).map((call) => call.params[0])).toEqual([0, 1, 2, 3]);
+  });
+
+  it('probes a node that will not answer a list once, not once per page', async () => {
+    // The answer is remembered against the context it was asked through. A
+    // walk pages its heights, so probing per page would pay the refused round
+    // trip on every page of every chunk of every sync.
+    const { context, calls } = headerNode({ head: 600, refuseHashLists: true });
+    let seen = 0;
+    await fetchHeaderRange(context, 0, { number: 600, hash: hashAt(600) }, () => {
+      seen += 1;
+    });
+    expect(seen).toBe(601);
+    const lists = calls.filter(
+      (call) => call.method === 'chain_getBlockHash' && Array.isArray(call.params[0]),
+    );
+    expect(lists.length).toBe(1);
   });
 
   it('asks one height at a time when the node will not answer a list', async () => {

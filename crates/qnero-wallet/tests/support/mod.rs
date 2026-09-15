@@ -161,6 +161,23 @@ pub struct NodeState {
     /// node answers the first number and nothing else, which is a list this
     /// wallet cannot read as one and is not a lie about any height.
     pub refuse_hash_lists: bool,
+    /// Set when this node answers `chain_getBlockHash` over a list of numbers
+    /// with a JSON-RPC error rather than with a hash.
+    ///
+    /// The other shape of the same older node, and the likelier one: an
+    /// implementation whose parameter is a single number fails to deserialize
+    /// an array and answers `-32602 Invalid params`. The wallet has to read
+    /// that as a parameter this node does not implement rather than as a
+    /// refusal, or every walk against such a node is refused outright.
+    pub error_hash_lists: bool,
+    /// Set when this node answers a JSON-RPC batch array with HTTP 429.
+    ///
+    /// A rate limiter refusing for now, which says nothing about whether this
+    /// node takes batch arrays. The live testnet's front end does exactly this
+    /// after about eighty requests in a window, and a wallet that read it as
+    /// "no batches" would send the next chunk as a thousand single requests
+    /// into the limiter that had just refused one.
+    pub rate_limited_batches: bool,
     /// The chain this node's storage implies, kept until that storage moves.
     ///
     /// [`ChainView::build`] folds the tree and hashes a header per block, and
@@ -464,9 +481,28 @@ fn serve(mut stream: TcpStream, state: Arc<Mutex<NodeState>>) -> std::io::Result
 
     let request: Value = serde_json::from_str(&body).expect("the wallet sends JSON");
 
-    let response = {
+    let rate_limited = {
         let mut state = state.lock().expect("the node state is not poisoned");
         state.requests.push(body.clone());
+        request.as_array().is_some() && state.rate_limited_batches
+    };
+    if rate_limited {
+        // A refusal to serve rather than an answer about batching. What a
+        // front end that will not take an array body sends is a 4xx this
+        // client reads as "no batches"; what this is, is the endpoint refusing
+        // everything for the next minute, and the wallet has to tell them
+        // apart.
+        let page = "<html>\r\n<head><title>429 Too Many Requests</title></head>\r\n</html>";
+        write!(
+            stream,
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+            page.len()
+        )?;
+        return stream.flush();
+    }
+
+    let response = {
+        let mut state = state.lock().expect("the node state is not poisoned");
         match request.as_array() {
             // A JSON-RPC batch array. Answered as an array, in the order it
             // arrived, which is one of the two orders a real node may answer
@@ -565,6 +601,11 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
                     .filter_map(Value::as_u64)
                     .map(|number| number as u32)
                     .collect();
+                if state.error_hash_lists {
+                    return Err(
+                        "Invalid params: expected a block number, got a sequence".to_string()
+                    );
+                }
                 if state.refuse_hash_lists {
                     let first = heights.first().copied().unwrap_or(state.head_number);
                     return Ok(one(state, first));

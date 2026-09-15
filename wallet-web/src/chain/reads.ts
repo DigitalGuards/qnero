@@ -161,14 +161,80 @@ export const HEADERS_IN_FLIGHT = 32;
 export const HEADER_SPAN_LIMIT = 1024;
 
 /**
+ * Whether a node answers `chain_getBlockHash` over a list of numbers, as far
+ * as this page knows, keyed by the context the question was asked through.
+ *
+ * Asked once, by asking. A walk pages its heights, so a node that will not
+ * answer a list would otherwise be probed once per page of every chunk of
+ * every sync, each probe a wasted round trip; the command-line wallet keeps
+ * the same memo for batch arrays and says so in `rpc.rs`.
+ *
+ * `refused` is only ever what a node **answered**: a hash where a list was
+ * asked for, a list of the wrong length, or a JSON-RPC error. A request that
+ * did not complete leaves the question open, because a dropped socket is not a
+ * fact about this node's parameter shapes.
+ */
+const hashLists = new WeakMap<ChainContext, 'taken' | 'refused'>();
+
+/** What one attempt at the list form came back as. */
+type ListAnswer =
+  | { kind: 'list'; hashes: (string | null)[] }
+  | { kind: 'refused' }
+  | { kind: 'failed' };
+
+/**
+ * Whether a rejection is the node answering rather than the request failing.
+ *
+ * A JSON-RPC error carries a numeric `code`, and polkadot-js spells it into
+ * the message as well. An implementation whose `chain_getBlockHash` parameter
+ * is one number rather than Substrate's list-or-value fails to deserialize an
+ * array and answers `-32602 Invalid params`, which is this shape: the node
+ * said no, and what it said no to is the parameter.
+ */
+function answeredNo(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  if (typeof (error as { code?: unknown }).code === 'number') {
+    return true;
+  }
+  const message = (error as { message?: unknown }).message;
+  return typeof message === 'string' && /^-?\d+:/.test(message.trim());
+}
+
+/** One attempt at the list form, with nothing recorded and nothing thrown. */
+async function tryHashList(
+  context: ChainContext,
+  numbers: readonly number[],
+): Promise<ListAnswer> {
+  let listed: unknown;
+  try {
+    listed = await context.send<unknown>('chain_getBlockHash', [[...numbers]]);
+  } catch (error) {
+    return answeredNo(error) ? { kind: 'refused' } : { kind: 'failed' };
+  }
+  if (!Array.isArray(listed) || listed.length !== numbers.length) {
+    return { kind: 'refused' };
+  }
+  return { kind: 'list', hashes: listed.map((hash) => (typeof hash === 'string' ? hash : null)) };
+}
+
+/**
  * The canonical hashes at a list of heights, in the order asked for.
  *
  * One request for the whole list where the node takes one, and one request per
  * height where it does not. A node that answers a list with anything but a
  * list of the right length is an older or a different implementation, not a
- * liar: nothing is decided from these hashes on their own. They are addresses,
- * and what makes the range a chain is the parent links checked over the
- * headers they fetch.
+ * liar, and so is one that refuses the parameter outright with a JSON-RPC
+ * error: nothing is decided from these hashes on their own. They are
+ * addresses, and what makes the range a chain is the parent links checked over
+ * the headers they fetch. Which of the two answers came back is remembered, so
+ * the probe is paid once per command rather than once per page of heights;
+ * see `hashLists`.
+ *
+ * A request that did not complete is neither answer. The per-height loop is
+ * run anyway and its first call fails with its own message, which names the
+ * endpoint rather than the parameter.
  *
  * `null` is an ordinary answer for a height this node has no block at.
  */
@@ -179,9 +245,15 @@ export async function blockHashesAt(
   if (numbers.length === 0) {
     return [];
   }
-  const listed = await context.send<unknown>('chain_getBlockHash', [[...numbers]]);
-  if (Array.isArray(listed) && listed.length === numbers.length) {
-    return listed.map((hash) => (typeof hash === 'string' ? hash : null));
+  if (hashLists.get(context) !== 'refused') {
+    const answer = await tryHashList(context, numbers);
+    if (answer.kind === 'list') {
+      hashLists.set(context, 'taken');
+      return answer.hashes;
+    }
+    if (answer.kind === 'refused') {
+      hashLists.set(context, 'refused');
+    }
   }
   const out: (string | null)[] = [];
   for (const number of numbers) {
@@ -282,10 +354,15 @@ export async function fetchHeaderRange(
   const headers: (RawChainHeader | undefined)[] = new Array<RawChainHeader | undefined>(span + 1);
   let next = 0;
   let done = 0;
-  let stop = false;
+  // How many workers have refused. A count on a field rather than a boolean
+  // in a `let`, because every worker writes this and reads it across an
+  // `await`, and what the compiler tracks is what *this* worker last left it
+  // as: a boolean read that way is narrowed to a constant and the check is
+  // compiled out.
+  const walk = { refusals: 0 };
   const worker = async (): Promise<void> => {
     for (;;) {
-      if (stop) {
+      if (walk.refusals > 0) {
         return;
       }
       const slot = next;
@@ -301,8 +378,16 @@ export async function fetchHeaderRange(
         // One refusal ends the walk. The requests already in flight are
         // answered and dropped: a node answers what it was sent whatever this
         // page does with it.
-        stop = true;
+        walk.refusals += 1;
         throw error;
+      }
+      if (walk.refusals > 0) {
+        // Another worker refused while this one was awaiting its answer. The
+        // walk is over and its caller has the error already, so this arrival
+        // is not reported: `runSync` turns `onProgress` into a rendered line,
+        // and without this the page painted up to 31 header-progress lines
+        // over the banner saying the sync had been refused.
+        return;
       }
       done += 1;
       onProgress?.(done);
