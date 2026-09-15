@@ -90,8 +90,16 @@ impl RpcClient {
             .map_err(|e| anyhow!("{method} failed against {}: {e}", self.url))?
             .into_string()
             .with_context(|| format!("{method} returned a body that is not UTF-8"))?;
-        let parsed: Value = serde_json::from_str(&response)
-            .with_context(|| format!("{method} returned a body that is not JSON"))?;
+        let parsed: Value = serde_json::from_str(&response).with_context(|| {
+            // The body, not just "that is not JSON". A rate limiter, a proxy
+            // error page and a captive portal all answer 200 with HTML, and a
+            // wallet that only said the body was unreadable sent an operator
+            // looking for a decoding bug in the wallet.
+            format!(
+                "{method} returned a body that is not JSON: {}",
+                first_line_of(&response)
+            )
+        })?;
         if let Some(error) = parsed.get("error") {
             bail!("{method} returned an RPC error: {error}");
         }
@@ -269,6 +277,24 @@ impl RpcClient {
             .map(|key| values.get(key).cloned())
             .collect())
     }
+}
+
+/// The start of a body, on one line, for an error message.
+///
+/// Bounded and flattened on purpose: this goes into an error somebody reads.
+/// An HTML error page's first line is `<html>`, which says nothing, and its
+/// title two lines later says everything, so the whole head of the body is
+/// taken with its line breaks turned into spaces.
+fn first_line_of(body: &str) -> String {
+    let flattened = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.is_empty() {
+        return "an empty body".to_string();
+    }
+    let mut short: String = flattened.chars().take(160).collect();
+    if flattened.chars().count() > 160 {
+        short.push('…');
+    }
+    short
 }
 
 pub fn hex_0x(bytes: &[u8]) -> String {

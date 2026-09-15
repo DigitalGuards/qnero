@@ -123,9 +123,32 @@ has the bug too.
   recoverable. Hex and no code beside it: a QR of a spend key is harvested by
   any camera, screen share or shoulder in the room in one frame, and nothing
   in this wallet scans one.
-- **Restore from a seed.** The 64 hex characters and nothing else. There is no
-  restore height, because a scan that started at a height the wallet named
-  would tell the node roughly when the wallet was created.
+
+  A new wallet records its **birthday**: the head the node it is connected to
+  is at, rounded down to a multiple of 1024 blocks, with the leaf count that
+  block held as its first watermark. A wallet cannot have been paid into a leaf
+  that existed before it did, so it never walks the headers under that block or
+  trial-decrypts the ciphertexts under that count. It is recorded as the
+  store's first checkpoint, so it is the node's claim like every checkpoint and
+  the fork walk rewinds through it; the screen says what was recorded and whose
+  claim it is.
+- **Restore from a seed.** The 64 hex characters, and one optional field: "the
+  chain height when this wallet was created, leave empty to scan everything".
+  Empty reads the whole chain from leaf zero, which is always correct, and the
+  screen quotes what that will take at the rate `docs/BENCH.md` measured before
+  anybody chooses it.
+
+  A height is taken as a block number or as a date, and it is recorded rounded
+  **down** to the 1024-block epoch below it, so what every node this wallet
+  syncs against is told is a coarse public epoch rather than the day the wallet
+  was made. Down, so a height a little too high still starts below the first
+  transfer. A height **above** the block a transfer arrived in is a transfer
+  this wallet never reads and a balance quietly short, with no warning
+  anywhere, and the only recovery is a rescan; the field says so and says to
+  leave it empty if you are not sure. A date is converted by counting back from
+  the node's head at the chain's own target block time and then dropped a whole
+  epoch, because that conversion is arithmetic over a block time that holds on
+  average.
 - **Lock.** PBKDF2-SHA-256 at 600,000 iterations over a 16-byte salt derives
   one non-extractable AES-256-GCM key. The eight-character floor is enforced
   in `wallet/crypto.ts`, where the only path to a key is, rather than on the
@@ -157,9 +180,9 @@ has the bug too.
   node's to write, so eight invented bytes on an incoming payment routed it
   onto the coinbase rebuild, which cannot open it, and an invented
   `Shielded::Ciphertexts` beside a withheld coinbase value hid a mined reward
-  the other way round. What decides now is the header chain, walked down from
-  the head by `parentHash` to a hash this wallet already trusts and rehashed
-  from each header's own preimage, in chunks of `HEADER_WALK_LIMIT` blocks so a
+  the other way round. What decides now is the header chain, walked between
+  the head and a hash this wallet already trusts and rehashed from each
+  header's own preimage, in chunks of `HEADER_WALK_LIMIT` blocks so a
   chain far ahead of the checkpoint syncs in one pass with one chunk resident;
   each block's leaf range, folded and compared against the `zkTreeRoot` its
   header carries, which makes `Shielded::LeafBlocks` advisory; and the coinbase
@@ -352,8 +375,16 @@ test per key on both the read layer and the scan, the refusal of the tree's own
 pad answered as a leaf below that count, the substituted ciphertext that
 nothing refuses and the rescan that recovers the payment, the merge that
 keeps a spend's own writes when a scan commits over them, the bound on the
-shield-origin walk, and the lint fence that keeps `zkTree_getMerkleProof` out
-of every spelling it has.
+shield-origin walk, the pipelined header walk against a node that answers
+headers out of order or a hash for a number its own header chain does not
+carry, where a wallet starts reading and what a restore height is rounded to,
+and the lint fence that keeps `zkTree_getMerkleProof` out of every spelling it
+has.
+
+`tests/header-walk-bench.test.ts` is a measurement and skips itself unless
+`QNERO_BENCH_WS` names an endpoint. It runs the walk this wallet had and the
+walk it has against one socket and prints both rates; `docs/BENCH.md` carries
+the runs.
 
 `tests/privacy.test.ts` is the one that needs explaining. "The node learns
 nothing" is a property of the request stream: a wallet that asked one point

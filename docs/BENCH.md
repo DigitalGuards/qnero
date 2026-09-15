@@ -1041,6 +1041,127 @@ serializes, so an incremental sync can stand on a stored one rather than
 reading the tree below the watermark again. That is the next step and it is not
 taken here.
 
+## The pipelined header walk (2026-09-15)
+
+The walk above is one `chain_getHeader` per block, in series, each header
+fetched by the hash its child names. That is one round trip per block with
+nothing else in flight, and against a node behind a CDN the round trip is the
+whole cost. Watching Qloak count "39 of 250 block headers" on the live testnet
+is watching 250 of them one after another.
+
+It is two pipelined halves now: `chain_getBlockHash` over a **list** of numbers
+paged at 256, then headers by hash with many requests outstanding, 32 JSON-RPC
+ids on the browser's one socket and JSON-RPC batch arrays of 64 from the
+command-line wallet. `docs/WALLET.md` carries what is verified locally in place
+of the parent-link walk, which is the same set of equalities.
+
+Both harnesses run the old walk and the new one against **one node in one
+process** and assert they build the same chain, so the comparison is not across
+two builds:
+
+- `crates/qnero-wallet/tests/header_walk_bench.rs`, ignored by default:
+  `cargo test -j 2 --release -p qnero-wallet --test header_walk_bench --
+  --ignored --nocapture`, with `QNERO_BENCH_NODE` to aim it at an endpoint and
+  `QNERO_BENCH_ONLY` to run one walk at a time.
+- `wallet-web/tests/header-walk-bench.test.ts`, which skips itself unless
+  `QNERO_BENCH_WS` names one: `QNERO_BENCH_WS=wss://rpc.qnero.io npx vitest run
+  --disable-console-intercept tests/header-walk-bench.test.ts`.
+
+### Against the live testnet
+
+`rpc.qnero.io`, from the development workstation, with the chain at 285 to 292
+blocks over the runs. This is the case the change is for: a real wide-area
+round trip through a CDN.
+
+The command-line wallet cannot speak HTTPS at all in this build, because `ureq`
+is compiled with no TLS backend, so its rows are measured through a local
+HTTP-to-HTTPS forwarder on loopback that adds a process hop and keeps one
+TLS connection per worker thread. The wide-area round trip, which is the term
+being measured, is unchanged by it. The browser wallet's rows are its own read
+layer over `wss://rpc.qnero.io` with no forwarder.
+
+| Wallet | Walk | Headers | Wall | Headers/s | Requests |
+|---|---|---|---|---|---|
+| command line | sequential | 79 of 290, then refused | 5.45 s | 14 | 83, then HTTP 429 |
+| command line | pipelined | 290 | 0.68 s | 426 | 10 |
+| browser | sequential | 292 | 5.10 s | 57 | 292 |
+| browser | pipelined | 292 | 0.44 s | 665 | 294 |
+
+Three browser runs over about ten minutes, as the chain moved from 289 to 294
+blocks: 0.39 s, 0.44 s and 0.36 s pipelined, which is 747, 665 and 815 headers
+a second, against 4.60 s, 5.10 s and 4.57 s sequential, which is 63, 57 and 64.
+The ratio is 11.6x to 12.6x across the three.
+
+**The two wallets win it in different ways, and the table says so.** The
+browser makes the same 292 requests either way: what it buys is 32 of them in
+flight on one socket instead of one. The command-line wallet makes 10 requests
+instead of 290, because a batch array of 64 headers is one HTTP request.
+
+**The command-line wallet's sequential walk cannot finish at all.** The node's
+front end rate-limits HTTP requests, answering `429 Too Many Requests` after
+about 80 in a window, so a sequential walk over any chain longer than that is
+refused partway through whatever the wallet does. A full fresh sync with the
+previous build ends the same way:
+
+| Build | Fresh sync of the whole chain | Wall | Requests |
+|---|---|---|---|
+| before | refused: `chain_getHeader returned a body that is not JSON` | 5.55 s | 83, then HTTP 429 |
+| after | 295 leaves through block 290 | 1.69 s | 21 |
+
+That refusal is also why `RpcClient` now quotes the start of a body it cannot
+parse. The old message said only that the body was not JSON, which reads as a
+decoding bug in the wallet; it now reads `<html> <head><title>429 Too Many
+Requests</title></head> …`, which is the node telling the operator what
+happened.
+
+The WebSocket endpoint does not rate-limit the same way, which is why the
+browser's sequential row completes where the command-line wallet's does not.
+
+### On loopback
+
+The round trip is microseconds here, so this is the floor: what is left is
+request handling rather than waiting.
+
+| Chain | Walk | Headers | Wall | Headers/s |
+|---|---|---|---|---|
+| 3 x `HEADER_WALK_LIMIT` fixture | sequential | 3075 | 1.67 s | 1836 |
+| 3 x `HEADER_WALK_LIMIT` fixture | pipelined | 3073 | 0.67 s | 4571 |
+
+Repeated once: 1.69 s and 0.68 s. The three-chunk fixture is the 3072-block
+chain the round asked for; a `--dev --tmp` node at one mining thread was at 206
+blocks after twenty minutes on this workstation and 3072 would have been six
+hours of mining for a number the fixture already serves.
+
+A full fresh sync against that dev node, 206 blocks and 206 leaves, is 0.10 s
+before and 0.05 s after, which is the same 2x.
+
+### What this projects to a year-old chain
+
+At the public chain's 120 s target a year is 262 980 blocks. The header walk
+alone, at the rates above:
+
+| Where | At the measured rate | Header walk over a year of blocks |
+|---|---|---|
+| browser, live testnet, sequential | 57 to 64 headers/s | 68 to 77 minutes |
+| browser, live testnet, pipelined | 665 to 815 headers/s | 5 to 7 minutes |
+| command line, live testnet, pipelined | 426 headers/s | 10 minutes |
+| command line, live testnet, sequential | 14 headers/s | it cannot finish: the node refuses it after about 80 requests |
+
+Both wallets quote 400 headers/s when they estimate a full scan
+(`MEASURED_HEADERS_PER_SECOND`, held equal by a test), which is under every
+pipelined figure here on purpose: an estimate that overstates the wait is the
+one to be wrong in.
+
+**This is the header walk and not the whole sync.** A year of blocks is also a
+year of coinbase leaves, one per block, and each of those is a commitment, a
+block number, a value and a rebuild. The leaf reads are already batched at 64
+and 256 per request and they are not what this round changed. What the walk
+projection says is that the header term stopped being the one that decides
+whether a first sync finishes, and the leaf term is now what a full scan costs.
+The answer to that term is the **birthday**: a wallet that records where it
+started reads neither the headers under it nor the ciphertexts under its leaf
+count. `docs/WALLET.md`, "Where a wallet starts reading", has it.
+
 ## What M10 leaves unmeasured
 
 - **A phone.** Still the 2 to 4 factor with no device under it, and now over a

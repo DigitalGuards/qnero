@@ -64,6 +64,18 @@ Both replacements read public data whole: the whole leaf range, the whole
 settled set. That costs `O(leaf_count)` reads per spend where the proof RPC
 costs one, and it distinguishes nothing.
 
+The header walk asks in a third shape now and names nothing new by it. It reads
+`chain_getBlockHash` over a **list** of block numbers rather than one at a time,
+and then fetches headers by hash with many requests in flight, as JSON-RPC
+batch arrays from the command-line wallet and as outstanding ids on the one
+socket from the browser. Every wallet on the chain reads the same headers and a
+range of heights is the same range for all of them, so what a node sees is the
+same public range arriving in fewer requests. What it does change is the
+**birthday**: a wallet that records one tells every node it ever syncs against
+the epoch it was created in, because that epoch is the bottom of the walk. That
+is why a birthday is rounded down to a coarse 1024-block epoch rather than
+recorded to the block. "Where a wallet starts reading" below has it in full.
+
 What is still visible to the node: this wallet's IP, that it is a Qnero wallet,
 when it syncs, and the extrinsics it submits. Traffic analysis over submission
 timing is not addressed here and is not addressable inside the wallet.
@@ -188,6 +200,31 @@ repository also gitignores `*.seed` and `*.store.json` for the same reason.
 Creates the seed file and prints the address. Refuses to overwrite an existing
 seed: the notes behind it would be unspendable.
 
+It also records the wallet's **birthday**: the head the node it is pointed at
+is at, rounded down to an epoch. See "Where a wallet starts reading" below. A
+node that cannot be reached is reported and is not an error, because the seed
+is already written by then and a wallet with no birthday reads the chain from
+block zero, which is correct and slow.
+
+### `restore [--restore-height N]`
+
+Writes a seed somebody already holds and records where it starts reading. The
+key is read from **stdin** rather than taken as an argument, because every
+process listing on the machine can read a command line:
+
+```
+qnero-wallet restore --restore-height 197000 < key.txt
+```
+
+64 hex characters, with spaces and line breaks ignored, so the eight groups of
+eight the browser wallet shows go straight back in. It refuses to overwrite an
+existing seed for the reason `keygen` does.
+
+`--restore-height` is the chain height this wallet was created at. Without it,
+the first sync reads the whole chain, and the command prints what that will
+cost at the rate `docs/BENCH.md` measured. See the section below for what a
+wrong height costs.
+
 ### `miner-address`
 
 Prints the miner key a block author's node is configured with, on stdout, with
@@ -250,6 +287,99 @@ the value is not a whole multiple of `POOL_STEP`, is included and appends no
 leaf. So after inclusion the wallet reads the leaves the block appended and
 looks for its own commitment among them, prints the leaf index it landed at,
 and turns an absent one into an error that drops the pending entry.
+
+## Where a wallet starts reading
+
+A wallet cannot have been paid into a leaf that existed before the wallet did.
+So a wallet records the block it was created at, its **birthday**, and its
+first sync starts there instead of at block zero. On a chain a year deep that
+is the difference between a first sync that finishes and one somebody watches.
+
+**A birthday is a checkpoint and nothing else.** It is recorded as the store's
+first checkpoint, with the leaf count the chain held at that block as the
+store's first watermark, and every rule that already stands on a checkpoint
+stands on this one: the header walk takes it as its trusted bottom, the
+checkpoint fork walk rewinds through it, and the first sync folds the leaves
+under it and compares against the `zkTreeRoot` the birthday block's own header
+published, which is what turns the recorded leaf count from a claim into a
+fact of that block. Nothing in the sync knows a birthday from a checkpoint an
+earlier pass wrote, which is the point.
+
+**It is the node's claim, exactly like every checkpoint.** The block hash was
+read from one node at one moment and nothing verified it, so a wallet created
+against a node serving a branch of its own records that branch's block. That is
+Bound B below and the defence is Bound B's defence: the first honest node
+disagrees at that height, the fork walk rewinds to the newest checkpoint both
+nodes stand on, which for a wallet with only a birthday is leaf zero, and the
+scan reads everything. Both wallets drive that end to end.
+
+**What it saves, and what it does not.** It saves the header walk under the
+birthday block and the ciphertexts under its leaf count, which is the
+trial-decryption of every leaf on the chain below it. It does **not** save the
+leaf hashes under the watermark: the first sync still reads those, at one key
+per leaf in pages of 256, because they are what seeds the fold that checks the
+watermark against the birthday block's root. That read is 32 bytes a leaf
+against kilobytes for a ciphertext.
+
+**Every recorded birthday is rounded down to a multiple of 1024 blocks.** A
+birthday is public: it is the bottom of the header walk, so every node this
+wallet ever syncs against is told it. Recorded exactly, it would be the
+wallet's creation time to the block, which is a fingerprint that follows the
+wallet across nodes and across syncs; rounded to an epoch, it is a coarse
+number a great many wallets share, and at the public chain's 120 s target one
+epoch is a day and a half. Down rather than to the nearest, always, in both
+wallets and on both paths, because a birthday above the block a note arrived in
+is a note the wallet never reads. The constant is `BIRTHDAY_EPOCH` in
+`crates/qnero-wallet/src/store.rs` and in `wallet-web/src/wallet/model.ts`, held
+equal by a test, and it is `HEADER_WALK_LIMIT`, so one epoch is one chunk of
+the walk.
+
+**A restore takes an optional height, and a wrong one costs notes.** The
+browser wallet's restore screen has one optional field, "the chain height when
+this wallet was created, leave empty to scan everything", and the command-line
+wallet has `--restore-height` on `restore`. Three answers and what each costs:
+
+| What is given | What happens |
+|---|---|
+| nothing | the whole chain is read from leaf zero. Always correct. Both wallets print an estimate of the wait first, at the rate `docs/BENCH.md` measured. |
+| a height at or below the block the wallet was created at | correct, and the epoch below it is where reading starts. A height that is too low costs time and nothing else. |
+| a height **above** the block a transfer arrived in | that transfer is never read. It is not in the balance, it is in no warning and it is in no report, because the watermark starts above its leaf and no later pass goes back. `sync --rescan`, which starts at leaf zero and keeps every note, is the recovery. |
+
+**What a full scan costs, as a projection rather than a promise.** At the
+public chain's 120 s target a year is 262 980 blocks. At the pipelined rate
+`docs/BENCH.md` measured against the live testnet, 665 to 815 headers a second
+in the browser and 426 in the command-line wallet, the header walk over that
+year is five to ten minutes. Both wallets quote 400 headers a second when they
+estimate one, which is under every measured figure on purpose: an estimate that
+overstates the wait is the one to be wrong in. Before this walk was pipelined
+the same range was 57 to 64 headers a second in the browser, which is 68 to 77
+minutes, and over HTTP it could not finish at all, because the node's front end
+answers `429 Too Many Requests` after about eighty requests in a window.
+
+That is the **header** term. A year of blocks is also a year of coinbase
+leaves, one per block, each with a commitment, a block, a value and a rebuild,
+and those reads are what a full scan costs on top. They are batched at 64 and
+256 per request and this round did not change them. So the honest summary is
+that the header walk stopped being what decides whether a first sync finishes,
+and the leaf term is what a full scan is now made of, and the birthday is the
+answer to that term rather than a faster read of it.
+
+That last row is why the field's help says to leave it empty if you are not
+sure. The browser wallet also takes a **date** in that field, because somebody
+restoring a wallet remembers when they made it and not what block the chain was
+on. A date is turned into a height by counting back from the node's head at the
+chain's own target block time, and then a whole epoch is given away on top,
+because that conversion is arithmetic over a block time that holds on average
+rather than block by block.
+
+A height above the node's own head is refused by name rather than recorded: a
+watermark past every leaf there is would be a wallet that reads nothing, ever.
+
+Both wallets say what they recorded. The command-line wallet prints the
+birthday block and its leaf count from `keygen`, `restore` and `status`, and
+the browser wallet shows it once on the screens the new wallet can reach. A
+wallet that quietly started above a note would be a balance quietly short, so
+the claim and whose claim it is are both said out loud.
 
 ### `sync [--rescan]`
 
@@ -350,16 +480,51 @@ What decides instead is what the block headers commit to. The rules are one
 implementation in each wallet, `crates/qnero-wallet/src/typing.rs` and
 `authenticateLeaves` in `wallet-web/src/wallet/sync.ts`, and they are these.
 
-1. **The header chain.** Every header from the head down to a block hash this
-   wallet already trusts is fetched by the hash its child names and rehashed
-   from its own preimage, and the result has to be that hash. The walk goes
-   downward by `parentHash`, so it costs one `chain_getHeader` per block and no
-   `chain_getBlockHash` at all. The bottom is the genesis the store is bound to
-   when the scan starts at leaf zero, and otherwise the checkpoint an earlier
-   pass recorded at the watermark, whose hash the stance walk has just
+1. **The header chain.** Every header between the head and a block hash this
+   wallet already trusts is rehashed from its own preimage, and the range is
+   checked to be one chain rather than a list of answers. The bottom is the
+   genesis the store is bound to when the scan starts at leaf zero, the
+   birthday when the wallet recorded one, and otherwise the checkpoint an
+   earlier pass recorded at the watermark, whose hash the stance walk has just
    confirmed still stands on this node's branch. Without that comparison a node
    can build a self-consistent chain out of nothing, so a walk that does not
    land on the trusted hash refuses the pass.
+
+   **The walk is pipelined, and that changed how it asks rather than what it
+   trusts.** It used to descend by `parentHash`, one `chain_getHeader` at a
+   time, each header fetched by the hash its child named: one round trip per
+   block with nothing else in flight, which against a node behind a CDN is the
+   entire cost. A year of 120 s blocks is 262 000 of them in series. Now the
+   heights are turned into hashes with `chain_getBlockHash` over a **list** of
+   numbers, paged at 256, and the headers are fetched by hash with many
+   requests outstanding: the browser wallet keeps 32 JSON-RPC ids in flight on
+   its one socket, and the command-line wallet sends JSON-RPC batch arrays of
+   64 over HTTP. The live testnet's node takes both. A node that takes neither
+   is answered around rather than refused, because that is an older
+   implementation and not a lie: the hash list falls back to one height per
+   call and the batch to one request per call, and the walk is then exactly
+   what it was.
+
+   **The hashes decide nothing.** They are addresses, and three local checks
+   are what make the range a chain, which is what the descending walk got by
+   construction:
+
+   - every header's own `number` is the height it was asked for;
+   - every header rehashes to the hash it was fetched by;
+   - every header names as its `parentHash` the hash this node answered for the
+     height below it. A hash answered for a number the header chain does not
+     carry is a lie and refuses the pass by name.
+
+   Composed, those are the same equalities the descending walk produced, down
+   to a hash this wallet already trusted. Nothing about which values are
+   trusted moved: hashes only, no proof of work, Bound B below unchanged. The
+   headers are handed to the scan only after the whole range checks out, so a
+   refusal hands it nothing. `crates/qnero-wallet/tests/header_walk.rs` and the
+   header-walk block of `wallet-web/tests/chain.test.ts` drive a node that
+   answers headers out of order, one header carrying a number that is not the
+   height it was answered for, one block spliced in from a second chain so the
+   parent link breaks while its own hash and number still check out, and a node
+   that refuses batch arrays and hash lists.
 
 2. **Each block's leaf range.** `pallet-zk-tree` folds a block's leaves in
    `on_finalize` and publishes the root in that block's header, so the wallet
@@ -417,13 +582,15 @@ implementation in each wallet, `crates/qnero-wallet/src/typing.rs` and
    with and the walk fetches, rehashes and holds one header per block between
    the trusted bottom and it, so the range is climbed in chunks of
    `HEADER_WALK_LIMIT` blocks, 1024 in both wallets. Each chunk learns its
-   top's hash from `chain_getBlockHash` and then proves it by walking down to a
-   hash already trusted, and its top is the bottom the next chunk stands on. A
-   chain far ahead of the checkpoint therefore syncs in one command with the
-   headers resident bounded by the chunk rather than by the distance. The
-   constant sits beside `ENTRY_WALK_LIMIT` in `crates/qnero-wallet/src/wallet.rs`
-   and in `wallet-web/src/wallet/sync.ts`, and `docs/BENCH.md` carries the
-   per-block cost.
+   top's hash from `chain_getBlockHash` and then proves it by walking to a hash
+   already trusted, and its top is the bottom the next chunk stands on. A chain
+   far ahead of the checkpoint therefore syncs in one command with the headers
+   resident bounded by the chunk rather than by the distance. The constant sits
+   beside `ENTRY_WALK_LIMIT` in `crates/qnero-wallet/src/wallet.rs` and in
+   `wallet-web/src/wallet/sync.ts`, and the read layer refuses a longer span
+   for itself now that it holds the chunk it is fetching
+   (`HEADER_SPAN_LIMIT` in `wallet-web/src/chain/reads.ts`, held equal by a
+   test). `docs/BENCH.md` carries the per-block cost and the measured rate.
 
 **No rule rests on the author label.**
 `qnero_note_core::MinerKey::author_label` is
@@ -1251,9 +1418,14 @@ copied between machines under a permissive umask.
 
 ```json
 {
-  "version": 6,
+  "version": 7,
   "address": "qn1...",
   "genesis_hash": "<64 hex chars>",
+  "birthday": {
+    "block_number": 196608,
+    "block_hash": "<64 hex chars>",
+    "next_leaf": 196600
+  },
   "last_synced_block": 1062,
   "next_leaf": 1069,
   "notes": [
@@ -1305,7 +1477,11 @@ copied between machines under a permissive umask.
 
 Field notes:
 
-- `version` is checked on load. A store written by another version is refused.
+- `version` is checked on load. A store written by a newer version is refused
+  and every older one this build still upgrades is upgraded in place. Version 7
+  added `birthday`; a version-6 store reads as one with none, which is a full
+  scan, and a version-6 build meeting a version-7 file ignores the field and
+  scans everything as well, so the bump costs time and never a note.
 - `address` is checked against the seed on load, so a store opened with the
   wrong seed is refused and two wallets' notes never merge.
 - `genesis_hash` is `chain_getBlockHash(0)` of the chain the store was built
@@ -1327,6 +1503,15 @@ Field notes:
   note's `rho` and `r`, and the reason it looks wrong may be an operator who
   typed the wrong `--node`. `status` reports a mismatch without refusing,
   because nothing it prints comes out of the store's own leaf indices.
+
+- `birthday` is the block this wallet was created or restored at and the leaf
+  count the chain held there, rounded down to a multiple of 1024 blocks. It is
+  written as the store's first checkpoint too, which is what the header walk
+  stands on, and it is kept separately because checkpoints are pruned to the
+  newest sixteen and rewound on a fork while the birthday is where the wallet
+  began. `null` for a store written before version 7 and for one restored with
+  no height; either way the first sync reads from leaf zero. "Where a wallet
+  starts reading" above carries what it is worth and what a wrong one costs.
 
   What this does **not** catch is the case that prompted it, and the
   distinction is worth writing down. `--dev` is a fixed chain spec, so a
@@ -1535,6 +1720,25 @@ Two of the default tests run the wallet against a scriptable JSON-RPC node in
   `tests/fixtures/author_label_headers.json`, is read by this file and by
   `wallet-web/tests/leaf-typing.test.ts`, so neither wallet can drift on how it
   reads a header's digest logs.
+- `tests/header_walk.rs` asserts what the pipelined walk still refuses. A node
+  that answers headers out of order builds one ascending chain; a header
+  carrying a number that is not the height it was answered for is refused; a
+  block spliced in from a second chain, whose own hash and number check out and
+  whose parent link does not, is refused; a node that will not take a JSON-RPC
+  batch array and a node that answers one hash for a list of numbers each get
+  one request per call and the same chain back; and a span longer than one
+  chunk is refused before the node is asked for anything.
+- `tests/birthday.rs` asserts where a wallet starts reading. A wallet created
+  at a head never asks for the ciphertext of a leaf under it and is paid by a
+  transfer above it; a restore height is recorded at the epoch below it; a
+  height above the node's head is refused and records nothing; a second
+  birthday on a store that has read a leaf is refused; and a spend key restored
+  in the grouped spelling the browser wallet shows is the same wallet, while a
+  malformed one writes no file at all.
+- `tests/header_walk_bench.rs` is a measurement rather than an assertion and is
+  ignored by default. It runs the old walk and the new one against one node in
+  one process, asserts they build the same chain, and prints both rates:
+  `docs/BENCH.md` carries the runs.
 
 ## Qloak, a Qnero wallet (M10)
 
@@ -1877,3 +2081,23 @@ are cited at each site.
     means pricing those bytes against the author's own credit in the same
     change that builds one. Until then a node pays the wallet whose miner key
     it was given.
+17. **A birthday is one node's claim and nothing checks the hash when it is
+    written.** `keygen`, `restore` and the browser's create and restore paths
+    read a head, an epoch block's hash and that block's leaf count from
+    whichever node they are pointed at, and record them. Nothing walks headers
+    at that moment, so a node serving a branch of its own writes that branch's
+    block into the store as the bottom every later walk stands on. The defence
+    is the one Bound B already has and it is enough to recover: the first
+    honest node disagrees at that height, the fork walk finds nothing below the
+    birthday to stand on, and the scan reads from leaf zero. What it costs in
+    the meantime is that a wallet talking to one node alone sees a
+    self-consistent chain with a bottom that node chose, which is the same
+    bound the rest of the sync has.
+
+    A second, separate limit: a wrong **restore height** is not recoverable by
+    any rule, because it is the operator's claim rather than the node's. A
+    height above the block a transfer arrived in leaves that transfer behind a
+    watermark with no error, no warning and nothing in the report, exactly the
+    shape the withheld-key refusals exist to close on the other side. The only
+    recovery is `sync --rescan`. Both wallets say what they recorded and both
+    say what a wrong one costs, and neither can detect one.
