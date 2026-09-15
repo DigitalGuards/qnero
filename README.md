@@ -141,9 +141,28 @@ for the key in `--rewards-miner-key`, so this is a solo-mining endpoint and the
 login is a worker label. `--stratum-host` defaults to loopback; a rig on
 another machine needs `0.0.0.0` and a firewall rule you chose.
 
+### The public testnet
+
+`docs/TESTNET.md` is the operator runbook, with placeholders for every host and
+name. The chain is `--chain qnero-testnet`, or the committed raw spec at
+`chain/node/chain-specs/qnero-testnet.json`, which
+`scripts/build-testnet-spec.sh` exports and a test compares byte for byte
+against a fresh export. Its genesis is one endowed faucet account and nothing
+else, its target is 120 second blocks, and its initial difficulty is 5 000,
+sized for the single in-process RandomX thread its node mines with rather than
+for a network that does not exist yet.
+
+`faucet/` is the faucet behind it. Under v1 there is no transparent transfer
+between accounts a user chooses, so a drip is a shielded payment and a shielded
+payment is a zero-knowledge proof: one prover built at startup, one worker
+thread that owns the wallet, and `POST /drip` answering `queued` while the page
+polls. `packaging/` carries the systemd units, the six nginx vhosts and the
+on-box monitor; `scripts/` carries the spec export, the bootnode key, the node
+probe and the deploy.
+
 ## Status, audits and caveats
 
-M1 through M10 are done, through the wallet CLI, v1 mandatory privacy, RandomX proof of work, a measured browser prover, the silQ Road explorer and the Qloak browser wallet. The audits are upstream's: Eiger on the Wormhole circuits (2026-03-20), a Substrate audit of the chain (2026-05-13), a proof-of-work and Poseidon review. **No external audit of the Qnero delta exists.** That delta is the leaf circuit's note fragments, the public-input layouts at all three layers, the aggregator rules, and `pallet-shielded`. The design claims a reviewer can read it in a day, and Plonky2's 100-bit security here is a conjecture.
+M1 through M10 and M12 are done, through the wallet CLI, v1 mandatory privacy, RandomX proof of work, a measured browser prover, the silQ Road explorer, the Qloak browser wallet and the project site. M11 is prepared and its deploy is pending: the chain spec, the faucet, the packaging and the runbook all exist and have been rehearsed locally, and no host has been touched. The audits are upstream's: Eiger on the Wormhole circuits (2026-03-20), a Substrate audit of the chain (2026-05-13), a proof-of-work and Poseidon review. **No external audit of the Qnero delta exists.** That delta is the leaf circuit's note fragments, the public-input layouts at all three layers, the aggregator rules, and `pallet-shielded`. The design claims a reviewer can read it in a day, and Plonky2's 100-bit security here is a conjecture.
 
 - Key storage is dev grade: 32 bytes of hex in a `0600` file, no passphrase or encryption, beside a note store holding every `rho` and `r` in clear text.
 - Weights are unbenchmarked, and admission work is unpaid per gossiped blob: a settlement walk and a verify each, with no rate limit.

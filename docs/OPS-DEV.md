@@ -732,7 +732,9 @@ Integer division rounds `difficulty / 2048` to zero anywhere below 2048, which
 left a chain at the floor unable to leave it, so M7 floored the increment at
 one: a dev chain now climbs one step per block for as long as blocks come in
 under the target. `docs/BENCH.md` measures it, 128 at block 1 and 189 at block
-66. Live presets start at `QPoWInitialDifficulty`, now 100 000.
+66. Live presets take `QPoWInitialDifficulty`, now 1 000 000, unless their own
+preset overrides it: `qnero-testnet` sets 5 000, sized for the single light-mode
+thread its node mines with rather than for a network (`docs/TESTNET.md`).
 
 **What did not move.** The header shape (one 32-byte `PreRuntime` item plus a
 64-byte `Seal`, filling the 110-byte digest window exactly), the author label
@@ -4916,3 +4918,264 @@ node rebuild took 10:01, cold for the runtime wasm and for rocksdb.
 `cargo +nightly fmt` is the gate in the chain workspace, as before: its
 `.rustfmt.toml` sets options only nightly honours, and stable `rustfmt` on a
 file there rewrites match arms and binary operators that nightly leaves alone.
+
+## The M11 preparation run: a two-node rehearsal of the public testnet, 2026-09-15
+
+Everything the public testnet needs, built and exercised on this workstation
+before a host exists: the `qnero-testnet` preset and the raw spec it exports,
+a bootnode key and the multiaddr it produces, systemd units and an nginx set
+for six hostnames, a deploy script, the faucet, a node probe, an on-box monitor
+and the runbook at `docs/TESTNET.md`. The deploy itself is a separate phase.
+
+### What the chain is
+
+`--chain qnero-testnet`, or the committed raw spec at
+`chain/node/chain-specs/qnero-testnet.json`. Name `Qnero Testnet`, id and
+protocol id `qnero-testnet`, `ChainType::Live`, QNR at twelve decimals and
+ss58 189.
+
+Genesis is one endowed account and nothing else: the faucet, with 100 000 QNR
+of transparent balance, which under v1 can go exactly one place, into the pool
+through a `shield` it signs for itself. No vesting row, no mainnet placeholder,
+no tech collective, no sudo, and no treasury. That last one widened
+`TreasuryGenesis.account` to `Option<AccountId>`, which is a state the runtime
+already supported: the pallet's genesis build returns early on `None`,
+`TreasuryAccountOption` answers `None`, `EnsureTreasury` matches no origin, and
+`pallet_vesting`'s admin calls refuse with `TreasuryNotConfigured`. Nothing in
+the runtime calls the panicking `Pallet::account_id()`. What an empty collective
+costs is named in the runbook: nobody can pass
+`RootOrMemberForTechReferendaOrigin`, so there is no runtime upgrade by
+referendum on this chain and the recovery for a runtime bug is a relaunch.
+
+**The initial difficulty is 5 000, and it is the one number in the spec that
+cannot be corrected afterwards.** Difficulty is expected hashes per block, and
+the retarget's equilibrium is the divisor rather than the target:
+`divisor = target * 10 / 12` is 100 000 ms at a 120 s target and the neutral
+band is one to two divisors wide, so a chain settles between `100 * H` and
+`200 * H`. The hash rate this chain is certain of is its own node's single
+light-mode RandomX thread, 32.9 H/s from the M7 measurements, which puts that
+band at 3 300 to 6 600 and its middle at one block every 152 seconds with no
+retarget pressure at all.
+
+Low on purpose, and the asymmetry is the argument. The Homestead retarget moves
+by one 2048th of the difficulty per step, which works out as linear growth at
+`H / 2048` per second upward and exponential decay with a time constant of
+`100 * 2048` seconds downward: 57 hours per e-fold whatever the numbers are. A
+difficulty above the available hash rate is days of a chain that looks dead; one
+below it is hours of fast blocks that fix themselves. Inheriting
+`QPoWInitialDifficulty`, 1 000 000 and sized for about 8 300 H/s, would have
+been 8.4 hours to the first block on the node alone and about a week to
+converge. There is no floor field to set beside it: `get_min_difficulty()` is a
+hard-coded 128 and genesis only validates against it.
+
+The seed epoch stays at 2 048 blocks with a lag of 64, both runtime constants a
+spec cannot move. The open question is restated in the runbook rather than
+closed here: the lag sits inside the 100-block reorg window, so a deep reorg
+across an epoch boundary changes the seed under work already started. That
+cannot split the chain, because the seed follows each candidate's own ancestry
+rather than canonical height, and a lag of 128 would remove even the
+disturbance, at the cost of a runtime upgrade.
+
+### The faucet account
+
+ML-DSA-87, minted with `qnero-faucet keygen`, which is
+`TransparentKey::from_seed` over 32 bytes from the operating system and
+therefore the same derivation as `Dilithium87Pair::from_seed`. Both variants of
+`DilithiumSignatureScheme` hash to the same 32-byte account, so an SS58 literal
+carries no trace of its scheme and no test can assert one. Provenance is a
+procedure, and the procedure is that the node derives the address independently
+before genesis is cut:
+
+```
+printf '%s%064d' "$(cat <seed>)" 0 > /tmp/seed64
+chain/target/release/qnero-node key qnero --scheme standard --no-derivation --seed < /tmp/seed64
+```
+
+`from_seed` reads the first 32 bytes of what it is handed, so padding to the 64
+that command wants derives the same pair. Both sides printed the same address.
+The spec carries the address; the seed is in the operator's own store and
+nowhere else.
+
+### The spec is generated, and a test says so
+
+`scripts/build-testnet-spec.sh` exports it in one step, with
+`--disable-default-bootnode`, which is not optional: without it a spec naming no
+bootnode gets a throwaway `/ip4/127.0.0.1` one injected into the file every
+operator is handed. Two consecutive runs gave the same sha256, so the export is
+deterministic.
+
+`chain/node/tests/testnet_spec.rs` regenerates it with the binary Cargo built
+for the test and compares every one of its 1 365 586 bytes, the megabyte of
+runtime wasm included. A preset edit nobody re-exported fails there rather than
+shipping a genesis the tree can no longer rebuild. `bootNodes` is the one field
+a deployment writes into the file afterwards, and it sits outside genesis, so
+when it is non-empty the test compares everything else and validates each
+multiaddr's shape instead. A second test reads the four identifying fields off
+the file rather than off a builder, and asserts `telemetryEndpoints` is absent
+and that `:code` is large enough to be a real runtime rather than a
+`SKIP_WASM_BUILD` stub.
+
+### Two flags a copied runbook gets wrong
+
+**`key generate-node-key` resolves a chain before it does anything.** Even with
+`--file` given, and even though the resolved id is then unused, `KeySubcommand`
+calls `load_spec(cmd.chain.unwrap_or(""))` first, and this tree refuses an empty
+id by naming its chains. So `--chain` has to be passed to generate a node key.
+`scripts/generate-bootnode-key.sh` does, and also captures the peer id from
+**stderr**, which a naive `> file` loses.
+
+**`--force-authoring` is what lets a new chain start at all.** Two gates pause
+authoring without it and a seed node on a fresh network trips both: a node with
+no peers does not author, and a node whose tip is older than `--max-tip-age`
+does not author, which a genesis block whose timestamp is zero always is. The
+first rehearsal start without it produced no blocks. With it, block 1 arrived.
+The flag costs the guard itself, so the unit carries it with a comment saying to
+remove it once the network has other authoring peers.
+
+### The rehearsal
+
+Two nodes on this box, both from the committed raw spec, genesis
+`0x439dee7cb5609728e54aa60ef8bed2924196c4a3d837f2c8a7e64685df69d900`.
+
+Node A, the seed: `--node-key-file`, `--port 30333`, `--validator
+--force-authoring --mining-threads 1`, `--stratum-port 3333`, `--rpc-port 9944
+--rpc-methods safe`, `--no-mdns --no-telemetry`, the miner key from
+`QNERO_MINER_KEY` in the environment rather than argv. Node B, a plain full
+node on 30334 and 9945, joining through
+`/dns/localhost/tcp/30333/p2p/QmSewr5LQZ4yTZKZ3CvvEk4rAP3vo12LnaZwfXmxihw4CQ`,
+which is the multiaddr the key script printed.
+
+B had A as a peer 5 seconds after start, and imported every block A produced
+within a second of it:
+
+```
+# node A
+2026-09-15 12:03:03 🥇 Successfully mined and submitted a new block in process (mining time: 199s)
+2026-09-15 12:03:03 🏆 Imported #1 (0x439d…d900 → 0x2db2…c9a3)
+2026-09-15 12:03:09 🥇 Successfully mined and submitted a new block in process (mining time: 5s)
+2026-09-15 12:03:09 🏆 Imported #2 (0x2db2…c9a3 → 0xd5bb…bddb)
+
+# node B, the same two blocks
+2026-09-15 12:03:04 🏆 Imported #1 (0x439d…d900 → 0x2db2…c9a3)
+2026-09-15 12:03:09 🏆 Imported #2 (0x2db2…c9a3 → 0xd5bb…bddb)
+```
+
+Block 1 took **199 seconds** on one in-process light-mode thread at difficulty
+5 000. The expectation at 32.9 H/s is 152 seconds and block times are
+exponentially distributed, so 199 is an ordinary draw; block 2 took 5 seconds,
+which is the other tail of the same distribution. Both are inside the neutral
+band the difficulty was chosen for, which is what the spec's 5 000 was meant to
+produce and is the whole reason the number is not 1 000 000.
+
+`scripts/probe-node.sh` against both nodes:
+
+```
+peers                  1
+isSyncing              false
+height                 55
+genesis                0x439dee7cb5609728e54aa60ef8bed2924196c4a3d837f2c8a7e64685df69d900
+target block time      120000 ms
+stratum                127.0.0.1:3333 open
+
+all checks passed
+```
+
+The target block time line is the probe decoding the little-endian SCALE `u64`
+that `state_call` of `QPoWApi_get_target_block_time` returns, which is how a
+client reads the interval a chain actually retargets against. Run against a
+deliberately wrong genesis and a height floor of 999 999, it failed both checks
+by name and exited 1, so the failure path is exercised rather than assumed.
+
+**The stratum port.** xmrig 6.21.3 at `nice -n 19 --threads=2` against A:
+**54 shares accepted, 0 rejected, 53 at the block difficulty, 52 sealed, 1 too
+late.** Every share at the block difficulty is what a share difficulty of 5 000
+clamped to a block difficulty of about 5 000 means. Over one measured window,
+10 shares in 71 seconds at a block difficulty near 5 090, which is about
+**717 H/s** for the rig while a node was mining beside it and the faucet was
+proving. The difficulty climbed from 5 000 to 5 106 across 55 blocks, which is
++2.1% over 55 steps against the +1/2048 per block the retarget applies below
+the target: the arithmetic in the preset's doc comment, observed.
+
+**The faucet**, pointed at A:
+
+```
+faucet      transparent account qzjpnqS6zVnCLeXgqAPn85dquWQNbSVr3ba54YivjzdYLKieZ
+faucet      circuits built in 4.74s (6 leaf slots per batch)
+faucet      listening on 127.0.0.1:8080
+faucet      shielding 50000 quanta from the genesis account (note 1 of 2)
+faucet      funded: leaf 15 in block 16
+faucet      ready, 50000 quanta spendable across 1 note(s)
+```
+
+The circuit build is 4.74 s, once, before the listener opens. Funding is a
+`shield` of the genesis endowment into the faucet's own notes, which is the only
+way to fund a faucet on this chain: there is no transparent transfer between
+accounts, and `Wallet::shield` always builds the note for `self.key.pk()`.
+
+A drip to a wallet created seconds earlier:
+
+```
+POST /drip  -> {"status":"queued","id":1,"amountQuanta":1000,"amountQnr":"10"}
+faucet      drip 1000 quanta plus 8 fee, proved in 11.18s, block 21
+faucet      claim 1 settled in block 21 after 15.81s
+GET /drip/1 -> {"status":"sent","includedAt":21}
+```
+
+11.18 s of proving, and the whole claim settled 15.81 s after it left the queue.
+That is the shape the endpoint is built around: `POST /drip` answers `queued`
+and the page polls, because holding a request open across a proof and a block
+would be a two-minute socket per claim in front of a server that proves one at a
+time.
+
+The recipient wallet, synced against **node B** rather than the miner:
+
+```
+scanned leaves 0..25 at block 22
+received 1 note(s) worth 1000 quanta
+unspent total 1000 quanta
+
+      leaf        quanta    block    state  memo
+        22          1000       21  unspent  qnero testnet faucet
+```
+
+A second claim for the same address from a different client was refused
+`429 address-cooldown` with `retry-after: 86353` and the message "this address
+has already been paid. It can claim again in 23 hours"; a malformed address was
+refused `400` with nothing read and nothing written. The faucet's `/status`
+afterwards read `balanceQuanta: 48992`, `paidQuanta: 1000`, one note, which is
+50 000 less the drip and its 8 quanta fee, held in the change note.
+
+**Stopping.** Everything was started with a pidfile and stopped by it, in
+reverse order, with a 60-second wait before any SIGKILL because rocksdb has to
+close cleanly. The faucet printed `stopping` and then `the worker's queue
+closed, stopping`, which is the graceful path through the channel close and the
+thread join. Afterwards no `qnero-node`, `qnero-faucet` or `xmrig` process
+remained and all eight ports (9944, 9945, 30333, 30334, 3333, 8080, 9615, 9616)
+were closed.
+
+### What the rehearsal did not cover
+
+It ran on one machine with `localhost` in the multiaddr, so it did not test DNS
+resolution, the CDN, nginx, TLS, the cross-origin isolation headers Qloak needs,
+or a rig on a second machine. Those are the verify section of
+`docs/TESTNET.md`, and they belong to the deploy phase.
+
+### Gates
+
+```
+# the chain workspace
+SKIP_WASM_BUILD=1 nice -n 19 cargo test -j 4 -p qnero-runtime --release --lib genesis_config_presets
+LIBCLANG_PATH=/usr/lib/llvm-18/lib RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 4 -p qnero-node --release
+SKIP_WASM_BUILD=1 nice -n 19 cargo clippy -j 4 -p qnero-node -p qnero-runtime --all-targets
+cargo +nightly fmt --all -- --check
+
+# the repository root
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+nice -n 19 cargo clippy -j 2 --workspace --all-targets
+cargo fmt --all -- --check
+```
+
+The node line runs **without** `SKIP_WASM_BUILD` on purpose: both the rename
+guard and the new spec reproducibility test build a preset spec and therefore
+need `WASM_BINARY`, and with the variable set they skip themselves and say so on
+stderr, which is most of the guard silently not running.
