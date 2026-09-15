@@ -251,20 +251,20 @@
         <div class="wrap">
           <span class="band__label">04 / Run it</span>
           <h2>Against a chain you start yourself</h2>
-          <div class="split">
+          <div class="split split--even">
             <div class="prose">
               <p>
                 Start a local node and fund an address with the command-line wallet first. The
-                repository README carries the build preconditions. Then:
+                repository README carries the build preconditions.
               </p>
-              <pre><code>cd wallet-web
-nice -n 19 npm ci
-./scripts/stage-wasm.sh --threaded
-nice -n 19 npm run dev</code></pre>
               <p>
-                That serves the wallet at <code>http://127.0.0.1:5173</code> against the node on
-                port 9944. One runtime JSON file points a built copy at a different chain, so one
-                build serves a devnet and a testnet.
+                The dev server runs the wallet at <code>http://127.0.0.1:5173</code> against the
+                node on port 9944. One runtime JSON file points a built copy at a different chain,
+                so one build serves a devnet and a testnet.
+              </p>
+              <p>
+                <code>stage-wasm.sh --threaded</code> stages the threaded prover module. Without it,
+                or without the two headers beside this, the page loads the single-threaded one.
               </p>
             </div>
             <div class="prose">
@@ -289,6 +289,15 @@ nice -n 19 npm run dev</code></pre>
                 choosing the endpoint at runtime from the settings screen. A deployment with a fixed
                 node closes it at build time.
               </p>
+            </div>
+          </div>
+          <div class="commands">
+            <div class="command">
+              <span class="command__label">Run it</span>
+              <pre><code>cd wallet-web
+nice -n 19 npm ci
+./scripts/stage-wasm.sh --threaded
+nice -n 19 npm run dev</code></pre>
             </div>
           </div>
         </div>

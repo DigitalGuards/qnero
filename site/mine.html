@@ -182,6 +182,7 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
           <h2>Stratum flags</h2>
           <section class="table-wrap" tabindex="0" aria-label="Stratum flags, scrollable table">
             <table class="table--mid">
+              <caption>Each flag, and what it takes when unset</caption>
               <thead>
                 <tr>
                   <th scope="col">Flag</th>
@@ -197,7 +198,7 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
                 </tr>
                 <tr>
                   <th scope="row"><code>--stratum-host&nbsp;ADDR</code></th>
-                  <td><code>127.0.0.1</code></td>
+                  <td>127.0.0.1</td>
                   <td>Bind address. A rig on another machine needs <code>0.0.0.0</code> and a firewall rule you chose</td>
                 </tr>
                 <tr>
@@ -234,7 +235,7 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
         <div class="wrap">
           <span class="band__label">04 / Schedule</span>
           <h2>Seed rotation and difficulty</h2>
-          <div class="split">
+          <div class="split split--even">
             <div class="prose">
               <h3>The seed rotates the way Monero's does</h3>
               <p>

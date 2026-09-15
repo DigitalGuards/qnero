@@ -85,6 +85,7 @@
           <h2>Six routes</h2>
           <section class="table-wrap" tabindex="0" aria-label="Six routes, scrollable table">
             <table class="table--pairs">
+              <caption>Each route, and what it shows</caption>
               <thead>
                 <tr>
                   <th scope="col">Route</th>
@@ -204,14 +205,14 @@
         <div class="wrap">
           <span class="band__label">03 / Run it</span>
           <h2>Build, configure, deploy</h2>
-          <div class="split">
+          <div class="split split--even">
             <div class="prose">
-              <p>Start a local node, then:</p>
-              <pre><code>cd explorer
-nice -n 19 npm ci
-nice -n 19 npm run dev</code></pre>
               <p>
-                That serves on <code>http://127.0.0.1:5173</code> and reads
+                Start a local node first. The repository README carries the build preconditions, and
+                the commands are below.
+              </p>
+              <p>
+                The dev server runs on <code>http://127.0.0.1:5173</code> and reads
                 <code>public/config.json</code>, which points at <code>ws://127.0.0.1:9944</code>
                 out of the box. <code>npm run build</code> produces <code>dist/</code>: an
                 <code>index.html</code>, one JS bundle, one stylesheet and
@@ -237,6 +238,14 @@ nice -n 19 npm run dev</code></pre>
                 window, a 512-block search window before a walk gives up, and 25 pages of 1000 keys
                 before the nullifier count reports a floor.
               </p>
+            </div>
+          </div>
+          <div class="commands">
+            <div class="command">
+              <span class="command__label">Run it</span>
+              <pre><code>cd explorer
+nice -n 19 npm ci
+nice -n 19 npm run dev</code></pre>
             </div>
           </div>
         </div>
