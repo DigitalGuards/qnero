@@ -223,6 +223,17 @@
               open. The gap between a spend's anchor block and its inclusion block is public too,
               and it tracks the speed of the machine that proved it.
             </p>
+            <p>
+              <strong>A wallet verifies no proof of work, and will not in v1.</strong> A RandomX
+              verification wants a 256 MiB cache and has no browser build, so above a wallet's
+              newest checkpoint the node picks every header field. Two per-leaf values are bound to
+              a leaf by nothing on chain: the ciphertext bytes, and where a commitment sits inside
+              its block's own leaf range. A node whose headers all check out can move an incoming
+              payment onto a position this wallet reads as somebody else's, and that payment reads
+              as never arriving. A rescan against a second node is the recovery, and both wallets
+              say so on screen. M13 closes it by taking every read with a trie proof at the pinned
+              block hash, verified against the header's own state root.
+            </p>
           </div>
         </div>
       </section>

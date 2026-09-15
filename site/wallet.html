@@ -229,6 +229,17 @@
                 the machine that proved it.
               </li>
               <li>
+                <strong>This wallet verifies no proof of work, and will not in v1.</strong> A
+                RandomX verification wants a 256 MiB cache and has no browser build, so above the
+                newest checkpoint a node picks every header field. Two per-leaf values are bound to
+                a leaf by nothing on chain: the ciphertext bytes, and where a commitment sits inside
+                its block's leaf range. A node whose headers check out can move an incoming payment
+                onto a position this wallet reads as somebody else's, and the payment reads as never
+                arriving. A rescan against a second node is the recovery, and a pass that read
+                leaves and received nothing says so on the balance screen.
+                <code>state_getReadProof</code> in M13 closes it.
+              </li>
+              <li>
                 <strong>What the node learns</strong> is your network address, that a wallet syncs
                 from it and roughly how often, and the exact bytes of every settlement submitted
                 through it. Which leaf and which nullifier are yours stay unasked. The one request

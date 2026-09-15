@@ -61,8 +61,10 @@
           <h1>About</h1>
           <p class="lede">Qnero is maintained by DigitalGuards, and it is MIT licensed.</p>
           <p class="sub">
-            There is no foundation, no token sale, no pre-sale, no advisory board and no admin key.
-            There is a repository. Read it, build it, run it, and disagree with it in public.
+            There is no foundation, no token sale, no pre-sale and no advisory board.
+            <code>pallet-sudo</code> is removed from the runtime. One privileged origin is left, a
+            tech collective seeded at genesis, and section 03 writes out what it can do. There is a
+            repository. Read it, build it, run it, and disagree with it in public.
           </p>
         </div>
       </section>
@@ -73,10 +75,10 @@
           <h2>Where the work stands</h2>
           <div class="prose">
             <p>
-              Ten milestones are done: the note crate, the leaf circuit, the two aggregators,
+              Eleven milestones are done: the note crate, the leaf circuit, the two aggregators,
               <code>pallet-shielded</code> and a local dev chain end to end, the wallet CLI, v1
               mandatory privacy, RandomX proof of work, a measured browser prover, the silQ Road
-              explorer and the Qloak browser wallet.
+              explorer, the Qloak browser wallet, and this site.
             </p>
             <p>
               The next milestone is a public testnet: a chain spec and a genesis both wallets can
@@ -85,10 +87,12 @@
               weeks to a private testnet.
             </p>
             <p>
-              Queued after M8's measurement: wasm threads, which is the measured gap and needs a
-              nightly toolchain and cross-origin isolation to try; then a device test to replace the
-              2-to-4 proxy factor; then real key storage, a hash pin on the first tagged circuit
-              release, and hiding the real-transfer count.
+              Threads shipped with Qloak. The threaded prover module is loaded when the origin
+              is cross-origin isolated, capped at four threads, with the single-threaded module as
+              the fallback its settings screen names: 11.2 s to prove a payment on four threads
+              against 37.6 s on one. Still queued: a device test to replace the 2-to-4 proxy factor,
+              real key storage, a hash pin on the first tagged circuit release, and hiding the
+              real-transfer count.
             </p>
           </div>
         </div>
@@ -125,6 +129,27 @@
           <h2>Open, and written down</h2>
           <div class="prose">
             <ul>
+              <li>
+                <strong>There is a privileged origin, and it is not a user.</strong>
+                <code>pallet-sudo</code> is removed. What is in the runtime is a ranked tech
+                collective, ten members seeded at genesis beside ten treasurers, with its own
+                referenda instance and a treasury. A tech referendum dispatches as Root, and Root
+                bypasses <code>BaseCallFilter</code>, the filter that keeps transparent transfers
+                out of ordinary use. So that collective can move transparent value and can enact a
+                runtime upgrade. The filter binds users. Root is exempt from it by design, and it
+                is written down in <code>docs/DESIGN.md</code> rather than discovered.
+              </li>
+              <li>
+                <strong>Neither wallet verifies proof of work, and neither will in v1.</strong> A
+                RandomX verification wants a 256 MiB cache and has no browser build, so above a
+                wallet's newest checkpoint a node picks every header field. Two per-leaf values are
+                bound to a leaf by nothing on chain: the ciphertext bytes, and where a commitment
+                sits inside its block's own leaf range. A node whose headers check out can move an
+                incoming payment onto a position the wallet reads as somebody else's, and that
+                payment reads as never arriving. A rescan against a second node is the recovery,
+                and both wallets print the hint on screen. M13 closes it with
+                <code>state_getReadProof</code>.
+              </li>
               <li>
                 <strong>Key storage is dev grade.</strong> 32 bytes of hex in a <code>0600</code>
                 file, with no passphrase and no encryption, beside a note store holding every
