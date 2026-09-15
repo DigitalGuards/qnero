@@ -944,7 +944,7 @@ pub mod pallet {
 		/// ciphertext is what carries `(rho, r)` to a recipient who cannot
 		/// derive them, and **it is usually empty**. A Qnero node cannot build
 		/// one, because it cannot link an ML-KEM implementation beside the one
-		/// its own post-step transport pins, so it derives the note from a
+		/// its own post-quantum transport pins, so it derives the note from a
 		/// miner key its operator configured instead
 		/// (`qnero_note_core::coinbase_r`). An empty field is therefore the
 		/// ordinary case here, unlike a settling slot, where it would mean a
