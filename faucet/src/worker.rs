@@ -297,9 +297,10 @@ impl Worker {
     fn drip(&mut self, job: &Job) -> Result<u32> {
         self.refresh_metadata()?;
         self.sync()?;
-        let fee =
-            self.wallet
-                .preflight(&self.metadata, &job.address, job.quanta, None, DRIP_MEMO)?;
+        let fee = self
+            .wallet
+            .preflight(&self.metadata, &job.address, job.quanta, None, DRIP_MEMO)?
+            .fee;
         // The row is marked submitted BEFORE the send, because the window this
         // closes is between a drip landing in a block and `mark_sent` writing
         // that down. A process that dies in there leaves a row that is still

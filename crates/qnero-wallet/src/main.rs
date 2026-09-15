@@ -140,8 +140,11 @@ enum Command {
         /// QNR to pay, such as 12.34.
         #[arg(long, value_parser = steps_from_qnr)]
         amount: u64,
-        /// Fee in QNR. Defaults to this submission's floor, and a value below
-        /// it is refused: the fee is a public input of the proof.
+        /// Fee in QNR. Defaults to this submission's floor. Below the floor
+        /// is refused, because the fee is a public input of the proof and
+        /// cannot be raised afterwards; well above it is refused too, because
+        /// every settlement carries the same pool priority, so a fee over the
+        /// floor buys nothing and half of it burns.
         #[arg(long, value_parser = steps_from_qnr)]
         fee: Option<u64>,
         /// Memo carried in the payment's ciphertext. Every memo is padded to
@@ -647,8 +650,20 @@ fn main() -> Result<()> {
             // The fee floor and the note selection are settled before any
             // circuit is built: both refuse spends that seconds of circuit
             // building and tens of seconds of proving would be spent on.
-            let resolved_fee = wallet.preflight(&metadata, &recipient, amount, fee, &memo)?;
-            println!("fee         {} QNR", qnr(resolved_fee));
+            let plan = wallet.preflight(&metadata, &recipient, amount, fee, &memo)?;
+            let resolved_fee = plan.fee;
+            // The floor is printed only when the caller asked for more than
+            // it, because that is the only time the two are worth comparing
+            // and a fee on its own has nothing on screen to be read against.
+            if resolved_fee == plan.floor {
+                println!("fee         {} QNR", qnr(resolved_fee));
+            } else {
+                println!(
+                    "fee         {} QNR, above this submission's floor of {} QNR",
+                    qnr(resolved_fee),
+                    qnr(plan.floor)
+                );
+            }
 
             // What the wait is made of, said before it starts, and the same
             // composition the browser wallet quotes. The block half is read

@@ -35,6 +35,7 @@ use qnero_wallet::dev_account::TransparentKey;
 use qnero_wallet::keys::create_seed;
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::RpcClient;
+use qnero_wallet::units::qnr;
 use qnero_wallet::wallet::{EntryRhoCheck, MerkleSource, Wallet, NUM_LEAF_PROOFS};
 
 /// `pallet-balances` and its first call. Stable indices in this runtime, and
@@ -128,6 +129,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
     let memo = "payment to B";
     let fee = alice
         .preflight(&metadata, &bob_address, 300, None, memo)
+        .map(|plan| plan.fee)
         .expect("the spend is fundable");
     let payment = alice
         .send(
@@ -165,6 +167,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
     let back_memo = "back to A";
     let back_fee = bob
         .preflight(&metadata, &alice_address, 100, None, back_memo)
+        .map(|plan| plan.fee)
         .expect("B can fund the payment back");
     let back = bob
         .send(
@@ -240,7 +243,7 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
         report.leaves_scanned,
         report.coinbase_leaves,
         report.coinbase_received,
-        qnero_wallet::units::qnr(miner.store.unspent_total())
+        qnr(miner.store.unspent_total())
     );
     assert!(
         report.coinbase_received > 0,
@@ -388,6 +391,7 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
     let memo = "mined and spent";
     let fee = miner
         .preflight(&metadata, &recipient_address, 5, None, memo)
+        .map(|plan| plan.fee)
         .expect("the spend is fundable");
     let payment = miner
         .send(
@@ -402,8 +406,10 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
         )
         .expect("the payment settles");
     println!(
-        "0.05 QNR to B at fee {fee}: included at block {}, change {}",
-        payment.included_at, payment.change
+        "0.05 QNR to B at a fee of {} QNR: included at block {}, change {} QNR",
+        qnr(fee),
+        payment.included_at,
+        qnr(payment.change)
     );
 
     recipient.sync(&chain, &metadata).expect("B syncs");
@@ -429,9 +435,13 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
     let (low, high) = quiet_band(&miner);
     let settled_leaves = leaves_appended(&chain, payment.included_at);
     println!(
-        "coinbase of block {}: {} steps against {low} to {high} on quiet blocks, author share \
-         {}, {settled_leaves} leaves appended",
-        payment.included_at, settling.value, author_share
+        "coinbase of block {}: {} QNR against {} to {} QNR on quiet blocks, author share {} QNR, \
+         {settled_leaves} leaves appended",
+        payment.included_at,
+        qnr(settling.value),
+        qnr(low),
+        qnr(high),
+        qnr(author_share)
     );
     assert!(
         author_share > 1,

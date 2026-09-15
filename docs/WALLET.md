@@ -1120,6 +1120,16 @@ refusal costs nothing:
    the fee is a public input of the proof, fixed at proving time, so it cannot
    be raised afterwards and the chain would refuse the settlement with
    `PayloadUnderpaid`.
+
+   A fee more than ten times the floor is refused as well. `--fee` is in QNR,
+   so `--fee 8` asks for a hundred times what the same flag meant when it took
+   a count of pool steps, and an inflated fee is not an error the chain
+   catches: it clears the floor, the spend settles, half the fee burns and the
+   block author takes the rest. Nothing is bought with it either, because the
+   pool gives every settlement submission the same constant priority
+   (`pallet_shielded::UNSIGNED_SETTLEMENT_PRIORITY`), deliberately, so there is
+   no bidding for a ceiling to interfere with. A fee between the floor and that
+   ceiling is accepted and printed with the floor beside it.
 2. **Selection.** Largest first, at most two notes, covering amount plus fee.
    The leaf circuit has two input slots, so a balance spread over three notes
    is not reachable in one spend and the wallet says so, naming what is

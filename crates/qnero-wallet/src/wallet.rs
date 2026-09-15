@@ -77,6 +77,37 @@ const fn parse_leaf_proofs(text: &str) -> usize {
     value
 }
 
+/// How far above the floor a caller's own fee may go before it is refused.
+///
+/// The pool gives every settlement submission the same constant priority
+/// (`pallet_shielded::UNSIGNED_SETTLEMENT_PRIORITY`), deliberately, so a fee
+/// above the floor buys nothing at all: half of it burns and the block author
+/// takes the rest. A fee an order of magnitude over is therefore a typing, and
+/// the one that is easy to type is a count of pool steps where QNR is wanted,
+/// which is a hundredfold overpay that `preflight` would otherwise wave
+/// through with nothing on screen to compare it against.
+const FEE_CEILING_MULTIPLE: u64 = 10;
+
+/// Whether a caller's own fee is so far over the floor that it reads as a
+/// typing rather than an intention.
+///
+/// The floor is clamped to one step before it is multiplied, so a runtime that
+/// declared `MinLeafFee` as zero on a slot carrying no ciphertext still has a
+/// ceiling rather than refusing every fee above nothing.
+fn fee_runs_away(fee: u64, floor: u64) -> bool {
+    fee > floor.max(1).saturating_mul(FEE_CEILING_MULTIPLE)
+}
+
+/// What [`Wallet::preflight`] settled before any circuit was built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Preflight {
+    /// The fee this spend will carry, in pool steps.
+    pub fee: u64,
+    /// The floor it had to clear. The same as `fee` unless a caller asked for
+    /// more, so printing the two together is what makes an overpay visible.
+    pub floor: u64,
+}
+
 /// Where an input note's Merkle path comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MerkleSource {
@@ -1416,17 +1447,18 @@ impl Wallet {
         amount: u64,
         requested_fee: Option<u64>,
         memo: &str,
-    ) -> Result<u64> {
+    ) -> Result<Preflight> {
         ensure_memo_pad_fits(metadata)?;
-        let fee = self.resolve_fee(metadata, to, memo, requested_fee)?;
+        let plan = self.resolve_fee(metadata, to, memo, requested_fee)?;
         let target = amount
-            .checked_add(fee)
-            .ok_or_else(|| anyhow!("{amount} plus {fee} overflows"))?;
+            .checked_add(plan.fee)
+            .ok_or_else(|| anyhow!("{amount} plus {} overflows", plan.fee))?;
         select_notes(self.store.spendable(), target)?;
-        Ok(fee)
+        Ok(plan)
     }
 
-    /// The fee this submission owes, or the caller's if it clears the floor.
+    /// The fee this submission owes, or the caller's if it clears the floor
+    /// without running away from it.
     ///
     /// The ciphertext sizes decide the floor and the fee is a public input
     /// fixed at proving time, so both are settled before a witness exists. A
@@ -1438,7 +1470,7 @@ impl Wallet {
         to: &Address,
         memo: &str,
         requested_fee: Option<u64>,
-    ) -> Result<u64> {
+    ) -> Result<Preflight> {
         let (probe_payment, probe_change) = self.probe_lengths(to, memo)?;
         ensure_ciphertext_fits(metadata, probe_payment, "payment")?;
         ensure_ciphertext_fits(metadata, probe_change, "change")?;
@@ -1448,7 +1480,7 @@ impl Wallet {
             submission_fee_floor(metadata, 1, (probe_payment + probe_change) as u64)
         );
         match requested_fee {
-            None => Ok(floor),
+            None => Ok(Preflight { fee: floor, floor }),
             Some(fee) if fee < floor => bail!(
                 "a fee of {} QNR is below this submission's floor of {}. The pallet asks \
                  MinLeafFee ({} QNR) plus 0.01 QNR per started {} bytes of ciphertext, and the \
@@ -1461,7 +1493,18 @@ impl Wallet {
                 metadata.ciphertext_bytes_per_fee_quantum,
                 probe_payment + probe_change
             ),
-            Some(fee) => Ok(fee),
+            Some(fee) if fee_runs_away(fee, floor) => bail!(
+                "a fee of {} QNR is {} times this submission's floor of {}, so it is refused as a \
+                 typing rather than an intention. The pool gives every settlement the same \
+                 constant priority, so a fee above the floor buys nothing: half of it burns and \
+                 the block author takes the rest. `--fee` is in QNR, so the floor here is `--fee \
+                 {}`.",
+                qnr(fee),
+                fee / floor.max(1),
+                qnr(floor),
+                qnr(floor)
+            ),
+            Some(fee) => Ok(Preflight { fee, floor }),
         }
     }
 
@@ -1547,7 +1590,7 @@ impl Wallet {
         // the path rebuild is an index into one chain's tree.
         self.store
             .ensure_genesis(&hex::encode(chain.genesis_hash()?))?;
-        let fee = self.resolve_fee(metadata, to, memo, requested_fee)?;
+        let fee = self.resolve_fee(metadata, to, memo, requested_fee)?.fee;
         let (probe_payment, probe_change) = self.probe_lengths(to, memo)?;
 
         let target = amount
@@ -2786,6 +2829,31 @@ pub struct SendReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression: `--fee` took a count of pool steps and now takes QNR,
+    /// so every `--fee 8` in a runbook, a shell history or a script resolves
+    /// to a hundred times what it used to mean. An inflated fee cleared the
+    /// floor, so nothing refused it: the spend proved and settled, half the
+    /// fee burned and the block author took the rest.
+    ///
+    /// A ceiling is sound here because the pool gives every settlement the
+    /// same constant priority, so a fee above the floor buys nothing at all
+    /// and there is no bidding to leave room for.
+    #[test]
+    fn a_fee_that_runs_away_from_the_floor_is_refused() {
+        // The floor for two real ciphertexts at this runtime, in pool steps.
+        let floor = 8;
+        assert!(!fee_runs_away(floor, floor), "the default is the floor");
+        assert!(!fee_runs_away(floor * FEE_CEILING_MULTIPLE, floor));
+        assert!(fee_runs_away(floor * FEE_CEILING_MULTIPLE + 1, floor));
+        // `--fee 8` meant eight steps and now means eight QNR, which is the
+        // hundredfold this exists to catch.
+        assert!(fee_runs_away(800, floor));
+        // And a floor of nothing still has a ceiling rather than refusing
+        // every fee over zero.
+        assert!(!fee_runs_away(FEE_CEILING_MULTIPLE, 0));
+        assert!(fee_runs_away(FEE_CEILING_MULTIPLE + 1, 0));
+    }
 
     /// The check this replaces compared `entry_rho(included_at, entry_index)`
     /// against a `rho` built from that same `entry_index`, which reduces to
