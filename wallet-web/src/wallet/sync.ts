@@ -526,6 +526,58 @@ function strip0x(hex: string): string {
 export const HEADER_WALK_LIMIT = 1024;
 
 /**
+ * Block headers a pipelined walk gets through in a second, measured.
+ *
+ * It is here to answer one question out loud: how long a wallet with no
+ * birthday is going to take to read a chain from block zero. A number nobody
+ * quotes is a progress bar somebody watches for an hour, which is what this
+ * round started from.
+ *
+ * Measured against the live testnet through its CDN, which is the slow case
+ * and the honest one: a dev node on loopback answers far faster and would
+ * quote an estimate nobody on a real chain will see. `docs/BENCH.md` carries
+ * the runs, and `crates/qnero-wallet/src/wallet.rs` carries the same number
+ * for the command-line wallet.
+ */
+export const MEASURED_HEADERS_PER_SECOND = 400;
+
+/**
+ * How long a full scan of `blocks` blocks takes at the measured rate, in whole
+ * seconds, rounded up and never zero.
+ */
+export function fullScanSeconds(blocks: number): number {
+  return Math.max(1, Math.ceil(blocks / Math.max(MEASURED_HEADERS_PER_SECOND, 1)));
+}
+
+/**
+ * The sentence a wallet about to read a chain whole prints.
+ *
+ * `crates/qnero-wallet/src/wallet.rs` carries the identical literal as
+ * `FULL_SCAN_ESTIMATE` and `tests/leaf-typing.test.ts` reads it out of that
+ * file to hold the two together, because two wallets quoting two different
+ * waits for one chain is two operators told different things about the same
+ * thing.
+ */
+export const FULL_SCAN_ESTIMATE =
+  'this wallet records no birthday, so the first sync reads the chain from block zero: ' +
+  '{blocks} block headers, {spell} at the rate this build measured, and the leaves under them ' +
+  'on top of that';
+
+/** That estimate as a sentence, for a wallet about to read a chain whole. */
+export function fullScanEstimate(blocks: number): string {
+  const seconds = fullScanSeconds(blocks);
+  const spell = (count: number, unit: string): string =>
+    count === 1 ? `about one ${unit}` : `about ${count} ${unit}s`;
+  const wait =
+    seconds < 90
+      ? spell(seconds, 'second')
+      : seconds < 5400
+        ? spell(Math.ceil(seconds / 60), 'minute')
+        : spell(Math.ceil(seconds / 3600), 'hour');
+  return FULL_SCAN_ESTIMATE.replace('{blocks}', String(blocks)).replace('{spell}', wait);
+}
+
+/**
  * Walk the headers, check every block's leaf range against the root it
  * published, and say which leaf of each block is its coinbase position.
  *

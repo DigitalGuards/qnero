@@ -559,8 +559,18 @@ export class WalletStore {
 /**
  * Create a store for a seed, sealed under a passphrase.
  *
- * `genesisHash` is deliberately null: it is recorded by the first operation
- * that commits, never at open. See [`StoreMeta.genesisHash`].
+ * `genesisHash` is deliberately null unless a birthday is being recorded with
+ * it: it is otherwise recorded by the first operation that commits, never at
+ * open. See [`StoreMeta.genesisHash`].
+ *
+ * `birthday` is where this wallet starts reading the chain, already rounded
+ * down to its epoch by the caller. It is written as the store's first
+ * checkpoint and its watermark is the store's first watermark, so every rule
+ * that stands on a checkpoint stands on this one and nothing in the sync knows
+ * it from a checkpoint an earlier pass wrote. The genesis goes with it,
+ * because a birthday is a statement about one chain and a store carrying one
+ * that named no chain would take its binding from whichever node it was
+ * pointed at next.
  */
 export async function createStore(
   db: IDBDatabase,
@@ -570,6 +580,7 @@ export async function createStore(
     key: CryptoKey;
     saltHex: string;
     iterations: number;
+    birthday?: { checkpoint: SyncCheckpoint; genesisHash: string } | null;
   },
 ): Promise<WalletStore> {
   const store = WalletStore.unlocked(db, options.address, options.key);
@@ -579,13 +590,15 @@ export async function createStore(
     options.seedHex,
   );
   const now = Date.now();
+  const birthday = options.birthday ?? null;
   const meta: StoreMeta = {
     id: 'store',
     schemaVersion: STORE_VERSION,
     address: options.address,
-    genesisHash: null,
-    lastSyncedBlock: 0,
-    nextLeaf: 0,
+    genesisHash: birthday === null ? null : birthday.genesisHash,
+    birthday: birthday === null ? null : birthday.checkpoint,
+    lastSyncedBlock: birthday === null ? 0 : birthday.checkpoint.blockNumber,
+    nextLeaf: birthday === null ? 0 : birthday.checkpoint.nextLeaf,
     kdf: {
       name: 'PBKDF2',
       hash: 'SHA-256',
@@ -596,9 +609,15 @@ export async function createStore(
     updatedAt: now,
     upgrades: [],
   };
-  const transaction = db.transaction([STORE_META, STORE_VAULT], 'readwrite');
+  const transaction = db.transaction(
+    [STORE_META, STORE_VAULT, STORE_CHECKPOINTS],
+    'readwrite',
+  );
   transaction.objectStore(STORE_META).put(meta);
   transaction.objectStore(STORE_VAULT).put({ id: 'seed', secret });
+  if (birthday !== null) {
+    transaction.objectStore(STORE_CHECKPOINTS).put(birthday.checkpoint);
+  }
   await transactionDone(transaction);
   return store;
 }

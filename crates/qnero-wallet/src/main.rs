@@ -8,16 +8,18 @@ use qnero_notes::Address;
 use qnero_prover::WalletProver;
 use qnero_wallet::chain::Chain;
 use qnero_wallet::dev_account::TransparentKey;
-use qnero_wallet::keys::{create_seed, default_seed_path, store_path_for};
+use qnero_wallet::keys::{create_seed, default_seed_path, import_seed, store_path_for};
 use qnero_wallet::memo::{memo_budget_within, render_memo_within, terminal_columns, MEMO_BYTES};
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{RpcClient, DEFAULT_NODE_URL};
+use qnero_wallet::store;
 use qnero_wallet::store::{NoteRow, PendingKind, StoredNote};
 use qnero_wallet::units::{qnr, steps_from_qnr};
 use qnero_wallet::wallet::{
-    ChainBinding, EntryRhoCheck, MerkleSource, SyncOptions, Wallet, ENTRY_WALK_LIMIT,
-    NUM_LEAF_PROOFS,
+    full_scan_estimate, ChainBinding, EntryRhoCheck, MerkleSource, SyncOptions, Wallet,
+    ENTRY_WALK_LIMIT, NUM_LEAF_PROOFS,
 };
+use zeroize::Zeroize;
 
 /// Amounts are in QNR, and value in the pool moves in steps of 0.01 QNR.
 #[derive(Debug, Parser)]
@@ -37,11 +39,27 @@ note store beside it holds every note's rho and r in the clear. Anyone who can
 read those two files can spend every note this wallet holds and can link every
 spend it has made. Use it on a dev chain and nowhere else.
 
+WHERE A WALLET STARTS READING. keygen and restore record a birthday: the block
+this wallet was created at, rounded DOWN to a multiple of 1024 blocks, with the
+leaf count the chain held there. A wallet cannot have been paid into a leaf
+that existed before it did, so the first sync starts there rather than at block
+zero. It is recorded as the store's first checkpoint, which makes it this
+node's claim like every checkpoint: an honest node that disagrees at that
+height rewinds it and the scan starts lower. restore --restore-height is the
+same number for a wallet that already exists, and a height ABOVE the block a
+note arrived in is a note this wallet never reads, with no warning anywhere and
+sync --rescan the only recovery. With no height at all the first sync reads the
+whole chain, which is always correct, and restore prints what it will cost.
+
 WHAT THE NODE LEARNS. A scan reads the whole leaf range and the whole settled
 nullifier set, and a spend rebuilds the commitment tree locally, so no request
-this wallet makes names a note as its own. Passing --merkle-rpc gives that up:
-it asks the node for a proof of each leaf being spent, seconds before the
-settlement that publishes the matching nullifiers.
+this wallet makes names a note as its own. The header walk reads block hashes
+as a list and fetches headers in JSON-RPC batches, which asks for the same
+public range in fewer requests and names nothing new; a recorded birthday is
+the one thing a node learns that it did not before, which is why it is a coarse
+epoch. Passing --merkle-rpc gives the second rule up: it asks the node for a
+proof of each leaf being spent, seconds before the settlement that publishes
+the matching nullifiers.
 
 WHAT EVERY CHAIN READER LEARNS. Memos are padded to one size and the payment
 takes either output slot at random, so a settlement's two ciphertexts do not
@@ -83,6 +101,33 @@ enum Command {
     /// The seed is written as hex with mode 0600 and is not encrypted. This is
     /// dev-grade key storage; see the top-level help.
     Keygen,
+    /// Restore a wallet from a spend key read on stdin.
+    ///
+    /// The key is read from standard input rather than taken as an argument,
+    /// because every process listing on the machine can read a command line.
+    /// 64 hex characters, with spaces and line breaks ignored, so the grouped
+    /// form the browser wallet shows goes straight back in:
+    ///
+    ///     qnero-wallet restore --restore-height 197000 < key.txt
+    ///
+    /// --restore-height is the chain height this wallet was created at. With
+    /// it, the first sync starts there instead of at block zero. Without it,
+    /// the first sync reads the whole chain, which is always correct and on a
+    /// long chain is slow; the command prints what that will cost.
+    Restore {
+        /// The chain height this wallet was created at.
+        ///
+        /// Rounded DOWN to a multiple of 1024 blocks before it is recorded, so
+        /// what every node this wallet syncs against is told is a coarse epoch
+        /// rather than the moment the wallet was made. Down, so a height a
+        /// little too high still starts below the first note.
+        ///
+        /// A height ABOVE the block a note arrived in is a note this wallet
+        /// never reads and a balance quietly short. If you are not sure, leave
+        /// it out or give a height you are sure is early.
+        #[arg(long)]
+        restore_height: Option<u32>,
+    },
     /// Print this wallet's address.
     Address,
     /// Print the miner key a block author's node is configured with.
@@ -301,6 +346,67 @@ fn print_notes(rows: &[NoteRow<'_>]) {
     }
 }
 
+/// Record where a wallet starts, and say what was recorded.
+///
+/// `height` says which of the two paths this is: `None` for a wallet created
+/// now, which starts at the node's own head, and `Some(height)` for a restore,
+/// where `Some(None)` is a restore that gave no height at all.
+///
+/// A node that cannot be reached is reported and not an error. The seed is
+/// already on disk by the time this runs, and a wallet with no birthday reads
+/// the chain from block zero, which is correct and slow. Failing the command
+/// here would leave a seed written and a person believing it was not.
+fn report_birthday(node: &str, seed_path: &std::path::Path, height: Option<Option<u32>>) {
+    let asked = height.flatten();
+    if height == Some(None) {
+        // A restore with no height, which is a deliberate full scan. There is
+        // nothing to record and the estimate is the whole point.
+        match head_of(node) {
+            Ok(head) => println!("scan    {}", full_scan_estimate(head)),
+            Err(_) => println!(
+                "scan    this wallet records no birthday, so the first sync reads the chain \
+                 from block zero"
+            ),
+        }
+        return;
+    }
+    let recorded = (|| -> Result<store::SyncCheckpoint> {
+        let rpc = RpcClient::new(node);
+        let chain = Chain::new(&rpc);
+        let mut wallet = Wallet::open(seed_path)?;
+        wallet.record_birthday(&chain, asked)
+    })();
+    match recorded {
+        Ok(checkpoint) => {
+            println!(
+                "birthday block {} ({} leaves), rounded down from {}",
+                checkpoint.block_number,
+                checkpoint.next_leaf,
+                asked
+                    .map(|height| height.to_string())
+                    .unwrap_or_else(|| "this node's head".to_string())
+            );
+            println!(
+                "        the first sync starts there. It is this node's claim, like every \
+                 checkpoint: an honest node that disagrees at that height rewinds it."
+            );
+        }
+        Err(error) => {
+            println!("birthday not recorded: {error:#}");
+            println!(
+                "        the first sync reads the chain from block zero, which is correct and \
+                 slow."
+            );
+        }
+    }
+}
+
+/// The node's head height, for an estimate and nothing else.
+fn head_of(node: &str) -> Result<u32> {
+    let rpc = RpcClient::new(node);
+    Ok(Chain::new(&rpc).head()?.number)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let seed_path = cli.file.clone().unwrap_or_else(default_seed_path);
@@ -311,6 +417,28 @@ fn main() -> Result<()> {
             println!("seed    {}", seed_path.display());
             println!("store   {}", store_path_for(&seed_path).display());
             println!("address {}", key.address().encode());
+            // A wallet created now cannot have been paid before now, so the
+            // store starts at the head this node is at rather than at block
+            // zero. A node that cannot be reached is not an error here: the
+            // seed is already written, and a wallet with no birthday reads the
+            // whole chain, which is correct and slow.
+            report_birthday(&cli.node, &seed_path, None);
+            println!();
+            println!(
+                "The seed is unencrypted hex at mode 0600. Anyone who can read it can spend \
+                 every note this wallet holds."
+            );
+        }
+        Command::Restore { restore_height } => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                .context("failed to read the spend key from stdin")?;
+            let key = import_seed(&seed_path, &text)?;
+            text.zeroize();
+            println!("seed    {}", seed_path.display());
+            println!("store   {}", store_path_for(&seed_path).display());
+            println!("address {}", key.address().encode());
+            report_birthday(&cli.node, &seed_path, Some(restore_height));
             println!();
             println!(
                 "The seed is unencrypted hex at mode 0600. Anyone who can read it can spend \
@@ -363,6 +491,17 @@ fn main() -> Result<()> {
                     None => {
                         println!("store chain       not recorded yet; the next sync records it")
                     }
+                }
+                match wallet.store.birthday.as_ref() {
+                    Some(birthday) => println!(
+                        "wallet birthday   block {} ({} leaves), this node's claim like every \
+                         checkpoint",
+                        birthday.block_number, birthday.next_leaf
+                    ),
+                    None => println!(
+                        "wallet birthday   none: {}",
+                        full_scan_estimate(head.number)
+                    ),
                 }
                 println!("last synced block {}", wallet.store.last_synced_block);
                 println!("next leaf to scan {}", wallet.store.next_leaf);

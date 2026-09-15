@@ -29,8 +29,8 @@ use crate::metadata::ChainMetadata;
 use crate::rpc::hex_0x;
 use crate::select::select_notes;
 use crate::store::{
-    NoteOrigin, PendingKind, PendingNote, RejectedNote, SecretHex, SpentDirection, StoredNote,
-    WalletStore,
+    self, NoteOrigin, PendingKind, PendingNote, RejectedNote, SecretHex, SpentDirection,
+    StoredNote, WalletStore,
 };
 use crate::typing::{
     check_chunk_appended_nothing, seed_frontier, type_chunk, LeafKind, MinerView, TypedLeaf,
@@ -195,6 +195,60 @@ pub const ENTRY_WALK_LIMIT: u64 = 100_000;
 /// chunk covers 34 hours of chain where at 12 s it covered 3.4, so a wallet
 /// opened daily now catches up inside one chunk.
 pub const HEADER_WALK_LIMIT: u32 = 1024;
+
+/// Block headers a pipelined walk gets through in a second, measured.
+///
+/// It is here to answer one question out loud: how long a wallet with no
+/// birthday is going to take to read a chain from block zero. A number nobody
+/// quotes is a progress bar somebody watches for an hour, which is what this
+/// round started from.
+///
+/// Measured against the live testnet through its CDN, which is the slow case
+/// and the honest one: a dev node on loopback answers far faster and would
+/// quote an estimate nobody on a real chain will see. `docs/BENCH.md` carries
+/// the runs, and `wallet-web/src/wallet/sync.ts` carries the same number for
+/// the browser.
+pub const MEASURED_HEADERS_PER_SECOND: u32 = 400;
+
+/// How long a full scan of `blocks` blocks takes at the measured rate, in
+/// whole seconds, rounded up and never zero.
+pub fn full_scan_seconds(blocks: u32) -> u32 {
+    blocks.div_ceil(MEASURED_HEADERS_PER_SECOND.max(1)).max(1)
+}
+
+/// The sentence a wallet about to read a chain whole prints.
+///
+/// A constant rather than an inline format string, because the browser wallet
+/// prints it too and `wallet-web/tests/leaf-typing.test.ts` reads this literal
+/// out of this file to hold the two identical. Two wallets quoting two
+/// different waits for one chain is two operators told different things about
+/// the same thing.
+pub const FULL_SCAN_ESTIMATE: &str =
+    "this wallet records no birthday, so the first sync reads the chain from block zero: \
+     {blocks} block headers, {spell} at the rate this build measured, and the leaves under them \
+     on top of that";
+
+/// That estimate as a sentence, for a wallet about to read a chain whole.
+pub fn full_scan_estimate(blocks: u32) -> String {
+    let seconds = full_scan_seconds(blocks);
+    let spell = |count: u32, unit: &str| -> String {
+        if count == 1 {
+            format!("about one {unit}")
+        } else {
+            format!("about {count} {unit}s")
+        }
+    };
+    let spell = if seconds < 90 {
+        spell(seconds, "second")
+    } else if seconds < 5400 {
+        spell(seconds.div_ceil(60), "minute")
+    } else {
+        spell(seconds.div_ceil(3600), "hour")
+    };
+    FULL_SCAN_ESTIMATE
+        .replace("{blocks}", &blocks.to_string())
+        .replace("{spell}", &spell)
+}
 
 /// How many per-leaf detector warnings one pass writes out in full.
 ///
@@ -382,6 +436,60 @@ impl Wallet {
 
     pub fn save(&self) -> Result<()> {
         self.store.save(&self.store_path)
+    }
+
+    /// Record where this wallet starts, and bind the store to this chain.
+    ///
+    /// `height` is the operator's restore height, or `None` for a wallet being
+    /// created now, which starts at the node's own head. Either way it is
+    /// rounded **down** to a multiple of [`store::BIRTHDAY_EPOCH`] before it is
+    /// recorded, so what the store holds and what every later node is told is a
+    /// coarse public epoch rather than the moment this wallet was made.
+    ///
+    /// Three reads, all public: the head, the hash of the epoch block, and the
+    /// leaf count that block's state carried. The leaf count is the watermark,
+    /// and it is checked on the first sync: the fold of the leaves under it has
+    /// to reach the `zkTreeRoot` the epoch block's own header published.
+    ///
+    /// The genesis binding is written here as well, because this is an
+    /// operation that commits: a birthday is a statement about one chain, and a
+    /// store carrying one that named no chain would take its binding from
+    /// whichever node it was pointed at next.
+    ///
+    /// A height above the node's head is refused by name. Everything else is
+    /// the operator's claim and is taken: `docs/WALLET.md` says what a wrong
+    /// one costs.
+    pub fn record_birthday(
+        &mut self,
+        chain: &Chain,
+        height: Option<u32>,
+    ) -> Result<store::SyncCheckpoint> {
+        let genesis = hex::encode(chain.genesis_hash()?);
+        self.store
+            .ensure_genesis(&genesis)
+            .with_context(|| format!("{}", self.store_path.display()))?;
+        let head = chain.head()?;
+        let wanted = height.unwrap_or(head.number);
+        if wanted > head.number {
+            bail!(
+                "this node's head is block {} and the height given is {wanted}, which names a \
+                 block nobody has yet. A birthday above the chain's own head would put this \
+                 wallet's watermark past every leaf there is. Nothing has been changed.",
+                head.number
+            );
+        }
+        let block_number = store::birthday_epoch_of(wanted);
+        let block_hash = chain.block_hash(block_number)?;
+        let next_leaf = chain.leaf_count_at(&block_hash)?;
+        let checkpoint = store::SyncCheckpoint {
+            block_number,
+            block_hash: hex::encode(block_hash),
+            next_leaf,
+        };
+        self.store.record_birthday(checkpoint.clone())?;
+        self.store.genesis_hash = Some(genesis);
+        self.save()?;
+        Ok(checkpoint)
     }
 
     /// Scan from the last synced leaf to the tree's current count.

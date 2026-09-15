@@ -378,7 +378,7 @@ impl ChainView {
             .unwrap_or([0u8; 32])
     }
 
-    fn number_of(&self, hash: &str) -> Option<u32> {
+    pub fn number_of(&self, hash: &str) -> Option<u32> {
         let wanted = hash.trim_start_matches("0x").to_ascii_lowercase();
         self.hashes
             .iter()
@@ -592,6 +592,30 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
         "state_getRuntimeVersion" => Ok(json!({"specVersion": 152, "transactionVersion": 6})),
         "state_getStorage" => {
             let key = params.get(0).and_then(Value::as_str).unwrap_or_default();
+            // `ZkTree::LeafCount` is answered as of the block asked about,
+            // which is the one piece of history this node keeps. A wallet
+            // recording a birthday reads the count at the epoch block it is
+            // starting from, and a fixture that answered the head's count
+            // there would hand it a watermark above leaves that block never
+            // held. Every other key is answered as it stands: the maps this
+            // fixture serves only grow, and no test reads one as of an older
+            // block.
+            let count_key = format!(
+                "0x{}",
+                hex::encode(qnero_wallet::scale::storage_prefix("ZkTree", "LeafCount"))
+            );
+            if key == count_key && state.short_leaf_count.is_none() {
+                if let Some(at) = params.get(1).and_then(Value::as_str) {
+                    if let Some(number) = state.chain().number_of(at) {
+                        if number < state.head_number {
+                            let dates = leaf_blocks(state);
+                            let count =
+                                dates.iter().filter(|block| **block <= number).count() as u64;
+                            return Ok(json!(format!("0x{}", hex::encode(count.to_le_bytes()))));
+                        }
+                    }
+                }
+            }
             Ok(match storage_at(state, key) {
                 Some(value) => json!(format!("0x{}", hex::encode(value))),
                 None => Value::Null,

@@ -46,11 +46,37 @@ use crate::keys::{refuse_if_readable_beyond_owner, sync_parent_dir};
 /// node it runs against. A version-1 store is refused;
 /// deleting it and re-syncing recovers every unspent note, because every
 /// note's plaintext is on chain inside its ciphertext.
-pub const STORE_VERSION: u32 = 6;
+///
+/// Version 7 added `birthday`, the block a wallet was created or restored at.
+/// A version-6 store reads as one with no birthday, which is a full scan: the
+/// same thing every store did before the field existed. A version-6 build
+/// meeting a version-7 file ignores the field and scans everything as well, so
+/// the bump costs time and never a note.
+pub const STORE_VERSION: u32 = 7;
 
 /// The oldest store shape this wallet still upgrades. Anything older is
 /// refused.
 const OLDEST_UPGRADABLE_VERSION: u32 = 2;
+
+/// How coarse a recorded birthday is, in blocks.
+///
+/// A birthday is a public number: it is the bottom of the header walk, so
+/// every node this wallet ever syncs against is told it. Recorded exactly, it
+/// is the wallet's creation time to the block, which is a fingerprint that
+/// follows the wallet across nodes and across syncs. Rounded down to a
+/// multiple of this, it is a coarse epoch that a great many wallets share, and
+/// at the public chain's 120 s target one epoch is a day and a half.
+///
+/// Rounded **down**, always, in both wallets and on both paths: a birthday
+/// above the block a note arrived in is a note the wallet never reads. The
+/// same number as `HEADER_WALK_LIMIT`, because one epoch is then one chunk of
+/// the walk, and `wallet-web/src/wallet/model.ts` carries it for the browser.
+pub const BIRTHDAY_EPOCH: u32 = 1024;
+
+/// The epoch a height sits in: the height itself, rounded down.
+pub fn birthday_epoch_of(height: u32) -> u32 {
+    height - (height % BIRTHDAY_EPOCH)
+}
 
 /// Sync checkpoints kept, newest last.
 ///
@@ -115,6 +141,30 @@ pub struct WalletStore {
     /// and a single `send` writes the store three times.
     #[serde(skip)]
     pub used_nullifiers: BTreeSet<String>,
+    /// The block this wallet was created or restored at, and the leaf count the
+    /// chain held there.
+    ///
+    /// A wallet cannot have received a note into a leaf that existed before it
+    /// did, so a wallet that records where it started never walks or scans the
+    /// history below it. What that saves is the header walk under the birthday
+    /// and every ciphertext under its leaf count; what it does not save is the
+    /// leaf hashes under the watermark, which the first sync still reads to
+    /// seed the fold, and that read is what checks this recorded leaf count
+    /// against the birthday block's own `zkTreeRoot`.
+    ///
+    /// **It is the node's claim, like every checkpoint.** The block hash here
+    /// was read from one node at one moment and nothing verified it, so a
+    /// wallet created against a node serving a branch of its own records that
+    /// branch's block. That is Bound B and the defence is the same defence:
+    /// the first honest node disagrees at that height, the fork walk rewinds
+    /// and the scan starts lower. A restore height the operator supplies is a
+    /// second claim on top, and a wrong one costs notes rather than time: see
+    /// `docs/WALLET.md`.
+    ///
+    /// `None` in a store written before version 7, and in one restored with no
+    /// height, and either way that is a full scan from leaf zero.
+    #[serde(default)]
+    pub birthday: Option<SyncCheckpoint>,
     /// The blocks this wallet finished a sync at, and the leaf watermark each
     /// one left, oldest first.
     ///
@@ -165,6 +215,8 @@ impl core::fmt::Debug for WalletStore {
             .field("pending", &self.pending.len())
             .field("rejected", &self.rejected.len())
             .field("used_nullifiers", &self.used_nullifiers.len())
+            // Public chain data: a block number and a block hash.
+            .field("birthday", &self.birthday)
             .field("checkpoints", &self.checkpoints.len())
             .finish()
     }
@@ -555,8 +607,37 @@ impl WalletStore {
             pending: Vec::new(),
             rejected: Vec::new(),
             used_nullifiers: BTreeSet::new(),
+            birthday: None,
             checkpoints: Vec::new(),
         }
+    }
+
+    /// Record where this wallet starts, and start it there.
+    ///
+    /// The birthday is the store's first checkpoint and the watermark it
+    /// leaves is the store's first watermark, so every rule that already
+    /// stands on a checkpoint stands on this one: the header walk takes it as
+    /// its trusted bottom, the fork walk rewinds through it, and the first
+    /// sync folds the leaves under it against the `zkTreeRoot` of the block it
+    /// names. Nothing else in the sync knows a birthday from a checkpoint an
+    /// earlier pass wrote, which is the point.
+    ///
+    /// Refused on a store that has already read a leaf or already carries one:
+    /// a watermark that jumped forward would step over leaves this wallet has
+    /// read and notes it has recorded.
+    pub fn record_birthday(&mut self, checkpoint: SyncCheckpoint) -> Result<()> {
+        if self.birthday.is_some() || !self.checkpoints.is_empty() || self.next_leaf != 0 {
+            bail!(
+                "this store already starts at leaf {} and a birthday is only recorded on a store \
+                 that has never read one. Nothing has been changed.",
+                self.next_leaf
+            );
+        }
+        self.last_synced_block = checkpoint.block_number;
+        self.next_leaf = checkpoint.next_leaf;
+        self.checkpoints = vec![checkpoint.clone()];
+        self.birthday = Some(checkpoint);
+        Ok(())
     }
 
     /// Load, or start a fresh store when the file does not exist.
@@ -620,6 +701,12 @@ impl WalletStore {
             // walks the tree from leaf zero and picks them up; the notes
             // already held are kept either way. `docs/WALLET.md` says so under
             // the store format.
+            //
+            // Version 6 to 7 adds `birthday`, which serde reads as `None`: a
+            // store written before the field existed scanned the whole chain
+            // and goes on doing so, which is correct and slow. There is no
+            // height to infer for it, because the oldest leaf it read is the
+            // oldest leaf the chain had.
             if store.version < 3 {
                 store.checkpoints.clear();
             }

@@ -1,10 +1,23 @@
 /**
  * Restoring from a seed.
  *
- * The only input is the 32 bytes. There is no server-side account and no
- * "restore height": a scan reads the whole leaf range, and it reads it whole
- * on purpose, because a scan that started at a height the wallet named would
- * be a scan that told the node roughly when this wallet was created.
+ * The 32 bytes, and one optional number: the chain height this wallet was
+ * created at. A scan with no height reads the whole leaf range from block
+ * zero, which is always correct and on a long chain is slow, and the screen
+ * says how slow before anybody chooses it.
+ *
+ * A height is a claim about this wallet and it is recorded rounded **down** to
+ * a multiple of `BIRTHDAY_EPOCH`, so what the store holds and what every node
+ * this wallet ever syncs against is told is a coarse public epoch rather than
+ * the moment the wallet was made. Down, so a height a little too high still
+ * starts below the first note. A height above the block a note arrived in is a
+ * note this wallet never reads, and the field says that in as many words.
+ *
+ * A date is taken as well as a number, because somebody restoring a wallet
+ * remembers when they made it and not what block the chain was on. It is
+ * converted by counting back from the node's head at the chain's own target
+ * block time, and then a whole epoch is given away on top, because the
+ * conversion is arithmetic over a block time that only holds on average.
  */
 
 import type { ReactNode } from 'react';
@@ -14,10 +27,41 @@ import { Button } from '../components/UI/Button';
 import { Field, Textarea, Input } from '../components/UI/Field';
 import { Panel, Prose } from '../components/UI/Panel';
 import { MIN_PASSPHRASE, seedHexIsWellFormed } from '../wallet/crypto';
+import { BIRTHDAY_EPOCH, birthdayEpochOf } from '../wallet/model';
+import { fullScanEstimate } from '../wallet/sync';
 
+/**
+ * A block number or a date, as a height, or `null` for neither.
+ *
+ * A bare number is a height. Anything `Date.parse` reads is a date, turned
+ * into a height by counting back from the head at the chain's own target block
+ * time and then dropped a whole epoch, because that conversion is arithmetic
+ * over a block time that holds on average and not block by block. Both are
+ * then rounded down to the epoch where they are recorded.
+ */
+export function heightFromRestoreField(
+  typed: string,
+  head: number | null,
+  targetBlockTimeMs: number | null,
+): number | null {
+  const trimmed = typed.trim();
+  if (trimmed === '') {
+    return null;
+  }
+  if (/^[0-9]+$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+  const when = Date.parse(trimmed);
+  if (Number.isNaN(when) || head === null || targetBlockTimeMs === null || targetBlockTimeMs <= 0) {
+    return null;
+  }
+  const back = Math.ceil((Date.now() - when) / targetBlockTimeMs);
+  return Math.max(head - back - BIRTHDAY_EPOCH, 0);
+}
 
 interface RestoreForm {
   seed: string;
+  restoreHeight: string;
   passphrase: string;
   repeat: string;
 }
@@ -26,17 +70,33 @@ export function RestoreWallet({
   onCancel,
   onRestore,
   busy,
+  head,
+  targetBlockTimeMs,
 }: {
   onCancel: () => void;
-  onRestore: (seedHex: string, passphrase: string) => void;
+  onRestore: (seedHex: string, passphrase: string, restoreHeight: number | null) => void;
   busy: boolean;
+  /** The node's head, for the estimate and for reading a date as a height. */
+  head: number | null;
+  /** The chain's own target block time, for the same reason. */
+  targetBlockTimeMs: number | null;
 }): ReactNode {
   const form = useForm<RestoreForm>({
-    defaultValues: { seed: '', passphrase: '', repeat: '' },
+    defaultValues: { seed: '', restoreHeight: '', passphrase: '', repeat: '' },
   });
   // `useWatch` rather than `form.watch`: the subscription form is the one the
   // React compiler can reason about, and it re-renders this field alone.
   const typed = useWatch({ control: form.control, name: 'seed' }).replace(/\s+/g, '');
+  const typedHeight = useWatch({ control: form.control, name: 'restoreHeight' });
+  const height = heightFromRestoreField(typedHeight, head, targetBlockTimeMs);
+  const heightHint =
+    typedHeight.trim() === ''
+      ? head === null
+        ? 'empty scans the whole chain from block zero'
+        : `empty scans the whole chain: ${fullScanEstimate(head)}`
+      : height === null
+        ? 'that is neither a block number nor a date this wallet can read'
+        : `recorded as block ${birthdayEpochOf(height)}, the epoch below it`;
 
   return (
     <Panel title="Use an existing wallet">
@@ -50,7 +110,11 @@ export function RestoreWallet({
         className="mt-3"
         onSubmit={(event) => {
           void form.handleSubmit((values) => {
-            onRestore(values.seed.replace(/\s+/g, '').toLowerCase(), values.passphrase);
+            onRestore(
+              values.seed.replace(/\s+/g, '').toLowerCase(),
+              values.passphrase,
+              heightFromRestoreField(values.restoreHeight, head, targetBlockTimeMs),
+            );
           })(event);
         }}
       >
@@ -72,6 +136,30 @@ export function RestoreWallet({
             })}
           />
         </Field>
+        <Field
+          label="Restore height (optional)"
+          htmlFor="restore-height"
+          hint={heightHint}
+        >
+          <Input
+            id="restore-height"
+            data-testid="restore-height"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="the chain height when this wallet was created, leave empty to scan everything"
+            {...form.register('restoreHeight')}
+          />
+        </Field>
+        <Prose>
+          <p className="text-meta text-muted">
+            A block number, or a date such as 2026-03-14. It is recorded rounded down to the
+            nearest {BIRTHDAY_EPOCH} blocks, so what the nodes this wallet syncs against are told
+            is a coarse epoch rather than the day it was made. A height{' '}
+            <strong className="text-ink">above</strong> the block a transfer arrived in is a
+            transfer this wallet never reads and a balance quietly short, so if you are not sure,
+            leave it empty or give a height you are sure is early.
+          </p>
+        </Prose>
         <Field
           label="Passphrase"
           htmlFor="passphrase"

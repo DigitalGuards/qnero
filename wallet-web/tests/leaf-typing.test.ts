@@ -26,7 +26,9 @@ import { authorLabelFromHeader, type RawChainHeader } from '../src/chain/anchor'
 
 import {
   CIPHERTEXT_SUBSTITUTION_HINT,
+  fullScanEstimate,
   HEADER_WALK_LIMIT,
+  MEASURED_HEADERS_PER_SECOND,
   movedLeafWarning,
   movedOverflowWarning,
   runSync,
@@ -37,7 +39,7 @@ import {
   type SyncChain,
   type SyncCrypto,
 } from '../src/wallet/sync';
-import { STORE_VERSION, type StoreMeta } from '../src/wallet/model';
+import { BIRTHDAY_EPOCH, STORE_VERSION, type StoreMeta } from '../src/wallet/model';
 import {
   chainParts,
   cryptoParts,
@@ -74,6 +76,7 @@ function meta(): StoreMeta {
     schemaVersion: STORE_VERSION,
     address: 'qn1test',
     genesisHash: GENESIS,
+    birthday: null,
     lastSyncedBlock: 0,
     nextLeaf: 0,
     kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 600_000, saltHex: '00'.repeat(16) },
@@ -1418,10 +1421,38 @@ describe('the sentences both wallets print', () => {
         values: { more: '1', '': 'leaf' },
         browser: unplaceableOverflowWarning(1),
       },
+      {
+        name: 'the wait a wallet with no birthday is quoted',
+        marker: 'pub const FULL_SCAN_ESTIMATE: &str =',
+        values: { blocks: '262980', spell: 'about 11 minutes' },
+        browser: fullScanEstimate(262_980),
+      },
     ];
 
   it.each(CASES)('$name is identical in both wallets', ({ marker, values, browser }) => {
     expect(rustSentence(marker, values)).toBe(browser);
+  });
+
+  it('quotes the same measured rate in both wallets', () => {
+    // The sentence above says "at the rate this build measured", so a rate
+    // that moved on one side alone would leave both wallets printing a true
+    // sentence about two different waits.
+    const declared = /pub const MEASURED_HEADERS_PER_SECOND: u32 = (\d+);/.exec(RUST);
+    expect(declared).not.toBeNull();
+    expect(Number(declared?.[1])).toBe(MEASURED_HEADERS_PER_SECOND);
+  });
+
+  it('rounds a birthday to the same epoch in both wallets', () => {
+    // A birthday is public and it is coarse on purpose. Two wallets rounding
+    // to two different epochs would put one of them on a finer grid than the
+    // other, which is a fingerprint the coarse one does not carry.
+    const store = readFileSync(
+      new URL('../../crates/qnero-wallet/src/store.rs', import.meta.url),
+      'utf8',
+    );
+    const declared = /pub const BIRTHDAY_EPOCH: u32 = (\d+);/.exec(store);
+    expect(declared).not.toBeNull();
+    expect(Number(declared?.[1])).toBe(BIRTHDAY_EPOCH);
   });
 
   it('caps the per-leaf warnings at the same count in both wallets', () => {

@@ -32,7 +32,7 @@
 import type { Envelope } from './crypto';
 
 /** `crates/qnero-wallet/src/store.rs`'s `STORE_VERSION`. */
-export const STORE_VERSION = 6;
+export const STORE_VERSION = 7;
 
 /** The oldest schema this build upgrades rather than refuses. */
 export const OLDEST_UPGRADABLE_VERSION = 2;
@@ -121,6 +121,28 @@ export interface SyncCheckpoint {
 /** At most this many checkpoints are kept, newest last. */
 export const MAX_CHECKPOINTS = 16;
 
+/**
+ * How coarse a recorded birthday is, in blocks.
+ *
+ * A birthday is a public number: it is the bottom of the header walk, so every
+ * node this wallet ever syncs against is told it. Recorded exactly, it is the
+ * wallet's creation time to the block, which is a fingerprint that follows the
+ * wallet across nodes and across syncs. Rounded down to a multiple of this, it
+ * is a coarse epoch that a great many wallets share, and at the public chain's
+ * 120 s target one epoch is a day and a half.
+ *
+ * Rounded **down**, always, on both paths: a birthday above the block a note
+ * arrived in is a note the wallet never reads. `crates/qnero-wallet/src/
+ * store.rs` carries the same number, which is `HEADER_WALK_LIMIT`, so one
+ * epoch is one chunk of the walk.
+ */
+export const BIRTHDAY_EPOCH = 1024;
+
+/** The epoch a height sits in: the height itself, rounded down. */
+export function birthdayEpochOf(height: number): number {
+  return height - (height % BIRTHDAY_EPOCH);
+}
+
 /** The plaintext head of the store. */
 export interface StoreMeta {
   id: 'store';
@@ -136,6 +158,30 @@ export interface StoreMeta {
    * the same genesis; the checkpoint walk and the leaf gate catch that.
    */
   genesisHash: string | null;
+  /**
+   * The block this wallet was created or restored at, and the leaf count the
+   * chain held there.
+   *
+   * A wallet cannot have received a note into a leaf that existed before it
+   * did, so a wallet that records where it started never walks or scans the
+   * history below it. What that saves is the header walk under the birthday
+   * and every ciphertext under its leaf count; what it does not save is the
+   * leaf hashes under the watermark, which the first sync still reads to seed
+   * the fold, and that read is what checks this recorded leaf count against
+   * the birthday block's own `zkTreeRoot`.
+   *
+   * **It is the node's claim, like every checkpoint.** Nothing verified this
+   * hash when it was written, so a wallet created against a node serving a
+   * branch of its own records that branch's block; the first honest node
+   * disagrees at that height, the fork walk rewinds and the scan starts lower.
+   * A restore height somebody types is a second claim on top, and a wrong one
+   * costs notes rather than time: `docs/WALLET.md` says what.
+   *
+   * `null` in a store written before schema 7, and in one restored with no
+   * height, and either way that is a full scan from leaf zero. It is written
+   * into `checkpoints` as well, which is what the header walk stands on.
+   */
+  birthday: SyncCheckpoint | null;
   lastSyncedBlock: number;
   /** The leaf watermark: the first index the next scan reads. */
   nextLeaf: number;

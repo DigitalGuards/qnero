@@ -28,7 +28,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Navigate, Route, Routes, useNavigate } from 'react-router';
 
 import { loadConfig, type WalletConfig } from './chain/config';
-import { fetchHead } from './chain/reads';
+import { blockHashAt, fetchBirthday, fetchHead } from './chain/reads';
 import { chainAdapter, cryptoAdapter } from './app/adapters';
 import { readEndpoint, writeEndpoint } from './app/endpoint';
 import { readMeasuredSendSeconds, writeMeasuredSendSeconds } from './app/proverMode';
@@ -55,7 +55,14 @@ import {
   WrongPassphraseError,
 } from './wallet/crypto';
 import { createStore, WalletStore } from './wallet/store';
-import type { Balances, NoteRow, RejectedNote, StoreMeta, StoredNote } from './wallet/model';
+import type {
+  Balances,
+  NoteRow,
+  RejectedNote,
+  StoreMeta,
+  StoredNote,
+  SyncCheckpoint,
+} from './wallet/model';
 import { collapseRows, reachableTotal, spendable } from './wallet/select';
 import { runSync, type SyncReport } from './wallet/sync';
 import {
@@ -100,6 +107,14 @@ export function App(): ReactNode {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [unlockError, setUnlockError] = useState<string | null>(null);
+  /**
+   * What was recorded as this wallet's birthday, said once after it is made.
+   *
+   * It is where the first sync starts reading the chain, and it is the node's
+   * claim rather than a fact, so it is shown rather than left implicit: a
+   * wallet quietly starting above a note is a balance quietly short.
+   */
+  const [birthdayNotice, setBirthdayNotice] = useState<string | null>(null);
 
   const [address, setAddress] = useState('');
   const [minerKey, setMinerKey] = useState<string | null>(null);
@@ -378,8 +393,26 @@ export function App(): ReactNode {
     });
   }, []);
 
+  /**
+   * Create or restore a wallet, and record where it starts reading the chain.
+   *
+   * `restoreHeight` is the chain height somebody restoring says this wallet was
+   * created at, `null` for a restore that gave none, and it is absent for a
+   * wallet being created now, which starts at the node's own head. Either way
+   * the height is rounded down to its epoch before it is recorded: see
+   * `BIRTHDAY_EPOCH`.
+   *
+   * A birthday needs the node, and a wallet can be created with no connection
+   * at all. So a node that cannot be reached is a warning on the screen and
+   * not a refusal: the wallet is made, it records no birthday, and its first
+   * sync reads the chain from block zero, which is correct and slow.
+   */
   const createWallet = useCallback(
-    async (seedHex: string, passphrase: string): Promise<void> => {
+    async (
+      seedHex: string,
+      passphrase: string,
+      restoreHeight?: number | null,
+    ): Promise<void> => {
       const current = session;
       setBusy(true);
       setError(null);
@@ -406,12 +439,59 @@ export function App(): ReactNode {
         const account = await current.prover.unlock(hexToBytes(seedHex));
         const saltHex = bytesToHex(newSalt());
         const key = await deriveKey(passphrase, saltHex);
+        // Read before the store is written, so a store is never created with
+        // half a birthday in it. `restoreHeight === undefined` is a wallet
+        // being created now, which starts at the head; `null` is a restore
+        // that asked for the whole chain.
+        let birthday: { checkpoint: SyncCheckpoint; genesisHash: string } | null = null;
+        if (restoreHeight !== null) {
+          const context = current.context;
+          const limits = current.limits;
+          if (context === null || limits === null) {
+            setBirthdayNotice(
+              'This wallet records no birthday, because it was made without a node to read a ' +
+                'head from. Its first sync reads the chain from block zero, which is correct ' +
+                'and slow.',
+            );
+          } else {
+            try {
+              const read = await fetchBirthday(
+                context,
+                restoreHeight ?? null,
+                limits.max_tree_depth,
+              );
+              const genesis = await blockHashAt(context, 0);
+              if (genesis === null) {
+                throw new Error('this node has no block zero, so it cannot say which chain it serves');
+              }
+              birthday = {
+                checkpoint: {
+                  blockNumber: read.blockNumber,
+                  blockHash: read.blockHash,
+                  nextLeaf: read.nextLeaf,
+                },
+                genesisHash: genesis,
+              };
+              setBirthdayNotice(
+                `This wallet starts at block ${read.blockNumber}, where the chain held ` +
+                  `${read.nextLeaf} leaves. That is this node's claim, like every checkpoint: ` +
+                  'an honest node that disagrees at that height rewinds it.',
+              );
+            } catch (birthdayError) {
+              setBirthdayNotice(
+                `This wallet records no birthday: ${(birthdayError as Error).message} Its first ` +
+                  'sync reads the chain from block zero, which is correct and slow.',
+              );
+            }
+          }
+        }
         const store = await createStore(db, {
           address: account.address,
           seedHex,
           key,
           saltHex,
           iterations: PBKDF2_ITERATIONS,
+          birthday,
         });
         current.store = store;
         current.account = account;
@@ -902,6 +982,14 @@ export function App(): ReactNode {
             </Notice>
           )}
 
+          {/* Where this wallet starts reading the chain, said once, on the
+              screens the wallet it belongs to can reach. A wallet that quietly
+              started above a note would be a balance quietly short, so the
+              claim and whose claim it is are both on the page. */}
+          {birthdayNotice !== null && open && (
+            <Notice testId="birthday-notice">{birthdayNotice}</Notice>
+          )}
+
           {phase.kind === 'booting' && (
             <Panel>
               <p className="text-meta text-muted">Loading the prover…</p>
@@ -952,11 +1040,13 @@ export function App(): ReactNode {
                   'public',
                   <RestoreWallet
                     busy={busy}
+                    head={connection.kind === 'live' ? (connection.head ?? null) : null}
+                    targetBlockTimeMs={session.context?.targetBlockTimeMs ?? null}
                     onCancel={() => {
                       void navigate('/');
                     }}
-                    onRestore={(seedHex, passphrase) => {
-                      void createWallet(seedHex, passphrase);
+                    onRestore={(seedHex, passphrase, restoreHeight) => {
+                      void createWallet(seedHex, passphrase, restoreHeight);
                     }}
                   />,
                 )}

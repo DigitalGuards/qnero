@@ -100,6 +100,47 @@ pub fn create_seed(path: &Path) -> Result<SpendingKey> {
     Ok(SpendingKey::take_from(&mut bytes))
 }
 
+/// Write a seed somebody already holds, refusing to overwrite one that exists.
+///
+/// The hex is taken with whitespace anywhere in it, because the browser wallet
+/// shows a spend key as eight groups of eight characters and somebody
+/// restoring one has written it down that way.
+pub fn import_seed(path: &Path, text: &str) -> Result<SpendingKey> {
+    if path.exists() {
+        bail!(
+            "{} already exists. Refusing to overwrite a seed: the notes behind it would be \
+             unspendable.",
+            path.display()
+        );
+    }
+    let packed = Zeroizing::new(
+        text.chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase(),
+    );
+    if packed.len() != 64
+        || !packed
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        bail!(
+            "a spend key is 64 hex characters and this is {}. Nothing has been written.",
+            packed.len()
+        );
+    }
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    hex::decode_to_slice(packed.as_str(), bytes.as_mut()).context("the spend key is not hex")?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+    }
+    write_seed(path, &bytes)?;
+    Ok(SpendingKey::take_from(&mut bytes))
+}
+
 fn write_seed(path: &Path, bytes: &[u8; 32]) -> Result<()> {
     let mut file = fs::OpenOptions::new()
         .write(true)

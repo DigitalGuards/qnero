@@ -22,6 +22,7 @@
  */
 
 import { hexByteLength, hexToBytes, leBytesToBigInt, normaliseHash, readCompact } from '../lib/hex';
+import { birthdayEpochOf } from '../wallet/model';
 import { parseRawHeader, type RawChainHeader } from './anchor';
 import { storage, type ChainContext } from './api';
 
@@ -345,6 +346,46 @@ export async function fetchHeaderRange(
   for (let offset = 0; offset <= span; offset += 1) {
     onHeader(headers[offset] as RawChainHeader);
   }
+}
+
+/**
+ * Where a wallet being created or restored starts reading, read from the node.
+ *
+ * `height` is the operator's restore height, or the node's own head for a
+ * wallet being created now. It is rounded **down** to a multiple of
+ * `BIRTHDAY_EPOCH` before anything is asked for, so what the store holds and
+ * what every later node is told is a coarse public epoch rather than the
+ * moment this wallet was made, and so that a height a little too high still
+ * starts below the first note.
+ *
+ * Three public reads: the head, the hash of the epoch block, and the leaf
+ * count that block's state carried. None of them names this wallet.
+ *
+ * The leaf count becomes the watermark, and it is checked on the first sync
+ * rather than trusted here: the fold of the leaves under it has to reach the
+ * `zkTreeRoot` the epoch block's own header published.
+ */
+export async function fetchBirthday(
+  context: ChainContext,
+  height: number | null,
+  maxTreeDepth: number,
+): Promise<{ blockNumber: number; blockHash: string; nextLeaf: number }> {
+  const head = await fetchHead(context);
+  const wanted = height ?? head.number;
+  if (wanted > head.number) {
+    throw new Error(
+      `this node's head is block ${head.number} and the height given is ${wanted}, which names ` +
+        "a block nobody has yet. A birthday above the chain's own head would put this wallet's " +
+        'watermark past every leaf there is.',
+    );
+  }
+  const blockNumber = birthdayEpochOf(Math.max(wanted, 0));
+  const blockHash = await blockHashAt(context, blockNumber);
+  if (blockHash === null) {
+    throw new Error(`this node has no block at height ${blockNumber}`);
+  }
+  const shape = await fetchTreeShape(context, blockHash, maxTreeDepth);
+  return { blockNumber, blockHash, nextLeaf: shape.leafCount };
 }
 
 /**

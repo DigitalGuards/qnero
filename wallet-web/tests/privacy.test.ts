@@ -285,6 +285,7 @@ function freshMeta(): StoreMeta {
     schemaVersion: STORE_VERSION,
     address: 'qn1test',
     genesisHash: null,
+    birthday: null,
     lastSyncedBlock: 0,
     nextLeaf: 0,
     kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 600_000, saltHex: '00'.repeat(16) },

@@ -73,6 +73,7 @@ function meta(overrides: Partial<StoreMeta> = {}): StoreMeta {
     schemaVersion: STORE_VERSION,
     address: 'qn1test',
     genesisHash: GENESIS,
+    birthday: null,
     lastSyncedBlock: 0,
     nextLeaf: 0,
     kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 600_000, saltHex: '00'.repeat(16) },
@@ -916,5 +917,92 @@ describe('the shield counter a pass reads', () => {
       fakeCrypto(leaves),
     );
     expect(result.report.warnings.join(' ')).not.toMatch(/origin walk/);
+  });
+});
+
+describe('the wallet birthday', () => {
+  /**
+   * A wallet created at a head, and a payment that arrives after it.
+   *
+   * The birthday is the store's first checkpoint and its watermark, so nothing
+   * in the sync knows it from a checkpoint an earlier pass wrote: the walk
+   * stands on it, the scan starts at its leaf count, and the leaves under it
+   * are never read as ciphertexts at all.
+   */
+  it('starts the scan at the birthday and takes a payment above it', async () => {
+    const mine = note(700n, 'b7');
+    const leaves: FakeLeaf[] = [
+      { index: 0, commitment: 'a0'.repeat(32), blockNumber: 4, note: null },
+      { index: 1, commitment: 'a1'.repeat(32), blockNumber: 4, note: null },
+      { index: 2, commitment: 'a2'.repeat(32), blockNumber: 4, note: null },
+      { index: 3, commitment: mine.commitment, blockNumber: 12, note: mine },
+    ];
+    const chain = fakeChain({ head: 14, leaves });
+    const asked: number[] = [];
+    const watched: SyncChain = {
+      ...chain,
+      leaves: (from, to, at, leafCount, onProgress) => {
+        for (let index = from; index < to; index += 1) {
+          asked.push(index);
+        }
+        return chain.leaves(from, to, at, leafCount, onProgress);
+      },
+    };
+    const birthday = { blockNumber: 8, blockHash: hashAtHeight(8), nextLeaf: 3 };
+
+    const result = await runSync(
+      {
+        meta: meta({ birthday, lastSyncedBlock: 8, nextLeaf: 3 }),
+        held: [],
+        rejected: [],
+        pending: [],
+        checkpoints: [birthday],
+      },
+      watched,
+      fakeCrypto(leaves, shapeOf({ head: 14, leafCount: 4, leaves })),
+    );
+
+    expect(result.report.received).toBe(1);
+    expect(result.notes[0]?.note.commitment).toBe(mine.commitment);
+    // Never a leaf under the birthday's own count. Those are the expensive
+    // reads and the ones that say which leaves this wallet cared about.
+    expect(asked).toEqual([3]);
+    expect(result.meta.nextLeaf).toBe(4);
+  });
+
+  /**
+   * The birthday is a checkpoint, so the fork walk treats it as one.
+   *
+   * A wallet created against a node serving a branch of its own records that
+   * branch's block, which is Bound B. The defence is the defence every
+   * checkpoint already has: the first node that disagrees at that height sends
+   * the watermark back down, and here there is nothing under it to stand on,
+   * so the scan starts at leaf zero and the payment under the birthday
+   * arrives.
+   */
+  it('rewinds to leaf zero when an honest node disagrees at the birthday', async () => {
+    const mine = note(500n, 'b5');
+    const leaves: FakeLeaf[] = [
+      { index: 0, commitment: mine.commitment, blockNumber: 4, note: mine },
+      { index: 1, commitment: 'a1'.repeat(32), blockNumber: 4, note: null },
+      { index: 2, commitment: 'a2'.repeat(32), blockNumber: 4, note: null },
+    ];
+    const birthday = { blockNumber: 8, blockHash: hashAtHeight(8, 'x'), nextLeaf: 3 };
+
+    const result = await runSync(
+      {
+        meta: meta({ birthday, lastSyncedBlock: 8, nextLeaf: 3 }),
+        held: [],
+        rejected: [],
+        pending: [],
+        checkpoints: [birthday],
+      },
+      fakeChain({ head: 14, leaves }),
+      fakeCrypto(leaves, shapeOf({ head: 14, leafCount: 3, leaves })),
+    );
+
+    expect(result.report.forkedAt).toBe(0);
+    expect(result.report.received).toBe(1);
+    expect(result.notes[0]?.note.commitment).toBe(mine.commitment);
   });
 });
