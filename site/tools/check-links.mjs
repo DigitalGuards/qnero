@@ -2,8 +2,9 @@
  * Walks every HTML file in site/ and checks that each internal link and each
  * referenced asset exists on disk, that every fragment target exists in the
  * page it points at, that sitemap.xml lists exactly the pages that exist, that
- * every absolute qnero.io meta URL resolves to a file, and that every link to
- * an M11 subdomain carries the marker that labels it.
+ * every absolute qnero.io meta URL resolves to a file, and that every M11
+ * subdomain reference carries its marker and its "testnet, coming online"
+ * label.
  *
  *   node site/tools/check-links.mjs
  *
@@ -68,24 +69,77 @@ for (const page of pages) {
   }
 }
 
-/* The M11 subdomains are linked and labelled "testnet, coming online", which is
-   what the brief asks for and what site/README.md records. They answer nothing
-   until M11 deploys, so each one carries `data-m11-host` on its anchor: that
-   marker is the single grep that finds every one of them on the day they go
-   live, and this check fails an unmarked one so a new subdomain link cannot
-   arrive without the label beside it. The apex is not one of them: it is this
-   site, and it is what canonical and og:url carry. */
+/* The M11 subdomains answer nothing until M11 deploys, so every one of them
+   carries `data-m11-host` and the words "testnet, coming online" beside it.
+   Checking only the marker would be checking the half a reader never sees, so
+   this walks the tags with a stack, takes the marked element's parent, and
+   requires the label inside it. A link to one of those hosts that arrives
+   without the marker fails too, so a new subdomain cannot be added unlabelled.
+   The marker sits on an `<a>` for the three hosts a browser renders and on a
+   `<code>` for the RPC endpoint, which is a WebSocket and is not a control.
+   The apex is not one of them: it is this site, and it is what canonical and
+   og:url carry. */
+const LABEL = 'testnet, coming online';
+const VOID = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+  'link', 'meta', 'param', 'source', 'track', 'wbr',
+]);
 const m11 = [];
 for (const page of pages) {
   const html = readFileSync(join(site, page), 'utf8');
-  for (const m of html.matchAll(/<a\b([^>]*)>/g)) {
-    const attrs = m[1];
-    const href = /href="([^"]+)"/.exec(attrs);
-    if (!href || !/^https?:\/\//.test(href[1])) continue;
-    const host = new URL(href[1]).hostname;
-    if (!host.endsWith('.qnero.io') || host === 'www.qnero.io') continue;
-    if (attrs.includes('data-m11-host')) m11.push(`${page}: ${href[1]}`);
-    else problems.push(`${page}: ${href[1]} is an M11 host and its anchor has no data-m11-host`);
+  const stack = [];
+  const pending = [];
+
+  for (const m of html.matchAll(/<(\/?)([a-zA-Z][a-zA-Z0-9-]*)\b([^>]*)>/g)) {
+    const [tag, closing, name, attrs] = [m[0], m[1] === '/', m[2].toLowerCase(), m[3]];
+
+    if (closing) {
+      for (let i = stack.length - 1; i >= 0; i -= 1) {
+        if (stack[i].name !== name) continue;
+        const frame = stack[i];
+        const inner = html.slice(frame.contentStart, m.index);
+        for (const mark of pending) {
+          if (mark.frame === frame) mark.scope = inner;
+        }
+        stack.length = i;
+        break;
+      }
+      continue;
+    }
+
+    const marked = /\sdata-m11-host(?=[\s=]|$)/.test(attrs);
+    if (marked) {
+      const href = /href="([^"]+)"/.exec(attrs);
+      const text = href ? href[1] : null;
+      pending.push({ name, href: text, frame: stack[stack.length - 1], scope: null });
+    }
+
+    /* An anchor at one of those hosts must be marked, whatever else it is. */
+    if (name === 'a') {
+      const href = /href="([^"]+)"/.exec(attrs);
+      if (href && /^https?:\/\//.test(href[1])) {
+        const host = new URL(href[1]).hostname;
+        if (host.endsWith('.qnero.io') && host !== 'www.qnero.io' && !marked) {
+          problems.push(`${page}: ${href[1]} is an M11 host and its anchor has no data-m11-host`);
+        }
+      }
+    }
+
+    if (!VOID.has(name) && !attrs.trimEnd().endsWith('/')) {
+      stack.push({ name, contentStart: m.index + tag.length });
+    }
+  }
+
+  for (const mark of pending) {
+    const inner = mark.scope;
+    const what = mark.href || `<${mark.name}> at ${page}`;
+    if (inner === null) {
+      problems.push(`${page}: ${what} carries data-m11-host but its parent element never closes`);
+    } else if (!inner.includes(LABEL)) {
+      problems.push(`${page}: ${what} carries data-m11-host but "${LABEL}" is not beside it`);
+    } else {
+      m11.push(`${page}: ${mark.href || `${mark.name} element`}`);
+    }
   }
 }
 
@@ -121,7 +175,7 @@ for (const page of pages) {
 
 console.log(`${pages.length} pages, ${external.size} distinct external links`);
 for (const [url, n] of [...external].sort()) console.log(`  ${n}x ${url}`);
-console.log(`\n${m11.length} M11 host link(s), each labelled "testnet, coming online":`);
+console.log(`\n${m11.length} M11 host reference(s), each with "${LABEL}" beside it:`);
 for (const entry of m11) console.log(`  ${entry}`);
 console.log('  These answer nothing until M11 deploys. Grep data-m11-host to find them all.');
 
