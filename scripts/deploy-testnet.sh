@@ -59,9 +59,22 @@ step() {
 # so the deploy account cannot write into them and a plain `rsync` to
 # `$host:/var/www/...` fails with permission denied on every file: binaries and
 # spec installed, every static asset rejected, nginx serving empty roots. The
-# fix is to stage under the deploy account's own /tmp and let one sudo'd rsync
-# do the replace, rather than chowning three webroots to the deploy account and
-# handing whoever holds it write access to everything nginx serves.
+# fix is to stage into a directory of the deploy account's own and let one
+# sudo'd rsync do the replace, rather than chowning three webroots to the
+# deploy account and handing whoever holds it write access to everything nginx
+# serves.
+#
+# Two details make that true rather than merely intended:
+#
+#  - **--chown=root:root on the second hop.** `-a` implies `-o -g`, and running under sudo
+#    they take effect, so without this the replace writes every file, and the webroot
+#    itself, owned by the deploy account. Which is the thing this function is shaped to
+#    avoid: anything running as that account could then rewrite the wallet's JavaScript
+#    with no sudo at all, on the one host where a page handles seeds.
+#  - **The stage is an mktemp -d.** A fixed `/tmp/qnero-deploy/var/www/...` is
+#    predictable and /tmp is world-writable, so another local account could create the
+#    path first, keep it writable, and have the sudo'd hop copy its contents into a
+#    webroot as root.
 #
 # Any extra arguments are excludes, and they are applied to BOTH hops: the
 # second rsync also carries --delete, so an exclude the first hop honoured and
@@ -69,16 +82,20 @@ step() {
 deploy_tree() {
   local source="$1" webroot="$2"
   shift 2
-  local stage="/tmp/qnero-deploy$webroot"
+  local stage
+  stage="$(ssh "$host" 'mktemp -d')"
+  if [ -z "$stage" ]; then
+    echo "the host would not make a staging directory" >&2
+    exit 1
+  fi
   local extra=""
   local argument
   for argument in "$@"; do
     extra="$extra $(printf '%q' "$argument")"
   done
-  ssh "$host" "mkdir -p $(printf '%q' "$stage")"
   rsync -a --delete "$@" "$source" "$host:$stage/"
-  ssh "$host" "sudo rsync -a --delete$extra $(printf '%q' "$stage/") $(printf '%q' "$webroot/") \
-    && rm -rf $(printf '%q' "$stage")"
+  ssh "$host" "sudo rsync -a --delete --chown=root:root$extra $(printf '%q' "$stage/") \
+    $(printf '%q' "$webroot/") && rm -rf $(printf '%q' "$stage")"
 }
 
 if has_stage node; then
@@ -134,10 +151,25 @@ if has_stage spec; then
   scp "$here/chain/node/chain-specs/qnero-testnet.json" "$host:/tmp/qnero-testnet.json"
   ssh "$host" 'sudo install -m 0644 -o root -g root /tmp/qnero-testnet.json \
     /etc/qnero/qnero-testnet.json && rm -f /tmp/qnero-testnet.json'
-  echo
-  echo "If this spec was regenerated, the bootNodes entry is gone from the"
-  echo "installed copy. Put it back:"
-  echo "  ./scripts/generate-bootnode-key.sh /etc/qnero/node-key $domain"
+  cat <<MSG
+
+The committed spec carries an empty "bootNodes", so the installed copy has just
+lost its entry. Put it back ON THE HOST. This reads the peer id out of the key
+that is already there; it does not generate anything, and it must not, because
+a bootnode that rotates its identity is one nobody can reach:
+
+  ssh $host
+  PEER_ID=\$(qnero-node key inspect-node-key --file /etc/qnero/node-key)
+  spec=\$(mktemp)
+  jq --arg addr "/dns/node.$domain/tcp/30333/p2p/\$PEER_ID" '.bootNodes = [\$addr]' \\
+     /etc/qnero/qnero-testnet.json > "\$spec" \\
+     && sudo install -m 0644 -o root -g root "\$spec" /etc/qnero/qnero-testnet.json
+  rm -f "\$spec"
+
+The hostname is node.$domain and not $domain: p2p is raw TCP under a
+post-quantum Noise handshake, and the apex is proxied by the CDN, which
+blackholes it.
+MSG
 fi
 
 if has_stage site; then

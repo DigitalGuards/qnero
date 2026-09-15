@@ -42,6 +42,33 @@ if [ -z "$key_file" ]; then
   exit 2
 fi
 
+# The hostname has to be the p2p name, and an apex is almost never it.
+#
+# p2p is raw TCP under a post-quantum Noise handshake, so the record has to be
+# DNS-only at the CDN; an apex on a proxied zone is the one name guaranteed to
+# be orange-clouded, and a multiaddr pointing at it blackholes every dial. The
+# symptom arrives late and somewhere else: the spec looks right, the node logs
+# nothing unusual, and it is a second operator, on another machine, who cannot
+# join. So a bare two-label name is refused here rather than printed.
+#
+# Placeholders, `localhost` and address literals pass, because a rehearsal on
+# one workstation dials `/dns/localhost/...` and that is the correct address
+# for it.
+case "$host" in
+  *'<'*|*'>'*|localhost|localhost.*|*[0-9].[0-9]*.[0-9]*.[0-9]*|*:*) ;;
+  *.*.*) ;;
+  *)
+    if [ "${QNERO_ALLOW_APEX:-0}" != "1" ]; then
+      echo "$host has no subdomain label, and an apex record on a proxied zone" >&2
+      echo "blackholes p2p: it is raw TCP, and the CDN only proxies HTTP." >&2
+      echo "Pass node.$host instead, kept DNS-only, or set QNERO_ALLOW_APEX=1 if" >&2
+      echo "this zone really is not proxied." >&2
+      exit 2
+    fi
+    echo "warning: $host is an apex name and QNERO_ALLOW_APEX=1 was set." >&2
+    ;;
+esac
+
 if [ ! -x "$node" ]; then
   echo "$node is missing. Build it first, or set QNERO_NODE." >&2
   exit 1
@@ -101,9 +128,11 @@ Put that multiaddr in the "bootNodes" array of the raw chain spec. It sits
 outside genesis, so adding it does not move the genesis hash and nothing has
 to be regenerated:
 
+  spec=\$(mktemp)
   jq '.bootNodes = ["/dns/$host/tcp/$port/p2p/$peer_id"]' \\
-     /etc/qnero/qnero-testnet.json > /tmp/spec.json \\
-     && sudo install -m 0644 /tmp/spec.json /etc/qnero/qnero-testnet.json
+     /etc/qnero/qnero-testnet.json > "\$spec" \\
+     && sudo install -m 0644 -o root -g root "\$spec" /etc/qnero/qnero-testnet.json
+  rm -f "\$spec"
 
 Keep that hostname DNS-only at the CDN. p2p is raw TCP under a post-quantum
 Noise handshake, so a proxied record blackholes it.
