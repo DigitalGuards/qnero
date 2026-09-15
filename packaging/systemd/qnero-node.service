@@ -1,0 +1,145 @@
+# The Qnero testnet node.
+#
+# Install to /etc/systemd/system/qnero-node.service and fill in the three
+# placeholders: <node-name>, and whatever <domain> appears in --rpc-cors.
+# Everything secret comes from /etc/qnero/node.env at mode 0600, never from
+# this file and never from the command line: argv is world-readable in `ps`,
+# and QNERO_MINER_KEY carries the coinbase viewing key, so whoever reads it can
+# pick this miner's coinbase notes out of the tree.
+#
+# Why systemd rather than a container: the binary is built on a workstation
+# with the same glibc and copied here, because this box cannot build it (the build
+# wants cmake and a C++17 compiler for randomx-rs, libclang for the rocksdb
+# bindings, and a pallet build script that generates the circuit artifact set
+# first). RandomX in light mode wants page cache and RAM rather than a cgroup,
+# every mining thread is a blocking task on the pool that rocksdb and block
+# import share, and systemd already gives restart, limits, logs and a user of
+# its own.
+
+[Unit]
+Description=Qnero testnet node
+Documentation=https://qnero.io/docs.html
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qnero
+Group=qnero
+WorkingDirectory=/var/lib/qnero
+
+# QNERO_MINER_KEY (qnm1...) and QNERO_REWARDS_INNER_HASH (0x...) live here.
+# Both are required of an authority: without the miner key the node builds
+# blocks with no coinbase inherent, every node including its own import
+# refuses them, and startup fails.
+EnvironmentFile=/etc/qnero/node.env
+
+ExecStart=/usr/local/bin/qnero-node \
+  --chain /etc/qnero/qnero-testnet.json \
+  --base-path /var/lib/qnero \
+  --name <node-name> \
+  --node-key-file /etc/qnero/node-key \
+  --port 30333 \
+  --no-mdns \
+  --no-telemetry \
+  --validator \
+  --force-authoring \
+  --rewards-inner-hash ${QNERO_REWARDS_INNER_HASH} \
+  --mining-threads 1 \
+  --stratum-port 3333 \
+  --stratum-host 0.0.0.0 \
+  --rpc-port 9944 \
+  --rpc-methods safe \
+  --rpc-cors https://wallet.<domain>,https://explorer.<domain> \
+  --rpc-max-connections 200 \
+  --rpc-rate-limit 120 \
+  --rpc-rate-limit-trust-proxy-headers \
+  --prometheus-port 9615 \
+  --state-pruning archive
+
+# --base-path is explicit because sc_cli derives its default from the
+# executable file name under a $HOME a system user does not have, so a rename
+# of the binary silently moves the database and the node resyncs from genesis
+# with a fresh peer id.
+#
+# --node-key-file, never --node-key <hex>. The peer id of this node is
+# published in other people's spec files, so the identity must be stable and
+# the seed must not be in argv. --unsafe-force-node-key-generation must never
+# appear here.
+#
+# --force-authoring is what lets this node author at all while it is the only
+# one, and it is required to mine the first block of a new chain. Two gates
+# pause authoring without it, and a seed node on a fresh network trips both:
+# the node stops authoring while it has no peers, and it stops while its tip is
+# older than --max-tip-age (24 hours), which a genesis block whose timestamp is
+# zero always is. Without this flag the chain never starts and the log says
+# "Mining paused" once and then nothing.
+#
+# What it costs is the guard itself: a node that is genuinely behind during an
+# initial sync will author on a stale tip and fork rather than wait. That is
+# the right trade for a single-seed testnet and the wrong one for a node
+# joining an established network, so remove this line once the network has
+# other authoring peers.
+#
+# --no-telemetry is explicit rather than implied. Telemetry defaults ON for a
+# ChainType::Live chain, and Qnero runs no telemetry server, so the only thing
+# leaving it on could do is publish this node's name, version and height to a
+# third party.
+#
+# --rpc-methods safe rather than auto. Auto means safe when external and unsafe
+# on loopback, and nginx proxies to loopback, so auto would expose the unsafe
+# methods through the public endpoint. There is no --rpc-external: the node
+# binds 127.0.0.1:9944 and nginx is the only thing in front of it.
+#
+# --mining-threads 1 is the floor the chain's genesis difficulty was sized
+# against: one in-process light-mode RandomX thread, about 33 H/s, which is one
+# block every 152 seconds at a difficulty of 5000 and a 120 s target. Set it to
+# 0 only if a rig is permanently attached to the stratum port; an authority
+# with 0 threads and no stratum port refuses to start. Above 1 costs the node
+# the second of its two cores.
+#
+# --stratum-host 0.0.0.0 is what lets a rig on another machine connect, and it
+# is deliberate: the endpoint is unauthenticated, bounded only by 64 connection
+# slots and 16 per address, so opening the port is a decision and a firewall is
+# the answer if it is abused.
+#
+# --state-pruning archive is what the explorer's search-by-extrinsic-hash walk
+# needs beyond a few hundred blocks. It costs disk, it is the default for this
+# deployment, and changing it later means a resync, so decide it before
+# genesis. Drop this line for a pruned node.
+
+Restart=always
+RestartSec=10s
+# rocksdb needs to close cleanly. A SIGKILL here is a corrupt database and a
+# resync from genesis.
+TimeoutStopSec=120
+KillSignal=SIGINT
+
+# rocksdb plus a few hundred proxied RPC connections.
+LimitNOFILE=65535
+
+# RandomX light mode is a 256 MiB Argon2d cache per seed plus about 2 MiB per
+# VM, and briefly two caches across an epoch boundary; the rest is the rocksdb
+# block cache and the import pipeline. The remaining 3 GB of an 8 GB box is for
+# the faucet, whose prover peaks around 1 GB per proof. These two numbers are
+# what stop one of them taking the machine from the other.
+MemoryHigh=4G
+MemoryMax=5G
+# The node outranks the faucet when both want the two cores.
+CPUWeight=200
+Nice=0
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qnero
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

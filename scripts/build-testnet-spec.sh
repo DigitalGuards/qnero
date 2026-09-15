@@ -48,10 +48,10 @@ fi
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-# One step, not two. The two-step form in chain/docs/CHAINSPEC_CREATION.md
-# exists so the plain spec can be edited before it is rawified; nothing here
-# edits it, because the one field a deployment fills in, `bootNodes`, sits
-# outside genesis and is edited in the raw file directly.
+# One step. The two-step form in chain/docs/CHAINSPEC_CREATION.md exists so the
+# plain spec can be edited before it is rawified; nothing here edits it, because
+# the one field a deployment fills in, `bootNodes`, sits outside genesis and is
+# edited in the raw file directly.
 "$node" build-spec --chain qnero-testnet --raw --disable-default-bootnode > "$tmp"
 
 if [ "$check" = "1" ]; then

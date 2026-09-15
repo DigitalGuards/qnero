@@ -1,0 +1,55 @@
+# The Qnero testnet faucet.
+#
+# Install to /etc/systemd/system/qnero-faucet.service. Its whole configuration
+# is /etc/qnero/faucet.env at mode 0600, because two of the values name files
+# that spend and argv is world-readable in `ps`.
+#
+# Its own user, because it holds a spend key. The shielded spending key in
+# /var/lib/qnero-faucet is the only thing between a reader of that directory
+# and every note the faucet holds, and the transparent seed beside it is the
+# key to the account the chain spec endows at genesis.
+
+[Unit]
+Description=Qnero testnet faucet
+Documentation=https://qnero.io/docs.html
+After=network-online.target qnero-node.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qnero-faucet
+Group=qnero-faucet
+WorkingDirectory=/var/lib/qnero-faucet
+EnvironmentFile=/etc/qnero/faucet.env
+ExecStart=/usr/local/bin/qnero-faucet serve
+
+Restart=always
+RestartSec=5s
+TimeoutStopSec=60
+
+# One private-batch proof peaks around a gigabyte, and the circuit set is held
+# for the life of the process. This is the ceiling that keeps a drip from
+# taking the node's memory: the node is capped at 5G on an 8 GB box and nginx
+# and the static sites are under 100 MB.
+MemoryHigh=2G
+MemoryMax=2500M
+# A proof must not take both cores away from block import. The node carries
+# CPUWeight=200 against this unit's default 100, and this is the hard ceiling
+# above that.
+CPUQuota=150%
+Nice=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qnero-faucet
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
