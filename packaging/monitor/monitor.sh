@@ -31,6 +31,16 @@ set -uo pipefail
 
 OPS_HOME="${MONITOR_HOME:-$HOME}"
 ENV_FILE="${MONITOR_ENV:-$OPS_HOME/.monitor.env}"
+
+# The operator's file is sourced HERE, before a single default below is
+# resolved. Sourcing it after them reads as a detail and is not one: every
+# default is `${MONITOR_X:-...}` expanded once, so a later source sets
+# MONITOR_DOMAIN to no effect, DOMAIN stays at the literal `<domain>`, curl
+# cannot resolve a host with angle brackets, and the one check written to catch
+# a dead proxy latches a red alert on its first tick that never clears.
+# shellcheck source=/dev/null
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
 STATE_DIR="${MONITOR_STATE_DIR:-$OPS_HOME/monitor-state}"
 ALERT_STATE="$STATE_DIR/alerts"
 FAIL_COUNTS="$STATE_DIR/fails"
@@ -54,8 +64,15 @@ STALE_SECS="${MONITOR_STALE_SECS:-600}"
 DISK_MIN_PCT="${MONITOR_DISK_MIN_PCT:-10}"
 CERT_WARN_DAYS="${MONITOR_CERT_WARN_DAYS:-30}"
 
-# shellcheck source=/dev/null
-[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+# A placeholder is never probed. Without this the TLS check asks curl for
+# `wallet.<domain>`, gets 000 every tick, and alerts on a name that does not
+# exist instead of on nginx.
+case "$DOMAIN" in
+    *'<'*|*'>'*|'')
+        echo "[$(date -Is)] MONITOR_DOMAIN is still the placeholder ($DOMAIN). Set it in $ENV_FILE." >&2
+        exit 2
+        ;;
+esac
 
 mkdir -p "$STATE_DIR"
 touch "$ALERT_STATE" "$FAIL_COUNTS"
@@ -95,7 +112,13 @@ alert() {
 resolve() {
     local key="$1" message="$2"
     is_alerting "$key" || return
-    grep -vxF "$key" "$ALERT_STATE" > "$ALERT_STATE.new" && mv "$ALERT_STATE.new" "$ALERT_STATE"
+    # `|| true` and an unconditional mv, because grep exits 1 when it matches
+    # nothing, which is exactly the case where this key was the only one in the
+    # file. Guarding the mv on grep's status there leaves the key behind for
+    # ever: the next alert() returns early on `is_alerting` and the check is
+    # silently dead from its first recovery onward.
+    { grep -vxF "$key" "$ALERT_STATE" || true; } > "$ALERT_STATE.new"
+    mv "$ALERT_STATE.new" "$ALERT_STATE"
     notify ":green_circle: **qnero testnet** $message"
 }
 
