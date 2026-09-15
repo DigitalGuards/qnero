@@ -261,23 +261,36 @@ code {
   word-break: normal;
 }
 
+/* A command scrolls rather than wraps, with the same edge shadows a table
+   carries, because nothing in CSS stops a soft wrap falling inside a token:
+   Chromium breaks at a hyphen under every `word-break` and `overflow-wrap`
+   value, so a wrapped `--no-color` reads as two flags and a wrapped
+   `qnero-node` as two path segments. A line here is exactly the line you
+   paste. */
 pre {
   margin: 0 0 var(--space-4);
-  background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: var(--space-3);
   overflow-x: auto;
+  scrollbar-width: thin;
   color: var(--text-primary);
+  background:
+    linear-gradient(to right, var(--bg-raised) 30%, rgba(0, 0, 0, 0)),
+    linear-gradient(to left, var(--bg-raised) 30%, rgba(0, 0, 0, 0)) 100% 0,
+    radial-gradient(farthest-side at 0 50%, var(--shadow-edge), var(--shadow-edge-fade)),
+    radial-gradient(farthest-side at 100% 50%, var(--shadow-edge), var(--shadow-edge-fade)) 100% 0,
+    var(--bg-raised);
+  background-repeat: no-repeat;
+  background-size:
+    32px 100%,
+    32px 100%,
+    12px 100%,
+    12px 100%,
+    auto;
+  background-attachment: local, local, scroll, scroll, scroll;
 }
 
-/* A command that clips is a command that gets pasted broken, and an overlay
-   scrollbar says nothing at rest. These wrap instead: every block already uses
-   `\` continuations, so a wrapped line still reads as one command. A hanging
-   indent was measured and rejected: `text-indent` does not apply to an inline
-   `code`, `each-line` is unimplemented in Chromium, and on a block it would
-   inset every line after the first, so an unindented second command would read
-   as a wrap of the first. */
 pre code {
   font-size: var(--fs-body);
   line-height: 1.6;
@@ -285,8 +298,7 @@ pre code {
   border: 0;
   border-radius: 0;
   padding: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  white-space: pre;
   word-break: normal;
 }
 
@@ -1054,9 +1066,16 @@ tbody tr:hover td.col-self {
   background-attachment: local, local, scroll, scroll;
 }
 
+/* Pinned to its own coordinate width. `img, svg { max-width: 100% }` would
+   otherwise scale the figure down to the container, and a 944-unit viewBox at a
+   400px viewport paints its 12px labels at 7.9px and its 10px captions at
+   6.6px, under the smallest type on the site. At 1:1 the scroller does the
+   work, which is what its edge shadows were drawn for. */
 .diagram svg {
   display: block;
-  min-width: 620px;
+  width: 944px;
+  min-width: 944px;
+  max-width: none;
 }
 
 .diagram figcaption {
@@ -1114,6 +1133,7 @@ tbody tr:hover td.col-self {
 .split > *,
 .cards > *,
 .figures > *,
+.commands > *,
 .hero-grid > * {
   min-width: 0;
 }
