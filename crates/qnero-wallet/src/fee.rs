@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::metadata::ChainMetadata;
 
-/// The per-slot floor: `MinLeafFee + ceil(ciphertext bytes / quantum)`.
+/// The per-slot floor: `MinLeafFee + ceil(ciphertext bytes / the byte bucket)`.
 pub fn slot_fee_floor(metadata: &ChainMetadata, ct_1_len: usize, ct_2_len: usize) -> u64 {
     let bytes = ct_1_len as u64 + ct_2_len as u64;
     metadata
@@ -179,15 +179,15 @@ pub fn memo_pad_separation_warning(metadata: &ChainMetadata) -> Option<String> {
     Some(format!(
         "this runtime's payload fee prices nothing. This wallet pads every memo to \
          memo::MEMO_BYTES ({}), so the pair of ciphertexts a spend publishes is {} bytes and \
-         pays {} quanta of payload fee, and a pair padded to this runtime's cap of {cap} bytes \
+         pays {} QNR of payload fee, and a pair padded to this runtime's cap of {cap} bytes \
          each pays {}. A settler can pad both outputs to the cap and write {} bytes of permanent \
          state per slot for what an honest spend pays. It is a property of the chain and not of \
-         this spend, so the spend goes ahead. This runtime charges one quantum per {} ciphertext \
+         this spend, so the spend goes ahead. This runtime charges 0.01 QNR per {} ciphertext \
          bytes; {advice}.",
         crate::memo::MEMO_BYTES,
         2 * padded,
-        slot_fee_floor(metadata, padded, padded),
-        slot_fee_floor(metadata, cap, cap),
+        crate::units::qnr(slot_fee_floor(metadata, padded, padded)),
+        crate::units::qnr(slot_fee_floor(metadata, cap, cap)),
         2 * cap.saturating_sub(padded),
         bytes_per_fee_quantum(metadata)
     ))
@@ -234,7 +234,7 @@ mod tests {
     }
 
     /// The two figures `docs/CIRCUIT.md` section 9.7 pins: two real
-    /// ciphertexts (3462 bytes) pay eight quanta, two padded to the cap (4096)
+    /// ciphertexts (3462 bytes) pay eight steps of fee, two padded to the cap (4096)
     /// pay nine.
     #[test]
     fn the_slot_floor_matches_the_documented_endpoints() {
@@ -344,7 +344,7 @@ mod tests {
             memo_pad_separation_warning(&widened).expect("the merged buckets are reported");
         assert!(message.contains("prices nothing"), "{message}");
         assert!(message.contains("1024"), "{message}");
-        // At 1024 bytes per quantum against a 2048-byte cap, no pad at all
+        // At 1024 bytes to the bucket against a 2048-byte cap, no pad at all
         // restores the separation: an unpadded pair is 3462 bytes and a capped
         // one 4096, and both are the fourth bucket.
         assert_eq!(largest_separating_pad(&widened), None);
@@ -361,7 +361,7 @@ mod tests {
 
         // A runtime that widened the divisor by less still separates the two,
         // at a smaller pad, and the message names that pad rather than sending
-        // an operator to guess. At 1160 bytes per quantum a pair may reach
+        // an operator to guess. At 1160 bytes to the bucket a pair may reach
         // 3480 bytes, so each ciphertext may reach 1740 and the pad is 9.
         let mut slightly = runtime();
         slightly.ciphertext_bytes_per_fee_quantum = 1_160;
@@ -375,7 +375,7 @@ mod tests {
     /// Where `memo::MEMO_BYTES` comes from, computed rather than asserted.
     ///
     /// The pad is the largest that keeps this wallet's pair a fee bucket below
-    /// a pair padded to the cap, and at the M4 runtime's 512-byte quantum and
+    /// a pair padded to the cap, and at the M4 runtime's 512-byte bucket and
     /// 2048-byte cap that is exactly 61.
     #[test]
     fn the_pad_is_the_largest_one_the_m4_runtime_separates() {
@@ -395,9 +395,9 @@ mod tests {
         );
     }
 
-    /// A started quantum is a whole quantum.
+    /// A started bucket is a whole bucket.
     #[test]
-    fn a_partial_quantum_of_payload_rounds_up() {
+    fn a_partial_bucket_of_payload_rounds_up() {
         assert_eq!(slot_fee_floor(&runtime(), 1, 0), 2);
         assert_eq!(slot_fee_floor(&runtime(), 512, 0), 2);
         assert_eq!(slot_fee_floor(&runtime(), 513, 0), 3);

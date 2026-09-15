@@ -91,9 +91,9 @@ pub struct ChainMetadata {
     pub shield: u8,
     /// Anchor window, in blocks.
     pub block_hash_window: u32,
-    /// Flat fee floor per real leaf slot, in pool quanta.
+    /// Flat fee floor per real leaf slot, as a count of pool steps.
     pub min_leaf_fee: u64,
-    /// Bytes of note ciphertext one quantum of fee buys.
+    /// Bytes of note ciphertext one step of fee buys.
     pub ciphertext_bytes_per_fee_quantum: u32,
     /// Size cap on one ciphertext. Exceeding it fails the extrinsic's SCALE
     /// decode, after the proof that committed to those bytes exists.

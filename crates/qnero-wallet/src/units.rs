@@ -28,6 +28,38 @@ pub fn qnr_plain(steps: u64) -> String {
     }
 }
 
+/// A count of pool steps out of the QNR amount somebody typed.
+///
+/// Amounts move in steps of 0.01 QNR, so two decimal places is the whole
+/// precision the pool has: a note's value is a count of steps and the circuit
+/// range-checks it, so accepting a third decimal here would build a proof for
+/// an amount nobody asked for. `wallet-web/src/lib/format.ts` reads what a
+/// person types by the same rule.
+pub fn steps_from_qnr(text: &str) -> Result<u64, String> {
+    let trimmed = text.trim();
+    let (whole, fraction) = trimmed.split_once('.').unwrap_or((trimmed, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty() || !digits(whole) || !digits(fraction) {
+        return Err(format!(
+            "{trimmed:?} is not an amount in QNR, such as 12.34"
+        ));
+    }
+    if fraction.len() > 2 {
+        return Err(
+            "amounts move in steps of 0.01 QNR, so an amount has at most two decimals".to_string(),
+        );
+    }
+    let hundredths: u64 = format!("{fraction:0<2}")
+        .parse()
+        .map_err(|_| format!("{trimmed:?} is not an amount in QNR, such as 12.34"))?;
+    whole
+        .parse::<u64>()
+        .ok()
+        .and_then(|qnr| qnr.checked_mul(STEPS_PER_QNR))
+        .and_then(|steps| steps.checked_add(hundredths))
+        .ok_or_else(|| format!("{trimmed} is more QNR than this chain can hold"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,6 +78,43 @@ mod tests {
         assert_eq!(qnr(1_234), "12.34");
         assert_eq!(qnr(411), "4.11");
         assert_eq!(qnr(0), "0.00");
+    }
+
+    #[test]
+    fn a_typed_amount_reads_as_steps() {
+        assert_eq!(steps_from_qnr("10"), Ok(1_000));
+        assert_eq!(steps_from_qnr("12.34"), Ok(1_234));
+        assert_eq!(steps_from_qnr("0.01"), Ok(1));
+        assert_eq!(steps_from_qnr("0.5"), Ok(50));
+        assert_eq!(steps_from_qnr("  4.11  "), Ok(411));
+        assert_eq!(steps_from_qnr("0"), Ok(0));
+    }
+
+    /// A third decimal has no representation in a note, so it is refused here
+    /// rather than rounded into a proof for an amount nobody asked for.
+    #[test]
+    fn a_third_decimal_is_refused() {
+        assert!(steps_from_qnr("0.001").is_err());
+        assert!(steps_from_qnr("12.345").is_err());
+        assert!(steps_from_qnr("ten").is_err());
+        assert!(steps_from_qnr("-1").is_err());
+        assert!(steps_from_qnr("").is_err());
+        assert!(steps_from_qnr("1e3").is_err());
+    }
+
+    /// What the two wallets agree on, amount by amount: the same text in gives
+    /// the same count of steps, and that count printed gives the text back.
+    #[test]
+    fn what_is_typed_and_what_is_printed_are_one_rule() {
+        for (typed, steps) in [
+            ("10", 1_000u64),
+            ("12.34", 1_234),
+            ("0.08", 8),
+            ("4.11", 411),
+        ] {
+            assert_eq!(steps_from_qnr(typed), Ok(steps));
+            assert_eq!(steps_from_qnr(&qnr(steps)), Ok(steps));
+        }
     }
 
     #[test]

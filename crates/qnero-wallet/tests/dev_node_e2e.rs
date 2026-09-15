@@ -100,7 +100,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
         .shield(&chain, &metadata, &dev, 1_000, "first shield")
         .expect("the shield settles");
     println!(
-        "shield of 1000 quanta included at block {} ({:.2?}), leaf {}",
+        "shield of 10 QNR included at block {} ({:.2?}), leaf {}",
         shielded.included_at, shielded.inclusion, shielded.leaf_index
     );
     // The leaf index is the dispatch confirmation: an included extrinsic
@@ -122,7 +122,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
     let prover = WalletProver::new(NUM_LEAF_PROOFS).expect("the circuits build");
 
     // The floor, computed from the ciphertexts this submission carries: two
-    // of 1731 bytes plus a memo cost `MinLeafFee` plus one quantum per started
+    // of 1731 bytes plus a memo cost `MinLeafFee` plus 0.01 QNR per started
     // 512 bytes, and the fee is a public input so it cannot be raised after
     // proving.
     let memo = "payment to B";
@@ -142,7 +142,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
         )
         .expect("the payment settles");
     println!(
-        "300 quanta to B: proved in {:.2?}, {} proof bytes, included at block {}",
+        "3 QNR to B: proved in {:.2?}, {} proof bytes, included at block {}",
         payment.proving, payment.proof_bytes, payment.included_at
     );
     assert_eq!(payment.change, 1_000 - 300 - fee);
@@ -179,7 +179,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
         )
         .expect("the payment back settles");
     println!(
-        "100 quanta back to A: proved in {:.2?}, included at block {}",
+        "1 QNR back to A: proved in {:.2?}, included at block {}",
         back.proving, back.included_at
     );
 
@@ -236,11 +236,11 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
     // The coinbase notes of every block this node has authored so far.
     let report = miner.sync(&chain, &metadata).expect("the miner syncs");
     println!(
-        "sync: {} leaves, {} coinbase leaves, {} of them this wallet's, {} quanta",
+        "sync: {} leaves, {} coinbase leaves, {} of them this wallet's, {} QNR",
         report.leaves_scanned,
         report.coinbase_leaves,
         report.coinbase_received,
-        miner.store.unspent_total()
+        qnero_wallet::units::qnr(miner.store.unspent_total())
     );
     assert!(
         report.coinbase_received > 0,
@@ -343,9 +343,9 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
         "the coinbase is the last leaf of its block, the label is this wallet's own derivation \
          and the value is the chain's, on {checked_blocks} real blocks"
     );
-    // The emission is flat over a few blocks, to within the one quantum the
-    // sub-quantum carry adds: a block's credit is not a whole number of pool
-    // quanta, so the remainder waits and occasionally completes one.
+    // The emission is flat over a few blocks, to within the one step the
+    // sub-step carry adds: a block's credit is not a whole number of pool
+    // steps, so the remainder waits and occasionally completes one.
     //
     // Measured over quiet blocks alone, which is what keeps this test off the
     // other one's chain activity. A settled fee is credited to the coinbase of
@@ -402,7 +402,7 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
         )
         .expect("the payment settles");
     println!(
-        "5 quanta to B at fee {fee}: included at block {}, change {}",
+        "0.05 QNR to B at fee {fee}: included at block {}, change {}",
         payment.included_at, payment.change
     );
 
@@ -429,7 +429,7 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
     let (low, high) = quiet_band(&miner);
     let settled_leaves = leaves_appended(&chain, payment.included_at);
     println!(
-        "coinbase of block {}: {} quanta against {low} to {high} on quiet blocks, author share \
+        "coinbase of block {}: {} steps against {low} to {high} on quiet blocks, author share \
          {}, {settled_leaves} leaves appended",
         payment.included_at, settling.value, author_share
     );
@@ -597,7 +597,7 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
 ///
 /// The pallet appends one leaf per coinbase, one per shield and two per
 /// settled slot, so a block whose tree grew by exactly one carried nothing but
-/// its own coinbase and its credit is the flat emission plus the sub-quantum
+/// its own coinbase and its credit is the flat emission plus the sub-step
 /// carry. That is what lets the miner test measure an emission band on a chain
 /// it shares with the test above it: a block either carried a settlement, in
 /// which case it is not in the band, or it did not, in which case no fee

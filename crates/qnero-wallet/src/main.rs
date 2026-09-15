@@ -13,13 +13,13 @@ use qnero_wallet::memo::{memo_budget_within, render_memo_within, terminal_column
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{RpcClient, DEFAULT_NODE_URL};
 use qnero_wallet::store::{NoteRow, PendingKind, StoredNote};
+use qnero_wallet::units::{qnr, steps_from_qnr};
 use qnero_wallet::wallet::{
     ChainBinding, EntryRhoCheck, MerkleSource, SyncOptions, Wallet, ENTRY_WALK_LIMIT,
     NUM_LEAF_PROOFS,
 };
-use qnero_wallet::POOL_STEP;
 
-/// Amounts are in pool quanta. One quantum is 10^10 planck, 0.01 QNR.
+/// Amounts are in QNR, and value in the pool moves in steps of 0.01 QNR.
 #[derive(Debug, Parser)]
 #[command(
     name = "qnero-wallet",
@@ -27,8 +27,9 @@ use qnero_wallet::POOL_STEP;
     about = "Qnero v0 shielded wallet",
     long_about = "Qnero v0 shielded wallet.
 
-Amounts are in POOL QUANTA. One quantum is 10^10 planck (0.01 QNR) and every
-value inside the pool, fees included, is counted in them.
+AMOUNTS ARE IN QNR. --amount and --fee take a figure such as 12.34, and every
+figure this wallet prints is QNR as well. Value inside the pool moves in steps
+of 0.01 QNR, so an amount has at most two decimals and a third is refused.
 
 KEY HANDLING IS DEV GRADE. The seed is 32 bytes of hex in a file with mode
 0600, with no passphrase, no key derivation and no encryption at rest, and the
@@ -97,8 +98,8 @@ enum Command {
         /// A dev chain's endowed accounts: alice, bob or charlie.
         #[arg(long)]
         from_dev_account: String,
-        /// Pool quanta to move into the pool.
-        #[arg(long)]
+        /// QNR to move into the pool, such as 12.34.
+        #[arg(long, value_parser = steps_from_qnr)]
         amount: u64,
         /// Memo carried in the note's ciphertext. Every memo is padded to one
         /// fixed size, so a longer one is refused.
@@ -136,12 +137,12 @@ enum Command {
         /// Recipient address, `qn1...`.
         #[arg(long)]
         to: String,
-        /// Pool quanta to pay.
-        #[arg(long)]
+        /// QNR to pay, such as 12.34.
+        #[arg(long, value_parser = steps_from_qnr)]
         amount: u64,
-        /// Fee in pool quanta. Defaults to this submission's floor, and a
-        /// value below it is refused: the fee is a public input of the proof.
-        #[arg(long)]
+        /// Fee in QNR. Defaults to this submission's floor, and a value below
+        /// it is refused: the fee is a public input of the proof.
+        #[arg(long, value_parser = steps_from_qnr)]
         fee: Option<u64>,
         /// Memo carried in the payment's ciphertext. Every memo is padded to
         /// one fixed size, so a longer one is refused.
@@ -245,7 +246,7 @@ fn print_notes(rows: &[NoteRow<'_>]) {
         .iter()
         .map(|row| Row {
             leaf: row.note.leaf_index.to_string(),
-            value: row.note.value.to_string(),
+            value: qnr(row.note.value),
             block: block(row.note),
             state: state(row),
             memo: row.note.memo.as_str(),
@@ -264,7 +265,7 @@ fn print_notes(rows: &[NoteRow<'_>]) {
 
     println!(
         "{:>leaf$}  {:>value$}  {:>block_width$}  {:>state_width$}  memo",
-        "leaf", "quanta", "block", "state"
+        "leaf", "QNR", "block", "state"
     );
     for row in &rows {
         let fields = format!(
@@ -443,8 +444,9 @@ fn main() -> Result<()> {
                 report.scanned_from, report.scanned_to, report.head_block
             );
             println!(
-                "received {} note(s) worth {} quanta",
-                report.received, report.received_value
+                "received {} note(s) worth {} QNR",
+                report.received,
+                qnr(report.received_value)
             );
             if report.rejected > 0 {
                 println!(
@@ -508,16 +510,16 @@ fn main() -> Result<()> {
                     report.newly_unspent
                 );
             }
-            println!("unspent total {} quanta", wallet.store.unspent_total());
+            println!("unspent total {} QNR", qnr(wallet.store.unspent_total()));
         }
         Command::Balance => {
             let wallet = Wallet::open(&seed_path)?;
             let store = &wallet.store;
             println!("address        {}", store.address);
-            println!("unspent        {} quanta", store.unspent_total());
-            println!("pending        {} quanta", store.pending_total());
+            println!("unspent        {} QNR", qnr(store.unspent_total()));
+            println!("pending        {} QNR", qnr(store.pending_total()));
             if store.off_chain().next().is_some() {
-                println!("not on chain   {} quanta", store.off_chain_total());
+                println!("not on chain   {} QNR", qnr(store.off_chain_total()));
             }
             let conflicted = store.conflicted();
             if !conflicted.is_empty() {
@@ -538,18 +540,20 @@ fn main() -> Result<()> {
             if store.off_chain().next().is_some() {
                 println!();
                 println!(
-                    "not on the current chain, {} quanta. The block that settled these was \
+                    "not on the current chain, {} QNR. The block that settled these was \
                      orphaned and the settlement has not been re-included, so the chain does not \
                      back their value and they are out of the unspent total. A sync that finds \
                      the commitment again puts them back.",
-                    store.off_chain_total()
+                    qnr(store.off_chain_total())
                 );
                 print_notes(&store.off_chain_rows());
             }
             for pending in &store.pending {
                 println!(
-                    "pending {:?} of {} quanta submitted at block {}",
-                    pending.kind, pending.value, pending.submitted_at_block
+                    "pending {:?} of {} QNR submitted at block {}",
+                    pending.kind,
+                    qnr(pending.value),
+                    pending.submitted_at_block
                 );
                 if pending.kind == PendingKind::Shield {
                     println!("        commitment {}", pending.commitment);
@@ -557,8 +561,10 @@ fn main() -> Result<()> {
             }
             for rejected in &store.rejected {
                 println!(
-                    "refused leaf {} worth {} quanta: {}",
-                    rejected.leaf_index, rejected.value, rejected.reason
+                    "refused leaf {} worth {} QNR: {}",
+                    rejected.leaf_index,
+                    qnr(rejected.value),
+                    rejected.reason
                 );
             }
         }
@@ -577,10 +583,7 @@ fn main() -> Result<()> {
             let (mut wallet, binding) =
                 Wallet::open_on_chain(&seed_path, &chain, cli.new_chain_store)?;
             report_binding(&binding);
-            println!(
-                "shielding {amount} quanta ({} planck) from {from_dev_account}",
-                u128::from(amount) * POOL_STEP
-            );
+            println!("shielding {} QNR from {from_dev_account}", qnr(amount));
             let report = wallet.shield(&chain, &metadata, &from, amount, &memo)?;
             println!("commitment  {}", report.commitment);
             println!("leaf        {}", report.leaf_index);
@@ -605,9 +608,9 @@ fn main() -> Result<()> {
             }
             let sync = wallet.sync(&chain, &metadata)?;
             println!(
-                "synced      {} new note(s), unspent total {} quanta",
+                "synced      {} new note(s), unspent total {} QNR",
                 sync.received,
-                wallet.store.unspent_total()
+                qnr(wallet.store.unspent_total())
             );
         }
         Command::Send {
@@ -645,7 +648,7 @@ fn main() -> Result<()> {
             // circuit is built: both refuse spends that seconds of circuit
             // building and tens of seconds of proving would be spent on.
             let resolved_fee = wallet.preflight(&metadata, &recipient, amount, fee, &memo)?;
-            println!("fee         {resolved_fee} quanta");
+            println!("fee         {} QNR", qnr(resolved_fee));
 
             // What the wait is made of, said before it starts, and the same
             // composition the browser wallet quotes. The block half is read
@@ -681,10 +684,12 @@ fn main() -> Result<()> {
             )?;
             println!("anchor      block {}", report.anchor_block);
             println!(
-                "inputs      leaves {:?} for {} quanta plus {} fee",
-                report.inputs, report.amount, report.fee
+                "inputs      leaves {:?} for {} QNR plus {} fee",
+                report.inputs,
+                qnr(report.amount),
+                qnr(report.fee)
             );
-            println!("change      {} quanta", report.change);
+            println!("change      {} QNR", qnr(report.change));
             println!("proof       {} bytes", report.proof_bytes);
             println!("proving     {:.2?}", report.proving);
             println!(
@@ -695,9 +700,9 @@ fn main() -> Result<()> {
             );
             let sync = wallet.sync(&chain, &metadata)?;
             println!(
-                "synced      {} new note(s), unspent total {} quanta",
+                "synced      {} new note(s), unspent total {} QNR",
                 sync.received,
-                wallet.store.unspent_total()
+                qnr(wallet.store.unspent_total())
             );
         }
     }

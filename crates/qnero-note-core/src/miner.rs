@@ -132,7 +132,7 @@ impl MinerKey {
     }
 
     /// The coinbase note this key mints at `block_number` on the chain whose
-    /// genesis is `genesis_hash`, worth `value` pool quanta.
+    /// genesis is `genesis_hash`, worth `value` pool steps.
     ///
     /// One function, called by three places that must agree: the node building
     /// the inherent payload, the wallet scanning for its own coinbase notes,

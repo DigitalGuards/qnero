@@ -473,7 +473,7 @@ fn a_wrong_value_on_this_wallets_own_block_refuses_the_pass() {
         .expect_err("a wrong value on this wallet's own block is refused");
     let message = format!("{refused:#}");
     assert!(message.contains("own author label"), "{message}");
-    assert!(message.contains("1000 quanta"), "{message}");
+    assert!(message.contains("10.00 QNR"), "{message}");
     assert_eq!(wallet.store.next_leaf, 0);
 }
 

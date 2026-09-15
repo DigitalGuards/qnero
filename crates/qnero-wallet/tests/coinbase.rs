@@ -223,7 +223,7 @@ fn a_value_that_does_not_open_the_commitment_is_not_received() {
     let mut wallet = Wallet::open(&seed).expect("the wallet opens");
     let miner_key = wallet.miner_key();
 
-    // The commitment of a 42-quantum note, published beside a claim of 1000,
+    // The commitment of a 0.42 QNR note, published beside a claim of 10 QNR,
     // in a block whose author label is not this wallet's. A block this wallet
     // *did* author refuses the pass instead: see
     // `a_wrong_value_on_this_wallets_own_block_refuses_the_pass`.

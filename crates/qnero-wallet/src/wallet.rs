@@ -35,6 +35,7 @@ use crate::store::{
 use crate::typing::{
     check_chunk_appended_nothing, seed_frontier, type_chunk, LeafKind, MinerView, TypedLeaf,
 };
+use crate::units::qnr;
 use crate::POOL_STEP;
 
 /// Leaf slots in a private batch. Not a metadata value and not discoverable
@@ -748,10 +749,11 @@ impl Wallet {
                                 // mined reward back into a silent skip.
                                 None if ours => bail!(
                                     "leaf {} was typed as this wallet's own coinbase for block \
-                                     {block_number} at {value} quanta and the same rebuild does \
-                                     not open it. The two rebuilds are one rule, so this is a \
-                                     build whose halves disagree. Nothing has been changed.",
-                                    record.index
+                                     {block_number} at {} QNR and the same rebuild does not open \
+                                     it. The two rebuilds are one rule, so this is a build whose \
+                                     halves disagree. Nothing has been changed.",
+                                    record.index,
+                                    qnr(value)
                                 ),
                                 None => record
                                     .ciphertext
@@ -1250,7 +1252,7 @@ impl Wallet {
         chain: &Chain,
         metadata: &ChainMetadata,
         from: &crate::dev_account::TransparentKey,
-        quanta: u64,
+        steps: u64,
         memo: &str,
     ) -> Result<ShieldReport> {
         // The same guard `sync` and `prepare_spend` run, and for the same
@@ -1273,7 +1275,7 @@ impl Wallet {
         // describe.
         let genesis = chain.genesis_hash()?;
         self.store.ensure_genesis(&hex::encode(genesis))?;
-        if quanta == 0 {
+        if steps == 0 {
             bail!("a shield of zero moves nothing and the chain refuses it");
         }
         let head = chain.head()?;
@@ -1288,7 +1290,7 @@ impl Wallet {
         let predicted_block = head.number + 1;
         let rho = entry_rho(predicted_block, entry_index);
         let r = random_digest(b"qnero-wallet/shield-r")?;
-        let note = Note::new(self.key.pk(), quanta, rho, r)?;
+        let note = Note::new(self.key.pk(), steps, rho, r)?;
         let inner = note.inner();
         let ciphertext = encrypt_note(
             &self.ivk().encapsulation_key(),
@@ -1303,9 +1305,9 @@ impl Wallet {
         .to_bytes();
         ensure_ciphertext_fits(metadata, ciphertext.len(), "shield")?;
 
-        let planck = u128::from(quanta)
+        let planck = u128::from(steps)
             .checked_mul(POOL_STEP)
-            .ok_or_else(|| anyhow!("{quanta} quanta overflows the chain's balance type"))?;
+            .ok_or_else(|| anyhow!("{} QNR overflows the chain's balance type", qnr(steps)))?;
         let call = encode_shield_call(metadata, planck, &inner.to_bytes(), &ciphertext);
         let (spec_version, transaction_version) = chain.runtime_version()?;
         let context = SigningContext {
@@ -1328,7 +1330,7 @@ impl Wallet {
         self.store.pending.push(PendingNote {
             kind: PendingKind::Shield,
             commitment: note.commitment().to_hex(),
-            value: quanta,
+            value: steps,
             rho: rho.to_hex().into(),
             r: r.to_hex().into(),
             memo: memo.to_string(),
@@ -1388,7 +1390,7 @@ impl Wallet {
         );
 
         Ok(ShieldReport {
-            quanta,
+            steps,
             commitment: commitment.to_hex(),
             leaf_index,
             included_at,
@@ -1448,12 +1450,14 @@ impl Wallet {
         match requested_fee {
             None => Ok(floor),
             Some(fee) if fee < floor => bail!(
-                "a fee of {fee} quanta is below this submission's floor of {floor}. The pallet \
-                 asks MinLeafFee ({}) plus one quantum per started {} bytes of ciphertext, and \
-                 the two outputs here are {} bytes. The fee is a public input of the proof, so \
-                 it cannot be raised afterwards: the settlement would be refused with \
+                "a fee of {} QNR is below this submission's floor of {}. The pallet asks \
+                 MinLeafFee ({} QNR) plus 0.01 QNR per started {} bytes of ciphertext, and the \
+                 two outputs here are {} bytes. The fee is a public input of the proof, so it \
+                 cannot be raised afterwards: the settlement would be refused with \
                  PayloadUnderpaid.",
-                metadata.min_leaf_fee,
+                qnr(fee),
+                qnr(floor),
+                qnr(metadata.min_leaf_fee),
                 metadata.ciphertext_bytes_per_fee_quantum,
                 probe_payment + probe_change
             ),
@@ -2689,7 +2693,8 @@ struct ScanRewind {
 
 #[derive(Debug)]
 pub struct ShieldReport {
-    pub quanta: u64,
+    /// What the note is worth, as a count of pool steps.
+    pub steps: u64,
     pub commitment: String,
     /// The leaf the note actually landed at. Its existence is the proof the
     /// dispatch succeeded.

@@ -490,7 +490,7 @@ fn an_orphaned_settlement_leaves_the_balance_backed_by_the_chain() {
     assert_eq!(
         wallet.store.unspent_total(),
         1_000,
-        "the chain backs 1000 quanta and that is what the wallet may report"
+        "the chain backs 10 QNR and that is what the wallet may report"
     );
     assert_eq!(wallet.store.off_chain_total(), 692);
     let phantom = wallet

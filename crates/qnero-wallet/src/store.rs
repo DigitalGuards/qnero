@@ -258,7 +258,7 @@ fn on_chain_default() -> bool {
 pub struct StoredNote {
     pub leaf_index: u64,
     pub block_number: Option<u32>,
-    /// Pool quanta.
+    /// What the note is worth, as a count of pool steps.
     pub value: u64,
     pub commitment: String,
     /// Redacted in `Debug` and zeroized on drop, like `rho` and `r` beside it,
@@ -851,8 +851,8 @@ impl WalletStore {
     /// is, so the heading `balance` prints is the sum of the table under it.
     /// Summing every member instead counted a conflict set once per note: at
     /// most one member of a set can ever settle, so a set of two off-chain
-    /// notes of 692 quanta reported 1,384 above a table showing one row of
-    /// 692, which is the same overcount `unspent_total` collapses to avoid.
+    /// notes of 6.92 QNR reported 13.84 above a table showing one row of 6.92,
+    /// which is the same overcount `unspent_total` collapses to avoid.
     pub fn off_chain_total(&self) -> u64 {
         self.off_chain_rows().iter().map(|row| row.note.value).sum()
     }

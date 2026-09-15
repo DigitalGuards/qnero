@@ -47,11 +47,14 @@ pub fn select_notes<'a>(
         bail!("this wallet holds no unspent notes");
     }
     bail!(
-        "need {target} quanta and the {} largest of {} unspent notes reach {reachable} \
-         ({held} held in total). A spend has {MAX_INPUTS} input slots, so consolidate first: \
-         send yourself the largest notes to merge them.",
+        "need {} QNR and the {} largest of {} unspent notes reach {} QNR ({} QNR held in \
+         total). A spend has {MAX_INPUTS} input slots, so consolidate first: send yourself the \
+         largest notes to merge them.",
+        crate::units::qnr(target),
         chosen.len(),
-        candidates.len()
+        candidates.len(),
+        crate::units::qnr(reachable),
+        crate::units::qnr(held)
     );
 }
 
@@ -109,8 +112,8 @@ mod tests {
     fn a_balance_spread_over_three_notes_is_refused_with_the_reachable_total() {
         let notes = [note(100, 0), note(100, 1), note(100, 2)];
         let error = select_notes(notes.iter(), 250).unwrap_err().to_string();
-        assert!(error.contains("reach 200"), "{error}");
-        assert!(error.contains("300 held in total"), "{error}");
+        assert!(error.contains("reach 2.00 QNR"), "{error}");
+        assert!(error.contains("3.00 QNR held in total"), "{error}");
     }
 
     #[test]

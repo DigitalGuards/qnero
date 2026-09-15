@@ -133,7 +133,7 @@
 //!
 //! The one thing a block can do that this does not pin is mint no coinbase at
 //! all. `pallet-shielded::mint_coinbase` refuses a credit below one pool
-//! quantum, so a block whose emission plus fees round to nothing appends no
+//! step, so a block whose emission plus fees round to nothing appends no
 //! coinbase leaf, and its last leaf would then be an ordinary shield or
 //! settled output with no value beside it. That is unreachable until the
 //! emission itself has rounded away at the supply cap, and until then the
@@ -487,9 +487,10 @@ fn coinbase_position_kind(
             .unwrap_or_else(|| "no coinbase note at all".to_string());
         bail!(
             "block {block_number} carries this wallet's own author label and this node answered \
-             {value} quanta for its coinbase at leaf {}, which rebuilds to {rebuilt} where the \
-             tree holds {}. The value is the one field of a coinbase note the chain decides, and \
-             a wrong one reads the wallet's own reward as nobody's. Nothing has been changed.",
+             {} QNR for its coinbase at leaf {}, which rebuilds to {rebuilt} where the tree \
+             holds {}. The value is the one field of a coinbase note the chain decides, and a \
+             wrong one reads the wallet's own reward as nobody's. Nothing has been changed.",
+            crate::units::qnr(value),
             record.index,
             commitment.to_hex()
         );

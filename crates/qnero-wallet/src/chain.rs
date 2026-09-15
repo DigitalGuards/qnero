@@ -1138,7 +1138,7 @@ pub struct LeafRecord {
     pub commitment: Option<[u8; 32]>,
     pub ciphertext: Option<Vec<u8>>,
     pub block_number: Option<u32>,
-    /// The public value of a coinbase note, in pool quanta. `Some` for exactly
+    /// The public value of a coinbase note, as a count of pool steps. `Some` for exactly
     /// the leaves a block's coinbase minted.
     pub coinbase_value: Option<u64>,
 }
