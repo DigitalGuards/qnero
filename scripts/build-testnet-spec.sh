@@ -14,6 +14,19 @@
 #   ./scripts/build-testnet-spec.sh --check  # regenerate to a temporary file
 #                                            # and diff, changing nothing
 #
+# `bootNodes` is the one field a deployment writes into the file after it is
+# generated. It sits outside genesis, so it does not move the genesis hash, and
+# a peer id is public. It is fed through here rather than edited in afterwards,
+# because a regeneration that silently dropped the launched network's entry
+# point is the failure this script exists to prevent:
+#
+#   QNERO_BOOTNODES=/dns/node.<domain>/tcp/30333/p2p/<peer id> \
+#     ./scripts/build-testnet-spec.sh
+#
+# With the variable unset, whatever the committed file already carries is
+# preserved, so an ordinary re-export after a preset edit keeps the bootnode.
+# Pass `QNERO_BOOTNODES=` explicitly, as an empty value, to clear the list.
+#
 # `--disable-default-bootnode` is not optional. Without it, a spec that names
 # no bootnode gets a throwaway /ip4/127.0.0.1 one injected
 # (chain/docs/CHAINSPEC_CREATION.md), which would then be in the file every
@@ -54,6 +67,52 @@ trap 'rm -f "$tmp"' EXIT
 # edited in the raw file directly.
 "$node" build-spec --chain qnero-testnet --raw --disable-default-bootnode > "$tmp"
 
+# The bootnode list, either the one given or the one already committed.
+#
+# `${VAR+set}` rather than `${VAR:-}`: an empty QNERO_BOOTNODES is how a list is
+# deliberately cleared, and it has to be distinguishable from the variable not
+# being there at all, which is how a list is preserved.
+if [ -n "${QNERO_BOOTNODES+set}" ]; then
+  bootnodes="$QNERO_BOOTNODES"
+elif [ -f "$out" ]; then
+  bootnodes="$(jq -r '(.bootNodes // []) | join(",")' "$out")"
+else
+  bootnodes=""
+fi
+
+if [ -n "$bootnodes" ]; then
+  # The same shape chain/node/tests/testnet_spec.rs asserts, checked here so a
+  # typo fails at the machine that made it rather than in CI. A bare hostname,
+  # a missing /p2p segment or an apex name each produce a spec whose bootnode
+  # nobody can dial, and the symptom turns up days later on somebody else's
+  # machine.
+  old_ifs="$IFS"
+  IFS=,
+  for address in $bootnodes; do
+    case "$address" in
+      /dns/*/tcp/*/p2p/*|/dns4/*/tcp/*/p2p/*|/dns6/*/tcp/*/p2p/*|/ip4/*/tcp/*/p2p/*) ;;
+      *)
+        IFS="$old_ifs"
+        echo "$address is not a /dns/<host>/tcp/<port>/p2p/<peer id> multiaddr." >&2
+        echo "Nothing was written. Read the peer id off the seed node's key with" >&2
+        echo "  qnero-node key inspect-node-key --file /etc/qnero/node-key" >&2
+        exit 1
+        ;;
+    esac
+  done
+  IFS="$old_ifs"
+
+  # jq rather than a text edit, and the whole file through jq rather than only
+  # when a list is present: the committed bytes have to be reproducible, and
+  # `--check` below compares them. A file written by jq and re-exported without
+  # it differs everywhere, so the two paths have to agree. With no bootnode the
+  # node's own output is committed untouched, which is what keeps the byte
+  # comparison in chain/node/tests/testnet_spec.rs live for an empty list.
+  boot_json="$(printf '%s' "$bootnodes" | jq -R 'split(",")')"
+  jq --argjson list "$boot_json" '.bootNodes = $list' "$tmp" > "$tmp.boot"
+  mv "$tmp.boot" "$tmp"
+fi
+
 if [ "$check" = "1" ]; then
   if diff -q "$out" "$tmp" > /dev/null 2>&1; then
     echo "the committed spec matches what this binary exports"
@@ -79,5 +138,12 @@ echo
 echo "The genesis hash this spec produces:"
 echo "  $node --chain $out --tmp 2>&1 | grep 'Genesis'"
 echo
-echo "bootNodes is empty and stays empty here. The seed node's peer id is"
-echo "written into the copy installed on the host; see docs/TESTNET.md."
+if [ -n "$bootnodes" ]; then
+  echo "bootNodes carries:"
+  printf '%s\n' "$bootnodes" | tr ',' '\n' | sed 's/^/  /'
+  echo
+  echo "That list is outside genesis, so it did not move the genesis hash."
+else
+  echo "bootNodes is empty. Pass QNERO_BOOTNODES once the seed node's key"
+  echo "exists; see docs/TESTNET.md."
+fi

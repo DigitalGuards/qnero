@@ -2,10 +2,18 @@
  * Walks every HTML file in site/ and checks that each internal link and each
  * referenced asset exists on disk, that every fragment target exists in the
  * page it points at, that sitemap.xml lists exactly the pages that exist, that
- * every absolute qnero.io meta URL resolves to a file, and that every M11
- * subdomain reference, in an anchor or in prose, carries its marker and its
- * "testnet, coming online" label, and that the two light palette blocks in
- * css/site.css still declare the same values.
+ * every absolute qnero.io meta URL resolves to a file, and that the two light
+ * palette blocks in css/site.css still declare the same values.
+ *
+ * The rule that every `*.qnero.io` reference had to sit inside a
+ * `data-m11-host` element beside the words "testnet, coming online" is gone,
+ * and the hosts it protected are the reason. It existed so that a link which
+ * 404s could not be shipped before the testnet was deployed, and so that
+ * `grep -rn data-m11-host site/` was the complete list of what to unwrap on
+ * launch day. The testnet is deployed, the four names answer, and the same
+ * rule now forbids the links the site is supposed to carry. What replaces it
+ * is the external watchdog: the hosts are checked by request rather than by
+ * regular expression.
  *
  *   node site/tools/check-links.mjs
  *
@@ -66,101 +74,6 @@ for (const page of pages) {
       if (ids && !ids.has(fragment)) {
         problems.push(`${page}: ${ref} has no target #${fragment} in ${target}`);
       }
-    }
-  }
-}
-
-/* The M11 subdomains answer nothing until M11 deploys, so every one of them
-   carries `data-m11-host` and the words "testnet, coming online" beside it.
-   Checking only the marker would be checking the half a reader never sees, so
-   this walks the tags with a stack, takes the marked element's parent, and
-   requires the label inside it. A link to one of those hosts that arrives
-   without the marker fails too, so a new subdomain cannot be added unlabelled.
-   The marker sits on an `<a>` for the three hosts a browser renders and on a
-   `<code>` for the RPC endpoint, which is a WebSocket and is not a control.
-   The apex is not one of them: it is this site, and it is what canonical and
-   og:url carry. */
-const LABEL = 'testnet, coming online';
-const VOID = new Set([
-  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-  'link', 'meta', 'param', 'source', 'track', 'wbr',
-]);
-const m11 = [];
-for (const page of pages) {
-  const html = readFileSync(join(site, page), 'utf8');
-  const stack = [];
-  const pending = [];
-
-  for (const m of html.matchAll(/<(\/?)([a-zA-Z][a-zA-Z0-9-]*)\b([^>]*)>/g)) {
-    const [tag, closing, name, attrs] = [m[0], m[1] === '/', m[2].toLowerCase(), m[3]];
-
-    if (closing) {
-      for (let i = stack.length - 1; i >= 0; i -= 1) {
-        if (stack[i].name !== name) continue;
-        const frame = stack[i];
-        const inner = html.slice(frame.contentStart, m.index);
-        for (const mark of pending) {
-          if (mark.frame === frame) mark.scope = inner;
-        }
-        stack.length = i;
-        break;
-      }
-      continue;
-    }
-
-    const marked = /\sdata-m11-host(?=[\s=]|$)/.test(attrs);
-    if (marked) {
-      const href = /href="([^"]+)"/.exec(attrs);
-      const text = href ? href[1] : null;
-      pending.push({ name, href: text, frame: stack[stack.length - 1], scope: null });
-    }
-
-    /* An anchor at one of those hosts must be marked, whatever else it is. */
-    if (name === 'a') {
-      const href = /href="([^"]+)"/.exec(attrs);
-      if (href && /^https?:\/\//.test(href[1])) {
-        const host = new URL(href[1]).hostname;
-        if (host.endsWith('.qnero.io') && host !== 'www.qnero.io' && !marked) {
-          problems.push(`${page}: ${href[1]} is an M11 host and its anchor has no data-m11-host`);
-        }
-      }
-    }
-
-    if (!VOID.has(name) && !attrs.trimEnd().endsWith('/')) {
-      stack.push({ name, contentStart: m.index + tag.length });
-    }
-  }
-
-  for (const mark of pending) {
-    const inner = mark.scope;
-    const what = mark.href || `<${mark.name}> at ${page}`;
-    if (inner === null) {
-      problems.push(`${page}: ${what} carries data-m11-host but its parent element never closes`);
-    } else if (!inner.includes(LABEL)) {
-      problems.push(`${page}: ${what} carries data-m11-host but "${LABEL}" is not beside it`);
-    } else {
-      m11.push(`${page}: ${mark.href || `${mark.name} element`}`);
-    }
-  }
-}
-
-/* An anchor is not the only way to name a subdomain. A hostname in prose or in a
-   bare <code> would pass the tag walk above untouched, so every occurrence of
-   one in the source is required to sit inside an element that carries the
-   marker. That is what makes `grep -rn data-m11-host site/` a complete list on
-   the day the hosts go live. */
-const HOST = /[a-z0-9-]+\.qnero\.io/g;
-const MARKED = /<([a-z]+)([^>]*\sdata-m11-host(?=[\s=>])[^>]*)>([\s\S]*?)<\/\1>/g;
-for (const page of pages) {
-  const html = readFileSync(join(site, page), 'utf8');
-  const covered = [];
-  for (const m of html.matchAll(MARKED)) covered.push([m.index, m.index + m[0].length]);
-  for (const m of html.matchAll(HOST)) {
-    const inside = covered.some(([a, b]) => m.index >= a && m.index < b);
-    if (!inside) {
-      problems.push(
-        `${page}: ${m[0]} is named outside any data-m11-host element, so the M11 grep would miss it`,
-      );
     }
   }
 }
@@ -240,10 +153,6 @@ for (const page of pages) {
 
 console.log(`${pages.length} pages, ${external.size} distinct external links`);
 for (const [url, n] of [...external].sort()) console.log(`  ${n}x ${url}`);
-console.log(`\n${m11.length} M11 host reference(s), each with "${LABEL}" beside it:`);
-for (const entry of m11) console.log(`  ${entry}`);
-console.log('  These answer nothing until M11 deploys. Grep data-m11-host to find them all.');
-
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error(`  ${p}`);

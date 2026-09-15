@@ -146,7 +146,18 @@ ReadWritePaths=/var/lib/qnero
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK is here for one call. litep2p enumerates the machine's interfaces
+# with getifaddrs(3) to decide what to listen on, glibc implements that over a
+# netlink socket, and a sandbox without AF_NETLINK makes it fail. What that
+# looks like is not an error the unit reports: the node starts, logs
+# "failed to fetch network interfaces" and "litep2p started with no listen
+# addresses, cannot accept inbound connections" among a hundred startup lines,
+# binds 9944, 3333 and 9615 normally, mines normally, and simply never opens
+# 30333. The chain runs and nobody can ever peer with it, which on a seed node
+# whose peer id is published in other people's spec files is the failure that
+# arrives days later on somebody else's machine. `ss -ltn | grep 30333` after
+# the first start is what catches it.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=true
 LockPersonality=true
 

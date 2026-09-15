@@ -2,7 +2,9 @@
   "name": "Qnero Testnet",
   "id": "qnero-testnet",
   "chainType": "Live",
-  "bootNodes": [],
+  "bootNodes": [
+    "/dns/node.qnero.io/tcp/30333/p2p/QmfXuYvCz21mBHhPCuaQkchwN9tR5fS9VjKcLEeLiQpYzv"
+  ],
   "telemetryEndpoints": null,
   "protocolId": "qnero-testnet",
   "properties": {

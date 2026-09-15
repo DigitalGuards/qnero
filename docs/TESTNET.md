@@ -121,6 +121,18 @@ generated and never hand-edited:
 ./scripts/build-testnet-spec.sh --check  # compare, change nothing
 ```
 
+`bootNodes` is the one field a deployment writes in after the file is
+generated, and it is fed through the script rather than edited in afterwards:
+
+```bash
+QNERO_BOOTNODES=/dns/node.<domain>/tcp/30333/p2p/<peer id> \
+  ./scripts/build-testnet-spec.sh
+```
+
+With the variable unset the list already in the committed file is preserved, so
+an ordinary re-export after a preset edit keeps the launched network's entry
+point instead of silently dropping it. `QNERO_BOOTNODES=`, empty, clears it.
+
 `chain/node/tests/testnet_spec.rs` regenerates it in CI and compares every
 byte, so a preset edit nobody re-exported fails a test rather than shipping a
 genesis the tree can no longer rebuild.
@@ -273,13 +285,17 @@ workstation, where `/etc/qnero/node-key` does not exist. And the hostname is
 proxied record blackholes p2p. `deploy-testnet.sh spec` prints this exact
 command after every spec copy.
 
-The committed copy in this repository keeps an empty `bootNodes`, because the
-peer id of a node that does not exist yet is not a thing a repository can know.
-`deploy-testnet.sh spec` copies the committed file over the host's, so **the
-bootnode entry has to be put back after every spec copy**, and the script
-prints the command above when it runs. If the list is ever written back into the repository copy, the
-reproducibility test compares everything except `bootNodes` and validates the
-multiaddr shape, so it keeps working.
+That edit is what a first launch does, before the repository knows the peer id
+of a node that does not exist yet. **Then put the same multiaddr into the
+repository**, through `QNERO_BOOTNODES` in section 4, and commit it. Until that
+is done, `deploy-testnet.sh spec` copies a file with an empty list over the
+host's and the entry is lost on every deploy; once it is done, the two copies
+are byte-identical and the stage is idempotent. The reproducibility test
+compares everything except `bootNodes` and validates the multiaddr shape, so a
+committed list keeps it green.
+
+A peer id is public and belongs in a public repository. The key that produces
+it is not, and it never leaves `/etc/qnero/node-key`.
 
 ## 6. The systemd units
 
@@ -341,7 +357,20 @@ Four things in those units that are load-bearing:
 ```bash
 sudo systemctl enable --now qnero-node
 sudo journalctl -u qnero-node -f
+ss -ltn | grep -E ':(9944|30333|3333)'    # all three, and 30333 is the one to look at
 ```
+
+**Check 30333 in that list rather than trusting the unit.** The sandbox in
+`qnero-node.service` names the address families the node may open, and litep2p
+decides what to listen on by calling `getifaddrs(3)`, which glibc implements
+over a netlink socket. A `RestrictAddressFamilies=` without `AF_NETLINK` makes
+that call fail, and what follows is not a crash: the node logs
+`failed to fetch network interfaces` and `litep2p started with no listen
+addresses, cannot accept inbound connections` among a hundred startup lines,
+binds 9944, 3333 and 9615 normally, authors blocks normally, and never opens
+30333 at all. A seed node whose peer id is published in other people's spec
+files, which nobody can ever dial. The shipped unit carries `AF_NETLINK` for
+exactly this; the `ss` line is what catches a unit that lost it.
 
 The faucet is started after the node is producing blocks, in section 9.
 
@@ -397,7 +426,17 @@ distinct `CF-Connecting-IP` headers got eight 200s and four 429s with no list,
 and twelve 200s with one. That is why the include is unconditional and why the
 generator runs before `nginx -t` above rather than after it.
 
-Five rules those files encode, each of which cost an outage somewhere:
+Six rules those files encode, each of which cost an outage somewhere:
+
+- **`rpc.<domain>` proxies with `Host: 127.0.0.1:9944`, the upstream's own authority.** A
+  `$host` there is the whole failure below. jsonrpsee's host
+  filter is switched on by `--rpc-cors` being set to anything other than `all`, and the
+  allowlist it builds is exactly `localhost:<port>` and `127.0.0.1:<port>`. Forwarding the
+  public name gets every call answered `Provided Host header is not whitelisted.` as
+  plain text, which is not JSON-RPC, so both wallets and the explorer report the endpoint
+  as unreachable while the node is answering perfectly on loopback and its log says
+  nothing. Browser origin checking is untouched: `Origin` is what `--rpc-cors` validates,
+  and nginx passes it through unchanged.
 
 - **`listen 443 ssl http2`, never `http2 on;`.** The separate directive is nginx 1.25+.
 - **Never pin `ssl_ciphers`.** OpenSSL 3.5 plus a CDN's TLS 1.2 origin pulls plus an ECC
@@ -554,9 +593,15 @@ curl -sS -X POST -H 'content-type: application/json' \
   -d "{\"address\":\"$ADDR\"}" https://faucet.<domain>/drip
 # -> {"status":"queued","id":N,...}
 curl -sS https://faucet.<domain>/drip/N              # poll until "sent"
-qnero-wallet --node wss://rpc.<domain> --file /tmp/probe.seed sync
+qnero-wallet --node https://rpc.<domain> --file /tmp/probe.seed sync
 # -> received 1 note(s) worth 1000 quanta
 ```
+
+**`https://` for the CLI wallet and `wss://` for the two browser apps**, at the
+same hostname and the same nginx vhost. `qnero-wallet` speaks JSON-RPC over
+HTTP and its client rejects a WebSocket URL outright with
+`Unknown Scheme: unknown scheme 'wss'`, which reads like a broken endpoint and
+is a scheme the binary never had.
 
 A drip is about ten seconds of proving and then up to one block, so two minutes
 end to end is the expected time.

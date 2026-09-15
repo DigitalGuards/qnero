@@ -142,15 +142,18 @@ it. It needs the site served on port 8931, which is what the line above it does,
 and it resolves Playwright from `explorer/node_modules` the way
 `tools/make-images.mjs` does.
 
-**The M11 hosts are named but not linked.** `wallet.qnero.io`,
-`explorer.qnero.io`, `rpc.qnero.io` and `faucet.qnero.io` appear as plain
-hostnames with "testnet, coming online" beside each one. Nothing answers at any
-of them until M11 deploys, so none of them is an anchor: a link that 404s or
-serves an unrelated page is worse than a name a reader cannot click. Every one
-of those names carries `data-m11-host`, and the checker fails any `*.qnero.io`
-occurrence that sits outside such an element, in an anchor or in prose, so a new
-one cannot be added without the marker. At M11, `grep -rn data-m11-host site/`
-is the complete list, and nothing else has to change.
+**The testnet hosts are linked.** `wallet.qnero.io`, `explorer.qnero.io` and
+`faucet.qnero.io` are anchors, and `wss://rpc.qnero.io` is a `code` chip,
+because a WebSocket endpoint is an address a reader copies rather than a
+control a browser can follow. Each carries "testnet, live" beside it.
+
+They were plain unlinked hostnames until the testnet was deployed, marked with
+`data-m11-host` so that the checker could fail any `*.qnero.io` occurrence
+outside such an element and `grep -rn data-m11-host site/` was the complete
+list to unwrap on launch day. That rule is gone with the launch it was written
+for: the same check now forbids the links the site is supposed to carry.
+Whether these hosts actually answer is the external watchdog's job, and it
+asks them rather than reading the HTML.
 
 `sitemap.xml` carries a hand-written `lastmod` on each page. Bump it when the
 content changes; nothing derives it, because nothing builds.

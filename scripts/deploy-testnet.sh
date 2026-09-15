@@ -151,12 +151,33 @@ if has_stage spec; then
   scp "$here/chain/node/chain-specs/qnero-testnet.json" "$host:/tmp/qnero-testnet.json"
   ssh "$host" 'sudo install -m 0644 -o root -g root /tmp/qnero-testnet.json \
     /etc/qnero/qnero-testnet.json && rm -f /tmp/qnero-testnet.json'
-  cat <<MSG
+  # What the copy just installed says about the network's entry point. The
+  # committed spec carries the bootnode once a deployment has fed it through
+  # build-testnet-spec.sh, and carries an empty list before that, so this
+  # reports which of the two was copied rather than assuming either.
+  committed_boot="$(jq -r '(.bootNodes // []) | join(" ")' \
+    "$here/chain/node/chain-specs/qnero-testnet.json")"
+  if [ -n "$committed_boot" ]; then
+    cat <<MSG
 
-The committed spec carries an empty "bootNodes", so the installed copy has just
-lost its entry. Put it back ON THE HOST. This reads the peer id out of the key
-that is already there; it does not generate anything, and it must not, because
-a bootnode that rotates its identity is one nobody can reach:
+The copy on the host carries its bootnode:
+
+  $committed_boot
+
+Check it against the key that is actually on the host, because a spec naming
+somebody else's peer id is a network nobody can join:
+
+  ssh $host qnero-node key inspect-node-key --file /etc/qnero/node-key
+MSG
+  else
+    cat <<MSG
+
+The committed spec carries an empty "bootNodes", so the installed copy has no
+entry. Put one in ON THE HOST, then feed the same multiaddr through
+scripts/build-testnet-spec.sh and commit it, so the next copy does not drop it
+again. This reads the peer id out of the key that is already there; it does not
+generate anything, and it must not, because a bootnode that rotates its
+identity is one nobody can reach:
 
   ssh $host
   PEER_ID=\$(qnero-node key inspect-node-key --file /etc/qnero/node-key)
@@ -170,6 +191,7 @@ The hostname is node.$domain and not $domain: p2p is raw TCP under a
 post-quantum Noise handshake, and the apex is proxied by the CDN, which
 blackholes it.
 MSG
+  fi
 fi
 
 if has_stage site; then
