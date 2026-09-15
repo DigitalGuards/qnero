@@ -1,6 +1,6 @@
 # The Qnero testnet faucet
 
-Pays a fixed amount to one `qn1` address as a shielded note, rate limited per
+Sends a fixed amount to one `qn1` address, rate limited per
 address and per client, with an optional Cloudflare Turnstile challenge. It is
 what stands behind `faucet.<domain>`.
 
@@ -200,7 +200,7 @@ paying twice, and the operator's log line says which address to check.
 
 - No amount comes from the request. The drip is a config constant.
 - No error body names the seed path, the node URL or an extrinsic. Failures are reason codes
-  (`no-spendable-note`, `fee-floor`, `not-included`, `send-failed`, `queue-full`,
+  (`no-spendable-funds`, `fee-floor`, `not-included`, `send-failed`, `queue-full`,
   `interrupted`); the
   operator gets the whole error on stderr, where a response body is not.
 - Never two proofs at once. One worker, one queue, and a full queue is a 503 with a

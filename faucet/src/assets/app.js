@@ -51,7 +51,7 @@ async function poll(id, startedAt) {
   if (body.status === 'sent') {
     say(
       `Sent. ${body.amountQnr} QNR settled in block ${body.includedAt}. Sync your wallet to see ` +
-        'the note.',
+        'the funds.',
       'ok',
     );
     submit.disabled = false;

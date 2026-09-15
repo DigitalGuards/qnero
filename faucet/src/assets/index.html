@@ -6,7 +6,7 @@
     <title>Qnero testnet faucet</title>
     <meta
       name="description"
-      content="Ten QNR of Qnero testnet funds, paid as a shielded note to a qn1 address."
+      content="Ten QNR of Qnero testnet funds, sent to one qn1 address, once per address per day."
     />
     <meta name="referrer" content="no-referrer" />
     <link rel="stylesheet" href="/app.css" />
@@ -14,22 +14,22 @@
   <body>
     <header class="head">
       <div class="wrap">
-        <span class="mark">Q</span>
-        <span class="head__name">Qnero testnet faucet</span>
+        <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
+        <span class="head__name">testnet faucet</span>
       </div>
     </header>
 
     <main class="wrap main">
       <h1>Testnet funds</h1>
       <p class="lede">
-        This pays <strong><!--DRIP_QNR--> QNR</strong> as a shielded note to one
-        <code>qn1</code> address, once per address per <!--COOLDOWN-->.
+        This sends <strong><!--DRIP_QNR--> QNR</strong> to one <code>qn1</code> address, once per
+        address per <!--COOLDOWN-->.
       </p>
 
-      <p class="note">
-        Qnero has no transparent transfer, so a drip is a shielded payment and a shielded payment
-        is a zero-knowledge proof. The faucet proves one at a time: it takes about ten seconds to
-        prove and then up to one block, which is two minutes, to settle. The page waits for both.
+      <p class="sub">
+        Every payment on Qnero is private, and a private payment is a zero-knowledge proof. The
+        faucet proves one at a time: about ten seconds to prove, and then up to one block, which is
+        two minutes, to settle. The page waits for both.
       </p>
 
       <form id="form" class="panel" autocomplete="off">
@@ -56,7 +56,8 @@
           <li>It pays one address at a time and refuses a second claim inside the cooldown.</li>
           <li>
             It cannot pay transparent QNR. There is no transparent transfer on this chain, so the
-            note lands in the shielded pool and a wallet has to scan for it.
+            funds appear in your wallet once it has synced, and there is no public ledger entry to
+            look up.
           </li>
           <li>
             These tokens are worth nothing. The network may be reset without notice, which takes

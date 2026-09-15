@@ -108,7 +108,7 @@ pub struct Job {
 fn failure_code(error: &anyhow::Error) -> &'static str {
     let text = error.to_string().to_ascii_lowercase();
     if text.contains("select") || text.contains("insufficient") || text.contains("fund") {
-        "no-spendable-note"
+        "no-spendable-funds"
     } else if text.contains("fee") {
         "fee-floor"
     } else if text.contains("timed out") || text.contains("timeout") {
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(
             codes,
             [
-                "no-spendable-note",
+                "no-spendable-funds",
                 "fee-floor",
                 "not-included",
                 "send-failed"
