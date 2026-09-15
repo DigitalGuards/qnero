@@ -153,9 +153,12 @@ Each of these is a decision.
   `zkTree_getMerkleProof` method, the `ZkTreeApi_get_merkle_proof` runtime call
   behind `state_call`, `state_callAt` and `archive_v1_call` at whichever
   parameter position that method's layout puts the name in, and the polkadot-js
-  sugar `api). A template literal or an aliased reference would pass the fence, which is a reviewer's aid for this codebase and never a security boundary; the privacy property rests on the reads the code makes.call.<api>.getMerkleProof` with its snake-case and computed-key
-  spellings. A syntax fence fails open, so `tests/lint-fence.test.ts` runs each
-  spelling through the shipped selectors and fails if one of them lints clean.
+  sugar `api.call.<api>.getMerkleProof` with its snake-case and computed-key
+  spellings). A template literal or an aliased reference would pass the fence,
+  which is a reviewer's aid for this codebase and never a security boundary; the
+  privacy property rests on the reads the code makes. A syntax fence fails open,
+  so `tests/lint-fence.test.ts` runs each spelling through the shipped selectors
+  and fails if one of them lints clean.
 - **It does not read a settled nullifier as a note that was spent.** A leaf
   slot has two input positions and its two nullifiers mark both of them
   consumed. A position holding a real input spends one note; a position holding

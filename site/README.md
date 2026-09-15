@@ -1,7 +1,7 @@
 # qnero.io
 
-The project site. Eight pages of hand-written HTML, one stylesheet, one small
-script, two images. There is no build step, no framework, no package.json, no
+The project site. Eight pages of hand-written HTML, one stylesheet, two small
+scripts, three images. There is no build step, no framework, no package.json, no
 font download, no analytics and no third-party request of any kind, which is
 the rule the explorer states for itself and the rule this site lives by.
 
@@ -19,7 +19,16 @@ site/
 
 ## Deploy
 
-Copy the files. Any static host serves them.
+Copy the eight pages, `css/`, `js/`, `img/`, `robots.txt` and `sitemap.xml`.
+`tools/`, `README.md` and `NOTICE` are repository files and are not served: the
+nginx block below returns 404 for `/tools/`, and a host with no rewrite layer
+needs the payload named instead.
+
+```
+rsync -a --delete \
+  --exclude tools/ --exclude README.md --exclude NOTICE \
+  site/ user@host:/path/to/webroot/
+```
 
 ```nginx
 server {
@@ -70,6 +79,13 @@ files: `script-src 'self'` would block an inline theme bootstrap and discard a
 reader's choice on every load, silently and with no visible failure.
 
 Redirect `www` to the apex, and serve `404.html` for anything missing.
+
+`site/` reaches `origin/main` before the site is served anywhere. The BSD-3-Clause
+provenance on `about.html` names `site/NOTICE` as plain text rather than linking
+it, because a link to a path that is not upstream yet answers 404 on the one
+section whose job is that attribution. Once `git cat-file -e origin/main:site/NOTICE`
+resolves, the name can become a link again. No gate catches this: the link
+checker makes no network request, by design.
 
 ## Editing
 

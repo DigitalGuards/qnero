@@ -4334,7 +4334,7 @@ Every share the node accepted it re-hashed itself, over a blob it rebuilt from
 the job it issued; the `result` field a miner sends is compared against that
 and never used in its place. The in-process miner wins most of this devnet
 because at a difficulty of 180 almost any nonce is a block and the node is
-holding the build: on a real difficulty the rig's 800 H/s against the node's
+holding the build: on a real difficulty the rig's ~900 H/s against the node's
 33 H/s decides it.
 
 That run also measured what the loop did with the rig's winning shares. It

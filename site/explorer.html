@@ -145,7 +145,10 @@
                 whoever runs the node, which is the correlation a wallet's local tree rebuild exists
                 to avoid. An explorer making it for a viewer would hand the node a per-viewer
                 leaf-interest log. Leaves and the root are read as public ranges, and a lint rule
-                fails the build on every spelling of the call.
+                fails the build on the spellings of the call it knows. A syntax fence fails open:
+                a template literal or an aliased reference would pass it, so the rule is a
+                reviewer's aid and never a boundary, and the property rests on the reads the code
+                makes.
               </li>
               <li>
                 <strong>It does not read a settled nullifier as a note that was spent.</strong> A
@@ -270,8 +273,9 @@ nice -n 19 npm run dev</code></pre>
             <p>
               No analytics, no fonts, no images, no CDN is the explorer's rule, and this site lives
               by it. These pages are hand-written HTML and one stylesheet. There is no build step,
-              no framework, no font download, no tracker and no third-party request of any kind. The
-              one script is a theme toggle, and every page reads with it switched off.
+              no framework, no font download, no tracker and no third-party request of any kind. The two
+              scripts are the theme bootstrap and the theme toggle, and every page reads with both
+              switched off.
             </p>
             <p>
               Read the page source. It is the same discipline the apps are held to, and it is

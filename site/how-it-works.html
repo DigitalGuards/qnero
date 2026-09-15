@@ -213,7 +213,9 @@
             <p>
               <strong>A spend never names a leaf.</strong> Merkle paths are rebuilt locally from the
               leaf range at the anchor block. The explorer holds the same line: it makes no Merkle
-              proof call at all, and a lint rule fails the build on every spelling of that call.
+              proof call at all, and a lint rule fails the build on the spellings of that call it
+              knows. That fence fails open and is a reviewer's aid, so the property rests on the
+              reads the code makes.
             </p>
             <p>
               A node still sees an IP address, a cadence and the submissions. Traffic analysis stays

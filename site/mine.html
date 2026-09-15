@@ -64,14 +64,20 @@
             validators, no foundation keys in consensus, and no algorithm nobody has hardware or
             software for.
           </p>
+          <div class="actions">
+            <a class="btn btn--ghost" href="https://github.com/DigitalGuards/qnero/blob/main/chain/MINING.md">Source and full README</a>
+          </div>
           <div class="panel status-panel">
             <span class="panel__label">What has actually happened</span>
             <p>
               <strong>A stock xmrig mined a local devnet.</strong> That is the whole of the
-              evidence: 84 blocks in 4 minutes 2 seconds on one workstation, 74 of them mined in
-              process and 10 by the rig, on the 12-second dev preset. There is no public chain to
-              point a rig at, there is nothing to earn, and there is no pool. Every command on this
-              page starts a chain of your own.
+              evidence, three rig sessions on one workstation on the 12-second dev preset. One
+              reached 84 blocks in 4 minutes 2 seconds, 74 mined in process and 10 by the rig, at a
+              difficulty low enough that almost any nonce was a block and the node held the
+              template. A 79-second session on the same build sealed 128 blocks from 334 accepted
+              shares. An earlier 103-second run reached block 181 with 167 of its blocks mined by
+              the rig. There is no public chain to point a rig at, there is nothing to earn, and
+              there is no pool. Every command on this page starts a chain of your own.
             </p>
           </div>
         </div>
@@ -333,7 +339,7 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
                 each take in their runtime JSON. Run your own node instead and point them at that.
               </p>
               <p class="card__foot hostline">
-                <a href="https://rpc.qnero.io" data-m11-host>rpc.qnero.io</a>
+                <code data-m11-host>wss://rpc.qnero.io</code>
                 <span class="tag">testnet, coming online</span>
               </p>
             </div>
