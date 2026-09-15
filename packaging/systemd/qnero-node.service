@@ -52,7 +52,7 @@ ExecStart=/usr/local/bin/qnero-node \
   --rpc-methods safe \
   --rpc-cors https://wallet.<domain>,https://explorer.<domain> \
   --rpc-max-connections 200 \
-  --rpc-rate-limit 120 \
+  --rpc-max-subscriptions-per-connection 64 \
   --prometheus-port 9615 \
   --state-pruning archive
 
@@ -85,15 +85,17 @@ ExecStart=/usr/local/bin/qnero-node \
 # leaving it on could do is publish this node's name, version and height to a
 # third party.
 #
-# --rpc-rate-limit 120 is 120 calls a minute PER CONNECTION, which is what the
-# node's help says and what sc-rpc-server does: the limiting middleware is
-# built per accepted connection. It is not a per-caller bound, and one client
-# with 200 sockets gets 200 times it. The per-caller bound is limit_conn and
-# limit_req in the rpc vhost, and that is the only place it can be, since the
-# node cannot count callers at all. --rpc-rate-limit-trust-proxy-headers is
-# deliberately absent: its only effect is to decide whether a caller falls
-# inside --rpc-rate-limit-whitelisted-ips, and no whitelist is set here, so it
-# would be an inert flag that reads like protection.
+# There is no --rpc-rate-limit. The flag is a per-connection bound (the limiting
+# middleware in sc-rpc-server is built per accepted socket), and at 120 calls a
+# minute it refused ordinary use on the first day: silQ Road's block page reads
+# several storage keys per block over one socket and answered "RPC rate limit
+# exceeded" to a reader. One client with many sockets would multiply it anyway.
+# The per-caller bound lives in the rpc vhost (limit_conn caps sockets per
+# address), which is the only place a caller can be counted, since the node
+# sees loopback. --rpc-max-subscriptions-per-connection keeps one socket from
+# holding the node's subscription table. --rpc-rate-limit-trust-proxy-headers
+# is deliberately absent: it only decides whether a caller falls inside
+# --rpc-rate-limit-whitelisted-ips, and no whitelist is set.
 #
 # --rpc-methods safe rather than auto. Auto means safe when external and unsafe
 # on loopback, and nginx proxies to loopback, so auto would expose the unsafe
