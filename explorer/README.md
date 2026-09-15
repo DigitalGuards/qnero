@@ -122,7 +122,7 @@ server {
 
     # The page talks to the node and to nothing else.
     add_header Content-Security-Policy
-        "default-src 'self'; connect-src 'self' wss://rpc.example.invalid; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" always;
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' wss://rpc.example.invalid; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" always;
     add_header Referrer-Policy "no-referrer" always;
     add_header X-Content-Type-Options "nosniff" always;
 }
@@ -140,6 +140,22 @@ server {
 ```
 
 Every host, path and certificate above is a placeholder.
+
+**`'wasm-unsafe-eval'` in `script-src` is not optional.** `@polkadot/api` calls
+`cryptoWaitReady()` when the socket connects, and `@polkadot/wasm-crypto-init`
+resolves to the wasm-only builder in a browser, with no asm.js fallback. Under a
+policy that refuses WebAssembly compilation the call resolves **false** rather
+than throwing: `ApiPromise` never emits `ready`, `connect()` never settles, and
+the page reports the endpoint as unreachable against a node that is answering
+normally. Nothing in a static check catches it, since `nginx -t` reads syntax
+and a root-URL probe returns 200 either way, so `npm run e2e` serves the built
+site under this exact policy.
+
+The tighter alternative, for a host that will not permit wasm compilation at
+all, is `initWasm: false` in the `ApiPromise.create` call in
+`src/chain/api.ts`. The only crypto this page uses is `blake2AsHex`, and
+`@polkadot/util-crypto` keeps a pure-JS branch for it, so the explorer works
+either way; the header is what this repository ships.
 
 ## What it will not do
 

@@ -31,6 +31,7 @@ means adding **deep** checks, and the shallow ones are only there to separate
 | wallet isolation | `GET https://wallet.<domain>/` headers | `cross-origin-opener-policy: same-origin` and `cross-origin-embedder-policy: require-corp` are both present |
 | explorer | `GET https://explorer.<domain>/` | exactly 200 |
 | explorer config | `GET https://explorer.<domain>/config.json` | 200 and `.rpcEndpoint == "wss://rpc.<domain>"` |
+| explorer wasm policy | `GET https://explorer.<domain>/` headers | `content-security-policy` contains `'wasm-unsafe-eval'` |
 | rpc health | `POST https://rpc.<domain>` with `system_health` | 200 and `.result.peers` present and `.result.isSyncing == false` |
 | rpc height | `POST https://rpc.<domain>` with `chain_getHeader` | 200, `.result.number` present, and greater than the value stored on the previous tick within 15 minutes |
 | faucet status | `GET https://faucet.<domain>/status` | 200, `.configured == true`, `.captchaEnabled == true`, `.dripQuanta > 0`, `.cooldownHours` positive and finite |
@@ -50,6 +51,12 @@ Three notes on what these do and do not prove:
   server block, COOP and COEP vanish, and Qloak falls back to the single-threaded prover:
   37.6 s a payment instead of 11.2 s, with no error anywhere and only the settings screen
   saying which module it got.
+- **The explorer policy check catches a page that can never connect.** `@polkadot/api`
+  awaits `cryptoWaitReady()` on connect and `@polkadot/wasm-crypto-init` ships the wasm-only
+  builder, so a policy without `'wasm-unsafe-eval'` makes that call resolve false rather than
+  throw. `ApiPromise` never emits `ready`, and silQ Road reports the endpoint as unreachable
+  while the node is fine, which sends whoever is on call to debug the node. The root-URL
+  check answers 200 throughout.
 - **The height check has to compare across ticks.** A JSON-RPC endpoint that answers is not a
   chain that is advancing, and a node stops authoring when its tip is stale, when it has no
   peers or during an initial sync. At 120 s blocks and a 5-minute tick the height moves
