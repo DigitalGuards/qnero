@@ -1,0 +1,32 @@
+The page structure of this site follows MyMonero's site
+(https://github.com/mymonero/mymonero-app-site) and its component system
+follows MyMonero's web wallet (https://github.com/mymonero/mymonero-web-js),
+both BSD-3-Clause, Copyright (c) 2014-2019, MyMonero.com, read on 2026-09-15.
+
+What is carried over is the design those stylesheets state by repetition: the
+full-bleed alternating band as the page's unit, the surface ramp (#161416,
+#272527, #1d1b1d, #383638, #494749), the text ramp above it, the two-part
+elevation recipe (a half-pixel inset highlight over a one-pixel dark shadow),
+the 13/12/11/10 px type scale with 0.5 px tracking, the 3 px and 5 px radii,
+the 24 px status strip and the label-over-value field row. No file was copied.
+css/site.css states those values as custom properties, which the original does
+not have, and every component here is written against them.
+
+What is not carried over: the accent colour, which is the one value in that
+palette that carries MyMonero's identity; the logo and the wordmark; the
+download band and its OS detection; the testimonials band; and the `Native-*`
+typefaces, which are a licensed retail family outside the BSD grant on the
+source. The type roles here are filled by system stacks and the site self-hosts
+no font.
+
+BSD-3-Clause clause 3 forbids using the copyright holder's or contributors'
+names to endorse or promote products derived from this software. The MyMonero
+name and logo appear nowhere in this site as a badge, an endorsement or a
+lineage claim. The credit in the footer and the block on the about page are
+statements of provenance.
+
+Full licence text:
+https://github.com/mymonero/mymonero-web-js/blob/master/LICENSE.txt
+
+The same notice is carried by the two Qnero applications whose stylesheets
+share these values: explorer/NOTICE and wallet-web/NOTICE.
