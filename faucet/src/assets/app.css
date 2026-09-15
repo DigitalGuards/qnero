@@ -109,16 +109,13 @@ body {
 /* The site header's wordmark, copied from site/css/site.css so the faucet
    wears the same name: one word, Qnero, with the Q amber. --accent is a link
    colour and goes dark brown in light, so the mark carries --mark instead and
-   stays amber in both themes. */
+   stays amber in both themes. On the site the mark is an anchor home; here the
+   root of this host is this page, so it is a span and carries no link
+   affordance and no outbound target. */
 .wordmark {
   font-size: 1.05rem;
   font-weight: 700;
   letter-spacing: 0.02em;
-  color: var(--text-bright);
-  text-decoration: none;
-}
-
-.wordmark:hover {
   color: var(--text-bright);
 }
 

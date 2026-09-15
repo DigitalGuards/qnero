@@ -206,6 +206,14 @@ paying twice, and the operator's log line says which address to check.
 - Never two proofs at once. One worker, one queue, and a full queue is a 503 with a
   `Retry-After`.
 
+`no-spendable-funds` was spelled `no-spendable-note` until 2026-09-15. An
+operator's log filter or alert rule selects on these codes by name, and
+`app.js` prints whatever code comes back into the sentence the requester
+reads, so a filter still carrying the old spelling matches nothing after that
+deploy and reads as a faucet that stopped failing. Whoever owns the alerting
+updates it on the deploy that carries this change. Nothing inside this
+repository selects on the code.
+
 ## Tests
 
 ```
