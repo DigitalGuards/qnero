@@ -165,8 +165,10 @@
                 presentation what the protocol pays to hide.
               </li>
               <li>
-                <strong>It has no miner table.</strong> The author label is a hash of the block's
-                own parent and changes every block, so grouping by it groups nothing.
+                <strong>It has no miner table.</strong> The author label is
+                <code>H(cvk,&nbsp;parent_hash)</code>, the miner's coinbase viewing key hashed with
+                the block's own parent, so it changes every block and grouping by it groups
+                nothing.
               </li>
               <li>
                 <strong>It does not reprint a refused call's arguments.</strong> A transparent

@@ -71,13 +71,16 @@
             <span class="panel__label">What has actually happened</span>
             <p>
               <strong>A stock xmrig mined a local devnet.</strong> That is the whole of the
-              evidence, three rig sessions on one workstation on the 12-second dev preset. One
-              reached 84 blocks in 4 minutes 2 seconds, 74 mined in process and 10 by the rig, at a
-              difficulty low enough that almost any nonce was a block and the node held the
-              template. A 79-second session on the same build sealed 128 blocks from 334 accepted
-              shares. An earlier 103-second run reached block 181 with 167 of its blocks mined by
-              the rig. There is no public chain to point a rig at, there is nothing to earn, and
-              there is no pool. Every command on this page starts a chain of your own.
+              evidence, six rig sessions on one workstation on the 12-second dev preset. The
+              strongest: a rig mined 190 of the 199 blocks in its own two-minute window, one login,
+              no reconnects, 478 shares accepted and none rejected, the chain reaching block 211.
+              Three later sessions sealed 128, 215 and 189 blocks from 334, 508 and 455 accepted
+              shares. The first session reached 84 blocks in 4 minutes 2 seconds with only 10 of
+              them mined by the rig, which is a number to read with its cause: the node dropped 17
+              of the rig's 65 block-worthy shares as superseded seals, a defect fixed since, and at
+              that difficulty almost any nonce was a block for the in-process miner too. There is no
+              public chain to point a rig at, there is nothing to earn, and there is no pool. Every
+              command on this page starts a chain of your own.
             </p>
           </div>
         </div>

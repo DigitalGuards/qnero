@@ -370,6 +370,11 @@
                   <td>910.4 MiB of peak linear memory, on top of 12.1 s of circuit build once per worker. Natively on one thread the same batch is 9.82 s, so wasm costs about 3.3x</td>
                 </tr>
                 <tr>
+                  <th scope="row">A payment in a browser, four threads</th>
+                  <td>11.2 s</td>
+                  <td>Against 37.6 s on one thread in the same sitting, a factor of 3.36. Send pressed to settled block is 24.6 s against 53.4 s. The pool is capped at four threads and needs a cross-origin isolated page</td>
+                </tr>
+                <tr>
                   <th scope="row">A send on the command line</th>
                   <td>6.47 to 7.81 s</td>
                   <td>Picks two notes largest-first, rebuilds Merkle paths locally and proves the batch itself</td>
@@ -401,9 +406,10 @@
             <strong>There is no phone in these figures.</strong> A desktop core under headless
             Chromium is the proxy, and the stated 2-to-4 factor is a floor, because its low end is a
             peak single-core score ratio that leaves out both throttling and mobile browser engines.
-            A phone therefore lands at 67 to 134 s per payment or worse. The memory fits a 6 GB
-            device and the single-threaded clock misses the 60 s target, so threads are the measured
-            gap.
+            With threads shipped the estimate is a band rather than a point: 11.2 s at 4x is 45 s
+            and the slow sitting's 27.2 s at 4x is close to two minutes, four usable cores assumed
+            inside both. The memory fits a 6 GB device. Threads make the arithmetic comfortable at
+            the fast end and leave it open at the slow end, and no device has been measured.
           </p>
           <p class="table-note">
             One transfer per submission today: six slots, one filled, so 150908 bytes carries one
