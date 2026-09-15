@@ -239,8 +239,8 @@ and a 256-byte pad put `2 * (1731 + 256) = 3974` in the cap's own bucket, which
 let a settler pad to the cap and write 512 bytes of permanent state per slot
 for the same fee an honest spend pays. At 61 each output is 1792 bytes, the
 pair is 3584, and the floor is back to 0.08 QNR where the unpadded wallet paid
-8 and the 256-padded one paid 9. Circuit build 2.31 and 2.38 s, proving 3.34
-and 3.51 s, proof 150908 bytes unchanged, submit to inclusion 0.53 s both
+0.08 and the 256-padded one paid 0.09. Circuit build 2.31 and 2.38 s, proving
+3.34 and 3.51 s, proof 150908 bytes unchanged, submit to inclusion 0.53 s both
 times, wall clock 6.47 and 6.56 s. Nothing in the proving path moved: the
 ciphertext rides in the extrinsic, and only its `ct_digest` reaches the
 circuit.

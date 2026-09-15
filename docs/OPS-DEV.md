@@ -838,14 +838,16 @@ used.
 
 ## Reading the runs below
 
-Everything from here down is a transcript: what a command printed on the day
-it ran, pasted unedited so a later reader can compare a fresh run against it.
+The fenced blocks from here down are transcripts: what a command printed on
+the day it ran, pasted unedited so a later reader can compare a fresh run
+against it. The prose around them was written after the fact and reads like the
+rest of `docs/`, in QNR.
 
-The runs dated before 2026-09-15 quote amounts as a count of pool steps, under
-the name those steps used to carry. `qnero-wallet` prints QNR now and takes QNR
-on the command line, so "1000 quanta" in a transcript below is what today reads
-as `10.00 QNR`, "8 quanta" of fee is `0.08 QNR`, and `--amount 1000` is
-`--amount 10`. The amounts themselves have not moved: the chain settles the
+The transcripts dated before 2026-09-15 quote amounts as a count of pool steps,
+under the name those steps used to carry. `qnero-wallet` prints QNR now and
+takes QNR on the command line, so "1000 quanta" in a fenced block below is what
+today reads as `10.00 QNR`, "8 quanta" of fee is `0.08 QNR`, and
+`--amount 1000` is `--amount 10`. The amounts themselves have not moved: the chain settles the
 same steps of 0.01 QNR it always did. The transcripts are left as they were
 printed, because a record that is edited to match today is no longer a record.
 
@@ -1194,12 +1196,12 @@ What changed, and what a node operator sees:
   costs every node the admission walk, two `UsedNullifiers` probes, a position
   in `outputs` and the weight the extrinsic declares. Under the old floor one
   settling slot beside 317 emptied skipped ones commanded all of that for one
-  quantum, on an unsigned and fee-free extrinsic.
+  pool step, 0.01 QNR, on an unsigned and fee-free extrinsic.
 - What it costs an aggregator: a submission that settles everything it carries
   is unaffected, because each slot already pays this minimum once through the
   per-slot floor, so every private batch and every ungriefed public batch prices
   exactly as before. A griefed public batch of six-slot inners that loses one
-  inner owes six quanta more than its settling slots' own minimums. At the far
+  inner owes 0.06 QNR more than its settling slots' own minimums. At the far
   end, a batch that settles one slot beside 317 skipped ones owes 318 minimums,
   3.18 QNR at the runtime's parameters, and the aggregator's alternative is to
   recompose a fresh public batch without the conflicted inners for the cost of
@@ -1556,14 +1558,15 @@ $ kill $(cat node.pid), then wait for 9944 to close
   locally computed paths, so the rebuild agrees with `pallet-zk-tree` on real
   chain state, and one more settled through `--merkle-rpc` for the opt-in path.
 - **The fee floor, read from metadata.** Two ciphertexts of 1731 and 1743 bytes
-  are 3474, so the floor is `MinLeafFee(1) + ceil(3474 / 512) = 8` quanta. The
-  wallet defaults to it, refuses `--fee 1` with the arithmetic spelled out, and
-  every settlement carried exactly 8.
+  are 3474, so the floor is `MinLeafFee(1) + ceil(3474 / 512) = 8` steps,
+  0.08 QNR. The wallet defaults to it, refuses a fee below it with the
+  arithmetic spelled out, and every settlement carried exactly that.
 - **A received note is spendable.** B spent the note A sent it, whose `rho` the
   circuit derived from the two nullifiers A's leaf published and whose value and
   randomness reached B only inside A's ciphertext.
-- **The books.** 1000 shielded, 300 paid, 692 change, 8 fee; then 100 paid back,
-  192 change, 8 fee; then 50 more from A over the RPC path, 634 change, 8 fee.
+- **The books.** 10.00 QNR shielded, 3.00 paid, 6.92 change, 0.08 fee; then
+  1.00 paid back, 1.92 change, 0.08 fee; then 0.50 more from A over the RPC
+  path, 6.34 change, 0.08 fee.
 
 ### Timings, `RAYON_NUM_THREADS=4`
 
@@ -1589,7 +1592,7 @@ than what the wallet asks its node. The fix pass re-ran the whole end-to-end
 flow against a fresh `--dev --tmp` node, because two of the changes move
 numbers that the M5 run above recorded: every memo is now padded to 256 bytes,
 so each output ciphertext is a uniform 1987 bytes and the submission floor is
-9 quanta where it was 8.
+0.09 QNR where it was 0.08.
 
 ### What changed
 
@@ -1802,8 +1805,8 @@ cargo fmt --all -- --check
 
 ### What the fix pass cost
 
-One quantum of fee per spend. The floor is
-`MinLeafFee(1) + ceil(3974 / 512) = 9` where it was
+One pool step of fee per spend, 0.01 QNR. The floor is
+`MinLeafFee(1) + ceil(3974 / 512) = 9` steps, 0.09 QNR, where it was
 `MinLeafFee(1) + ceil(3474 / 512) = 8`, because padding both memos to 256 bytes
 takes the pair from 3474 bytes to 3974. Nothing else moved: the proof is the
 same 150908 bytes, proving is the same 3.6 s, and the padded plaintext is
@@ -1815,8 +1818,8 @@ Ten review findings, two of them high or medium on the sync path and two on
 what the memo pad costs the chain. The fix pass re-ran the whole end-to-end
 flow against a fresh `--dev --tmp` node, because one change moves numbers the
 run above recorded: the memo pad is 61 bytes where it was 256, so each output
-ciphertext is a uniform 1792 bytes and the submission floor is back to 8
-quanta.
+ciphertext is a uniform 1792 bytes and the submission floor is back to
+0.08 QNR.
 
 ### What changed
 
@@ -2065,9 +2068,10 @@ cargo fmt --all -- --check
 
 ### What the fix pass cost
 
-One quantum of fee back per spend, and 195 bytes of memo. The floor is
-`MinLeafFee(1) + ceil(3584 / 512) = 8` where the 256-byte pad made it
-`MinLeafFee(1) + ceil(3974 / 512) = 9`, and a memo is 61 bytes where it was
+One pool step of fee back per spend, 0.01 QNR, and 195 bytes of memo. The
+floor is `MinLeafFee(1) + ceil(3584 / 512) = 8` steps, 0.08 QNR, where the
+256-byte pad made it `MinLeafFee(1) + ceil(3974 / 512) = 9`, and a memo is 61
+bytes where it was
 256. Nothing else moved: the proof is the same 150908 bytes, proving is the
 same 3.4 s, and every ciphertext the chain carries is still one length.
 
@@ -2924,12 +2928,12 @@ tree leaves       23
 tree depth        3
 ```
 
-41 quanta was the emission at genesis supply under the 12 s target,
-`(21_000_000 - 0) / 50_000_000` QNR quantized down to a whole pool quantum. At
-the 120 s target the divisor is 5 000 000 and the figure is 411 quanta, which is
-the same supply against the same wall clock. The transcript below is from the
-12 s run and its numbers are read with that divisor. The occasional carry: a
-block's credit is not a whole number of quanta, the remainder waits in
+0.41 QNR was the emission at genesis supply under the 12 s target,
+`(21_000_000 - 0) / 50_000_000` QNR rounded down to a whole pool step. At the
+120 s target the divisor is 5 000 000 and the figure is 4.11 QNR, which is the
+same supply against the same wall clock. The transcript below is from the 12 s
+run and its numbers are read with that divisor. The occasional carry: a block's
+credit is not a whole number of steps, the remainder waits in
 `PendingCoinbaseFee`, and every eighth block or so it completes one. Nothing is
 lost between the two books and nothing is created.
 
@@ -2952,13 +2956,14 @@ test the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused ... ok
 Four things in four lines:
 
 1. **Every block's coinbase is this wallet's**, and the scan says so in both counts.
-2. **A coinbase note spends.** 42 in, 5 to B, 8 of fee, 29 of change, and B's own sync finds its
-   note at 5 quanta with the memo the sender wrote. The fee is the submission's floor, which at two
-   ciphertexts of 1731 bytes is 8 quanta; the milestone's "fee 1" is below it and the chain refuses
-   a fee below the floor, which is the anti-spam rule M4 built.
-3. **The author's share of that fee is in the coinbase of the block that settled it**: 45 against 41
-   elsewhere, and the share of an 8-quantum fee is 8 - ceil(8/2) = 4. It is in that block's note and
-   in no other.
+2. **A coinbase note spends.** 0.42 QNR in, 0.05 to B, 0.08 of fee, 0.29 of change, and B's own
+   sync finds its note at 0.05 QNR with the memo the sender wrote. The fee is the submission's
+   floor, which at two ciphertexts of 1731 bytes is 0.08 QNR; the milestone's "fee 1" is one pool
+   step, below the floor, and the chain refuses a fee below it, which is the anti-spam rule M4
+   built.
+3. **The author's share of that fee is in the coinbase of the block that settled it**: 0.45 QNR
+   against 0.41 elsewhere, and the author's share of a 0.08 QNR fee is 0.04, the chain burning
+   `ceil(8/2)` of its eight steps. It is in that block's note and in no other.
 4. **A transparent transfer is refused.** `0x0001030005000000` is
    `Ok(Err(DispatchError::Module { index: 0, error: [5, 0, 0, 0] }))`: `frame_system` is pallet 0
    and `CallFiltered` is its sixth error. The extrinsic is signed with a genuine ML-DSA key, passes
@@ -3316,9 +3321,9 @@ test a_shield_a_payment_and_a_payment_back_settle_end_to_end ... ok
 test result: ok. 2 passed; 0 failed
 ```
 
-The settling block's coinbase is 46 quanta against 41 to 43 elsewhere, so the
-author's share of the fee 8 is 4 and the other 4 burned, which is what the
-milestone measured every time.
+The settling block's coinbase is 0.46 QNR against 0.41 to 0.43 elsewhere, so
+the author's share of the 0.08 QNR fee is 0.04 and the other 0.04 burned, which
+is what the milestone measured every time.
 
 ```
 $ kill $(cat node.pid), then wait for 9944 to close
@@ -3595,8 +3600,8 @@ symbol was in scope for this pass whatever the review found.
   a hook of `Shielded` at index 24 would append every coinbase leaf after `ZkTree` folded the block,
   one block late against the root its own header carries. No test in the tree would have caught it.
 - **`PendingCoinbaseFee` does carry, on most blocks.** CIRCUIT 10.1 said it survives its block only
-  when a block mints no note at all. A successful mint writes `total % POOL_QUANTUM` straight back
-  into it, which on the dev chain completes one extra quantum roughly every eighth block. Read as
+  when a block mints no note at all. A successful mint writes `total % POOL_STEP` straight back
+  into it, which on the dev chain completes one extra 0.01 QNR step roughly every eighth block. Read as
   written, any supply audit or try-runtime invariant built on that sentence would flag healthy
   state as a missing coinbase on most blocks.
 - **The high-security whitelist doc claimed two calls it does not admit.** `HighSecurityConfig`'s
@@ -5156,7 +5161,8 @@ A second claim for the same address from a different client was refused
 has already been paid. It can claim again in 23 hours"; a malformed address was
 refused `400` with nothing read and nothing written. The faucet's `/status`
 afterwards read `balanceQuanta: 48992`, `paidQuanta: 1000`, one note, which is
-50 000 less the drip and its 8 quanta fee, held in the change note.
+the 500 QNR it shielded less the 10 QNR drip and its 0.08 QNR fee, held in the
+change note.
 
 **Stopping.** Everything was started with a pidfile and stopped by it, in
 reverse order, with a 60-second wait before any SIGKILL because rocksdb has to
@@ -5392,7 +5398,7 @@ all checks passed                 all checks passed
 
 The faucet, pointed at A: transparent account
 `qzjpnqS6zVnCLeXgqAPn85dquWQNbSVr3ba54YivjzdYLKieZ`, circuits built in 6.06 s,
-funded by shielding 50 000 quanta of the genesis endowment into leaf 12 in
+funded by shielding 500 QNR of the genesis endowment into leaf 12 in
 block 13. A drip to a wallet created seconds earlier proved in 21.70 s and
 settled in block 31, 31.94 s after it left the queue. The recipient wallet,
 synced against **node B** rather than the miner, found exactly one note:
@@ -5700,7 +5706,7 @@ deliberately that this faucet does not need one
 ```
 
 With the override set it started, built its circuits in 6.20 s before the
-listener opened, and funded itself by shielding 50 000 quanta of the genesis
+listener opened, and funded itself by shielding 500 QNR of the genesis
 endowment into leaf 6 in block 7. A drip to a wallet created seconds earlier
 proved in 14.86 s and settled in block 13, 19.01 s after it left the queue. The
 recipient wallet, synced against **node B** rather than the miner:
