@@ -80,12 +80,11 @@ reader's choice on every load, silently and with no visible failure.
 
 Redirect `www` to the apex, and serve `404.html` for anything missing.
 
-`site/` reaches `origin/main` before the site is served anywhere. The BSD-3-Clause
-provenance on `about.html` names `site/NOTICE` as plain text rather than linking
-it, because a link to a path that is not upstream yet answers 404 on the one
-section whose job is that attribution. Once `git cat-file -e origin/main:site/NOTICE`
-resolves, the name can become a link again. No gate catches this: the link
-checker makes no network request, by design.
+`site/` reaches `origin/main` before the site is served anywhere. `about.html`
+links `site/NOTICE` on GitHub, and that is the one link whose job is to back the
+BSD-3-Clause attribution, so a deploy from an unpushed tree answers 404 on it.
+No gate catches this: the link checker makes no network request, by design.
+Check it by hand with `git cat-file -e origin/main:site/NOTICE` before serving.
 
 ## Editing
 
