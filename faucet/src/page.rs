@@ -32,7 +32,6 @@ pub fn index(config: &Config) -> String {
     INDEX
         .replace("<!--TURNSTILE_WIDGET-->", &widget)
         .replace("<!--TURNSTILE_SCRIPT-->", &script)
-        .replace("<!--DRIP_QUANTA-->", &config.drip_quanta.to_string())
         .replace("<!--DRIP_QNR-->", &format_qnr(config.drip_quanta))
         .replace("<!--COOLDOWN-->", &format_hours(config.cooldown_hours()))
 }

@@ -18,7 +18,7 @@ use qnero_faucet::{keys, ss58};
     about = "Qnero testnet faucet",
     long_about = "Qnero testnet faucet.
 
-Pays a fixed amount of pool quanta to one qn1 address as a shielded note,
+Pays a fixed amount of QNR to one qn1 address as a shielded note,
 rate limited per address and per client, with an optional Cloudflare Turnstile
 challenge. Configuration is entirely environment variables, because two of the
 values name files that spend and argv is world-readable; the deployed shape is

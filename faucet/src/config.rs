@@ -12,9 +12,13 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-/// What one claim pays, in pool quanta. 1000 quanta is 10 QNR
-/// (`qnero_wallet::POOL_QUANTUM`, 10^10 planck to the quantum, twelve
-/// decimals to the QNR).
+/// What one claim pays, as a count of pool steps. Amounts move in steps of
+/// 0.01 QNR (`qnero_wallet::POOL_STEP`), so 1000 of them is 10 QNR.
+///
+/// The `quanta` in these names is the spelling of the environment keys an
+/// operator sets, of the ledger's own column and of the JSON fields the
+/// deployed monitor selects on. It is kept for those, and it reaches no page:
+/// every figure a person reads here is QNR.
 pub const DEFAULT_DRIP_QUANTA: u64 = 1_000;
 
 #[derive(Debug, Clone)]
@@ -31,7 +35,7 @@ pub struct Config {
     pub expect_address: Option<String>,
     /// The claims ledger.
     pub db_path: PathBuf,
-    /// Pool quanta per claim.
+    /// What one claim pays, as a count of pool steps.
     pub drip_quanta: u64,
     /// One claim per address per this long.
     pub address_cooldown: Duration,
@@ -42,8 +46,8 @@ pub struct Config {
     /// fails inside note selection after the queue has already accepted it.
     pub min_balance_quanta: u64,
     /// At first start, and whenever the spendable balance is under
-    /// `min_balance_quanta`, shield this many quanta from the transparent
-    /// account, `fund_notes` times.
+    /// `min_balance_quanta`, shield this much from the transparent account,
+    /// `fund_notes` times.
     pub fund_chunk_quanta: u64,
     pub fund_notes: u32,
     /// Empty disables Turnstile. `/status` reports which it is.

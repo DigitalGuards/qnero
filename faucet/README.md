@@ -102,13 +102,19 @@ pair. Both sides agreeing is the confirmation `docs/TESTNET.md` asks for.
 |---|---|
 | `GET /` | the page, with `/app.css` and `/app.js` beside it |
 | `GET /health` | 200 when the worker is up, the node answered inside six minutes and the balance is above the floor; 503 otherwise. The worker's minute tick is what keeps that freshness true with no traffic |
-| `GET /status` | the deep check: `configured`, `captchaEnabled`, `dripQuanta`, `cooldownHours`, `balanceQuanta`, `notes`, `queued`, `chainHead`, `address`, `genesis` |
+| `GET /status` | the deep check: `configured`, `captchaEnabled`, `dripQuanta`, `dripQnr`, `cooldownHours`, `balanceQuanta`, `balanceQnr`, `notes`, `queued`, `chainHead`, `address`, `genesis` |
 | `POST /drip` | `{"address": "qn1...", "turnstileToken": "..."}` → 202 `{"status":"queued","id":N}` |
 | `GET /drip/{id}` | `queued`, `sent` with `includedAt`, or `failed` with a reason code |
 
 `/status` is GET only so a probe can never submit a claim. `/health` is 503 when
 the faucet is drained, on purpose: a faucet that is up and cannot pay is an
 outage worth paging for even though the process is running.
+
+Every amount comes back twice. The `...Qnr` fields are strings in QNR and are
+what the page prints; the `...Quanta` fields beside them are integer counts of
+the 0.01 QNR steps the pool moves value in, and they keep that older spelling
+because the deployed monitor and the external watchdog already select on them
+by name. A reader wants the first pair.
 
 ## The order a claim is refused in
 
@@ -154,7 +160,7 @@ drain, and nothing in this list is:
 - The client side costs an attacker one more /64. That is real friction and it is not
   much: a second VPS, or a prefix an ISP hands out on request.
 - What is left is the prover. One drip at a time, roughly half a minute end to end, so
-  about 2 880 drips a day, which is 2.88M quanta against a 10M-quanta endowment: three
+  about 2 880 drips a day, which is 28 800 QNR against a 100 000 QNR endowment: three
   days to empty, and every claim after that answers `drained`.
 
 **Turnstile is the only defence here that costs an attacker something per

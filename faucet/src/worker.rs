@@ -31,6 +31,7 @@ use qnero_wallet::chain::Chain;
 use qnero_wallet::dev_account::TransparentKey;
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::RpcClient;
+use qnero_wallet::units::qnr;
 use qnero_wallet::wallet::{MerkleSource, Wallet, NUM_LEAF_PROOFS};
 
 use crate::config::Config;
@@ -63,7 +64,7 @@ const DRIP_MEMO: &str = "qnero testnet faucet";
 pub struct Shared {
     /// The prover is built, the wallet is open and the node answered.
     pub ready: AtomicBool,
-    /// Spendable pool quanta as of the last sync.
+    /// The spendable balance as of the last sync, as a count of pool steps.
     pub spendable_quanta: AtomicU64,
     /// Spendable notes as of the last sync.
     pub notes: AtomicU64,
@@ -258,7 +259,8 @@ impl Worker {
         {
             let amount = self.config.fund_chunk_quanta;
             println!(
-                "faucet      shielding {amount} quanta from the genesis account (note {} of {})",
+                "faucet      shielding {} QNR from the genesis account (note {} of {})",
+                qnr(amount),
                 shielded + 1,
                 self.config.fund_notes
             );
@@ -321,8 +323,11 @@ impl Worker {
             MerkleSource::Local,
         )?;
         println!(
-            "faucet      drip {} quanta plus {} fee, proved in {:.2?}, block {}",
-            report.amount, report.fee, report.proving, report.included_at
+            "faucet      drip {} QNR plus {} fee, proved in {:.2?}, block {}",
+            qnr(report.amount),
+            qnr(report.fee),
+            report.proving,
+            report.included_at
         );
         Ok(report.included_at)
     }
@@ -371,8 +376,8 @@ impl Worker {
         }
         self.shared.ready.store(true, Ordering::Relaxed);
         println!(
-            "faucet      ready, {} quanta spendable across {} note(s)",
-            self.shared.spendable(),
+            "faucet      ready, {} QNR spendable across {} note(s)",
+            qnr(self.shared.spendable()),
             self.shared.notes.load(Ordering::Relaxed)
         );
 
@@ -548,8 +553,8 @@ mod tests {
     #[test]
     fn a_failure_is_a_code_and_never_the_error() {
         let cases = [
-            anyhow!("select_notes: no combination of two notes covers 1000 quanta"),
-            anyhow!("a fee of 3 quanta is below this submission's floor of 7"),
+            anyhow!("select_notes: no combination of two notes covers 10.00 QNR"),
+            anyhow!("a fee of 0.03 QNR is below this submission's floor of 0.07"),
             anyhow!("the submission timed out waiting for inclusion"),
             anyhow!("http://127.0.0.1:9944 answered 500"),
         ];
