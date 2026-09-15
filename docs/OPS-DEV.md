@@ -5179,3 +5179,265 @@ The node line runs **without** `SKIP_WASM_BUILD` on purpose: both the rename
 guard and the new spec reproducibility test build a preset spec and therefore
 need `WASM_BINARY`, and with the variable set they skip themselves and say so on
 stderr, which is most of the guard silently not running.
+
+## The M11 fix pass: a review, twelve fixes and a second rehearsal, 2026-09-15
+
+A review of the preparation run above returned eighteen findings, several of
+them the same defect seen twice. Twelve distinct ones were applied and one was
+left open with a reason. What the fix pass is worth saying anything about is
+this: three of the twelve are code that reads correctly, passed its tests, and
+did not work. Two rehearsals are what separates that group from the rest.
+
+### The on-box monitor was decorative in two places
+
+**The operator's env file was sourced after every default had been resolved.**
+`DOMAIN="${MONITOR_DOMAIN:-<domain>}"` and the five settings derived from it
+were expanded above the `. "$ENV_FILE"` line, so setting `MONITOR_DOMAIN` did
+nothing: the TLS check asked curl for the literal host `wallet.<domain>`, got
+000 on the first tick and every tick after, and `MONITOR_SSL_DIR` pointed at a
+directory with no certificate in it, so the expiry of a fifteen-year origin
+certificate that nothing else watches was never checked at all. The source now
+runs directly after `ENV_FILE` is computed and above the defaults, and a
+placeholder is refused rather than probed:
+
+```
+$ monitor.sh                 # with an unedited ~/.monitor.env
+MONITOR_DOMAIN is still the placeholder (<domain>). Set it in ~/.monitor.env
+$ echo $?
+2
+```
+
+**A resolve never cleared the last key.** `grep -vxF "$key" "$ALERT_STATE" >
+new && mv new "$ALERT_STATE"` looks like a rewrite and is a conditional one:
+grep exits 1 when it matches nothing, which is exactly the case where the key
+being resolved was the only one in the file, so the `&&` never fired and the
+key stayed. Since `alert()` begins with `is_alerting "$key" && return`, the
+first check to ever recover became permanently silent. Driven through the
+script's own functions, before and after:
+
+```
+tick 1  nginx down    (debounced, silent)
+tick 2  nginx down    red   "nginx is not active"
+tick 3  nginx up      green "nginx is running again"
+tick 4  nginx up      (silent)
+tick 5  nginx up      (silent)
+        alert state:  empty
+tick 6  nginx down    (debounced, silent)
+tick 7  nginx down    red   "nginx is not active"
+```
+
+Before the fix, ticks 3, 4 and 5 each sent the green message and ticks 6 to 8
+sent nothing at all, which is the nine-hour nginx outage this file exists to
+catch, silently.
+
+### The faucet had no heartbeat, and no way out of a failed top-up
+
+`last_seen_node` was written only by `sync()`, and `sync()` ran at startup,
+during funding and after a job. `/health` reports the node stale after six
+minutes. So a faucet that served nobody overnight, which is the ordinary state
+of a new testnet at four in the morning, answered 503 with `nodeFresh:false`
+while the node was fine, and both monitoring layers paged for it. The same
+absence wedged the faucet in a second way: a top-up was retried only after a
+drip, and a balance under the floor refuses every claim before it enqueues
+anything, so one failed shield meant no job, which meant no retry, which meant
+a faucet that stayed dead until a human restarted the unit.
+
+The worker now waits with a deadline instead of blocking on the channel, and
+one tick a minute refreshes the balance and retries a top-up that is still
+needed. Measured on the rehearsal chain, 430 seconds after the last claim and
+so well past the 360-second window:
+
+```
+GET /health -> 200
+{"balanceQuanta":47984,"chainHead":87,"funded":true,"nodeFresh":true,"ready":true,"status":"ok"}
+```
+
+The chain head was 35 when the last claim settled and 87 at that probe, with no
+claim in between, which is the tick calling `sync` with nothing else to do.
+
+### One lock hold, and one spelling of an address
+
+Two defects in `POST /drip`, both about the ledger:
+
+- **The two rate-limit reads and the row insert took the mutex separately, with a Turnstile
+  await between them.** Every concurrent claim read a ledger none of them had written to yet.
+  With Turnstile enabled, which is what a public faucet runs, that gap is a round trip to
+  Cloudflare, and N tokens fired together are N drips for one address.
+- **The cooldown was keyed on the requester's own string.** bech32m lowercases the
+  human-readable part and maps `A-Z` onto the same values as `a-z`, so `QN1...` decodes to
+  the same account as `qn1...`, while a `TEXT` column with binary collation sees two
+  recipients. The first rehearsal paid that address twice.
+
+The limits are now read and the row written under one lock hold, with the
+cheap pre-check left in front of Turnstile so an already-refused claim still
+costs no outbound request, and the ledger is keyed on `recipient.encode()`.
+Live, against the rehearsal chain: the shouted spelling of an address that had
+just been paid was refused `429 address-cooldown` with `retry-after: 86400`
+from a different client, and eight simultaneous claims for one fresh address
+from eight clients produced exactly one 202, seven 429s and two rows in the
+whole ledger.
+
+### The public RPC had no per-caller bound
+
+The vhost's comment said the node's rate limit counted per caller because the
+node was started with `--rpc-rate-limit-trust-proxy-headers`. Neither half was
+true. `--rpc-rate-limit` is "calls/minute for each connection" in the node's
+own help and the limiting middleware is built per accepted connection, and in
+`sc-rpc-server` the proxy address decides one thing only, whether a caller
+falls inside `--rpc-rate-limit-whitelisted-ips` and is therefore exempt. No
+whitelist was set, so the flag was inert. One client with 200 sockets would
+have taken every connection slot the node has and 200 times the call budget,
+while both wallets were refused at connect.
+
+The inert flag is gone from the unit, both comments now say what the limit
+actually counts, and the bound is where it can exist: `limit_conn rpc_conn 8`
+and a `limit_req` in the rpc vhost, with the zones beside the faucet's in
+`00-qnero-common.conf`. The whole six-vhost set was then checked against a real
+nginx 1.24, the host's version, with a self-signed certificate and the
+placeholders filled: `syntax is ok`, `test is successful`.
+
+### The scripts and the runbook
+
+- **`generate-bootnode-key.sh` swallowed every failure.** `2>&1 >/dev/null | tr` folded the
+  node's diagnostics into the substitution that captures the peer id, and `set -e` aborted
+  before the assignment, so an unwritable `/etc/qnero` was exit 1 with zero bytes on both
+  streams, on the first command of a deployment. Diagnostics now go to a temp file and are
+  printed on failure. Three paths were exercised: an unwritable directory, an existing key
+  that is not hex, and the ordinary generation, which also confirmed the peer id from
+  `generate-node-key` on stderr and from `inspect-node-key` on stdout are the same string.
+- **The rollback depended on a copy nothing took.** `docs/TESTNET.md` told the operator to
+  keep `/usr/local/bin/qnero-node.previous` "before deploying", and the prescribed path is
+  `deploy-testnet.sh`, which did not. The node stage now copies both binaries to `.previous`
+  before installing and prints where they are, and the runbook's rollback uses them.
+- **The static stages could not write.** The webroots are root-owned and the three `rsync`
+  calls ran as the deploy account, so a first deploy would have installed the binaries and
+  the spec and had every static asset refused. Each tree is now staged under the deploy
+  account's own `/tmp` and moved in with one `sudo rsync`, excludes applied to both hops so
+  `--delete` cannot remove the `config.json` the first hop was careful not to copy.
+- **The nginx step would have failed on the distro default site.** Ubuntu 24.04 ships
+  `sites-enabled/default` with `listen 80 default_server`, and so does `qnero-10-default`.
+  Reproduced against real nginx: `[emerg] a duplicate default server for 0.0.0.0:80`, and
+  because of the `&&` the reload never runs and the operator is left mid-step. The runbook
+  removes it, with the reason.
+- **The node key was left root-owned while the unit runs as `qnero`.** Section 5 now runs the
+  generator under sudo, creates the service user if it is missing and chowns the key, and
+  section 6 has a three-line ownership checklist for the files a reinstall can drop.
+- **The pre-genesis seed confirmation wrote `/tmp/seed64` under the invoking umask.** It is
+  `(umask 077; ...)` now, in the runbook and in `faucet/README.md`, because 0644 for the
+  second between writing the key to the whole genesis endowment and shredding it is a leak
+  with no recovery: the address is in genesis.
+
+### What the second rehearsal found that the review did not
+
+The worker's new wait panicked on its first idle minute:
+
+```
+thread 'qnero-faucet-wallet' panicked at faucet/src/worker.rs:369:41:
+there is no reactor running, must be called from the context of a Tokio 1.x runtime
+```
+
+`tokio::time::timeout` builds its `Sleep` when the future is **constructed**
+rather than at the first poll, so `block_on(timeout(TICK, jobs.recv()))` builds
+the timer on a plain `std::thread` with no runtime entered. Wrapping it in an
+`async` block, which is what puts the construction inside the runtime's
+context, is the whole difference. Funding had already succeeded and the
+listener was already up, so the faucet answered `/status` normally with a dead
+worker behind it: the failure a test suite that never starts a worker cannot
+see, and a rehearsal sees in under a minute. `worker.rs` carries the shape as a
+test now.
+
+### The second rehearsal
+
+Same shape as the first: two nodes from the committed raw spec, genesis
+`0x439dee7cb5609728e54aa60ef8bed2924196c4a3d837f2c8a7e64685df69d900`, node A
+the seed with `--node-key-file`, `--mining-threads 1` and the stratum port,
+node B a plain full node on 30334 dialing
+`/dns/localhost/tcp/30333/p2p/QmTALAUeWs3iEzgK1yB6BUCCDtdUjnjBcdFG576ut7VhP8`.
+
+Block 1 was mined 8 seconds after start this time, against 199 seconds in the
+first rehearsal, which is the same exponential distribution at difficulty 5 000
+seen from its other tail. B had A as a peer within 8 seconds of its own start
+and imported block 1 one second after A produced it. xmrig 6.21.3 at
+`nice -n 19 --threads=2` was attached to the stratum port and sealed blocks
+from then on.
+
+`scripts/probe-node.sh` against both nodes, with the genesis pinned and a height
+floor of 5:
+
+```
+# node A                          # node B
+peers                  1          peers                  1
+isSyncing              false      isSyncing              false
+height                 34         height                 34
+advancing              yes, from 0 to 34
+genesis                0x439d…d900
+target block time      120000 ms  target block time      120000 ms
+stratum                open       stratum                open
+
+all checks passed                 all checks passed
+```
+
+The faucet, pointed at A: transparent account
+`qzjpnqS6zVnCLeXgqAPn85dquWQNbSVr3ba54YivjzdYLKieZ`, circuits built in 6.06 s,
+funded by shielding 50 000 quanta of the genesis endowment into leaf 12 in
+block 13. A drip to a wallet created seconds earlier proved in 21.70 s and
+settled in block 31, 31.94 s after it left the queue. The recipient wallet,
+synced against **node B** rather than the miner, found exactly one note:
+
+```
+scanned leaves 0..35 at block 32
+received 1 note(s) worth 1000 quanta
+unspent total 1000 quanta
+
+      leaf        quanta    block    state  memo
+        32          1000       31  unspent  qnero testnet faucet
+```
+
+Exactly one, which is the point: in the first rehearsal the same address
+claimed twice by shouting its own address back at the faucet.
+
+Stopping, in reverse order, each by its pidfile with a 60-second wait before any
+SIGKILL: xmrig, the faucet, node B, node A. All four stopped on SIGTERM within
+two seconds. The faucet's last three lines are the graceful path and also the
+new tick's error handling, since node A had gone first:
+
+```
+faucet      sync failed: ... Connection refused (os error 111)
+faucet      stopping
+faucet      the worker's queue closed, stopping
+```
+
+A tick that cannot reach the node logs and returns, which is what leaves
+`/health` to report the staleness rather than the worker dying of it.
+Afterwards no `qnero-node`, `qnero-faucet` or `xmrig` process remained and all
+eight ports (9944, 9945, 30333, 30334, 3333, 8080, 9615, 9616) were closed.
+
+### Gates
+
+```
+# the repository root
+cargo fmt --all -- --check                                        0
+nice -n 19 cargo clippy -j 2 --workspace --all-targets            0, no warnings
+RAYON_NUM_THREADS=4 nice -n 19 cargo test -j 2 --workspace --release
+                                                                  30 binaries, 0 failed
+nice -n 19 cargo test -j 2 --release -p qnero-faucet              28 + 12 passed
+
+# the chain workspace, which this pass does not touch
+cargo +nightly fmt --all -- --check                               0
+
+# the web properties
+explorer: lint, typecheck, test, build                            0
+wallet-web: lint, typecheck, test                                 0
+site: node site/tools/check-links.mjs                             no broken links
+
+# the nginx set, against the host's own version
+nginx -t (nginx/1.24.0, six vhosts, placeholders filled)          test is successful
+```
+
+One review finding was left open rather than fixed: two wall-clock stratum
+tests (`chain/node/src/stratum/tests.rs:864` and `:897`) flake under a loaded
+parallel `cargo test`, because they drive 250 ms intervals against 1 000 ms and
+1 500 ms deadlines. It is real and it is pre-existing: M11 touches nothing in
+`chain/node/src/stratum`, and the fix is to drive those two on paused tokio
+time rather than on the wall clock, which is a change to a subsystem this
+milestone has no other reason to rebuild.

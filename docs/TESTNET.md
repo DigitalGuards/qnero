@@ -182,10 +182,16 @@ no second copy. Confirm the seed and the address belong together before genesis
 is cut, using the node's own derivation rather than the faucet's:
 
 ```bash
-printf '%s%064d' "$(cat <seed-path>)" 0 > /tmp/seed64
+(umask 077; printf '%s%064d' "$(cat <seed-path>)" 0 > /tmp/seed64)
 chain/target/release/qnero-node key qnero --scheme standard --no-derivation --seed < /tmp/seed64
 shred -u /tmp/seed64
 ```
+
+The `umask 077` is the point of the subshell. Without it that file is created
+0644 under a stock umask, and for the second or so between writing it and
+shredding it, the key to the entire genesis endowment is readable by every
+account on the machine. There is no recovery from a leak: the address is fixed
+in genesis and the chain has to be relaunched.
 
 `Dilithium87Pair::from_seed` reads the first 32 bytes of whatever it is handed,
 so padding a 32-byte seed to the 64 that command wants derives the same pair.
@@ -202,9 +208,25 @@ upstream.
 
 ```bash
 sudo mkdir -p /etc/qnero
-QNERO_NODE=/usr/local/bin/qnero-node \
+# The key is given to the service user, so the service user has to exist. This
+# is the same line section 6 runs, and running it twice is harmless.
+id -u qnero >/dev/null 2>&1 || \
+  sudo useradd --system --home-dir /var/lib/qnero --create-home --shell /usr/sbin/nologin qnero
+sudo QNERO_NODE=/usr/local/bin/qnero-node \
   ./scripts/generate-bootnode-key.sh /etc/qnero/node-key node.<domain>
+sudo chown qnero:qnero /etc/qnero/node-key
+sudo chmod 0600 /etc/qnero/node-key
 ```
+
+The `sudo` and the `chown` are both load-bearing:
+
+- **`sudo` on the generator.** `/etc/qnero` is root-owned, so without it the script cannot
+  write the key at all.
+- **`chown qnero:qnero`.** The unit runs `User=qnero` and passes the file as
+  `--node-key-file`. A root-owned 0600 key is unreadable to that user, so the node exits 1
+  with `Service(Network(Permission denied (os error 13)))` on every start, and
+  `Restart=always` turns that into a crash loop whose message names neither the file nor the
+  permission. Section 6's checklist is where a reinstall that drops the ownership is caught.
 
 Three things that script handles and a hand-rolled command gets wrong:
 
@@ -266,6 +288,17 @@ sudoedit /etc/qnero/faucet.env    # fill in QNERO_FAUCET_EXPECT_ADDRESS and the 
 Then replace `<node-name>` and the two `<domain>` occurrences in
 `qnero-node.service`, and `sudo systemctl daemon-reload`.
 
+Before the first start, check that every file a service user has to read is
+readable by that user. Each of these is root-owned by default and each is a
+crash loop if it stays that way:
+
+```bash
+sudo ls -l /etc/qnero/node-key /etc/qnero/node.env /etc/qnero/faucet.env
+# node-key    qnero:qnero          0600
+# node.env    root:root            0600   (systemd reads it before dropping to the user)
+# faucet.env  root:qnero-faucet    0640
+```
+
 Four things in those units that are load-bearing:
 
 - **`--force-authoring` is what lets the chain start at all.** Two gates pause authoring
@@ -306,8 +339,19 @@ done
 sudo sed -i -e 's/<domain>/<the real domain>/g' -e 's|<user>|<the real account>|g' \
   /etc/nginx/sites-available/qnero-* /etc/nginx/conf.d/00-qnero-common.conf
 sudo mkdir -p /var/www/<domain> /var/www/wallet.<domain> /var/www/explorer.<domain>
+# Ubuntu ships /etc/nginx/sites-enabled/default, which also declares
+# `listen 80 default_server`, and so does qnero-10-default. Two of them is
+# `nginx -t` failing with "a duplicate default server for 0.0.0.0:80" and the
+# reload never running. Leaving the distro one instead of ours is worse than
+# the error: an unknown Host would be served /var/www/html under the wildcard
+# certificate rather than refused.
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+The webroots stay root-owned. `deploy-testnet.sh` stages each tree under the
+deploy account's own `/tmp` and finishes with one `sudo rsync`, so nothing has
+to be chowned to the account that ships builds.
 
 Also fill in the CDN's published address ranges in the `set_real_ip_from` lines
 of `00-qnero-common.conf`. Without them every faucet claim reads as coming from
@@ -483,6 +527,17 @@ loopback**, the origin certificate's expiry, and disk. Alerts are edge-triggered
 and debounced at two ticks, and the state lives outside `/tmp`, because a reboot
 wipes `/tmp` and every active alert then re-fires as new.
 
+Two things it does on purpose, both of which are the difference between a
+monitor and the appearance of one:
+
+- **It exits 2 while `MONITOR_DOMAIN` is still `<domain>`.** The env file is sourced before
+  any default is resolved, so an unedited one stops the monitor in a way the cron log shows.
+  The alternative is what a placeholder actually does: `curl` cannot resolve a host with
+  angle brackets, so the nginx check fails on the first tick, alerts once, and never clears.
+- **A recovery really clears the key.** An alert fires once when a check starts failing and
+  once when it recovers, and the state file empties as checks recover, so the all-clear is an
+  empty file and a check that has recovered can alert again.
+
 **Verify the webhook delivers before relying on it.** Discord answers HTTP 204
 on success, and a revoked or mistyped webhook fails invisibly:
 
@@ -498,14 +553,23 @@ files, so the node and the faucet can both be dead while every root returns 200.
 
 ## 12. Rollback
 
-**A bad binary.** Keep the previous one. The deploy installs over
-`/usr/local/bin/qnero-node`, so take a copy first and put it back:
+**A bad binary.** The previous one is already kept. The `node` stage copies
+whatever it is about to replace to `<name>.previous` before it installs, for
+both binaries, and prints where it put them, so a rollback is one install and a
+restart with nothing to have remembered beforehand:
 
 ```bash
-sudo cp /usr/local/bin/qnero-node /usr/local/bin/qnero-node.previous   # before deploying
 sudo install -m 0755 /usr/local/bin/qnero-node.previous /usr/local/bin/qnero-node
 sudo systemctl restart qnero-node
+
+# The faucet is replaced by the same stage and rolls back the same way.
+sudo install -m 0755 /usr/local/bin/qnero-faucet.previous /usr/local/bin/qnero-faucet
+sudo systemctl restart qnero-faucet
 ```
+
+There is exactly one generation of this: a second deploy overwrites
+`.previous` with the binary the first deploy installed. Roll back before
+deploying again, or keep a dated copy of your own.
 
 A rollback across a runtime change is not a rollback: the chain's state was
 produced by whichever runtime executed it. Under v1 there is no runtime upgrade
