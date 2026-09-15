@@ -228,13 +228,13 @@ fn leaves_word(count: u64) -> &'static str {
 /// about. `wallet-web/src/wallet/sync.ts` writes the same sentence.
 fn moved_leaf_warning(leaf: u64, block_number: u32, index: u64) -> String {
     format!(
-        "leaf {leaf} carries a ciphertext this wallet's own key opens, and the commitment \
-         answered beside it is one that note does not open. Block {block_number} holds the \
-         opened note's commitment at leaf {index}, inside the range this pass folded against \
-         that block's own header, so the note is recorded at leaf {index} and the payment \
-         arrives. A ciphertext that opens under this wallet's key is this wallet's note, so the \
-         pair was moved. Which index inside a block holds which commitment is bound by nothing \
-         on chain: sync against a second node before spending it."
+        "leaf {leaf} carries a ciphertext this wallet's own key opens, and the tree entry \
+         answered beside it is one that payment does not open. Block {block_number} holds the \
+         opened payment's entry at leaf {index}, inside the range this pass folded against \
+         that block's own header, so the payment is recorded at leaf {index} and it arrives. A \
+         ciphertext that opens under this wallet's key is this wallet's payment, so the pair \
+         was moved. Which index inside a block holds which entry is bound by nothing on chain: \
+         sync against a second node before spending it."
     )
 }
 
@@ -247,8 +247,8 @@ fn moved_leaf_warning(leaf: u64, block_number: u32, index: u64) -> String {
 fn unplaceable_leaf_warning(leaf: u64, block_number: u32) -> String {
     format!(
         "leaf {leaf} carries a ciphertext this wallet's own key opens, and block {block_number} \
-         holds the commitment it opens at none of the leaves it appended. The leaf is skipped \
-         and the pass continues, because a sender who encrypts a payload opening a commitment it \
+         holds the tree entry it opens at none of the leaves it appended. The leaf is skipped \
+         and the pass continues, because a sender who encrypts a payload opening a tree entry it \
          never published produces the same reading and nothing here tells the two apart. If a \
          payment is missing, sync against a second node."
     )
@@ -263,8 +263,8 @@ fn unplaceable_leaf_warning(leaf: u64, block_number: u32) -> String {
 fn moved_overflow_warning(more: u64) -> String {
     format!(
         "and {more} more {} in this pass carried a ciphertext this wallet's own key \
-         opens beside a commitment that note does not open, each recorded at the \
-         index inside its own block that holds the commitment it opens. Sync against \
+         opens beside a tree entry that payment does not open, each recorded at the \
+         index inside its own block that holds the entry it opens. Sync against \
          a second node before spending them.",
         leaves_word(more)
     )
@@ -276,7 +276,7 @@ fn moved_overflow_warning(more: u64) -> String {
 fn unplaceable_overflow_warning(more: u64) -> String {
     format!(
         "and {more} more {} in this pass carried a ciphertext this wallet's own key \
-         opens whose commitment their own block holds nowhere, each skipped. If a \
+         opens whose tree entry their own block holds nowhere, each skipped. If a \
          payment is missing, sync against a second node.",
         leaves_word(more)
     )
@@ -2428,8 +2428,8 @@ pub struct SyncReport {
 pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =
     "a pass that reads leaves and receives nothing is the ordinary case, and it is also what a \
      substituted or moved leaf looks like. Two per-leaf values are bound to a leaf by nothing on \
-     chain: the bytes at Shielded::Ciphertexts, and where a commitment sits inside its block's \
-     own leaf range. The tree sorts a node's children at every level and tags no level, so a \
+     chain: the bytes at Shielded::Ciphertexts, and where a leaf sits inside its block's own \
+     range. The tree sorts a node's children at every level and tags no level, so a \
      block's root pins that block's leaf multiset and each internal node's child multiset and \
      nothing further: sibling swaps composed at any level reach any position the range's aligned \
      subtrees allow, the coinbase position included, and a shorter tree of internal node values \

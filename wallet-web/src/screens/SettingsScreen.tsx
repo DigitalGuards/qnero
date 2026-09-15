@@ -114,7 +114,8 @@ export function SettingsScreen({
             ))}
             <p>
               An absent key and an empty map are indistinguishable, and an empty map here is a zero
-              balance or a settled note reported unspent. Syncing against this node is refused.
+              balance, or an amount already spent reported as unspent. Syncing against this node is
+              refused.
             </p>
           </Notice>
         )}
@@ -123,7 +124,7 @@ export function SettingsScreen({
       <Panel title="What this wallet tells the node">
         <Prose>
           <p>
-            A light wallet hands a server its viewing key and is told which outputs are its own.
+            A light wallet hands a server its viewing key and is told which payments are its own.
             This wallet has no server and does not do that. What it asks the node for is public
             data, whole:
           </p>
@@ -133,29 +134,29 @@ export function SettingsScreen({
             here. The node cannot tell which one decrypted.
           </p>
           <p>
-            <strong className="text-ink">Spent status.</strong> The whole settled nullifier set is
-            paged, and every decision is made against the local copy. The node is never asked about
-            one nullifier, because that request would carry the raw value: a node that logged those
-            would hold, per wallet, the set of values it will publish when it spends, before it has
-            spent anything.
+            <strong className="text-ink">Spent status.</strong> The whole set of settled spend
+            markers is paged, and every decision is made against the local copy. The node is never
+            asked about one marker, because that request would carry the raw value: a node that
+            logged those would hold, per wallet, the set of values it will publish when it spends,
+            before it has spent anything.
           </p>
           <p>
             <strong className="text-ink">Spending.</strong> Merkle paths are rebuilt here from the
             whole leaf range. The node is never asked for one leaf&apos;s proof, because that names
-            the leaf being spent seconds before the settlement publishes the matching nullifiers.
+            the leaf being spent seconds before the settlement publishes the matching spend markers.
           </p>
           <p>
             <strong className="text-ink">What it does learn.</strong> Your network address, that a
             wallet is syncing from it, roughly how often, and the exact bytes of every settlement
-            you submit through it. A settlement&apos;s two nullifiers and two commitments are public
-            the moment it is in a block, and the wallet asks this node to confirm those two
-            nullifiers by name once, to tell a settled spend from one the chain skipped.
+            you submit through it. A settlement&apos;s two spend markers and two tree entries are
+            public the moment it is in a block, and the wallet asks this node to confirm those two
+            markers by name once, to tell a settled spend from one the chain skipped.
           </p>
           <p>
             <strong className="text-ink">What a chain reader sees.</strong> That a settlement
-            happened, its fee, its anchor block, and two commitments and two ciphertexts of a fixed
-            size. Not the amounts, not the sender, not the recipient, and not which of the two
-            outputs is the change.
+            happened, its fee, its anchor block, and two tree entries and two ciphertexts of a
+            fixed size. Not the amounts, not the sender, not the recipient, and not which of the two
+            slots is the change.
           </p>
         </Prose>
       </Panel>
@@ -201,10 +202,10 @@ export function SettingsScreen({
             Storage is {persisted ? 'marked persistent' : 'not marked persistent'} in this browser.
             {persisted
               ? ' The browser has been asked not to evict it under storage pressure.'
-              : ' A browser under storage pressure may drop it. Every note re-derives from the seed,' +
-                " because every note's plaintext is on the chain inside its ciphertext, so what a" +
-                ' drop costs is a full rescan and the record of which notes are spent. Without the' +
-                ' 32 bytes written down it costs the wallet.'}
+              : ' A browser under storage pressure may drop it. Everything this wallet holds' +
+                " re-derives from the seed, because each transfer's plaintext is on the chain inside" +
+                ' its ciphertext, so what a drop costs is a full rescan and the record of what has' +
+                ' been spent. Without the 32 bytes written down it costs the wallet.'}
           </p>
         </Prose>
         <div className="mt-3 flex flex-wrap gap-2">
@@ -219,9 +220,9 @@ export function SettingsScreen({
         </div>
         {spending && (
           <p className="mt-2 text-meta text-muted" data-testid="rescan-needs-quiet">
-            A rescan is unavailable while a payment is being proved. A scan reads every note
-            before it starts and commits them at the end, so the two would write the same rows
-            from two different moments. It can run once the payment has settled.
+            A rescan is unavailable while a payment is being proved. A scan reads everything this
+            wallet holds before it starts and commits at the end, so the two would write the same
+            rows from two different moments. It can run once the payment has settled.
           </p>
         )}
         {!proverRunning && (
@@ -233,8 +234,8 @@ export function SettingsScreen({
         <p className="mt-2 text-meta text-muted">
           A rescan drops this wallet&apos;s watermark and its record of which blocks it has seen,
           then walks the node&apos;s whole tree again. It runs add only: spent flags and orphaned
-          notes are not reconciled, because the evidence for reconciling them is the node gate the
-          rescan bypassed. Run an ordinary sync against a current node afterwards.
+          transfers are not reconciled, because the evidence for reconciling them is the node gate
+          the rescan bypassed. Run an ordinary sync against a current node afterwards.
         </p>
         <div className="mt-4 border-t border-edge pt-3">
           <Dialog>

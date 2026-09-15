@@ -60,8 +60,8 @@ import { MAX_CHECKPOINTS, type NoteOrigin, type NoteSecret, type RejectedNote, t
 export const CIPHERTEXT_SUBSTITUTION_HINT =
   'a pass that reads leaves and receives nothing is the ordinary case, and it is also what a ' +
   'substituted or moved leaf looks like. Two per-leaf values are bound to a leaf by nothing on ' +
-  "chain: the bytes at Shielded::Ciphertexts, and where a commitment sits inside its block's " +
-  "own leaf range. The tree sorts a node's children at every level and tags no level, so a " +
+  "chain: the bytes at Shielded::Ciphertexts, and where a leaf sits inside its block's own " +
+  "range. The tree sorts a node's children at every level and tags no level, so a " +
   "block's root pins that block's leaf multiset and each internal node's child multiset and " +
   'nothing further: sibling swaps composed at any level reach any position the range\'s aligned ' +
   'subtrees allow, the coinbase position included, and a shorter tree of internal node values ' +
@@ -785,13 +785,13 @@ export function movedLeafWarning(
   index: number,
 ): string {
   return (
-    `leaf ${leaf} carries a ciphertext this wallet's own key opens, and the ` +
-    'commitment answered beside it is one that note does not open. Block ' +
-    `${String(blockNumber)} holds the opened note's commitment at leaf ${index}, inside ` +
-    "the range this pass folded against that block's own header, so the note is " +
-    `recorded at leaf ${index} and the payment arrives. A ciphertext that opens under ` +
-    "this wallet's key is this wallet's note, so the pair was moved. Which index " +
-    'inside a block holds which commitment is bound by nothing on chain: sync against ' +
+    `leaf ${leaf} carries a ciphertext this wallet's own key opens, and the tree ` +
+    'entry answered beside it is one that payment does not open. Block ' +
+    `${String(blockNumber)} holds the opened payment's entry at leaf ${index}, inside ` +
+    "the range this pass folded against that block's own header, so the payment is " +
+    `recorded at leaf ${index} and it arrives. A ciphertext that opens under ` +
+    "this wallet's key is this wallet's payment, so the pair was moved. Which index " +
+    'inside a block holds which entry is bound by nothing on chain: sync against ' +
     'a second node before spending it.'
   );
 }
@@ -807,9 +807,9 @@ export function movedLeafWarning(
 export function unplaceableLeafWarning(leaf: number, blockNumber: number | null): string {
   return (
     `leaf ${leaf} carries a ciphertext this wallet's own key opens, and block ` +
-    `${String(blockNumber)} holds the commitment it opens at none of the leaves it ` +
+    `${String(blockNumber)} holds the tree entry it opens at none of the leaves it ` +
     'appended. The leaf is skipped and the pass continues, because a sender who ' +
-    'encrypts a payload opening a commitment it never published produces the same ' +
+    'encrypts a payload opening a tree entry it never published produces the same ' +
     'reading and nothing here tells the two apart. If a payment is missing, sync ' +
     'against a second node.'
   );
@@ -827,8 +827,8 @@ export function unplaceableLeafWarning(leaf: number, blockNumber: number | null)
 export function movedOverflowWarning(more: number): string {
   return (
     `and ${more} more ${leavesWord(more)} in this pass carried a ciphertext this ` +
-    "wallet's own key opens beside a commitment that note does not open, each recorded " +
-    'at the index inside its own block that holds the commitment it opens. Sync against ' +
+    "wallet's own key opens beside a tree entry that payment does not open, each recorded " +
+    'at the index inside its own block that holds the entry it opens. Sync against ' +
     'a second node before spending them.'
   );
 }
@@ -842,7 +842,7 @@ export function movedOverflowWarning(more: number): string {
 export function unplaceableOverflowWarning(more: number): string {
   return (
     `and ${more} more ${leavesWord(more)} in this pass carried a ` +
-    "ciphertext this wallet's own key opens whose commitment their own block holds " +
+    "ciphertext this wallet's own key opens whose tree entry their own block holds " +
     'nowhere, each skipped. If a payment is missing, sync against a second node.'
   );
 }
@@ -1570,7 +1570,7 @@ export async function runSync(
             commitment: heldAt,
             leafIndex,
             value: received.value.toString(),
-            reason: 'its nullifier is already settled on chain',
+            reason: 'its spend marker is already settled on chain',
           });
           continue;
         }
@@ -1716,12 +1716,12 @@ export async function runSync(
     // viewing key, so a non-zero count is a header this wallet is being handed
     // for a block it did not come from. The wording is the command-line
     // wallet's.
-    const notes = report.coinbaseLabelDisagreed === 1 ? 'note' : 'notes';
+    const rewards = report.coinbaseLabelDisagreed === 1 ? 'reward' : 'rewards';
     warnings.push(
-      `${report.coinbaseLabelDisagreed} coinbase ${notes} this wallet rebuilt as its own sit in ` +
+      `${report.coinbaseLabelDisagreed} mining ${rewards} this wallet rebuilt as its own sit in ` +
         "blocks whose author label is not this wallet's. The reward is taken, because only this " +
-        "wallet's coinbase viewing key derives that commitment. Sync against a second node: a " +
-        'branch built for this wallet alone is what the checkpoint walk finds there.',
+        "wallet's coinbase viewing key derives the entry the tree holds. Sync against a second " +
+        'node: a branch built for this wallet alone is what the checkpoint walk finds there.',
     );
   }
   if (report.leavesScanned > 0 && report.received === 0) {
@@ -1799,9 +1799,9 @@ export async function runSync(
   if (report.pendingAbandoned > 0) {
     warnings.push(
       `${report.pendingAbandoned} submitted ${report.pendingAbandoned === 1 ? 'payment' : 'payments'} ` +
-        `never settled inside the ${chain.anchorWindow}-block anchor window and ` +
-        `${report.pendingAbandoned === 1 ? 'its change note is' : 'their change notes are'} no ` +
-        'longer counted as pending. The notes they would have spent are unspent.',
+        `never settled inside the ${chain.anchorWindow}-block anchor window and the change ` +
+        `${report.pendingAbandoned === 1 ? 'from it is' : 'from them is'} no longer counted as ` +
+        'pending. The funds they would have spent are unspent.',
     );
   }
 

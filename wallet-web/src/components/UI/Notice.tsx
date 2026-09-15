@@ -41,7 +41,7 @@ export function Notice({
     <div
       role={tone === 'error' ? 'alert' : 'status'}
       data-testid={testId}
-      data-sensitive={sensitive ? 'may name a note' : undefined}
+      data-sensitive={sensitive ? 'may name an amount' : undefined}
       className={cn(
         'flex gap-2 rounded-panel border p-2 text-meta',
         // `bg-notice-bg` is `transparent` in both themes. The token is kept so

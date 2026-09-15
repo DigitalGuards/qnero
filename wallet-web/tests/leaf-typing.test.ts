@@ -681,7 +681,7 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.report.warnings).toEqual([]);
     expect(hidden.meta.nextLeaf).toBe(8);
     expect(
-      hidden.report.hints.some((hint) => hint.includes("inside its block's own leaf range")),
+      hidden.report.hints.some((hint) => hint.includes("where a leaf sits inside its block's own range")),
     ).toBe(true);
 
     const ordinary = await runSync(
@@ -960,7 +960,7 @@ describe('a leaf whose kind the headers decide', () => {
     expect(result.notes[0]?.note.leafIndex).toBe(EACH * 2);
 
     const moved = result.report.warnings.filter((entry) =>
-      entry.includes('commitment answered beside it'),
+      entry.includes('tree entry answered beside it'),
     );
     const skipped = result.report.warnings.filter((entry) =>
       entry.includes('at none of the leaves it appended'),

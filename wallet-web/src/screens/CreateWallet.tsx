@@ -221,9 +221,9 @@ export function CreateWallet({
     <Panel title="Lock it with a passphrase">
       <Prose>
         <p>
-          The seed and every note is encrypted with this passphrase before it is written to this
-          browser&apos;s storage. It is not recoverable and it is not stored anywhere: forgetting it
-          means restoring from the seed you just wrote down.
+          The seed and the secrets behind every transfer are encrypted with this passphrase before
+          they are written to this browser&apos;s storage. It is not recoverable and it is not stored
+          anywhere: forgetting it means restoring from the seed you just wrote down.
         </p>
       </Prose>
       <form

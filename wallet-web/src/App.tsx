@@ -515,7 +515,7 @@ export function App(): ReactNode {
         setError(
           'this runtime declares storage differently from what this build assumes, so syncing ' +
             'against it is refused. An absent key and an empty map are indistinguishable, and an ' +
-            'empty map here is a zero balance or a settled note reported unspent.',
+            'empty map here is a zero balance, or an amount already spent reported as unspent.',
         );
         return;
       }
@@ -531,9 +531,9 @@ export function App(): ReactNode {
       if (running.current !== null) {
         setError(
           running.current === 'spend'
-            ? 'a payment is being proved and submitted. A scan reads every note before it starts ' +
-              'and commits them at the end, so the two would write the same rows from two ' +
-              'different moments. It will run once the payment has settled.'
+            ? 'a payment is being proved and submitted. A scan reads everything this wallet ' +
+              'holds before it starts and commits at the end, so the two would write the same ' +
+              'rows from two different moments. It will run once the payment has settled.'
             : 'a scan is already running.',
         );
         return;
@@ -632,9 +632,9 @@ export function App(): ReactNode {
       if (running.current !== null) {
         setSpendError(
           running.current === 'sync'
-            ? 'a scan is running. It reads every note before it starts and commits them at the ' +
-              'end, so a payment settling underneath it would be writing the same rows from a ' +
-              'later moment. Wait for the scan to finish.'
+            ? 'a scan is running. It reads everything this wallet holds before it starts and ' +
+              'commits at the end, so a payment settling underneath it would be writing the same ' +
+              'rows from a later moment. Wait for the scan to finish.'
             : 'a payment is already being proved.',
         );
         return;

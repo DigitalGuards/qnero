@@ -253,9 +253,9 @@ export function SendScreen({
       )}
       {syncing && (
         <Notice className="mb-3" testId="send-blocked">
-          A scan is running. It reads every note before it starts and commits them at the end, so a
-          payment settling underneath it would write the same rows from a later moment. This button
-          comes back when the scan finishes.
+          A scan is running. It reads everything this wallet holds before it starts and commits at
+          the end, so a payment settling underneath it would write the same rows from a later moment.
+          This button comes back when the scan finishes.
         </Notice>
       )}
       <form
@@ -425,9 +425,9 @@ function SendResultView({
       ) : (
         !settled && (
           <Notice tone="error" className="mb-3">
-            The extrinsic is in block {result.inclusion.blockNumber} and its nullifiers are not in
-            the settled set at that block. A segment whose anchor went stale or whose nullifier was
-            claimed elsewhere is skipped, and the block carries it anyway. Sync, then send again
+            The extrinsic is in block {result.inclusion.blockNumber} and its spend markers are not
+            in the settled set at that block. A segment whose anchor went stale or whose spend marker
+            was claimed elsewhere is skipped, and the block carries it anyway. Sync, then send again
             against a fresh anchor.
           </Notice>
         )
@@ -484,11 +484,11 @@ function SendResultView({
         </TableScroll>
       </details>
       <p className="mt-3 text-meta text-muted">
-        The payment landed in output slot {result.paymentSlot}, drawn for this spend. The circuit
-        derives each output&apos;s <code>rho</code> from its slot and the proving module draws each
-        output&apos;s <code>r</code> fresh, so either assignment settles the same way, and drawing
-        it is what stops a chain reader telling the counterparty&apos;s output from the
-        sender&apos;s change.
+        The payment landed in slot {result.paymentSlot}, drawn for this spend. The circuit derives
+        each slot&apos;s <code>rho</code> from its position and the proving module draws each
+        slot&apos;s <code>r</code> fresh, so either assignment settles the same way, and drawing it
+        is what stops a chain reader telling the counterparty&apos;s slot from the sender&apos;s
+        change.
       </p>
       <Button variant="action" size="block" className="mt-4" data-testid="send-done" onClick={onDismiss}>
         Done

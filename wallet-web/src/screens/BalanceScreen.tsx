@@ -138,8 +138,9 @@ export function BalanceScreen({
             {showReachable && (
               <Stat
                 term="reachable in one payment"
-                explains="A leaf has two input slots, so one payment can spend at most two notes. A
-                  balance spread over more than two is held and not reachable until it is merged."
+                explains="One payment has two input slots, so it can spend at most two of the
+                  transfers this wallet holds. A balance spread over more than two is held and not
+                  reachable until it is merged."
                 value={formatStepsAsQnr(balances.reachable)}
                 testId="balance-reachable"
               />
@@ -147,8 +148,8 @@ export function BalanceScreen({
             {showPending && (
               <Stat
                 term="pending"
-                explains="Written by this wallet and not yet met in the tree: a change note whose
-                  settlement has been submitted."
+                explains="Written by this wallet and not yet met in the tree: the change from your
+                  own payment, whose settlement has been submitted."
                 value={formatStepsAsQnr(balances.pending)}
                 testId="balance-pending"
               />
@@ -165,10 +166,10 @@ export function BalanceScreen({
             )}
             {showCount && (
               <Stat
-                term="notes held"
-                explains="Every note in this store, spent and unspent, on chain and off. The table
-                  below collapses a conflict set to the one member a spend could use, so it can be
-                  shorter than this."
+                term="transfers held"
+                explains="Every incoming transfer this wallet holds, spent and unspent, on chain and
+                  off. The table below collapses a repeated pair to the one a spend could use, so it
+                  can be shorter than this."
                 value={formatCount(balances.noteCount)}
               />
             )}
@@ -190,26 +191,27 @@ export function BalanceScreen({
       {syncing && (
         <Notice testId="sync-progress">
           Syncing{syncStage === null ? '' : `: ${syncStage}`}. Every ciphertext on the chain is read
-          and tried against this wallet&apos;s viewing key, and the settled nullifier set is paged
-          whole, so the node is never told which leaves or which nullifiers are this wallet&apos;s.
+          and tried against this wallet&apos;s viewing key, and the whole set of settled spend
+          markers is paged, so the node is never told which leaves or which markers are this
+          wallet&apos;s.
         </Notice>
       )}
 
       {balances.reachable < balances.unspent && (
         <Notice>
           One payment reaches {formatStepsAsQnr(balances.reachable)} of{' '}
-          {formatStepsAsQnr(balances.unspent)}. A leaf has two input slots, so a balance spread
-          over more than two notes is not reachable in one spend: send yourself the largest notes
-          to merge them.
+          {formatStepsAsQnr(balances.unspent)}. One payment has two input slots, so a balance spread
+          over more than two incoming transfers is not reachable in one spend: send yourself the
+          largest ones to merge them.
         </Notice>
       )}
 
       {conflicted.length > 0 && (
         <Notice>
-          {conflicted.length} of these notes share a nullifier with another note this wallet holds.
-          A sender picks each note&apos;s randomness, so a repeated pair is two notes of which at
-          most one can ever settle. Both are held; the larger is the one a spend uses, and the set
-          is counted once.
+          {conflicted.length} of these transfers would be spent by the same marker as another this
+          wallet holds. A sender picks the randomness behind that marker, so a repeated pair is two
+          transfers of which at most one can ever settle. Both are held; the larger is the one a
+          spend uses, and the pair is counted once.
         </Notice>
       )}
 
@@ -232,12 +234,12 @@ export function BalanceScreen({
         </div>
       )}
 
-      <Panel title="Notes" flush>
+      <Panel title="Incoming transfers" flush>
         {notes.length === 0 ? (
           <Empty>
-            No notes yet. A wallet receives value when somebody spends to its address, when a node
-            configured with its miner key wins a block, or when a transparent account shields into
-            it from the command-line wallet.
+            Nothing received yet. A wallet receives value when somebody pays its address, when a
+            node configured with its miner key wins a block, or when a transparent account shields
+            into it from the command-line wallet.
           </Empty>
         ) : (
           <TableScroll>
@@ -306,7 +308,7 @@ export function BalanceScreen({
       </Panel>
 
       {rejected.length > 0 && (
-        <Panel title="Outputs this wallet could not keep" flush>
+        <Panel title="Amounts this wallet could not keep" flush>
           <TableScroll>
             <Table>
               <thead>
@@ -329,7 +331,7 @@ export function BalanceScreen({
           </TableScroll>
           <p className="px-4 pt-2 text-meta text-muted">
             Provisional. A reorg that orphans the settlement makes the same leaf acceptable, and the
-            next sync drops the entry and holds the note.
+            next sync drops the row and keeps the funds.
           </p>
         </Panel>
       )}
@@ -356,9 +358,9 @@ export function BalanceScreen({
                     <Num>{formatCount(report.leavesScanned)}</Num>
                   </tr>
                   <tr>
-                    <td>notes received</td>
+                    <td>transfers received</td>
                     <Num>{formatCount(report.received)}</Num>
-                    <td>settled nullifiers</td>
+                    <td>settled spend markers</td>
                     <Num>{formatCount(report.nullifierSetSize)}</Num>
                   </tr>
                   <tr>
@@ -385,10 +387,10 @@ export function BalanceScreen({
           </details>
           {report.heldSpent > 0 && (
             <p className="px-4 pt-2 text-meta text-muted">
-              {report.heldSpent} note{report.heldSpent === 1 ? '' : 's'} kept marked spent: their
-              nullifiers are absent from this node&apos;s set, and this node has not yet reached the
-              block that settled them. Clearing the flag on that reading would put a consumed note
-              back into selection.
+              {report.heldSpent} transfer{report.heldSpent === 1 ? '' : 's'} kept marked spent:
+              their spend markers are absent from this node&apos;s set, and this node has not yet
+              reached the block that settled them. Clearing the flag on that reading would put an
+              already spent amount back into selection.
             </p>
           )}
           {report.forkedAt !== null && (

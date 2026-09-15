@@ -405,16 +405,16 @@ fn main() -> Result<()> {
                 // author's label is a header it is being handed for a block it
                 // did not come from.
                 println!(
-                    "warning     {} coinbase {} this wallet rebuilt as its own sit in blocks \
+                    "warning     {} mining {} this wallet rebuilt as its own sit in blocks \
                      whose author label is not this wallet's. The reward is taken, because only \
-                     this wallet's coinbase viewing key derives that commitment. Sync against a \
-                     second node: a branch built for this wallet alone is what the checkpoint \
-                     walk finds there.",
+                     this wallet's coinbase viewing key derives the entry the tree holds. Sync \
+                     against a second node: a branch built for this wallet alone is what the \
+                     checkpoint walk finds there.",
                     report.coinbase_label_disagreed,
                     if report.coinbase_label_disagreed == 1 {
-                        "note"
+                        "reward"
                     } else {
-                        "notes"
+                        "rewards"
                     }
                 );
             }

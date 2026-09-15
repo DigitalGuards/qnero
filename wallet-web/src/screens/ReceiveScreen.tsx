@@ -40,9 +40,9 @@ export function ReceiveScreen({
       <Panel title="Receive Qnero">
         <Prose>
           <p>
-            Anything sent to this address arrives as a note only this wallet can open. The chain
-            publishes the commitment and the ciphertext and nothing else: not the amount, not the
-            sender, not which of a settlement&apos;s two outputs is this one.
+            Anything sent to this address arrives as a payment only this wallet can open. The
+            chain publishes its entry in the tree and the ciphertext and nothing else: not the
+            amount, not the sender, not which of a settlement&apos;s two slots is this one.
           </p>
         </Prose>
         <Address value={address} testId="receive-address" />
@@ -65,8 +65,8 @@ export function ReceiveScreen({
             <strong className="text-ink">This is not the address, and it is secret bearing.</strong>{' '}
             It is what a node you run is configured with so that the blocks it wins mint their
             reward to this wallet. It carries the coinbase viewing key, so whoever holds it can pick
-            this wallet&apos;s coinbase notes out of the tree. It cannot spend them, and it says
-            nothing about any other note this wallet holds.
+            this wallet&apos;s mining rewards out of the tree. It cannot spend them, and it says
+            nothing about anything else this wallet holds.
           </p>
         </Prose>
         {locked ? (
@@ -83,7 +83,7 @@ export function ReceiveScreen({
               title="Show the miner key?"
               description={
                 <p>
-                  Whoever holds it can pick this wallet&apos;s coinbase notes out of the tree and
+                  Whoever holds it can pick this wallet&apos;s mining rewards out of the tree and
                   read what a miner earned block by block. Do not hand it out the way an address is
                   handed out.
                 </p>
