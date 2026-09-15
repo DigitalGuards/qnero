@@ -213,14 +213,26 @@ async fn drip(
 
     // 1. The address. Nothing is read and nothing is written for a string
     //    that is not an address.
-    let wanted = request.address.trim().to_string();
-    let recipient = match Address::decode(&wanted) {
+    //
+    //    The ledger is keyed on `recipient.encode()` and never on what was
+    //    posted. bech32m lowercases the human-readable part and maps `A-Z` to
+    //    the same values as `a-z`, so `QN1...` and `qn1...` decode to one
+    //    account; keying on the requester's spelling against a `TEXT` column
+    //    with SQLite's binary collation would give that one account two
+    //    cooldowns and two ledger rows.
+    let recipient = match Address::decode(request.address.trim()) {
         Ok(address) => address,
         Err(error) => return refuse(Refusal::BadAddress(error.to_string())),
     };
+    let wanted = recipient.encode();
 
     // 2 and 3. The two rate limits, one indexed read each, and both before
     //    Cloudflare is asked anything.
+    //
+    //    This pass is an optimization and not the gate: it is what stops an
+    //    already-refused claim costing an outbound request to Cloudflare. The
+    //    decision that counts is step 6, which reads and writes under one lock
+    //    hold, because between here and there this task awaits.
     let (last_claim, in_window) = {
         let Ok(store) = state.store.lock() else {
             return internal("the claims ledger is poisoned");
@@ -266,15 +278,36 @@ async fn drip(
         }
     }
 
-    // 6. The queue. The row is written first: a claim that is accepted and
-    //    then lost to a crash has still spent its cooldown, which is the safe
-    //    side of that trade for a faucet.
+    // 6. The decision, and the row. Both limits are read again and the row is
+    //    written without the lock being released in between, which is what
+    //    makes the pair atomic.
+    //
+    //    Step 2 is not enough on its own. Turnstile above is an await of tens
+    //    to hundreds of milliseconds against Cloudflare, and every claim that
+    //    is parked in it read a ledger none of them had written to yet: N
+    //    simultaneous requests for one address would each see zero claims,
+    //    each pass, and each enqueue. The row is written before anything is
+    //    proved, so a claim that is accepted and then lost to a crash has
+    //    still spent its cooldown, which is the safe side of that trade for a
+    //    faucet.
     let amount = state.config.drip_quanta;
     let claim_id = {
         let Ok(store) = state.store.lock() else {
             return internal("the claims ledger is poisoned");
         };
         let hash = store.ip_hash(&client);
+        let last = store.last_claim_for_address(&wanted).unwrap_or(None);
+        if let Some(refusal) = limits::address_cooldown(last, state.config.address_cooldown, now) {
+            return refuse(refusal);
+        }
+        let count = store
+            .claims_for_client(&hash, state.config.ip_window, now)
+            .unwrap_or(0);
+        if let Some(refusal) =
+            limits::client_limit(count, state.config.ip_limit, state.config.ip_window)
+        {
+            return refuse(refusal);
+        }
         match store.record_queued(&wanted, &hash, amount, now) {
             Ok(id) => id,
             Err(error) => {

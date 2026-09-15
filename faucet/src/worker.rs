@@ -36,6 +36,18 @@ use qnero_wallet::wallet::{MerkleSource, Wallet, NUM_LEAF_PROOFS};
 use crate::config::Config;
 use crate::store::{now_secs, Store};
 
+/// How long the worker waits for a job before taking a tick of its own.
+///
+/// The tick is not a nicety. `last_seen_node` is written by `sync`, `/health`
+/// reports the node stale after six minutes, and nothing but a claim used to
+/// call `sync`: a faucet that served nobody overnight, which is the ordinary
+/// state of a new testnet at four in the morning, answered 503 with
+/// `nodeFresh:false` while the node was fine, and both monitoring layers paged
+/// for it. The same tick is what retries a top-up that failed, because a
+/// balance under the floor refuses every claim, and a claim was the only thing
+/// that used to reach the funding path.
+const TICK: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The memo every drip carries. Every memo is padded to one size, so this
 /// costs nothing over an empty one and tells a recipient scanning a fresh
 /// wallet where the note came from.
@@ -304,8 +316,42 @@ impl Worker {
         Ok(report.included_at)
     }
 
+    /// One pass with no job to do: refresh what `/health` reports, and retry a
+    /// top-up that is still needed.
+    ///
+    /// Both halves run after a drip as well, which is where the balance
+    /// usually falls under the floor. What this adds is that neither depends
+    /// on a drip: a faucet whose funding failed once is not wedged until a
+    /// human restarts it, and an idle faucet does not decay into a 503.
+    fn tick(&mut self) {
+        if let Err(error) = self.sync() {
+            eprintln!("faucet      sync failed: {error:#}");
+            return;
+        }
+        if self.shared.spendable() < self.config.min_balance_quanta {
+            if let Err(error) = self.ensure_funded() {
+                eprintln!("faucet      top-up: {error:#}");
+            }
+        }
+    }
+
     /// The loop. Runs until the channel closes.
     pub fn run(mut self, mut jobs: tokio::sync::mpsc::Receiver<Job>) {
+        // A current-thread runtime, built here and used for one thing: waiting
+        // with a deadline. This is a plain `std::thread` rather than a runtime
+        // thread, `tokio::time::timeout` needs a timer driver, and putting the
+        // wallet on a runtime thread is what the whole module exists to avoid.
+        let waits = match tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("faucet      the worker could not build its timer: {error:#}");
+                return;
+            }
+        };
+
         if let Err(error) = self.sync() {
             eprintln!("faucet      the first sync failed: {error:#}");
         }
@@ -319,7 +365,24 @@ impl Worker {
             self.shared.notes.load(Ordering::Relaxed)
         );
 
-        while let Some(job) = jobs.blocking_recv() {
+        loop {
+            // The `async` block is load-bearing. `timeout` builds its `Sleep`
+            // at construction rather than at the first poll, so
+            // `block_on(timeout(..))` builds it on this plain thread with
+            // no runtime entered and panics with "there is no reactor
+            // running". Constructing it inside the block puts it in the
+            // runtime's context, where the timer it needs exists.
+            let waited = waits.block_on(async { tokio::time::timeout(TICK, jobs.recv()).await });
+            let job = match waited {
+                // The deadline, which is the whole point of waiting with one.
+                Err(_elapsed) => {
+                    self.tick();
+                    continue;
+                }
+                // Every sender is gone, so the server is stopping.
+                Ok(None) => break,
+                Ok(Some(job)) => job,
+            };
             let started = std::time::Instant::now();
             match self.drip(&job) {
                 Ok(included_at) => {
@@ -348,14 +411,7 @@ impl Worker {
             }
             // Publish the balance after every drip, and top up when the change
             // has taken the faucet below its floor.
-            if let Err(error) = self.sync() {
-                eprintln!("faucet      sync after a drip failed: {error:#}");
-            }
-            if self.shared.spendable() < self.config.min_balance_quanta {
-                if let Err(error) = self.ensure_funded() {
-                    eprintln!("faucet      top-up: {error:#}");
-                }
-            }
+            self.tick();
         }
         println!("faucet      the worker's queue closed, stopping");
     }
@@ -384,6 +440,38 @@ pub fn ensure_spend_seed(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The worker waits with a deadline from a plain `std::thread`, and that
+    /// is the whole subtlety: `tokio::time::timeout` builds its `Sleep` when
+    /// the future is constructed rather than when it is polled, so
+    /// `block_on(timeout(..))` constructs it outside the runtime and panics
+    /// with "there is no reactor running". A rehearsal found that; this keeps
+    /// it found. The shape asserted here is the shape `run` uses.
+    #[test]
+    fn a_deadline_can_be_waited_on_from_a_plain_thread() {
+        let (jobs_tx, mut jobs) = tokio::sync::mpsc::channel::<Job>(1);
+        let waits = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("a current-thread runtime with a timer");
+        let waited = waits.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_millis(50), jobs.recv()).await
+        });
+        assert!(
+            waited.is_err(),
+            "nothing was sent, so the deadline is what returns"
+        );
+        drop(jobs_tx);
+        let closed = waits.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_millis(50), jobs.recv()).await
+        });
+        assert!(
+            closed
+                .expect("the queue closed rather than timing out")
+                .is_none(),
+            "a closed queue is what ends the loop"
+        );
+    }
 
     /// Every failure a drip can report has to be a code, because the ledger
     /// row is shown to the requester and the error it came from names the

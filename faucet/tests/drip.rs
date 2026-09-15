@@ -339,6 +339,97 @@ async fn one_address_gets_one_drip_per_cooldown() {
     assert_eq!(retry_after.as_deref(), Some("86400"));
 }
 
+/// bech32m lowercases the human-readable part and maps `A-Z` onto the same
+/// values as `a-z`, so the shouted spelling of an address is the same account.
+/// The ledger is a `TEXT` column with binary collation, so a cooldown keyed on
+/// what was posted gives that one account two drips.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_recipient_cannot_spell_its_way_to_a_second_drip() {
+    let dir = tempdir::TempDir::new("cfg");
+    let harness = start(config_in(dir.path())).await;
+    let address = an_address("shouted");
+    let shouted = address.to_uppercase();
+    assert_ne!(shouted, address, "the test needs two spellings");
+
+    let (status, body, _) = request(
+        "POST",
+        format!("{}/drip", harness.base),
+        Some(serde_json::json!({ "address": address }).to_string()),
+        Some("203.0.113.9"),
+    )
+    .await;
+    assert_eq!(status, 202);
+    assert_eq!(
+        body["address"],
+        serde_json::json!(address),
+        "the canonical spelling is what is recorded and answered"
+    );
+
+    // A different client, so the address limit is the one that can answer.
+    let (status, refusal, _) = request(
+        "POST",
+        format!("{}/drip", harness.base),
+        Some(serde_json::json!({ "address": shouted }).to_string()),
+        Some("198.51.100.4"),
+    )
+    .await;
+    assert_eq!(status, 429, "the shouted spelling is the same recipient");
+    assert_eq!(refusal["reason"], serde_json::json!("address-cooldown"));
+}
+
+/// Eight claims for one address, posted together from eight clients. The
+/// limits are read and the row is written under one lock hold, so exactly one
+/// of them is accepted. Reading the limits, releasing the lock and inserting
+/// afterwards lets every request in the batch see a ledger none of them has
+/// written to yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn simultaneous_claims_for_one_address_produce_one_drip() {
+    let dir = tempdir::TempDir::new("cfg");
+    let mut harness = start(config_in(dir.path())).await;
+    let address = an_address("stampede");
+    let clients = [
+        "203.0.113.1",
+        "203.0.113.2",
+        "203.0.113.3",
+        "203.0.113.4",
+        "203.0.113.5",
+        "203.0.113.6",
+        "203.0.113.7",
+        "203.0.113.8",
+    ];
+
+    let mut attempts = Vec::new();
+    for client in clients {
+        let body = serde_json::json!({ "address": address }).to_string();
+        let url = format!("{}/drip", harness.base);
+        attempts.push(tokio::spawn(async move {
+            request("POST", url, Some(body), Some(client)).await
+        }));
+    }
+    let mut accepted = 0;
+    let mut refused = 0;
+    for attempt in attempts {
+        let (status, body, _) = attempt.await.expect("the request task");
+        match status {
+            202 => accepted += 1,
+            429 => {
+                assert_eq!(body["reason"], serde_json::json!("address-cooldown"));
+                refused += 1;
+            }
+            other => panic!("unexpected status {other}: {body}"),
+        }
+    }
+    assert_eq!(accepted, 1, "one address, one drip");
+    assert_eq!(refused, clients.len() - 1);
+
+    // And the queue holds exactly the one job.
+    assert!(harness.jobs.try_recv().is_ok(), "the accepted claim");
+    assert!(
+        harness.jobs.try_recv().is_err(),
+        "nothing else reached the worker"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_client_gets_its_allowance_and_no_more() {
     let dir = tempdir::TempDir::new("cfg");

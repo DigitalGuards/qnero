@@ -43,7 +43,12 @@ it. A `send` spends up to two notes into a payment and a change note, and the
 change is what keeps the note count roughly flat.
 
 A faucet that cannot fund itself still serves `/status` and refuses claims with
-`drained`, which is a more useful state than a process that exits at boot.
+`drained`, which is a more useful state than a process that exits at boot, and
+it is not a state a human has to clear: the worker takes a tick every minute
+with no traffic, which refreshes what `/health` reports and retries a top-up
+that is still needed. Without that tick a single failed shield would wedge the
+faucet, because a balance under the floor refuses every claim and a claim was
+the only thing that reached the funding path.
 
 ## Two secrets, and neither derives from the other
 
@@ -74,7 +79,7 @@ goes into the `qnero-testnet` preset, and the address it prints is the node's
 own answer for the same seed:
 
 ```
-printf '%s%064d' "$(cat <seed-file>)" 0 > /tmp/seed64
+(umask 077; printf '%s%064d' "$(cat <seed-file>)" 0 > /tmp/seed64)
 chain/target/release/qnero-node key qnero --scheme standard --no-derivation --seed < /tmp/seed64
 shred -u /tmp/seed64
 ```
@@ -88,7 +93,7 @@ pair. Both sides agreeing is the confirmation `docs/TESTNET.md` asks for.
 | Route | What it is |
 |---|---|
 | `GET /` | the page, with `/app.css` and `/app.js` beside it |
-| `GET /health` | 200 when the worker is up, the node answered inside six minutes and the balance is above the floor; 503 otherwise |
+| `GET /health` | 200 when the worker is up, the node answered inside six minutes and the balance is above the floor; 503 otherwise. The worker's minute tick is what keeps that freshness true with no traffic |
 | `GET /status` | the deep check: `configured`, `captchaEnabled`, `dripQuanta`, `cooldownHours`, `balanceQuanta`, `notes`, `queued`, `chainHead`, `address`, `genesis` |
 | `POST /drip` | `{"address": "qn1...", "turnstileToken": "..."}` → 202 `{"status":"queued","id":N}` |
 | `GET /drip/{id}` | `queued`, `sent` with `includedAt`, or `failed` with a reason code |
