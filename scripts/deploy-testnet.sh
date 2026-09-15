@@ -53,6 +53,34 @@ step() {
   printf '\n=== %s ===\n' "$1"
 }
 
+# Copy a built directory into a root-owned webroot.
+#
+# The webroots are created by the runbook's nginx step and are owned by root,
+# so the deploy account cannot write into them and a plain `rsync` to
+# `$host:/var/www/...` fails with permission denied on every file: binaries and
+# spec installed, every static asset rejected, nginx serving empty roots. The
+# fix is to stage under the deploy account's own /tmp and let one sudo'd rsync
+# do the replace, rather than chowning three webroots to the deploy account and
+# handing whoever holds it write access to everything nginx serves.
+#
+# Any extra arguments are excludes, and they are applied to BOTH hops: the
+# second rsync also carries --delete, so an exclude the first hop honoured and
+# the second did not would delete the very file it was protecting.
+deploy_tree() {
+  local source="$1" webroot="$2"
+  shift 2
+  local stage="/tmp/qnero-deploy$webroot"
+  local extra=""
+  local argument
+  for argument in "$@"; do
+    extra="$extra $(printf '%q' "$argument")"
+  done
+  ssh "$host" "mkdir -p $(printf '%q' "$stage")"
+  rsync -a --delete "$@" "$source" "$host:$stage/"
+  ssh "$host" "sudo rsync -a --delete$extra $(printf '%q' "$stage/") $(printf '%q' "$webroot/") \
+    && rm -rf $(printf '%q' "$stage")"
+}
+
 if has_stage node; then
   step "building qnero-node"
   (
@@ -73,9 +101,23 @@ if has_stage node; then
   step "copying the binaries"
   scp "$here/chain/target/release/qnero-node" "$host:/tmp/qnero-node"
   scp "$here/target/release/qnero-faucet" "$host:/tmp/qnero-faucet"
-  # `install` rather than `cp`: the mode is set in the same operation and the
-  # replace is atomic, so a running node is never reading a half-written file.
-  ssh "$host" 'sudo install -m 0755 /tmp/qnero-node /usr/local/bin/qnero-node \
+  # The binary that is about to be replaced is kept as `.previous`, here,
+  # because this is the only moment it still exists. Rolling a bad node back
+  # otherwise means rebuilding a release binary on the workstation, which is
+  # the wrong thing to be doing while the chain is stopped. It is taken
+  # automatically rather than asked of the operator as a pre-step, since a
+  # rollback that depends on somebody having remembered is not a rollback.
+  #
+  # `install` rather than `cp` for the new one: the mode is set in the same
+  # operation and the replace is atomic, so a running node is never reading a
+  # half-written file.
+  ssh "$host" 'for binary in qnero-node qnero-faucet; do \
+      if sudo test -x "/usr/local/bin/$binary"; then \
+        sudo cp -a "/usr/local/bin/$binary" "/usr/local/bin/$binary.previous"; \
+        echo "kept /usr/local/bin/$binary.previous"; \
+      fi; \
+    done \
+    && sudo install -m 0755 /tmp/qnero-node /usr/local/bin/qnero-node \
     && sudo install -m 0755 /tmp/qnero-faucet /usr/local/bin/qnero-faucet \
     && rm -f /tmp/qnero-node /tmp/qnero-faucet \
     && sudo systemctl restart qnero-node \
@@ -102,9 +144,8 @@ if has_stage site; then
   step "deploying the site"
   # --delete is what stops a removed page lingering. The excludes are the
   # site's own build tools and its two repository-facing files.
-  rsync -a --delete \
-    --exclude tools/ --exclude README.md --exclude NOTICE \
-    "$here/site/" "$host:/var/www/$domain/"
+  deploy_tree "$here/site/" "/var/www/$domain" \
+    --exclude tools/ --exclude README.md --exclude NOTICE
 fi
 
 if has_stage wallet; then
@@ -123,8 +164,7 @@ if has_stage wallet; then
   # config.json is excluded rather than deleted and rewritten, because
   # --delete would otherwise remove it for however long the next step takes
   # and a wallet loading in that window starts against nothing.
-  rsync -a --delete --exclude config.json \
-    "$here/wallet-web/dist/" "$host:/var/www/wallet.$domain/"
+  deploy_tree "$here/wallet-web/dist/" "/var/www/wallet.$domain" --exclude config.json
 fi
 
 if has_stage explorer; then
@@ -134,8 +174,7 @@ if has_stage explorer; then
     nice -n 19 npm ci
     nice -n 19 npm run build
   )
-  rsync -a --delete --exclude config.json \
-    "$here/explorer/dist/" "$host:/var/www/explorer.$domain/"
+  deploy_tree "$here/explorer/dist/" "/var/www/explorer.$domain" --exclude config.json
 fi
 
 if has_stage config; then

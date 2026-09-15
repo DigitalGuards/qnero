@@ -47,19 +47,50 @@ if [ ! -x "$node" ]; then
   exit 1
 fi
 
+# The node's own diagnostics go here rather than into the command substitution
+# that captures the peer id. Folding stderr into that capture is what makes a
+# failure silent: the message becomes part of $peer_id, `set -e` aborts on the
+# failing command before the assignment finishes, and the operator sees a
+# script that exits 1 having printed nothing at all. Which is exactly what an
+# unwritable /etc/qnero looks like, on the first command of a deployment.
+diagnostics="$(mktemp "${TMPDIR:-/tmp}/qnero-nodekey.XXXXXX")"
+trap 'rm -f "$diagnostics"' EXIT
+
+fail() {
+  echo "$1" >&2
+  if [ -s "$diagnostics" ]; then
+    echo "--- what the node said ---" >&2
+    cat "$diagnostics" >&2
+  fi
+  exit 1
+}
+
 if [ -e "$key_file" ]; then
   echo "$key_file already exists, so this prints its peer id rather than" >&2
   echo "replacing it. A bootnode that rotates its identity is a bootnode" >&2
   echo "nobody can reach." >&2
-  peer_id="$("$node" key inspect-node-key --file "$key_file" 2>&1 | tr -d '[:space:]')"
+  # `inspect-node-key` prints the peer id on STDOUT, and `generate-node-key`
+  # prints it on STDERR. They really do differ, so each branch reads the
+  # stream its own command writes.
+  if ! peer_id="$("$node" key inspect-node-key --file "$key_file" 2>"$diagnostics")"; then
+    fail "reading the peer id out of $key_file failed. A truncated or non-hex key reads like this."
+  fi
+  peer_id="$(printf '%s' "$peer_id" | tr -d '[:space:]')"
 else
   umask 077
-  mkdir -p "$(dirname "$key_file")"
-  # The peer id goes to stderr and the seed to the file, so both streams are
-  # captured and the seed is never echoed.
-  peer_id="$("$node" key generate-node-key --chain "$chain" --file "$key_file" 2>&1 >/dev/null | tr -d '[:space:]')"
+  mkdir -p "$(dirname "$key_file")" || fail "$(dirname "$key_file") could not be created. Root-owned? Run this under sudo."
+  # The seed goes to the file and the peer id to stderr, so the seed is never
+  # echoed and the peer id is read back out of the diagnostics.
+  if ! "$node" key generate-node-key --chain "$chain" --file "$key_file" >/dev/null 2>"$diagnostics"; then
+    fail "generating the node key failed and $key_file was not written."
+  fi
+  peer_id="$(grep -v '^[[:space:]]*$' "$diagnostics" | tail -1 | tr -d '[:space:]')"
   chmod 600 "$key_file"
   echo "wrote $key_file (mode 600, 64 hex characters of seed)"
+fi
+
+if [ -z "$peer_id" ]; then
+  fail "the node printed no peer id. The key file is not trustworthy until one does."
 fi
 
 echo "peer id     $peer_id"
