@@ -353,10 +353,12 @@ impl SubstrateCli for Cli {
 				Box::new(chain_spec::planck_chain_spec()?) as Box<dyn sc_service::ChainSpec>,
 			"mainnet" | "mainnet_live_spec" =>
 				Box::new(chain_spec::mainnet_chain_spec()?) as Box<dyn sc_service::ChainSpec>,
+			"qnero-testnet" | "qnero-testnet_live_spec" =>
+				Box::new(chain_spec::qnero_testnet_chain_spec()?) as Box<dyn sc_service::ChainSpec>,
 			"" =>
 				return Err("no chain was named. Pass --dev for a throwaway development chain, \
-				            or --chain with one of dev, heisenberg, planck, mainnet, or the path \
-				            to a chain spec file"
+				            or --chain with one of dev, heisenberg, planck, mainnet, \
+				            qnero-testnet, or the path to a chain spec file"
 					.to_string()),
 			path =>
 				Box::new(chain_spec::ChainSpec::from_json_file(std::path::PathBuf::from(path))?)
@@ -1047,6 +1049,8 @@ mod tests {
 			"planck_live_spec",
 			"mainnet",
 			"mainnet_live_spec",
+			"qnero-testnet",
+			"qnero-testnet_live_spec",
 		] {
 			match cli.load_spec(id) {
 				Ok(spec) => assert_eq!(
@@ -1078,7 +1082,7 @@ mod tests {
 			.expect("parse a bare authority command line");
 
 		let error = cli.load_spec("").expect_err("an empty chain id must not resolve to a chain");
-		for id in ["dev", "heisenberg", "planck", "mainnet"] {
+		for id in ["dev", "heisenberg", "planck", "mainnet", "qnero-testnet"] {
 			assert!(
 				error.contains(id),
 				"the refusal does not name the {id} chain, so it does not tell an operator \

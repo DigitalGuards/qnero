@@ -102,6 +102,15 @@ pub const PLANCK_RUNTIME_PRESET: &str = "planck";
 /// without the rest of the preset machinery.
 pub const MAINNET_RUNTIME_PRESET: &str = "mainnet";
 
+/// Identifier for the Qnero public testnet preset.
+///
+/// The first Qnero chain with a genesis of its own. Its whole allocation is
+/// one endowed account, the faucet, and nothing else: no vesting table, no
+/// treasury, no tech collective and no placeholder. See
+/// [`qnero_testnet_config_genesis`] for what each of those absences costs and
+/// why the cost is the right one on a testnet.
+pub const QNERO_TESTNET_RUNTIME_PRESET: &str = "qnero-testnet";
+
 /// SS58 address format used by all Quantus chains.
 fn ss58_version() -> sp_core::crypto::Ss58AddressFormat {
 	sp_core::crypto::Ss58AddressFormat::custom(189)
@@ -157,10 +166,22 @@ fn heisenberg_treasury_account() -> AccountId {
 }
 
 /// Treasury genesis params per profile. The account is configured here; any
-/// balance comes from the ordinary genesis endowment list, not from mining.
+/// balance comes from the ordinary genesis endowment list, and never from
+/// mining.
+///
+/// `None` is a chain with no treasury, which is a state the runtime already
+/// supports rather than one this widening invented:
+/// `pallet_treasury`'s genesis build returns early on `None`
+/// (`pallets/treasury/src/lib.rs`), `TreasuryAccountOption` answers `None`
+/// (`runtime/src/configs/mod.rs`), `EnsureTreasury` then matches no origin, and
+/// `pallet_vesting`'s admin calls refuse with `TreasuryNotConfigured`. Nothing
+/// in the runtime calls the panicking `Pallet::account_id()`. The alternative
+/// was to point the field at some account the preset already names, which on a
+/// chain with no treasury means handing that key the vesting admin origin for
+/// no reason and writing a treasury address into genesis that means nothing.
 #[derive(Clone)]
 struct TreasuryGenesis {
-	account: AccountId,
+	account: Option<AccountId>,
 }
 
 /// Two extra well-known Dilithium accounts (public seeds `[3u8; 32]` / `[4u8; 32]`) that pad the
@@ -263,7 +284,7 @@ fn genesis_template(
 			..Default::default()
 		},
 		treasury_pallet: pallet_treasury::GenesisConfig::<crate::Runtime> {
-			treasury_account: Some(treasury.account),
+			treasury_account: treasury.account,
 		},
 		vesting: pallet_vesting::GenesisConfig::<crate::Runtime> {
 			schedules: vesting_schedules
@@ -331,7 +352,7 @@ fn log_vesting_schedules(preset: &str, schedules: &[VestingScheduleTuple]) {
 fn log_genesis_accounts(
 	preset: &str,
 	endowed: &[AccountId],
-	treasury_account: &AccountId,
+	treasury_account: Option<&AccountId>,
 	treasury_signers: &[AccountId],
 	tech_collective: &[AccountId],
 ) {
@@ -339,7 +360,14 @@ fn log_genesis_accounts(
 	for account in endowed {
 		log::info!("[{preset}] 💰 Endowed: {:?}", account.to_ss58check_with_version(ss58));
 	}
-	log::info!("[{preset}] 🏦 Treasury: {:?}", treasury_account.to_ss58check_with_version(ss58));
+	match treasury_account {
+		Some(account) =>
+			log::info!("[{preset}] 🏦 Treasury: {:?}", account.to_ss58check_with_version(ss58)),
+		None => log::info!(
+			"[{preset}] 🏦 Treasury: none. EnsureTreasury matches no origin on this chain and \
+			 the vesting pallet's admin calls answer TreasuryNotConfigured"
+		),
+	}
 	for signer in treasury_signers {
 		log::info!("[{preset}] 🔑 Treasury signer: {:?}", signer.to_ss58check_with_version(ss58));
 	}
@@ -380,7 +408,49 @@ impl ConsensusGenesis {
 			target_block_time: Some(DEV_TARGET_BLOCK_TIME_MS),
 		}
 	}
+
+	/// The Qnero public testnet: the 120 s target, and a difficulty sized for
+	/// the hash rate that chain is certain to have on its first day.
+	fn qnero_testnet() -> Self {
+		Self {
+			initial_difficulty: Some(U512::from(QNERO_TESTNET_INITIAL_DIFFICULTY)),
+			target_block_time: Some(TARGET_BLOCK_TIME_MS),
+		}
+	}
 }
+
+/// Genesis mining difficulty for the Qnero public testnet.
+///
+/// Difficulty is expected hashes per block, so the number that matters is the
+/// hash rate the chain actually has, and the retarget's equilibrium is the
+/// *divisor* rather than the target: `divisor = target * 10 / 12` is 100 000 ms
+/// at a 120 s target, and the neutral band is one to two divisors wide
+/// (`pallets/qpow/src/lib.rs`). A chain settles at roughly `100 * H` to
+/// `200 * H` for a hash rate of `H` hashes a second.
+///
+/// The hash rate this chain is certain of is its own node's: one in-process
+/// RandomX light-mode thread, measured at 32.9 H/s (`docs/BENCH.md`). That
+/// puts the neutral band at 3 300 to 6 600 and its middle at 5 000, which is
+/// one block every 152 seconds on the node alone, inside the band and needing
+/// no retarget at all. A rig is 450 H/s per thread in full mode, so the first
+/// one to point xmrig at the stratum port takes the chain far under the target
+/// until the retarget climbs.
+///
+/// **The asymmetry is the whole argument for choosing low.** The retarget is
+/// Homestead's, one 2048th of the difficulty per step, and it is slow in both
+/// directions: climbing is linear at `H / 2048` per second, and falling is
+/// exponential with a time constant of `100 * 2048` seconds, which is 57
+/// hours per e-fold whatever the numbers are. A difficulty set above the
+/// available hash rate is therefore days of a chain that looks dead, while one
+/// set below it is hours of fast blocks that fix themselves. Inheriting
+/// `QPoWInitialDifficulty` (1 000 000, sized for about 8 300 H/s) would be the
+/// first of those: 8.4 hours to the first block on the node alone, and a week
+/// to converge.
+///
+/// There is no floor field to set beside this. `get_min_difficulty()` is a
+/// hard-coded 128 (`pallets/qpow/src/lib.rs`); genesis validates against it
+/// and cannot move it.
+pub const QNERO_TESTNET_INITIAL_DIFFICULTY: u64 = 5_000;
 
 /// Target block time for the `dev` preset, in milliseconds.
 ///
@@ -400,7 +470,7 @@ pub fn development_config_genesis() -> Value {
 	log_genesis_accounts(
 		"dev",
 		&endowed_accounts,
-		&treasury_account,
+		Some(&treasury_account),
 		&dilithium_default_accounts(),
 		&tech_collective,
 	);
@@ -431,7 +501,7 @@ pub fn development_config_genesis() -> Value {
 			initial_high_security_accounts: vec![(multisig_address, guardian, delay)],
 		};
 
-		let treasury = TreasuryGenesis { account: treasury_account };
+		let treasury = TreasuryGenesis { account: Some(treasury_account) };
 		let mut template_value = genesis_template(
 			endowed_accounts,
 			treasury,
@@ -463,7 +533,7 @@ pub fn development_config_genesis() -> Value {
 
 	#[cfg(not(feature = "runtime-benchmarks"))]
 	{
-		let treasury = TreasuryGenesis { account: treasury_account };
+		let treasury = TreasuryGenesis { account: Some(treasury_account) };
 		genesis_template(
 			endowed_accounts,
 			treasury,
@@ -484,13 +554,13 @@ pub fn heisenberg_config_genesis() -> Value {
 	log_genesis_accounts(
 		"heisenberg",
 		&endowed_accounts,
-		&treasury_account,
+		Some(&treasury_account),
 		&treasury_signers,
 		&tech_collective,
 	);
 	let vesting_schedules = testnet_vesting_schedules();
 	log_vesting_schedules("heisenberg", &vesting_schedules);
-	let treasury = TreasuryGenesis { account: treasury_account };
+	let treasury = TreasuryGenesis { account: Some(treasury_account) };
 	genesis_template(
 		endowed_accounts,
 		treasury,
@@ -664,14 +734,14 @@ pub fn planck_config_genesis() -> Value {
 	log_genesis_accounts(
 		"planck",
 		&endowed_accounts,
-		&treasury_account,
+		Some(&treasury_account),
 		&treasury_signers,
 		&tech_collective,
 	);
 	// No vesting allocations on Planck; the pot still receives its ED buffer so
 	// `create_schedule` works post-genesis.
 	log_vesting_schedules("planck", &[]);
-	let treasury = TreasuryGenesis { account: treasury_account };
+	let treasury = TreasuryGenesis { account: Some(treasury_account) };
 	genesis_template(
 		endowed_accounts,
 		treasury,
@@ -696,13 +766,13 @@ pub fn mainnet_config_genesis() -> Value {
 	log_genesis_accounts(
 		MAINNET_RUNTIME_PRESET,
 		&seeded,
-		&treasury_account,
+		Some(&treasury_account),
 		&treasury_signers,
 		&tech_collective,
 	);
 	let vesting_schedules = mainnet_vesting::schedules();
 	log_vesting_schedules(MAINNET_RUNTIME_PRESET, &vesting_schedules);
-	let treasury = TreasuryGenesis { account: treasury_account };
+	let treasury = TreasuryGenesis { account: Some(treasury_account) };
 	genesis_template(
 		vec![],
 		treasury,
@@ -714,6 +784,64 @@ pub fn mainnet_config_genesis() -> Value {
 	)
 }
 
+/// The Qnero public testnet's faucet: the one account its genesis endows.
+///
+/// ML-DSA-87, as every literal in this file must be ([`account_from_ss58`]).
+/// Minted with `qnero-faucet keygen`, which is
+/// `TransparentKey::from_seed(32 bytes from the operating system)` and
+/// therefore the same derivation as `Dilithium87Pair::from_seed`; the node's
+/// own `key qnero --scheme standard --no-derivation --seed` answers this
+/// address for the same seed, which is the confirmation `docs/TESTNET.md`
+/// asks for before genesis is cut. The seed lives in the operator's secret
+/// store and nowhere else, and this address is all the chain spec carries.
+fn qnero_testnet_faucet_account() -> AccountId {
+	account_from_ss58("qzjpnqS6zVnCLeXgqAPn85dquWQNbSVr3ba54YivjzdYLKieZ")
+}
+
+/// The Qnero public testnet genesis: one endowed faucet account, and nothing
+/// else.
+///
+/// Every absence here is deliberate, and each one costs something worth
+/// naming:
+///
+/// - **No vesting table.** `GENESIS_VESTING_*` and [`testnet_vesting_schedules`] are the dev and
+///   Heisenberg example table; a public chain that shipped them would vest real supply to the three
+///   well-known public keys. The pot still receives its existential deposit from
+///   [`genesis_template`], which is what lets a schedule be created later.
+/// - **No mainnet placeholder.** `mainnet_vesting::PLACEHOLDER` pays 2% of the supply to an address
+///   nobody holds a key for. It reaches a chain only through [`mainnet_config_genesis`], so not
+///   calling that is the whole defence, and `FINALIZED` is the backstop.
+/// - **No treasury.** There is nothing for one to hold and nothing to spend from it, so the field
+///   is `None` rather than an account picked to fill it in. See [`TreasuryGenesis`].
+/// - **No tech collective.** [`seed_tech_collective`] accepts an empty seed and refuses any
+///   non-empty one below [`MIN_TECH_COLLECTIVE_MEMBERS`], so the choice is five real key holders or
+///   none. With none, nobody can pass `RootOrMemberForTechReferendaOrigin` and a runtime upgrade by
+///   referendum is not available on this chain. On a testnet the recovery for that is a relaunch,
+///   which is cheaper than distributing five keys nobody audits.
+/// - **No sudo.** There is no sudo pallet in this runtime and nothing should add one back.
+///
+/// What the faucet account does receive is `ENDOWED_BALANCE_UNITS`, 100 000
+/// QNR of the 21 000 000 `MaxSupply`, all of it transparent. Under v1 that
+/// balance can go exactly one place: into the pool, through a `shield` the
+/// faucet signs for itself. It cannot be transferred to anybody, which is why
+/// the faucet is a shielded-payment server and not a transfer script.
+pub fn qnero_testnet_config_genesis() -> Value {
+	let faucet = qnero_testnet_faucet_account();
+	let endowed_accounts = vec![faucet];
+	log_genesis_accounts(QNERO_TESTNET_RUNTIME_PRESET, &endowed_accounts, None, &[], &[]);
+	log_vesting_schedules(QNERO_TESTNET_RUNTIME_PRESET, &[]);
+	let treasury = TreasuryGenesis { account: None };
+	genesis_template(
+		endowed_accounts,
+		treasury,
+		Vec::new(),
+		Vec::new(),
+		Vec::new(),
+		false,
+		ConsensusGenesis::qnero_testnet(),
+	)
+}
+
 /// Provides the JSON representation of predefined genesis config for given `id`.
 pub fn get_preset(id: &PresetId) -> Option<Vec<u8>> {
 	let patch = match id.as_ref() {
@@ -721,6 +849,7 @@ pub fn get_preset(id: &PresetId) -> Option<Vec<u8>> {
 		HEISENBERG_RUNTIME_PRESET => heisenberg_config_genesis(),
 		PLANCK_RUNTIME_PRESET => planck_config_genesis(),
 		MAINNET_RUNTIME_PRESET => mainnet_config_genesis(),
+		QNERO_TESTNET_RUNTIME_PRESET => qnero_testnet_config_genesis(),
 		_ => return None,
 	};
 	Some(
@@ -762,6 +891,7 @@ pub fn preset_names() -> Vec<PresetId> {
 		PresetId::from(sp_genesis_builder::DEV_RUNTIME_PRESET),
 		PresetId::from(HEISENBERG_RUNTIME_PRESET),
 		PresetId::from(PLANCK_RUNTIME_PRESET),
+		PresetId::from(QNERO_TESTNET_RUNTIME_PRESET),
 	];
 	if mainnet_vesting::FINALIZED {
 		names.push(PresetId::from(MAINNET_RUNTIME_PRESET));
@@ -898,10 +1028,15 @@ mod tests {
 		}
 	}
 
-	/// `dev` starts at the qpow difficulty floor so a single machine mines
-	/// immediately; every other preset keeps the mainnet-scale runtime constant.
+	/// Each preset starts at the difficulty its own chain needs.
+	///
+	/// `dev` starts at the qpow floor so a single machine mines immediately.
+	/// `heisenberg` and `planck` keep the mainnet-scale runtime constant. The
+	/// public testnet sets its own, an order of magnitude below that constant,
+	/// because it is the one of the four with a real hash rate to be sized
+	/// against and a retarget too slow to correct a bad guess.
 	#[test]
-	fn only_the_dev_preset_lowers_initial_difficulty() {
+	fn each_preset_starts_at_the_difficulty_its_chain_needs() {
 		let difficulty_of = |name: &str| {
 			let raw = get_preset(&PresetId::from(name)).expect("listed preset must resolve");
 			let (json, _) = prepare_genesis_build_input(raw).expect("well-formed");
@@ -912,6 +1047,25 @@ mod tests {
 		for preset in [HEISENBERG_RUNTIME_PRESET, PLANCK_RUNTIME_PRESET] {
 			assert_eq!(difficulty_of(preset), crate::configs::QPoWInitialDifficulty::get());
 		}
+
+		// The public testnet sets its own, and the value is the one thing in
+		// its spec that cannot be corrected without a new genesis: the
+		// retarget moves by a 2048th of the difficulty per step, which is 57
+		// hours per e-fold downwards, so a number set above the hash rate that
+		// chain actually has is days of a chain that looks dead. It is pinned
+		// here by value, and below the inherited constant by an order of
+		// magnitude, because both halves are the point.
+		let testnet = difficulty_of(QNERO_TESTNET_RUNTIME_PRESET);
+		assert_eq!(testnet, U512::from(QNERO_TESTNET_INITIAL_DIFFICULTY));
+		assert_eq!(QNERO_TESTNET_INITIAL_DIFFICULTY, 5_000);
+		assert!(
+			testnet < crate::configs::QPoWInitialDifficulty::get(),
+			"the public testnet must not inherit the mainnet-scale initial difficulty"
+		);
+		assert!(
+			testnet >= pallet_qpow::Pallet::<crate::Runtime>::get_min_difficulty(),
+			"genesis validates the initial difficulty against the pallet's floor"
+		);
 	}
 
 	/// The public chain targets 120 s and the `dev` preset overrides it to 12 s,
@@ -935,7 +1089,9 @@ mod tests {
 		);
 		assert_eq!(DEV_TARGET_BLOCK_TIME_MS, 12_000);
 		assert_eq!(crate::TARGET_BLOCK_TIME_MS, 120_000);
-		for preset in [HEISENBERG_RUNTIME_PRESET, PLANCK_RUNTIME_PRESET] {
+		for preset in
+			[HEISENBERG_RUNTIME_PRESET, PLANCK_RUNTIME_PRESET, QNERO_TESTNET_RUNTIME_PRESET]
+		{
 			assert_eq!(target_of(preset), crate::TARGET_BLOCK_TIME_MS);
 		}
 	}
@@ -1022,6 +1178,10 @@ mod tests {
 					planck.push(planck_faucet_account());
 					planck
 				},
+				// The public testnet's whole allocation: one faucet account,
+				// whose key the operator holds and whose seed the runbook says
+				// is confirmed against this address before genesis.
+				QNERO_TESTNET_RUNTIME_PRESET => vec![qnero_testnet_faucet_account()],
 				MAINNET_RUNTIME_PRESET =>
 					mainnet_vesting::seed_balances().into_iter().map(|(who, _)| who).collect(),
 				other => panic!(
@@ -1053,7 +1213,10 @@ mod tests {
 			match id.as_ref() {
 				sp_genesis_builder::DEV_RUNTIME_PRESET | HEISENBERG_RUNTIME_PRESET =>
 					dilithium_default_accounts(),
-				PLANCK_RUNTIME_PRESET => Vec::new(),
+				// Neither Planck nor the public testnet vests to anybody, so
+				// what the equality below pins for both is that
+				// `genesis_template` adds no schedule of its own.
+				PLANCK_RUNTIME_PRESET | QNERO_TESTNET_RUNTIME_PRESET => Vec::new(),
 				MAINNET_RUNTIME_PRESET => {
 					mainnet_vesting::schedules().into_iter().map(|(who, ..)| who).collect()
 				},
@@ -1159,6 +1322,7 @@ mod tests {
 			(sp_genesis_builder::DEV_RUNTIME_PRESET, 3),
 			(HEISENBERG_RUNTIME_PRESET, 3),
 			(PLANCK_RUNTIME_PRESET, 0),
+			(QNERO_TESTNET_RUNTIME_PRESET, 0),
 		];
 		if mainnet_vesting::FINALIZED {
 			expected.push((MAINNET_RUNTIME_PRESET, mainnet_vesting::schedules().len()));
@@ -1195,6 +1359,67 @@ mod tests {
 			total, expected_total,
 			"per-preset vesting schedule counts must sum to the pinned total"
 		);
+	}
+
+	/// The public testnet's genesis, field by field.
+	///
+	/// This is the first Qnero chain with a genesis of its own, and the whole
+	/// of what it mints is one endowed faucet account. Every other preset here
+	/// carries something the testnet deliberately does not, so each absence is
+	/// asserted rather than left to the reader of the builder: a vesting row
+	/// would pay the public dev keys, a treasury would hand somebody the
+	/// vesting admin origin for nothing, a tech collective is five real key
+	/// holders or none, and the mainnet placeholder is 2% of the supply paid
+	/// to an address nobody can sign for.
+	#[test]
+	fn the_public_testnet_endows_one_faucet_and_nothing_else() {
+		let id = PresetId::from(QNERO_TESTNET_RUNTIME_PRESET);
+		let raw = get_preset(&id).expect("the testnet preset resolves");
+		let (json, members) = prepare_genesis_build_input(raw).expect("well-formed");
+		let config: RuntimeGenesisConfig = serde_json::from_slice(&json).expect("deserializes");
+
+		let pot = pallet_vesting::Pallet::<crate::Runtime>::pot_account_id();
+		let faucet = qnero_testnet_faucet_account();
+
+		let mut endowed: Vec<(AccountId, u128)> = config.balances.balances.clone();
+		endowed.sort();
+		assert_eq!(endowed.len(), 2, "the testnet genesis has two balance rows and no more");
+		let faucet_row =
+			endowed.iter().find(|(who, _)| *who == faucet).expect("the faucet is endowed");
+		assert_eq!(faucet_row.1, 100_000 * UNIT);
+		let pot_row = endowed.iter().find(|(who, _)| *who == pot).expect("the pot is endowed");
+		assert_eq!(
+			pot_row.1, EXISTENTIAL_DEPOSIT,
+			"with no schedules the pot holds exactly its own existential deposit"
+		);
+
+		assert!(config.vesting.schedules.is_empty(), "the testnet vests to nobody");
+		assert!(!config.vesting.anchor_to_first_timestamp);
+		assert!(
+			config.treasury_pallet.treasury_account.is_none(),
+			"the testnet configures no treasury, so EnsureTreasury matches no origin"
+		);
+		assert!(members.is_none(), "the testnet seeds no tech collective");
+
+		// The placeholder, by address rather than by absence of a row: it is
+		// the one allocation in this file that would be invisible in a diff
+		// and permanent in a genesis.
+		let placeholder = mainnet_vesting::PLACEHOLDER;
+		assert!(
+			config
+				.balances
+				.balances
+				.iter()
+				.all(|(who, _)| { who.to_ss58check_with_version(ss58_version()) != placeholder }),
+			"the mainnet placeholder allocation reached the testnet genesis"
+		);
+
+		assert_eq!(config.q_po_w.target_block_time, crate::TARGET_BLOCK_TIME_MS);
+		assert_eq!(config.q_po_w.target_block_time, 120_000);
+		assert_eq!(config.q_po_w.initial_difficulty, U512::from(5_000u64));
+
+		// It has to build, treasury-free genesis included.
+		config.build_storage().expect("the testnet genesis builds");
 	}
 
 	#[test]

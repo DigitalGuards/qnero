@@ -160,6 +160,45 @@ fn the_mainnet_preset_builds() -> bool {
 		.any(|listed| AsRef::<str>::as_ref(listed) == MAINNET_RUNTIME_PRESET)
 }
 
+/// The public testnet's four identifying fields, pinned by value.
+///
+/// These are what a wallet, an explorer and a miner read out of the spec file
+/// they are handed, and no runtime upgrade reaches a file somebody already
+/// holds. They are also what the committed raw spec at
+/// `node/chain-specs/qnero-testnet.json` carries, so a rename here without a
+/// regeneration would leave the id in the file disagreeing with the id the
+/// binary answers to.
+#[test]
+fn the_public_testnet_spec_names_qnero_testnet() {
+	let Some(spec) = chain_spec("qnero-testnet") else { return };
+
+	assert_eq!(spec["name"].as_str(), Some("Qnero Testnet"), "the testnet spec's name");
+	assert_eq!(spec["id"].as_str(), Some("qnero-testnet"), "the testnet spec's id");
+	assert_eq!(
+		spec["protocolId"].as_str(),
+		Some("qnero-testnet"),
+		"the testnet spec's protocol id"
+	);
+	assert_eq!(
+		spec["properties"]["tokenSymbol"].as_str(),
+		Some("QNR"),
+		"the testnet spec's token symbol"
+	);
+	assert_eq!(spec["chainType"].as_str(), Some("Live"), "the testnet spec's chain type");
+
+	// Two fields that sit outside genesis and that a public spec must not
+	// carry until Qnero runs the peers and the server they would name. The
+	// bootnode list is filled in at deploy, from the key the seed node
+	// actually holds.
+	let bootnodes = spec["bootNodes"].as_array().expect("bootNodes is an array");
+	assert!(bootnodes.is_empty(), "the testnet spec ships with a bootnode already in it");
+	let telemetry = &spec["telemetryEndpoints"];
+	assert!(
+		telemetry.is_null() || telemetry.as_array().is_some_and(|list| list.is_empty()),
+		"the testnet spec carries a telemetry endpoint: {telemetry}"
+	);
+}
+
 /// Everything a spec says about itself, with the genesis dropped.
 ///
 /// The genesis is the runtime wasm as hex and carries whatever byte sequences
@@ -213,6 +252,8 @@ fn no_chain_spec_this_node_builds_says_quantus() {
 		"planck_live_spec",
 		"mainnet",
 		"mainnet_live_spec",
+		"qnero-testnet",
+		"qnero-testnet_live_spec",
 	] {
 		if id.starts_with("mainnet") && !the_mainnet_preset_builds() {
 			eprintln!(

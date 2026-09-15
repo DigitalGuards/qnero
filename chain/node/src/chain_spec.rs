@@ -1,6 +1,7 @@
 use qnero_runtime::{
 	genesis_config_presets::{
 		HEISENBERG_RUNTIME_PRESET, MAINNET_RUNTIME_PRESET, PLANCK_RUNTIME_PRESET,
+		QNERO_TESTNET_RUNTIME_PRESET,
 	},
 	WASM_BINARY,
 };
@@ -126,6 +127,36 @@ pub fn planck_chain_spec() -> Result<ChainSpec, String> {
 	.build())
 }
 
+/// The Qnero public testnet.
+///
+/// The first chain in this file that is Qnero's own network rather than an
+/// upstream identity kept for reference. Its genesis is the `qnero-testnet`
+/// runtime preset: one endowed faucet account, a 120 s target, and a mining
+/// difficulty sized for the hash rate the chain has on day one.
+///
+/// `bootNodes` is empty here and stays empty in the committed raw spec. It
+/// sits outside genesis, so the peer id of the seed node is written into the
+/// file after the key exists and the genesis hash does not move
+/// (`docs/TESTNET.md`). `telemetryEndpoints` stays absent for the reason given
+/// on [`heisenberg_chain_spec`]: Qnero runs no telemetry server, and telemetry
+/// defaults on for a `ChainType::Live` chain, so the node is also started with
+/// `--no-telemetry`.
+pub fn qnero_testnet_chain_spec() -> Result<ChainSpec, String> {
+	let properties = qnero_properties();
+
+	Ok(ChainSpec::builder(
+		WASM_BINARY.ok_or_else(|| "Runtime wasm not available".to_string())?,
+		None,
+	)
+	.with_name("Qnero Testnet")
+	.with_id("qnero-testnet")
+	.with_protocol_id("qnero-testnet")
+	.with_chain_type(ChainType::Live)
+	.with_genesis_config_preset_name(QNERO_TESTNET_RUNTIME_PRESET)
+	.with_properties(properties)
+	.build())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -165,11 +196,12 @@ mod tests {
 		assert_eq!(properties.get("tokenDecimals").and_then(|value| value.as_u64()), Some(12));
 		assert_eq!(properties.get("ss58Format").and_then(|value| value.as_u64()), Some(189));
 
-		let built: [(&str, Result<ChainSpec, String>); 4] = [
+		let built: [(&str, Result<ChainSpec, String>); 5] = [
 			(sp_genesis_builder::DEV_RUNTIME_PRESET, development_chain_spec()),
 			(HEISENBERG_RUNTIME_PRESET, heisenberg_chain_spec()),
 			(PLANCK_RUNTIME_PRESET, planck_chain_spec()),
 			(MAINNET_RUNTIME_PRESET, mainnet_chain_spec()),
+			(QNERO_TESTNET_RUNTIME_PRESET, qnero_testnet_chain_spec()),
 		];
 
 		for listed in qnero_runtime::genesis_config_presets::preset_names() {
