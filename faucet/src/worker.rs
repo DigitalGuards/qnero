@@ -34,7 +34,7 @@ use qnero_wallet::rpc::RpcClient;
 use qnero_wallet::wallet::{MerkleSource, Wallet, NUM_LEAF_PROOFS};
 
 use crate::config::Config;
-use crate::store::{now_secs, Store};
+use crate::store::{now_secs, Store, INTERRUPTED};
 
 /// How long the worker waits for a job before taking a tick of its own.
 ///
@@ -298,6 +298,17 @@ impl Worker {
         let fee =
             self.wallet
                 .preflight(&self.metadata, &job.address, job.quanta, None, DRIP_MEMO)?;
+        // The row is marked submitted BEFORE the send, because the window this
+        // closes is between a drip landing in a block and `mark_sent` writing
+        // that down. A process that dies in there leaves a row that is still
+        // `queued` and a payment that may already have settled, and the old
+        // startup path re-queued exactly that row: one crash, two payments to
+        // one address, one claim in the ledger. Marking it here costs one
+        // small write per drip and makes the interrupted case decidable at the
+        // next start.
+        if let Ok(store) = self.store.lock() {
+            let _ = store.mark_submitted(job.claim_id, now_secs());
+        }
         let chain = Chain::new(&self.rpc);
         let report = self.wallet.send(
             &chain,
@@ -415,6 +426,64 @@ impl Worker {
         }
         println!("faucet      the worker's queue closed, stopping");
     }
+}
+
+/// Re-queue the claims that were accepted before the last stop.
+///
+/// With one exception, and it is the important half: a claim the worker had
+/// already started submitting is **never** re-queued. Its row was marked
+/// before `Wallet::send`, so a row that still says `queued` and carries a
+/// `submitted_at` is a drip that may already be in a block with nothing having
+/// written that down. Proving a second one would pay that address twice for
+/// one crash and record a single claim, so it is failed as `interrupted`
+/// instead. That reason code still counts against the address cooldown and the
+/// client's window, because the faucet cannot tell a payment that landed from
+/// one that did not, and paying twice is the worse of the two mistakes.
+pub fn recover_queued_claims(
+    store: &Arc<Mutex<Store>>,
+    jobs: &tokio::sync::mpsc::Sender<Job>,
+) -> Result<()> {
+    let poisoned = || anyhow::anyhow!("the claims ledger mutex is poisoned");
+    let queued = store.lock().map_err(|_| poisoned())?.queued_claims()?;
+    for claim in queued {
+        let outcome = match Address::decode(&claim.address) {
+            Err(_) => Err("bad-address"),
+            Ok(_) if claim.submitted_at.is_some() => Err(INTERRUPTED),
+            Ok(address) => jobs
+                .try_send(Job {
+                    claim_id: claim.id,
+                    address,
+                    quanta: claim.amount_quanta,
+                })
+                // More rows than the queue holds. The rest are failed rather
+                // than left pending for ever, so their requesters can ask
+                // again instead of watching a claim that nothing will pick up.
+                .map_err(|_| "queue-full"),
+        };
+        match outcome {
+            Ok(()) => println!("faucet      recovered queued claim {}", claim.id),
+            Err(INTERRUPTED) => {
+                store.lock().map_err(|_| poisoned())?.mark_failed(
+                    claim.id,
+                    INTERRUPTED,
+                    now_secs(),
+                )?;
+                println!(
+                    "faucet      claim {} was interrupted mid-drip and is NOT being paid again. \
+                     Its payment may have settled; check {} before refunding it by hand.",
+                    claim.id, claim.address
+                );
+            }
+            Err(reason) => {
+                store
+                    .lock()
+                    .map_err(|_| poisoned())?
+                    .mark_failed(claim.id, reason, now_secs())?;
+                println!("faucet      queued claim {} released as {reason}", claim.id);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Open the wallet's seed if it exists, or create one.

@@ -79,10 +79,18 @@ goes into the `qnero-testnet` preset, and the address it prints is the node's
 own answer for the same seed:
 
 ```
-(umask 077; printf '%s%064d' "$(cat <seed-file>)" 0 > /tmp/seed64)
-chain/target/release/qnero-node key qnero --scheme standard --no-derivation --seed < /tmp/seed64
-shred -u /tmp/seed64
+seed64=$(mktemp)
+printf '%s%064d' "$(cat <seed-file>)" 0 > "$seed64"
+chain/target/release/qnero-node key qnero --scheme standard --no-derivation --seed < "$seed64"
+shred -u "$seed64"
 ```
+
+`mktemp` rather than a fixed path, and it is the file that matters rather than
+the mode: a name like `/tmp/seed64` is world-writable ground somebody else can
+own first, and a `umask` does nothing about a symlink already sitting there
+pointing somewhere readable. What would go through it is the key to the entire
+genesis endowment, and there is no recovery from that leak: the address is
+fixed in genesis and the chain has to be relaunched.
 
 `Dilithium87Pair::from_seed` reads the first 32 bytes of what it is handed, so
 padding a 32-byte seed to the 64 bytes that command wants derives the same
@@ -128,7 +136,31 @@ to have. Without that condition a faucet bound to a public interface would take
 every client's word for its own address and the per-client limit would be no
 limit at all. nginx has to set `real_ip_header` from the CDN's ranges, or every
 claim reads as coming from the CDN and the per-client limit is one global
-limit.
+limit. The packaged `00-qnero-common.conf` includes that list from a file and
+fails `nginx -t` while it is missing, for exactly this reason.
+
+An IPv6 client is counted **by its /64**, which is the unit an ISP or a cloud
+provider hands out. Counting whole addresses would give one requester 2^64 keys
+and a limit that bounds nothing. `store::client_key` does the grouping and
+nginx groups the same way, and the two have to agree.
+
+### What the per-client limit is worth, and what it is not
+
+It is worth the cost of a second prefix. It is not a bound on a determined
+drain, and nothing in this list is:
+
+- The address side bounds nobody. A `qn1` address is minted locally for free, so a
+  requester who wants a second drip makes a second address.
+- The client side costs an attacker one more /64. That is real friction and it is not
+  much: a second VPS, or a prefix an ISP hands out on request.
+- What is left is the prover. One drip at a time, roughly half a minute end to end, so
+  about 2 880 drips a day, which is 2.88M quanta against a 10M-quanta endowment: three
+  days to empty, and every claim after that answers `drained`.
+
+**Turnstile is the only defence here that costs an attacker something per
+claim**, so `serve` refuses to start with no `QNERO_FAUCET_TURNSTILE_SECRET`
+unless `QNERO_FAUCET_ALLOW_NO_CAPTCHA=1` says deliberately that this faucet does
+not need one. A devnet does not. A public faucet with an endowment does.
 
 ## The ledger
 
@@ -145,11 +177,22 @@ safe side of that trade for a faucet; the queued rows are re-queued at the next
 start, so nothing is left pending for ever. A **failed** drip does not hold the
 cooldown: nobody was paid.
 
+One failure is different, and it is the one a restart cannot decide.
+`submitted_at` is written just before the payment goes to the node and cleared
+by nothing, so a row that is still `queued` at the next start and carries one
+was interrupted between submission and settlement: the drip may be in a block
+with nothing having recorded it. Re-queueing that row pays the same address
+twice for one crash, and `Restart=always` makes the crash five seconds old, so
+it is failed as `interrupted` instead. That reason code is the one failure that
+**does** hold the cooldown and the client's window, because the alternative is
+paying twice, and the operator's log line says which address to check.
+
 ## What it must not do, and does not
 
 - No amount comes from the request. The drip is a config constant.
 - No error body names the seed path, the node URL or an extrinsic. Failures are reason codes
-  (`no-spendable-note`, `fee-floor`, `not-included`, `send-failed`, `queue-full`); the
+  (`no-spendable-note`, `fee-floor`, `not-included`, `send-failed`, `queue-full`,
+  `interrupted`); the
   operator gets the whole error on stderr, where a response body is not.
 - Never two proofs at once. One worker, one queue, and a full queue is a 503 with a
   `Retry-After`.

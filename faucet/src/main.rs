@@ -7,10 +7,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use qnero_faucet::config::Config;
 use qnero_faucet::http::{router, AppState};
-use qnero_faucet::store::{now_secs, Store};
-use qnero_faucet::worker::{ensure_spend_seed, Job, Shared, Worker};
+use qnero_faucet::store::Store;
+use qnero_faucet::worker::{ensure_spend_seed, recover_queued_claims, Shared, Worker};
 use qnero_faucet::{keys, ss58};
-use qnero_notes::Address;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -93,6 +92,7 @@ fn serve() -> Result<()> {
     if let Some(expected) = &config.expect_address {
         ss58::decode(expected).context("QNERO_FAUCET_EXPECT_ADDRESS is not a Qnero address")?;
     }
+    require_captcha_decision(&config)?;
     ensure_spend_seed(&config.seed_path)?;
 
     let store = Arc::new(Mutex::new(Store::open(
@@ -157,39 +157,40 @@ fn serve() -> Result<()> {
     Ok(())
 }
 
-/// Re-queue the claims that were accepted before the last stop.
-fn recover_queued_claims(
-    store: &Arc<Mutex<Store>>,
-    jobs: &tokio::sync::mpsc::Sender<Job>,
-) -> Result<()> {
-    let poisoned = || anyhow::anyhow!("the claims ledger mutex is poisoned");
-    let queued = store.lock().map_err(|_| poisoned())?.queued_claims()?;
-    for claim in queued {
-        let outcome = match Address::decode(&claim.address) {
-            Err(_) => Err("bad-address"),
-            Ok(address) => jobs
-                .try_send(Job {
-                    claim_id: claim.id,
-                    address,
-                    quanta: claim.amount_quanta,
-                })
-                // More rows than the queue holds. The rest are failed rather
-                // than left pending for ever, so their requesters can ask
-                // again instead of watching a claim that nothing will pick up.
-                .map_err(|_| "queue-full"),
-        };
-        match outcome {
-            Ok(()) => println!("faucet      recovered queued claim {}", claim.id),
-            Err(reason) => {
-                store
-                    .lock()
-                    .map_err(|_| poisoned())?
-                    .mark_failed(claim.id, reason, now_secs())?;
-                println!("faucet      queued claim {} released as {reason}", claim.id);
-            }
-        }
+/// Refuse to serve with no challenge unless somebody said so out loud.
+///
+/// The rate limits are not a substitute for one, and the arithmetic says why.
+/// A recipient address is minted locally for nothing, so the per-address
+/// cooldown bounds an attacker not at all. The per-client limit counts an IPv6
+/// requester by its /64, which is the right unit and still costs nothing to a
+/// client holding several prefixes or a handful of cloud addresses. What is
+/// left is the prover: one drip at a time, roughly half a minute end to end,
+/// so a determined requester takes the endowment at about 2 880 drips a day
+/// and every later claim answers `drained`.
+///
+/// Turnstile is the defence that actually costs an attacker something, so a
+/// public faucet starts with it or says explicitly that it is not one.
+fn require_captcha_decision(config: &Config) -> Result<()> {
+    if config.captcha_enabled() {
+        return Ok(());
     }
-    Ok(())
+    let allowed = std::env::var("QNERO_FAUCET_ALLOW_NO_CAPTCHA")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false);
+    if allowed {
+        println!(
+            "faucet      no captcha: QNERO_FAUCET_ALLOW_NO_CAPTCHA=1. The rate limits are all \
+             that stands between this faucet and its endowment."
+        );
+        return Ok(());
+    }
+    anyhow::bail!(
+        "QNERO_FAUCET_TURNSTILE_SECRET is empty, so every claim would be answered with no \
+         challenge at all. The address cooldown bounds nobody, since addresses are free to \
+         mint, and the per-client limit counts an IPv6 /64, which a client with several \
+         prefixes simply rotates. Set the Turnstile pair, or set \
+         QNERO_FAUCET_ALLOW_NO_CAPTCHA=1 to say deliberately that this faucet does not need one"
+    );
 }
 
 async fn shutdown() {

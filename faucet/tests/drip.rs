@@ -594,3 +594,113 @@ async fn the_page_and_its_two_files_are_served() {
         assert_eq!(status, 200, "{path} was not served");
     }
 }
+
+/// The per-client limit counts an IPv6 requester by its /64, through the whole
+/// stack rather than in a unit test of the key function.
+///
+/// The address half of the limit is no help against this: a recipient address
+/// is minted locally for nothing, so a requester who wants a second drip mints
+/// a second address. The client half is the one that has to hold, and a client
+/// holding an ordinary /64 has 2^64 addresses to rotate through. Three claims
+/// go in from three addresses in one /64 and the fourth is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_ipv6_prefix_is_one_client() {
+    let dir = tempdir::TempDir::new("cfg");
+    let harness = start(config_in(dir.path())).await;
+
+    for client in [
+        "2001:db8:aa:bb:1:2:3:4",
+        "2001:db8:aa:bb::99",
+        "2001:db8:aa:bb:ffff:ffff:ffff:ffff",
+    ] {
+        let (status, body, _) = request(
+            "POST",
+            format!("{}/drip", harness.base),
+            Some(serde_json::json!({ "address": an_address("v6") }).to_string()),
+            Some(client),
+        )
+        .await;
+        assert_eq!(status, 202, "{client} was refused: {body}");
+    }
+
+    let (status, refusal, retry_after) = request(
+        "POST",
+        format!("{}/drip", harness.base),
+        Some(serde_json::json!({ "address": an_address("v6-fourth") }).to_string()),
+        Some("2001:db8:aa:bb:dead:beef:dead:beef"),
+    )
+    .await;
+    assert_eq!(status, 429, "a fourth address in the same /64 was served");
+    assert_eq!(refusal["reason"], serde_json::json!("client-limit"));
+    assert!(retry_after.is_some());
+
+    // A different /64 is a different client, so the limit bounds a prefix
+    // rather than the whole of IPv6.
+    let (status, _, _) = request(
+        "POST",
+        format!("{}/drip", harness.base),
+        Some(serde_json::json!({ "address": an_address("v6-elsewhere") }).to_string()),
+        Some("2001:db8:aa:cc::1"),
+    )
+    .await;
+    assert_eq!(status, 202, "another /64 was counted as the same client");
+}
+
+/// What a restart does with a claim that was already being paid.
+///
+/// The row is written before the proof and cleared after the send returns, so
+/// a process that dies in between leaves a `queued` row whose payment may
+/// already be in a block. Re-queueing it pays that address twice for one
+/// crash, which is what `submitted_at` exists to prevent: an interrupted claim
+/// is failed, and its cooldown is held because the faucet cannot tell a
+/// payment that landed from one that did not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_claim_is_never_paid_twice() {
+    let dir = tempdir::TempDir::new("recover");
+    let db = dir.path().join("claims.sqlite");
+    let key = dir.path().join("ip-hash.key");
+    let store = Arc::new(Mutex::new(Store::open(&db, &key).expect("a ledger")));
+
+    let untouched = an_address("untouched");
+    let mid_flight = an_address("mid-flight");
+    let (untouched_id, mid_flight_id) = {
+        let ledger = store.lock().expect("the ledger");
+        let hash = ledger.ip_hash("203.0.113.7");
+        let first = ledger
+            .record_queued(&untouched, &hash, 1_000, now_secs())
+            .expect("insert");
+        let second = ledger
+            .record_queued(&mid_flight, &hash, 1_000, now_secs())
+            .expect("insert");
+        // The worker got as far as handing this one to the node.
+        ledger
+            .mark_submitted(second, now_secs())
+            .expect("submitted");
+        (first, second)
+    };
+
+    let (jobs_tx, mut jobs) = tokio::sync::mpsc::channel(8);
+    qnero_faucet::worker::recover_queued_claims(&store, &jobs_tx).expect("recovery");
+
+    let job = jobs.try_recv().expect("the untouched claim was re-queued");
+    assert_eq!(job.claim_id, untouched_id);
+    assert!(
+        jobs.try_recv().is_err(),
+        "the interrupted claim was queued to be proved a second time"
+    );
+
+    let ledger = store.lock().expect("the ledger");
+    let claim = ledger
+        .claim(mid_flight_id)
+        .expect("query")
+        .expect("the row is still there");
+    assert_eq!(claim.status.as_str(), "failed");
+    assert_eq!(claim.detail.as_deref(), Some("interrupted"));
+    assert!(
+        ledger
+            .last_claim_for_address(&mid_flight)
+            .expect("query")
+            .is_some(),
+        "an interrupted claim has to hold its cooldown, since it may have been paid"
+    );
+}
