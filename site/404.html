@@ -21,17 +21,12 @@
     <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
     <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="stylesheet" href="/css/site.css">
-    <script>
-      try {
-        var t = localStorage.getItem('qnero-theme');
-        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
-      } catch (e) {}
-    </script>
+    <script src="/js/theme.js"></script>
     <script src="/js/site.js" defer></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <div class="status-strip">
+    <aside class="status-strip" aria-label="Project status">
       <div class="wrap">
         <span class="dot" aria-hidden="true"></span>
         <p>
@@ -39,15 +34,15 @@
           has been audited.
         </p>
       </div>
-    </div>
+    </aside>
     <header class="site-header">
       <div class="wrap">
         <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
         <nav class="nav" aria-label="Main">
         <a href="/how-it-works.html">How it works</a>
-        <a href="/wallet.html">Wallet</a>
+        <a href="/wallet.html">Qloak wallet</a>
         <a href="/mine.html">Mine</a>
-        <a href="/explorer.html">Explorer</a>
+        <a href="/explorer.html">silQ Road explorer</a>
         <a href="/docs.html">Docs</a>
         <a href="/about.html">About</a>
           <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
@@ -78,9 +73,9 @@
         <nav class="footer-nav" aria-label="Footer">
           <a href="/">Home</a>
           <a href="/how-it-works.html">How it works</a>
-          <a href="/wallet.html">Qloak</a>
+          <a href="/wallet.html">Qloak wallet</a>
           <a href="/mine.html">Mine</a>
-          <a href="/explorer.html">silQ Road</a>
+          <a href="/explorer.html">silQ Road explorer</a>
           <a href="/docs.html">Docs</a>
           <a href="/about.html">About</a>
           <a href="https://github.com/DigitalGuards/qnero">Source</a>

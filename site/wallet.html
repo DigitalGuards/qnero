@@ -21,17 +21,12 @@
     <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
     <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="stylesheet" href="/css/site.css">
-    <script>
-      try {
-        var t = localStorage.getItem('qnero-theme');
-        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
-      } catch (e) {}
-    </script>
+    <script src="/js/theme.js"></script>
     <script src="/js/site.js" defer></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <div class="status-strip">
+    <aside class="status-strip" aria-label="Project status">
       <div class="wrap">
         <span class="dot" aria-hidden="true"></span>
         <p>
@@ -39,15 +34,15 @@
           has been audited.
         </p>
       </div>
-    </div>
+    </aside>
     <header class="site-header">
       <div class="wrap">
         <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
         <nav class="nav" aria-label="Main">
         <a href="/how-it-works.html">How it works</a>
-        <a href="/wallet.html" aria-current="page">Wallet</a>
+        <a href="/wallet.html" aria-current="page">Qloak wallet</a>
         <a href="/mine.html">Mine</a>
-        <a href="/explorer.html">Explorer</a>
+        <a href="/explorer.html">silQ Road explorer</a>
         <a href="/docs.html">Docs</a>
         <a href="/about.html">About</a>
           <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
@@ -68,8 +63,11 @@
           </p>
           <div class="actions">
             <a class="btn btn--ghost" href="https://github.com/DigitalGuards/qnero/tree/main/wallet-web">Source and full README</a>
-            <span class="btn btn--ghost" aria-disabled="true">wallet.qnero.io: testnet, coming online</span>
           </div>
+          <p class="hostline">
+              <a href="https://wallet.qnero.io" data-m11-host>wallet.qnero.io</a>
+              <span class="tag">testnet, coming online</span>
+            </p>
           <div class="panel status-panel">
             <span class="panel__label">Read this first</span>
             <p>
@@ -87,9 +85,9 @@
         <div class="wrap">
           <span class="band__label">01 / What it does</span>
           <h2>What it does</h2>
-          <div class="cards">
+          <div class="cards cards--3">
             <div class="card">
-              <h3>Create a wallet</h3>
+              <h3>Create or restore</h3>
               <p>
                 32 bytes from <code>crypto.getRandomValues</code>, shown once as eight groups of
                 eight hex characters, then three of the eight groups asked back before the wallet is
@@ -100,13 +98,10 @@
                 Hex and no code beside it. A QR of a spend key is harvested by any camera, screen
                 share or shoulder in the room in one frame, and nothing in this wallet scans one.
               </p>
-            </div>
-            <div class="card">
-              <h3>Restore from a seed</h3>
               <p>
-                The 64 hex characters and nothing else. There is no restore height, because a scan
-                that started at a height the wallet named would tell the node roughly when the
-                wallet was created.
+                A restore takes the 64 hex characters and nothing else. There is no restore height,
+                because a scan that started at a height the wallet named would tell the node roughly
+                when the wallet was created.
               </p>
             </div>
             <div class="card">
@@ -274,8 +269,8 @@ nice -n 19 npm run dev</code></pre>
             <div class="prose">
               <h3>What a host has to send</h3>
               <p>
-                <code>Cross-Origin-Opener-Policy: same-origin</code> and
-                <code>Cross-Origin-Embedder-Policy: require-corp</code>, which is what a page needs
+                <code>Cross-Origin-Opener-Policy</code>: <code>same-origin</code> and
+                <code>Cross-Origin-Embedder-Policy</code>: <code>require-corp</code>, which is what a page needs
                 before <code>SharedArrayBuffer</code> exists, and therefore before the threaded
                 prover can run. Without them the page falls back to the single-threaded module and
                 the settings screen says which one it got.
@@ -326,9 +321,9 @@ nice -n 19 npm run dev</code></pre>
         <nav class="footer-nav" aria-label="Footer">
           <a href="/">Home</a>
           <a href="/how-it-works.html">How it works</a>
-          <a href="/wallet.html">Qloak</a>
+          <a href="/wallet.html">Qloak wallet</a>
           <a href="/mine.html">Mine</a>
-          <a href="/explorer.html">silQ Road</a>
+          <a href="/explorer.html">silQ Road explorer</a>
           <a href="/docs.html">Docs</a>
           <a href="/about.html">About</a>
           <a href="https://github.com/DigitalGuards/qnero">Source</a>

@@ -16,7 +16,8 @@
  *
  * Contrast: --text-muted carries labels, table headers and provenance notes
  * at 10 to 11 px and clears 4.5:1 on every ground this sheet paints.
- * --text-dim carries no prose: it is a rule, a dot and a disabled control.
+ * --text-dim and --shadow-float are held so this block stays a copy of the
+ * apps' and are used by no rule here.
  */
 
 :root {
@@ -39,9 +40,12 @@
   --accent-fill: #e6a145;
   --accent-on-fill: #161416;
   --band-accent-bg: #1f1a14;
+  --band-accent-hover: #2b241a;
 
   --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
   --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
+  --shadow-edge: rgba(255, 255, 255, 0.22);
+  --shadow-edge-fade: rgba(255, 255, 255, 0);
 
   color-scheme: dark;
 }
@@ -62,14 +66,21 @@
     --text-muted: #6a6460;
     --text-dim: #948d88;
 
+    /* --accent is dark because it carries link text on a near-white ground.
+       --accent-fill is a ground of its own and only owes contrast to its own
+       label, so it keeps the amber the favicon and the card lead with:
+       #e6a145 under #161416 measures 8.29:1. */
     --accent: #8a4b06;
     --accent-hover: #6f3c05;
-    --accent-fill: #8a4b06;
-    --accent-on-fill: #ffffff;
+    --accent-fill: #e6a145;
+    --accent-on-fill: #161416;
     --band-accent-bg: #f8f1e4;
+    --band-accent-hover: #f0e4cd;
 
     --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
     --shadow-float: 0 1px 4px 0 rgba(27, 26, 25, 0.16);
+    --shadow-edge: rgba(27, 26, 25, 0.25);
+    --shadow-edge-fade: rgba(27, 26, 25, 0);
 
     color-scheme: light;
   }
@@ -92,12 +103,15 @@
 
   --accent: #8a4b06;
   --accent-hover: #6f3c05;
-  --accent-fill: #8a4b06;
-  --accent-on-fill: #ffffff;
+  --accent-fill: #e6a145;
+  --accent-on-fill: #161416;
   --band-accent-bg: #f8f1e4;
+  --band-accent-hover: #f0e4cd;
 
   --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
   --shadow-float: 0 1px 4px 0 rgba(27, 26, 25, 0.16);
+  --shadow-edge: rgba(27, 26, 25, 0.25);
+  --shadow-edge-fade: rgba(27, 26, 25, 0);
 
   color-scheme: light;
 }
@@ -106,7 +120,7 @@
   --fs-display: clamp(2rem, 1.4rem + 2.8vw, 3.25rem);
   --fs-h2: clamp(1.4rem, 1.2rem + 1vw, 1.9rem);
   --fs-h3: 1.1rem;
-  --fs-lede: clamp(1rem, 0.95rem + 0.4vw, 1.2rem);
+  --fs-lede: clamp(1.15rem, 1.05rem + 0.5vw, 1.2rem);
   --fs-prose: 1rem;
   --fs-body: 13px;
   --fs-ui: 12px;
@@ -198,6 +212,13 @@ a:hover {
   outline-offset: 2px;
 }
 
+/* A hyphen is a line-break opportunity, so `--stratum-port` in prose becomes
+   `--stratum-` and `port`, and on a page whose content is command-line flags
+   that reads as two flags. No `word-break` value stops it in Chromium, so a
+   chip does not wrap at all: every chip on this site is short enough to sit on
+   one line at 400 px, measured. The clone is the backstop, so a chip that ever
+   does break keeps one shape across the break instead of painting a complete
+   box on each fragment. */
 code {
   font-family: var(--font-mono);
   font-size: 0.875em;
@@ -206,7 +227,9 @@ code {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 0.05em 0.35em;
-  word-break: break-word;
+  white-space: nowrap;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 pre {
@@ -219,6 +242,9 @@ pre {
   color: var(--text-primary);
 }
 
+/* A command that clips is a command that gets pasted broken, and an overlay
+   scrollbar says nothing at rest. These wrap instead: every block already uses
+   `\` continuations, so a wrapped line still reads as one command. */
 pre code {
   font-size: var(--fs-body);
   line-height: 1.6;
@@ -226,7 +252,8 @@ pre code {
   border: 0;
   border-radius: 0;
   padding: 0;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: normal;
 }
 
@@ -273,6 +300,17 @@ svg {
   left: var(--space-2);
   top: var(--space-2);
   color: var(--accent-on-fill);
+}
+
+/* Read by a screen reader, painted nowhere. Same clip as .skip, without the
+   focus behaviour, for a header cell that would otherwise be empty. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .wrap {
@@ -337,7 +375,8 @@ svg {
   color: var(--text-bright);
 }
 
-.wordmark .mark {
+.wordmark .mark,
+h1 .mark {
   color: var(--accent);
 }
 
@@ -558,17 +597,23 @@ svg {
   color: var(--text-primary);
 }
 
-/* An address that does not answer yet. It sits in the row of actions because
-   that is where a reader looks for it, and it is drawn so that it reads as a
-   label: dashed edge, muted ink, no pointer. */
-.btn[aria-disabled='true'] {
-  border-style: dashed;
-  border-color: var(--border-strong);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: default;
+/* An M11 address: the host as a link, in the mono face the rest of the site
+   gives an identifier, and the status beside it as its own chip. One treatment,
+   used on every page that names one, so nothing reads as a control that is not
+   one and nothing reads as prose that is a link. */
+.hostline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
   font-family: var(--font-mono);
-  letter-spacing: var(--ls-wide);
+  font-size: var(--fs-ui);
+}
+
+.card__foot .hostline {
+  margin-bottom: 0;
+  margin-top: var(--space-2);
 }
 
 /* ---------- panels ---------- */
@@ -618,6 +663,14 @@ svg {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: var(--space-4);
+}
+
+/* Six boxes read as two rows of three, which an auto-fit track turns into four
+   and a hole. Same reason as .figures--3. */
+@media (min-width: 900px) {
+  .cards--3 {
+    grid-template-columns: repeat(3, 1fr);
+  }
 }
 
 .card {
@@ -697,11 +750,37 @@ svg {
 
 /* ---------- tables ---------- */
 
+/* An overlay scrollbar is invisible until it is dragged, so a table wider than
+   its box hides columns with nothing to say so. The two gradients are pinned to
+   the content box, so an edge shadow appears exactly while something is off
+   screen on that side. Copied in behaviour from explorer/src/styles/app.css,
+   where the same class solves the same problem. Every one of these carries
+   tabindex="0" in the markup, because a region that scrolls and holds no
+   focusable child is unreachable without a pointer. */
 .table-wrap {
   overflow-x: auto;
+  scrollbar-width: thin;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--bg-panel);
+  background:
+    linear-gradient(to right, var(--bg-panel) 30%, rgba(0, 0, 0, 0)),
+    linear-gradient(to left, var(--bg-panel) 30%, rgba(0, 0, 0, 0)) 100% 0,
+    radial-gradient(farthest-side at 0 50%, var(--shadow-edge), var(--shadow-edge-fade)),
+    radial-gradient(farthest-side at 100% 50%, var(--shadow-edge), var(--shadow-edge-fade)) 100% 0,
+    var(--bg-panel);
+  background-repeat: no-repeat;
+  background-size:
+    32px 100%,
+    32px 100%,
+    12px 100%,
+    12px 100%,
+    auto;
+  background-attachment: local, local, scroll, scroll, scroll;
+}
+
+/* A table follows its wrapper's own spacing when prose comes after it. */
+.table-wrap + .prose {
+  margin-top: var(--space-4);
 }
 
 table {
@@ -751,6 +830,12 @@ tbody tr:hover td,
 tbody tr:hover th {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* The tint is the only thing naming which of six columns is Qnero's, so it has
+   to outlast the hover that lands on the row being read. */
+tbody tr:hover td.col-self {
+  background: var(--band-accent-hover);
 }
 
 .table-note {
@@ -896,6 +981,19 @@ tbody tr:hover th {
 .diagram {
   margin: 0 0 var(--space-4);
   overflow-x: auto;
+  scrollbar-width: thin;
+  background:
+    linear-gradient(to right, var(--bg-deep) 30%, rgba(0, 0, 0, 0)),
+    linear-gradient(to left, var(--bg-deep) 30%, rgba(0, 0, 0, 0)) 100% 0,
+    radial-gradient(farthest-side at 0 50%, var(--shadow-edge), var(--shadow-edge-fade)),
+    radial-gradient(farthest-side at 100% 50%, var(--shadow-edge), var(--shadow-edge-fade)) 100% 0;
+  background-repeat: no-repeat;
+  background-size:
+    32px 100%,
+    32px 100%,
+    12px 100%,
+    12px 100%;
+  background-attachment: local, local, scroll, scroll;
 }
 
 .diagram svg {
@@ -975,6 +1073,29 @@ tbody tr:hover th {
 
 .stack > * + * {
   margin-top: var(--space-4);
+}
+
+/* A command belongs at the band's full width. In a 3fr column at this
+   container a 70-character line is half off screen, and the mine page is two
+   commands and some prose about them. */
+.commands {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+
+.command__label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  letter-spacing: var(--ls-wide);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: var(--space-2);
+}
+
+.command pre {
+  margin-bottom: 0;
 }
 
 /* ---------- footer ---------- */

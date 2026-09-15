@@ -21,17 +21,12 @@
     <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
     <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="stylesheet" href="/css/site.css">
-    <script>
-      try {
-        var t = localStorage.getItem('qnero-theme');
-        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
-      } catch (e) {}
-    </script>
+    <script src="/js/theme.js"></script>
     <script src="/js/site.js" defer></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <div class="status-strip">
+    <aside class="status-strip" aria-label="Project status">
       <div class="wrap">
         <span class="dot" aria-hidden="true"></span>
         <p>
@@ -39,15 +34,15 @@
           has been audited.
         </p>
       </div>
-    </div>
+    </aside>
     <header class="site-header">
       <div class="wrap">
         <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
         <nav class="nav" aria-label="Main">
         <a href="/how-it-works.html">How it works</a>
-        <a href="/wallet.html">Wallet</a>
+        <a href="/wallet.html">Qloak wallet</a>
         <a href="/mine.html">Mine</a>
-        <a href="/explorer.html">Explorer</a>
+        <a href="/explorer.html">silQ Road explorer</a>
         <a href="/docs.html">Docs</a>
         <a href="/about.html">About</a>
           <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
@@ -84,7 +79,7 @@
             </p>
           </div>
           </div>
-          <aside class="panel hero-facts">
+          <aside class="panel hero-facts" aria-label="At a glance">
             <span class="panel__label">At a glance</span>
             <dl>
               <div>
@@ -165,7 +160,7 @@
             Ten pieces of Monero and what each becomes here. The last two are the habits that do
             not carry.
           </p>
-          <div class="table-wrap">
+          <section class="table-wrap" tabindex="0" aria-label="The mental model carries over almost intact, scrollable table">
             <table class="table--pairs">
               <caption>Monero to Qnero, piece by piece</caption>
               <thead>
@@ -250,7 +245,7 @@
                 </tr>
               </tbody>
             </table>
-          </div>
+          </section>
           <p class="table-note">
             Supply is capped at 21M QNR on the upstream decay schedule, and emission at genesis
             supply is 411 quanta a block against the 120-second target. Every unit of value created
@@ -398,12 +393,12 @@
             Bitcoin hold the longest track records, years of mainnet under adversarial pressure, and
             QRL's legacy chain has run since 2018.
           </p>
-          <div class="table-wrap">
+          <section class="table-wrap" tabindex="0" aria-label="Five projects on the points that decide a payment's privacy, scrollable table">
             <table class="table--wide">
               <caption>Checked 2026-09-14</caption>
               <thead>
                 <tr>
-                  <th scope="col"></th>
+                  <th scope="col"><span class="visually-hidden">Property</span></th>
                   <th scope="col" class="col-self">Qnero</th>
                   <th scope="col">Quantus</th>
                   <th scope="col">QRL</th>
@@ -492,7 +487,7 @@
                 </tr>
               </tbody>
             </table>
-          </div>
+          </section>
           <p class="table-note">
             The rows leave out everything that takes years to acquire. Monero has carried real value
             under sustained attack since 2014, Bitcoin since 2009 and QRL's legacy chain since 2018,
@@ -532,8 +527,10 @@
                 no account.
               </p>
               <p class="card__foot">
-                <a href="/wallet.html">What it does and what it cannot do</a><br>
-                <span class="tag">wallet.qnero.io: testnet, coming online</span>
+                <a href="/wallet.html">What it does and what it cannot do</a></p>
+              <p class="hostline">
+                <a href="https://wallet.qnero.io" data-m11-host>wallet.qnero.io</a>
+                <span class="tag">testnet, coming online</span>
               </p>
             </div>
             <div class="card">
@@ -544,8 +541,10 @@
                 one WebSocket, no server-side indexer.
               </p>
               <p class="card__foot">
-                <a href="/explorer.html">The six things it refuses to do</a><br>
-                <span class="tag">explorer.qnero.io: testnet, coming online</span>
+                <a href="/explorer.html">The six things it refuses to do</a></p>
+              <p class="hostline">
+                <a href="https://explorer.qnero.io" data-m11-host>explorer.qnero.io</a>
+                <span class="tag">testnet, coming online</span>
               </p>
             </div>
             <div class="card">
@@ -569,9 +568,9 @@
         <nav class="footer-nav" aria-label="Footer">
           <a href="/">Home</a>
           <a href="/how-it-works.html">How it works</a>
-          <a href="/wallet.html">Qloak</a>
+          <a href="/wallet.html">Qloak wallet</a>
           <a href="/mine.html">Mine</a>
-          <a href="/explorer.html">silQ Road</a>
+          <a href="/explorer.html">silQ Road explorer</a>
           <a href="/docs.html">Docs</a>
           <a href="/about.html">About</a>
           <a href="https://github.com/DigitalGuards/qnero">Source</a>

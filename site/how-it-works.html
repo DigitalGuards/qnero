@@ -21,17 +21,12 @@
     <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
     <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="stylesheet" href="/css/site.css">
-    <script>
-      try {
-        var t = localStorage.getItem('qnero-theme');
-        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
-      } catch (e) {}
-    </script>
+    <script src="/js/theme.js"></script>
     <script src="/js/site.js" defer></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <div class="status-strip">
+    <aside class="status-strip" aria-label="Project status">
       <div class="wrap">
         <span class="dot" aria-hidden="true"></span>
         <p>
@@ -39,15 +34,15 @@
           has been audited.
         </p>
       </div>
-    </div>
+    </aside>
     <header class="site-header">
       <div class="wrap">
         <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
         <nav class="nav" aria-label="Main">
         <a href="/how-it-works.html" aria-current="page">How it works</a>
-        <a href="/wallet.html">Wallet</a>
+        <a href="/wallet.html">Qloak wallet</a>
         <a href="/mine.html">Mine</a>
-        <a href="/explorer.html">Explorer</a>
+        <a href="/explorer.html">silQ Road explorer</a>
         <a href="/docs.html">Docs</a>
         <a href="/about.html">About</a>
           <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
@@ -114,7 +109,7 @@
         <div class="wrap">
           <span class="band__label">02 / The circuit</span>
           <h2>Up to 2 inputs, exactly 2 outputs, a public fee</h2>
-          <figure class="diagram">
+          <figure class="diagram" tabindex="0" aria-label="Up to 2 inputs, exactly 2 outputs, a public fee, scrollable diagram">
             <svg viewBox="0 0 944 232" role="img" aria-labelledby="flow-title flow-desc">
               <title id="flow-title">From a note to a settled block</title>
               <desc id="flow-desc">
@@ -246,7 +241,7 @@
             The full list, from <code>docs/CIRCUIT.md</code> section 10.7. A privacy claim is worth
             what its disclosure list says.
           </p>
-          <div class="table-wrap">
+          <section class="table-wrap" tabindex="0" aria-label="What a v1 block reveals, scrollable table">
             <table class="table--pairs">
               <thead>
                 <tr>
@@ -293,8 +288,8 @@
                 </tr>
               </tbody>
             </table>
-          </div>
-          <div class="prose" style="margin-top: var(--space-4)">
+          </section>
+          <div class="prose">
             <h3>The three edges worth stating twice</h3>
             <p>
               <strong>The entry is the sharp edge.</strong> <code>shield</code> is a signed
@@ -335,7 +330,7 @@
             One workstation, 20 cores, WSL2. <code>docs/BENCH.md</code> is the log. No figure below
             was measured on a public network, because there is no public network.
           </p>
-          <div class="table-wrap">
+          <section class="table-wrap" tabindex="0" aria-label="Every figure, and the machine it came from, scrollable table">
             <table class="table--mid">
               <thead>
                 <tr>
@@ -397,7 +392,7 @@
                 </tr>
               </tbody>
             </table>
-          </div>
+          </section>
           <p class="table-note">
             <strong>There is no phone in these figures.</strong> A desktop core under headless
             Chromium is the proxy, and the stated 2-to-4 factor is a floor, because its low end is a
@@ -414,15 +409,38 @@
           </p>
         </div>
       </section>
+
+      <section class="band band--accent">
+        <div class="wrap">
+          <span class="band__label">06 / Next</span>
+          <h2>Read the circuit, then run one</h2>
+          <div class="prose">
+            <p>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/docs/CIRCUIT.md">docs/CIRCUIT.md</a>
+              is the constraint-by-constraint account, and section 10.7 is the disclosure list above
+              in its original form.
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/docs/DESIGN.md">docs/DESIGN.md</a>
+              carries the chain, the emission and the open questions.
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/docs/BENCH.md">docs/BENCH.md</a>
+              carries every figure on this page and the machine it came from.
+            </p>
+            <p>
+              None of it asks to be believed. Clone the repository, build it, start a devnet, and
+              check the numbers against your own machine. <a href="/mine.html">Mine it</a> or
+              <a href="/wallet.html">read what Qloak can and cannot do</a>.
+            </p>
+          </div>
+        </div>
+      </section>
     </main>
     <footer class="site-footer">
       <div class="wrap">
         <nav class="footer-nav" aria-label="Footer">
           <a href="/">Home</a>
           <a href="/how-it-works.html">How it works</a>
-          <a href="/wallet.html">Qloak</a>
+          <a href="/wallet.html">Qloak wallet</a>
           <a href="/mine.html">Mine</a>
-          <a href="/explorer.html">silQ Road</a>
+          <a href="/explorer.html">silQ Road explorer</a>
           <a href="/docs.html">Docs</a>
           <a href="/about.html">About</a>
           <a href="https://github.com/DigitalGuards/qnero">Source</a>

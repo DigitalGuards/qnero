@@ -21,17 +21,12 @@
     <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
     <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="stylesheet" href="/css/site.css">
-    <script>
-      try {
-        var t = localStorage.getItem('qnero-theme');
-        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
-      } catch (e) {}
-    </script>
+    <script src="/js/theme.js"></script>
     <script src="/js/site.js" defer></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <div class="status-strip">
+    <aside class="status-strip" aria-label="Project status">
       <div class="wrap">
         <span class="dot" aria-hidden="true"></span>
         <p>
@@ -39,15 +34,15 @@
           has been audited.
         </p>
       </div>
-    </div>
+    </aside>
     <header class="site-header">
       <div class="wrap">
         <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
         <nav class="nav" aria-label="Main">
         <a href="/how-it-works.html">How it works</a>
-        <a href="/wallet.html">Wallet</a>
+        <a href="/wallet.html">Qloak wallet</a>
         <a href="/mine.html" aria-current="page">Mine</a>
-        <a href="/explorer.html">Explorer</a>
+        <a href="/explorer.html">silQ Road explorer</a>
         <a href="/docs.html">Docs</a>
         <a href="/about.html">About</a>
           <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
@@ -86,7 +81,7 @@
         <div class="wrap">
           <span class="band__label">01 / Setup</span>
           <h2>What you need</h2>
-          <div class="split">
+          <div class="split split--even">
             <div class="prose">
               <p>
                 A built node and a wallet. Release builds are mandatory: a leaf takes about 0.2 s in
@@ -97,8 +92,6 @@
                 coinbase notes out of the tree, so keep it with the seed. A node without one refuses
                 to start.
               </p>
-              <pre><code>./target/release/qnero-wallet keygen
-export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pre>
             </div>
             <div class="prose">
               <h3>The node's own miner</h3>
@@ -106,14 +99,24 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
                 Every authoring node runs an in-process RandomX miner in light mode, one thread by
                 default, so a devnet produces blocks with no rig attached.
               </p>
-              <pre><code>nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
-  --rewards-miner-key "$QNERO_MINER_KEY" --rewards-inner-hash &lt;hash&gt;</code></pre>
               <p>
-                <code>--mining-threads N</code> sets the thread count and <code>0</code> turns the
-                in-process miner off, so only external rigs mine. Values above the machine's own
+                <code>--mining-threads&nbsp;N</code> sets the thread count and <code>0</code> turns
+                the in-process miner off, so only external rigs mine. Values above the machine's own
                 parallelism are refused. Light mode is an order of magnitude slower than a rig
                 carrying the full 2 GiB dataset.
               </p>
+            </div>
+          </div>
+          <div class="commands">
+            <div class="command">
+              <span class="command__label">Make a miner key</span>
+              <pre><code>./target/release/qnero-wallet keygen
+export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pre>
+            </div>
+            <div class="command">
+              <span class="command__label">Start an authoring node</span>
+              <pre><code>nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
+  --rewards-miner-key "$QNERO_MINER_KEY" --rewards-inner-hash &lt;hash&gt;</code></pre>
             </div>
           </div>
         </div>
@@ -123,16 +126,7 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
         <div class="wrap">
           <span class="band__label">02 / Point a rig at it</span>
           <h2>Open the stratum port, then run a stock xmrig</h2>
-          <div class="split">
-            <div class="prose">
-              <h3>On the node</h3>
-              <pre><code>nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
-  --rewards-miner-key "$QNERO_MINER_KEY" --rewards-inner-hash &lt;hash&gt; \
-  --stratum-port 3333 --mining-threads 0</code></pre>
-              <h3>On the rig</h3>
-              <pre><code>nice -n 19 xmrig --threads=2 --algo rx/0 \
-  -o 127.0.0.1:3333 -u qnero-rig -p x --no-color</code></pre>
-            </div>
+          <div class="split split--even">
             <div class="prose">
               <h3>Nothing is paid to the login</h3>
               <p>
@@ -144,6 +138,9 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
                 <code>--stratum-host</code> defaults to loopback. A rig on another machine needs
                 <code>0.0.0.0</code> and a firewall rule you chose.
               </p>
+            </div>
+            <div class="prose">
+              <h3>The dialect is Monero's</h3>
               <p>
                 The endpoint speaks the Monero stratum dialect xmrig uses: <code>login</code>,
                 <code>job</code> pushes with <code>blob</code>, <code>target</code>,
@@ -154,6 +151,19 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
               </p>
             </div>
           </div>
+          <div class="commands">
+            <div class="command">
+              <span class="command__label">On the node</span>
+              <pre><code>nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
+  --rewards-miner-key "$QNERO_MINER_KEY" --rewards-inner-hash &lt;hash&gt; \
+  --stratum-port 3333 --mining-threads 0</code></pre>
+            </div>
+            <div class="command">
+              <span class="command__label">On the rig</span>
+              <pre><code>nice -n 19 xmrig --threads=2 --algo rx/0 \
+  -o 127.0.0.1:3333 -u qnero-rig -p x --no-color</code></pre>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -161,7 +171,7 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
         <div class="wrap">
           <span class="band__label">03 / The endpoint</span>
           <h2>Stratum flags</h2>
-          <div class="table-wrap">
+          <section class="table-wrap" tabindex="0" aria-label="Stratum flags, scrollable table">
             <table class="table--mid">
               <thead>
                 <tr>
@@ -172,33 +182,33 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
               </thead>
               <tbody>
                 <tr>
-                  <th scope="row"><code>--stratum-port PORT</code></th>
+                  <th scope="row"><code>--stratum-port&nbsp;PORT</code></th>
                   <td>off</td>
                   <td>Opens the endpoint xmrig connects to. Requires an authoring node</td>
                 </tr>
                 <tr>
-                  <th scope="row"><code>--stratum-host ADDR</code></th>
+                  <th scope="row"><code>--stratum-host&nbsp;ADDR</code></th>
                   <td><code>127.0.0.1</code></td>
                   <td>Bind address. A rig on another machine needs <code>0.0.0.0</code> and a firewall rule you chose</td>
                 </tr>
                 <tr>
-                  <th scope="row"><code>--stratum-share-difficulty D</code></th>
+                  <th scope="row"><code>--stratum-share-difficulty&nbsp;D</code></th>
                   <td>5000</td>
                   <td>Per-connection share difficulty, clamped per job to the block difficulty</td>
                 </tr>
                 <tr>
-                  <th scope="row"><code>--stratum-max-connections-per-ip N</code></th>
+                  <th scope="row"><code>--stratum-max-connections-per-ip&nbsp;N</code></th>
                   <td>16</td>
                   <td>Connections one address may hold. Several rigs behind one NAT gateway arrive from a single address</td>
                 </tr>
                 <tr>
-                  <th scope="row"><code>--stratum-share-timeout S</code></th>
+                  <th scope="row"><code>--stratum-share-timeout&nbsp;S</code></th>
                   <td>600, rising with the share difficulty</td>
                   <td>How long a logged-in session has to produce an accepted share before it is closed. The ceiling is 7200 s</td>
                 </tr>
               </tbody>
             </table>
-          </div>
+          </section>
           <p class="table-note">
             The port is off by default and binds loopback by default. When it is open it is bounded
             like anything an unauthenticated peer can reach: 8 KiB lines, 64 connections, a
@@ -318,13 +328,25 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
           <div class="cards">
             <div class="card">
               <h3>Public RPC</h3>
-              <p><code>wss://rpc.qnero.io</code></p>
-              <p class="card__foot"><span class="tag">testnet, coming online</span></p>
+              <p>
+                One WebSocket at <code>wss://rpc.qnero.io</code>, which is what Qloak and silQ Road
+                each take in their runtime JSON. Run your own node instead and point them at that.
+              </p>
+              <p class="card__foot hostline">
+                <a href="https://rpc.qnero.io" data-m11-host>rpc.qnero.io</a>
+                <span class="tag">testnet, coming online</span>
+              </p>
             </div>
             <div class="card">
               <h3>Faucet</h3>
-              <p><code>https://faucet.qnero.io</code></p>
-              <p class="card__foot"><span class="tag">testnet, coming online</span></p>
+              <p>
+                Testnet coin for a wallet that has none. A transfer needs a note in the pool, and a
+                faucet drip is how the first one arrives without a rig.
+              </p>
+              <p class="card__foot hostline">
+                <a href="https://faucet.qnero.io" data-m11-host>faucet.qnero.io</a>
+                <span class="tag">testnet, coming online</span>
+              </p>
             </div>
             <div class="card">
               <h3>Stratum</h3>
@@ -343,9 +365,9 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
         <nav class="footer-nav" aria-label="Footer">
           <a href="/">Home</a>
           <a href="/how-it-works.html">How it works</a>
-          <a href="/wallet.html">Qloak</a>
+          <a href="/wallet.html">Qloak wallet</a>
           <a href="/mine.html">Mine</a>
-          <a href="/explorer.html">silQ Road</a>
+          <a href="/explorer.html">silQ Road explorer</a>
           <a href="/docs.html">Docs</a>
           <a href="/about.html">About</a>
           <a href="https://github.com/DigitalGuards/qnero">Source</a>
