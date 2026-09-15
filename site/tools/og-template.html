@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Qnero open graph card</title>
+    <style>
+      /*
+       * The source of site/img/og.png. Rendered at 1200x630 by tools/make-images.mjs.
+       * Same palette and same typography as the site: this is a page, photographed.
+       */
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        width: 1200px;
+        height: 630px;
+        background: #161416;
+        color: #fcfbfc;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu,
+          Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 64px 72px;
+      }
+      .strip {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-family: ui-monospace, 'DejaVu Sans Mono', monospace;
+        font-size: 17px;
+        letter-spacing: 1.4px;
+        text-transform: uppercase;
+        color: #909090;
+      }
+      .dot {
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background: #e6a145;
+      }
+      h1 {
+        margin: 0 0 20px;
+        font-size: 108px;
+        line-height: 1;
+        letter-spacing: -3px;
+        font-weight: 700;
+        color: #ffffff;
+      }
+      h1 span {
+        color: #e6a145;
+      }
+      p {
+        margin: 0;
+        font-size: 38px;
+        line-height: 1.3;
+        color: #fcfbfc;
+        max-width: 22ch;
+        letter-spacing: -0.5px;
+      }
+      .facts {
+        display: flex;
+        gap: 40px;
+        justify-content: space-between;
+        border-top: 1px solid #494749;
+        padding-top: 26px;
+        font-size: 19px;
+        color: #9e9c9e;
+      }
+      .facts > div {
+        flex: 1 1 0;
+      }
+      .facts b {
+        display: block;
+        font-family: ui-monospace, 'DejaVu Sans Mono', monospace;
+        font-size: 13px;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        color: #909090;
+        font-weight: 400;
+        margin-bottom: 7px;
+      }
+      .foot {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        font-family: ui-monospace, 'DejaVu Sans Mono', monospace;
+        font-size: 19px;
+        letter-spacing: 1.2px;
+        color: #e6a145;
+      }
+      .foot .repo {
+        color: #909090;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="strip">
+      <span class="dot"></span>
+      <span>Pre-alpha &middot; devnet only &middot; unaudited</span>
+    </div>
+    <div>
+      <h1><span>Q</span>nero</h1>
+      <p>Monero's principles, rebuilt without elliptic curves.</p>
+    </div>
+    <div class="facts">
+      <div><b>Privacy</b>Mandatory, every spend a proof</div>
+      <div><b>Consensus</b>RandomX, stock rx/0</div>
+      <div><b>Blocks</b>120 seconds</div>
+      <div><b>Supply</b>21M QNR cap</div>
+    </div>
+    <div class="foot">
+      <span>qnero.io</span>
+      <span class="repo">github.com/DigitalGuards/qnero</span>
+    </div>
+  </body>
+</html>
