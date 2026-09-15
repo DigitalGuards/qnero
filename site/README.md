@@ -126,6 +126,8 @@ resolve it elsewhere. Edit the template and re-run to change the card.
 ```
 npx html-validate site/*.html
 node site/tools/check-links.mjs
+python3 -m http.server 8931 -d site &   # check-layout.mjs needs the site served
+node site/tools/check-layout.mjs
 grep -rnP '\x{2014}' site/ && echo 'em dash found'
 ```
 
@@ -133,14 +135,22 @@ The link checker walks every internal link and asset reference and reports
 anything missing, asserts that `sitemap.xml` lists exactly the pages that
 exist, and resolves every absolute `qnero.io` URL in a meta tag against disk.
 
-**The M11 hosts are linked now.** `wallet.qnero.io`, `explorer.qnero.io`,
-`rpc.qnero.io` and `faucet.qnero.io` appear as links with "testnet, coming
-online" beside each one, which is what the site was asked for. They answer
-nothing until M11 deploys, so every one of those anchors carries
-`data-m11-host`: that marker is the single grep that finds all six on the day
-they go live, and the checker fails a subdomain link that arrives without it,
-so a new one cannot be added without the label. Removing the labels at M11 is
-`grep -rn data-m11-host site/`, and nothing else has to change.
+`check-layout.mjs` measures the rendered pages in a headless browser at 320,
+400 and 1280 px and fails on two things a stylesheet comment cannot enforce: a
+page that scrolls sideways, and an inline `code` chip wider than the box holding
+it. It needs the site served on port 8931, which is what the line above it does,
+and it resolves Playwright from `explorer/node_modules` the way
+`tools/make-images.mjs` does.
+
+**The M11 hosts are named but not linked.** `wallet.qnero.io`,
+`explorer.qnero.io`, `rpc.qnero.io` and `faucet.qnero.io` appear as plain
+hostnames with "testnet, coming online" beside each one. Nothing answers at any
+of them until M11 deploys, so none of them is an anchor: a link that 404s or
+serves an unrelated page is worse than a name a reader cannot click. Every one
+of those names carries `data-m11-host`, and the checker fails any `*.qnero.io`
+occurrence that sits outside such an element, in an anchor or in prose, so a new
+one cannot be added without the marker. At M11, `grep -rn data-m11-host site/`
+is the complete list, and nothing else has to change.
 
 `sitemap.xml` carries a hand-written `lastmod` on each page. Bump it when the
 content changes; nothing derives it, because nothing builds.

@@ -3,8 +3,9 @@
  * referenced asset exists on disk, that every fragment target exists in the
  * page it points at, that sitemap.xml lists exactly the pages that exist, that
  * every absolute qnero.io meta URL resolves to a file, and that every M11
- * subdomain reference carries its marker and its "testnet, coming online"
- * label.
+ * subdomain reference, in an anchor or in prose, carries its marker and its
+ * "testnet, coming online" label, and that the two light palette blocks in
+ * css/site.css still declare the same values.
  *
  *   node site/tools/check-links.mjs
  *
@@ -139,6 +140,70 @@ for (const page of pages) {
       problems.push(`${page}: ${what} carries data-m11-host but "${LABEL}" is not beside it`);
     } else {
       m11.push(`${page}: ${mark.href || `${mark.name} element`}`);
+    }
+  }
+}
+
+/* An anchor is not the only way to name a subdomain. A hostname in prose or in a
+   bare <code> would pass the tag walk above untouched, so every occurrence of
+   one in the source is required to sit inside an element that carries the
+   marker. That is what makes `grep -rn data-m11-host site/` a complete list on
+   the day the hosts go live. */
+const HOST = /[a-z0-9-]+\.qnero\.io/g;
+const MARKED = /<([a-z]+)([^>]*\sdata-m11-host(?=[\s=>])[^>]*)>([\s\S]*?)<\/\1>/g;
+for (const page of pages) {
+  const html = readFileSync(join(site, page), 'utf8');
+  const covered = [];
+  for (const m of html.matchAll(MARKED)) covered.push([m.index, m.index + m[0].length]);
+  for (const m of html.matchAll(HOST)) {
+    const inside = covered.some(([a, b]) => m.index >= a && m.index < b);
+    if (!inside) {
+      problems.push(
+        `${page}: ${m[0]} is named outside any data-m11-host element, so the M11 grep would miss it`,
+      );
+    }
+  }
+}
+
+/* The light palette is declared twice, once for a system preference and once
+   for the toggle, and nothing else notices when an edit lands in one copy only.
+   The failure is invisible to anyone whose OS theme already matches their
+   toggle, so it is asserted here. */
+{
+  const css = readFileSync(join(site, 'css/site.css'), 'utf8');
+  const block = (start) => {
+    const at = css.indexOf(start);
+    if (at < 0) return null;
+    const open = css.indexOf('{', at + start.length - 1);
+    let depth = 0;
+    let i = open;
+    for (; i < css.length; i += 1) {
+      if (css[i] === '{') depth += 1;
+      else if (css[i] === '}') {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    const body = css.slice(open + 1, i);
+    const decls = new Map();
+    for (const m of body.matchAll(/(--[\w-]+|color-scheme)\s*:\s*([^;]+);/g)) {
+      decls.set(m[1], m[2].trim());
+    }
+    return decls;
+  };
+  const media = block(":root:not([data-theme='dark'])");
+  const toggle = block(":root[data-theme='light']");
+  if (!media || !toggle) {
+    problems.push('css/site.css: one of the two light palette blocks is missing');
+  } else {
+    for (const [name, value] of media) {
+      if (!toggle.has(name)) problems.push(`css/site.css: ${name} is in the system light palette and not in the toggled one`);
+      else if (toggle.get(name) !== value) {
+        problems.push(`css/site.css: ${name} is ${value} in the system light palette and ${toggle.get(name)} in the toggled one`);
+      }
+    }
+    for (const name of toggle.keys()) {
+      if (!media.has(name)) problems.push(`css/site.css: ${name} is in the toggled light palette and not in the system one`);
     }
   }
 }
