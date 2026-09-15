@@ -1176,7 +1176,7 @@ parameter_types! {
 	/// that a wallet can finish proving: about 20 seconds single threaded at
 	/// `N = 6`, plus propagation.
 	pub const ShieldedBlockHashWindow: BlockNumber = 256;
-	/// Minimum fee per real leaf slot, in pool quanta: one quantum, 0.01 QNR.
+	/// Minimum fee per real leaf slot, as a count of pool steps: one step, 0.01 QNR.
 	///
 	/// The anti-spam mechanism, and the only one. The leaf circuit requires a
 	/// real input, which does not bound how many leaves a prover can produce:
@@ -1193,21 +1193,21 @@ parameter_types! {
 	/// that, so a submission that carries 318 slots and settles one pays 318
 	/// minimums.
 	pub const ShieldedMinLeafFee: u64 = 1;
-	/// Bytes of note ciphertext one quantum of fee buys: 512 bytes.
+	/// Bytes of note ciphertext one step of fee buys: 512 bytes.
 	///
 	/// A real slot carries two ciphertexts whose fixed part is 1731 bytes
 	/// each, plus whatever memo pad the wallet writing them uses; the v0
 	/// wallet pads to 61, so the pair it publishes is 3584 bytes and pays
-	/// seven quanta of payload on top of `ShieldedMinLeafFee`. A slot padded
+	/// seven steps of payload on top of `ShieldedMinLeafFee`. A slot padded
 	/// to the cap (two ciphertexts of `ShieldedMaxCiphertextBytes`, 4096 bytes
 	/// in total) pays eight. The flat floor alone would price either at one
-	/// quantum. The chain never parses these bytes and `Ciphertexts` is never
+	/// step. The chain never parses these bytes and `Ciphertexts` is never
 	/// pruned, so the whole cap is usable by a settler and the payload is what
 	/// has to be priced.
 	///
 	/// The divisor has to sit below the slack between the real ciphertext size
 	/// and the cap, or the term prices nothing it was added to price: at one
-	/// kilobyte both 3584 and 4096 bytes round to four quanta, so a settler
+	/// kilobyte both 3584 and 4096 bytes round to four steps, so a settler
 	/// could pad both ciphertexts to the cap and add 512 bytes of permanent,
 	/// never-pruned, never-parsed state for no extra fee.
 	/// `a_slot_pays_for_the_ciphertext_bytes_it_publishes` in the pallet's
@@ -1224,7 +1224,7 @@ parameter_types! {
 	/// would drift `PoolValue` from the sum of the notes behind it. Its
 	/// ciphertexts are in the block all the same and every node sponges them
 	/// into a `ct_digest`, so the settling slots of a submission owe
-	/// `(settling slots + skipped slots) * ShieldedMinLeafFee` plus one quantum
+	/// `(settling slots + skipped slots) * ShieldedMinLeafFee` plus one step
 	/// per started 512 bytes the submission carries, a skipped segment's bytes
 	/// included. A skipped position may instead be emptied, which is what a
 	/// griefed aggregator resubmits: that removes the position from the payload

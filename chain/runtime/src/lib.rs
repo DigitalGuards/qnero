@@ -200,7 +200,7 @@ pub const MAX_SUPPLY: Balance = 21_000_000 * UNIT;
 /// high-security inclusion-fee cap, is derived through [`scale_fee`], so editing
 /// this one ratio (plus a runtime upgrade) repositions the whole price level.
 /// Percentage rates (wormhole bps, reversal/step factors), the existential
-/// deposit, and the 0.01-QNR circuit quanta are deliberately not scaled.
+/// deposit, and the 0.01 QNR circuit step are deliberately not scaled.
 pub const FEE_SCALE_NUM: Balance = 1;
 pub const FEE_SCALE_DEN: Balance = 1;
 
