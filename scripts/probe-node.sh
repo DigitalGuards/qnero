@@ -14,7 +14,14 @@
 #   QNERO_MIN_PEERS=0 \
 #   QNERO_MIN_HEIGHT=1 \
 #   QNERO_GENESIS=0x... \
+#   QNERO_HEIGHT_STATE=~/qnero-probe-height \
 #   ./scripts/probe-node.sh
+#
+# With QNERO_HEIGHT_STATE set it also checks that the height is **advancing**,
+# by remembering the last height and the wall-clock time it was first seen. A
+# JSON-RPC endpoint that answers is not a chain that is moving, and the file
+# must live somewhere a reboot does not wipe, or every restart reads as a fresh
+# start and the stall is never detected.
 #
 # Two failure shapes the generic checks miss, both checked here:
 #
@@ -37,6 +44,10 @@ min_height="${QNERO_MIN_HEIGHT:-1}"
 expect_genesis="${QNERO_GENESIS:-}"
 expect_target_ms="${QNERO_TARGET_BLOCK_TIME_MS:-120000}"
 timeout_s="${QNERO_RPC_TIMEOUT:-6}"
+height_state="${QNERO_HEIGHT_STATE:-}"
+# Five block intervals at the 120 s target. Below one interval this would fire
+# on every ordinary wait for a block.
+stale_secs="${QNERO_STALE_SECS:-600}"
 
 failures=0
 
@@ -83,6 +94,33 @@ else
   if [ "$height" -lt "$min_height" ]; then
     fail "height" "$height is below the floor of $min_height, which is what a node that \
 resynced from the spec looks like"
+  fi
+
+  # Is it moving. Stateless on its own, so this half runs only when the caller
+  # names a file to remember the last height in.
+  if [ -n "$height_state" ]; then
+    now="$(date +%s)"
+    previous_height=0
+    previous_at=0
+    if [ -f "$height_state" ]; then
+      read -r previous_height previous_at < "$height_state" || true
+    fi
+    if [ "$height" -gt "${previous_height:-0}" ] || [ "${previous_at:-0}" = "0" ]; then
+      printf '%s %s\n' "$height" "$now" > "$height_state"
+      say "advancing" "yes, from ${previous_height:-0} to $height"
+    else
+      stalled=$((now - previous_at))
+      if [ "$stalled" -gt "$stale_secs" ]; then
+        # Peers and isSyncing are named alongside rather than alerted on
+        # separately: authoring pauses on a stale tip, on no peers or during an
+        # initial sync, and a stall with zero peers is a different problem from
+        # a stall with peers.
+        fail "advancing" "still at block $height after ${stalled}s (peers ${peers:-unknown}, \
+syncing ${syncing:-unknown})"
+      else
+        say "advancing" "no movement for ${stalled}s, inside the ${stale_secs}s allowance"
+      fi
+    fi
   fi
 fi
 
