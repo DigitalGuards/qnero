@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>silQ Road, the Qnero explorer</title>
+    <meta name="description" content="A block explorer for a chain where value is private by default: six routes, one WebSocket, no server-side indexer, and eight things it refuses to do.">
+    <link rel="canonical" href="https://qnero.io/explorer.html">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Qnero">
+    <meta property="og:title" content="silQ Road, the Qnero explorer">
+    <meta property="og:description" content="A block explorer for a chain where value is private by default: six routes, one WebSocket, no server-side indexer, and eight things it refuses to do.">
+    <meta property="og:url" content="https://qnero.io/explorer.html">
+    <meta property="og:image" content="https://qnero.io/img/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Qnero: Monero's principles, rebuilt without elliptic curves.">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="theme-color" content="#161416" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f2f0" media="(prefers-color-scheme: light)">
+    <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
+    <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="stylesheet" href="/css/site.css">
+    <script>
+      try {
+        var t = localStorage.getItem('qnero-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
+    <script src="/js/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="status-strip">
+      <div class="wrap">
+        <span class="dot" aria-hidden="true"></span>
+        <p>
+          <strong>Pre-alpha.</strong> Devnet only. No public testnet. No part of Qnero's own code
+          has been audited.
+        </p>
+      </div>
+    </div>
+    <header class="site-header">
+      <div class="wrap">
+        <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
+        <nav class="nav" aria-label="Main">
+        <a href="/how-it-works.html">How it works</a>
+        <a href="/wallet.html">Wallet</a>
+        <a href="/mine.html">Mine</a>
+        <a href="/explorer.html" aria-current="page">Explorer</a>
+        <a href="/docs.html">Docs</a>
+        <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
+          <button class="theme-toggle" type="button" data-theme-toggle hidden>Theme: dark</button>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <section class="band band--hero hero">
+        <div class="wrap">
+          <h1>silQ Road</h1>
+          <p class="lede">A block explorer for a chain where value is private by default.</p>
+          <p class="sub">
+            One static directory, one WebSocket to a node, no server-side indexer and no third
+            party. Every number on every page is read live from the node the page is configured
+            with, and the only other requests are to the host serving the page, for
+            <code>config.json</code> at startup and for the page's own assets.
+          </p>
+          <div class="actions">
+            <a class="btn btn--ghost" href="https://github.com/DigitalGuards/qnero/tree/main/explorer">Source and full README</a>
+            <span class="btn btn--ghost" aria-disabled="true">explorer.qnero.io: testnet, coming online</span>
+          </div>
+          <div class="panel status-panel">
+            <span class="panel__label">The design constraint</span>
+            <p>
+              An explorer for a private chain is as careful about what it declines to show as about
+              what it shows. A heuristic that looked like it worked would be a privacy regression
+              shipped as a feature. The refusals below are each a decision, and each has a reason.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">01 / Pages</span>
+          <h2>Six routes</h2>
+          <div class="table-wrap">
+            <table class="table--pairs">
+              <thead>
+                <tr>
+                  <th scope="col">Route</th>
+                  <th scope="col">What it holds</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><code>#/</code></th>
+                  <td>
+                    Head and finalized height, rolling block time, difficulty and an estimated hash
+                    rate, the RandomX seed height and its next rotation, tree leaves and depth, the
+                    settled nullifier count, pool value, the newest block's coinbase, and a live
+                    list of recent blocks
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>#/blocks</code></th>
+                  <td>A paged list, newest first</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>#/block/&lt;height or hash&gt;</code></th>
+                  <td>
+                    Header fields, the coinbase note, every settlement in full, every shield entry,
+                    refused calls, and every extrinsic summarised
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>#/settlement/&lt;extrinsic hash&gt;</code></th>
+                  <td>One settlement: its slots, the anchor window, and what it publishes and does not</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>#/search?q=</code></th>
+                  <td>A height, a block hash, an extrinsic hash, a nullifier or a commitment</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>#/reveals</code></th>
+                  <td>What an observer learns per block, and what stays hidden</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note">
+            Routing is in the fragment, so any static host serves it with no rewrite rule and a
+            pasted link survives a refresh.
+          </p>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="wrap">
+          <span class="band__label">02 / Refusals</span>
+          <h2>What it will not do</h2>
+          <div class="prose">
+            <ul>
+              <li>
+                <strong>It never asks for a Merkle proof.</strong> That call names one leaf to
+                whoever runs the node, which is the correlation a wallet's local tree rebuild exists
+                to avoid. An explorer making it for a viewer would hand the node a per-viewer
+                leaf-interest log. Leaves and the root are read as public ranges, and a lint rule
+                fails the build on every spelling of the call.
+              </li>
+              <li>
+                <strong>It does not read a settled nullifier as a note that was spent.</strong> A
+                leaf slot has two input positions and its two nullifiers mark both consumed. A
+                position holding a real input spends one note; a position holding a dummy input
+                publishes a nullifier over no note; the two are the same uniform hash in the public
+                record. At least one position of a settled slot is real, so a slot spends one note
+                or two, and the home page's figure bounds from above the notes this chain has spent.
+              </li>
+              <li>
+                <strong>It renders a slot's two outputs unordered.</strong> Which one is the
+                sender's change is hidden because the wallet draws the payment's output slot per
+                spend. Ordering them, or labelling one "to" and one "change", would reintroduce by
+                presentation what the protocol pays to hide.
+              </li>
+              <li>
+                <strong>It has no miner table.</strong> The author label is a hash of the block's
+                own parent and changes every block, so grouping by it groups nothing.
+              </li>
+              <li>
+                <strong>It does not reprint a refused call's arguments.</strong> A transparent
+                transfer the runtime's filter refuses still enters a block and its arguments stay in
+                the body forever. The block page names the call, says why the arguments are public,
+                and leaves them where the chain put them.
+              </li>
+              <li>
+                <strong>It does not sort by ciphertext size or by anchor gap.</strong> Both are
+                documented open leaks. The size is shown per leaf and a size other than 1792 bytes
+                is marked, because that is worth knowing. Neither is a sortable column.
+              </li>
+              <li>
+                <strong>It does not decode a settlement's anchor height.</strong> The anchor is a
+                public input inside the proof. The settlement page states the window the chain
+                enforced, which is what the site can establish from chain state alone.
+              </li>
+              <li>
+                <strong>No analytics, no fonts, no images, no CDN.</strong> The only requests the
+                page makes are to the configured node and to the host serving the page.
+              </li>
+            </ul>
+            <p>
+              Reads whose request carries a viewer's own 32 bytes, the nullifier lookup and the
+              block-hash header check among them, are printed as a warning first and run only when a
+              reader presses the button.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">03 / Run it</span>
+          <h2>Build, configure, deploy</h2>
+          <div class="split">
+            <div class="prose">
+              <p>Start a local node, then:</p>
+              <pre><code>cd explorer
+nice -n 19 npm ci
+nice -n 19 npm run dev</code></pre>
+              <p>
+                That serves on <code>http://127.0.0.1:5173</code> and reads
+                <code>public/config.json</code>, which points at <code>ws://127.0.0.1:9944</code>
+                out of the box. <code>npm run build</code> produces <code>dist/</code>: an
+                <code>index.html</code>, one JS bundle, one stylesheet and
+                <code>config.json</code>. Asset URLs are relative, so the directory works at a
+                domain root and in a subdirectory with no rebuild.
+              </p>
+              <p>
+                The bundle is about 1.2 MB, 440 kB compressed, and almost all of it is the polkadot
+                API, which carries the SCALE codec and the type registry the event decoding needs.
+              </p>
+            </div>
+            <div class="prose">
+              <h3>One runtime JSON</h3>
+              <p>
+                <code>config.json</code> sits beside the built assets and is read at startup, so one
+                build serves a devnet and a testnet. Nothing about a chain is compiled in. The
+                endpoint must be <code>ws://</code> or <code>wss://</code>, because the live head is
+                a subscription. A page served over HTTPS cannot open a plain WebSocket, so put the
+                node behind the same TLS the site uses.
+              </p>
+              <p>
+                The defaults: 12 recent blocks in the home list and in the rolling block-time
+                window, a 512-block search window before a walk gives up, and 25 pages of 1000 keys
+                before the nullifier count reports a floor.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="wrap">
+          <span class="band__label">04 / Seams</span>
+          <h2>Two things a generic Substrate client gets silently wrong</h2>
+          <div class="prose">
+            <p>
+              <strong>The header.</strong> <code>zkTreeRoot</code> sits between
+              <code>extrinsicsRoot</code> and <code>digest</code>, and a generic decoder reads the
+              digest out of the wrong offset. Block hashes are Poseidon2 over a felt encoding.
+            </p>
+            <p>
+              <strong>The body.</strong> The ML-DSA-87 signature is a fixed 7219-byte array, and the
+              polkadot API refuses any fixed array above 2048, so the envelope is walked by hand
+              with the signature lengths and the extension list read out of metadata.
+            </p>
+            <p>
+              Everything else is metadata-driven, and the assumed storage hashers are asserted
+              against metadata at startup, because an absent key and an empty map are
+              indistinguishable and the difference renders as "0 leaves, 0 nullifiers" with no
+              error.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--accent">
+        <div class="wrap">
+          <span class="band__label">05 / The house rule</span>
+          <h2>The same rule binds this site</h2>
+          <div class="prose">
+            <p>
+              No analytics, no fonts, no images, no CDN is the explorer's rule, and this site lives
+              by it. These pages are hand-written HTML and one stylesheet. There is no build step,
+              no framework, no font download, no tracker and no third-party request of any kind. The
+              one script is a theme toggle, and every page reads with it switched off.
+            </p>
+            <p>
+              Read the page source. It is the same discipline the apps are held to, and it is
+              checkable in one view.
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <div class="wrap">
+        <nav class="footer-nav" aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/how-it-works.html">How it works</a>
+          <a href="/wallet.html">Qloak</a>
+          <a href="/mine.html">Mine</a>
+          <a href="/explorer.html">silQ Road</a>
+          <a href="/docs.html">Docs</a>
+          <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">Source</a>
+        </nav>
+        <p>
+          Qnero is MIT licensed and maintained by DigitalGuards. Pre-alpha, devnet only, and no
+          part of Qnero's own code has been audited. Read the code before you trust any of it.
+        </p>
+        <p>This site sets no cookies, runs no analytics and loads nothing from a third party.</p>
+        <p>
+          Site design follows MyMonero's, BSD-3-Clause, Copyright (c) 2014-2019 MyMonero.com. See
+          <a href="/about.html#notice">NOTICE</a>.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mine Qnero with a stock xmrig</title>
+    <meta name="description" content="RandomX, stock rx/0, the same algorithm and constants Monero uses. A rig that mines Monero mines Qnero with a config change. Devnet only: the node, the stratum flags and the measured figures.">
+    <link rel="canonical" href="https://qnero.io/mine.html">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Qnero">
+    <meta property="og:title" content="Mine Qnero with a stock xmrig">
+    <meta property="og:description" content="RandomX, stock rx/0, the same algorithm and constants Monero uses. A rig that mines Monero mines Qnero with a config change. Devnet only: the node, the stratum flags and the measured figures.">
+    <meta property="og:url" content="https://qnero.io/mine.html">
+    <meta property="og:image" content="https://qnero.io/img/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Qnero: Monero's principles, rebuilt without elliptic curves.">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="theme-color" content="#161416" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f2f0" media="(prefers-color-scheme: light)">
+    <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
+    <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="stylesheet" href="/css/site.css">
+    <script>
+      try {
+        var t = localStorage.getItem('qnero-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
+    <script src="/js/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="status-strip">
+      <div class="wrap">
+        <span class="dot" aria-hidden="true"></span>
+        <p>
+          <strong>Pre-alpha.</strong> Devnet only. No public testnet. No part of Qnero's own code
+          has been audited.
+        </p>
+      </div>
+    </div>
+    <header class="site-header">
+      <div class="wrap">
+        <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
+        <nav class="nav" aria-label="Main">
+        <a href="/how-it-works.html">How it works</a>
+        <a href="/wallet.html">Wallet</a>
+        <a href="/mine.html" aria-current="page">Mine</a>
+        <a href="/explorer.html">Explorer</a>
+        <a href="/docs.html">Docs</a>
+        <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
+          <button class="theme-toggle" type="button" data-theme-toggle hidden>Theme: dark</button>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <section class="band band--hero hero">
+        <div class="wrap">
+          <h1>Mine it</h1>
+          <p class="lede">
+            Qnero's proof of work is RandomX, stock <code>rx/0</code>, with the same algorithm and
+            the same constants Monero uses.
+          </p>
+          <p class="sub">
+            A rig that mines Monero mines Qnero with a config change. The node serves the stratum
+            dialect xmrig speaks to a Monero pool, so the miner is stock and unpatched. No stake, no
+            validators, no foundation keys in consensus, and no algorithm nobody has hardware or
+            software for.
+          </p>
+          <div class="panel status-panel">
+            <span class="panel__label">What has actually happened</span>
+            <p>
+              <strong>A stock xmrig mined a local devnet.</strong> That is the whole of the
+              evidence: 66 blocks in 3 minutes 48 seconds on one workstation, 50 of them mined in
+              process and 14 by the rig, on the 12-second dev preset. There is no public chain to
+              point a rig at, there is nothing to earn, and there is no pool. Every command on this
+              page starts a chain of your own.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">01 / Setup</span>
+          <h2>What you need</h2>
+          <div class="split">
+            <div class="prose">
+              <p>
+                A built node and a wallet. Release builds are mandatory: a leaf takes about 0.2 s in
+                release and minutes in debug. The repository README carries the build preconditions.
+              </p>
+              <p>
+                The miner key is secret-bearing and cannot spend. Its holder can pick that miner's
+                coinbase notes out of the tree, so keep it with the seed. A node without one refuses
+                to start.
+              </p>
+              <pre><code>./target/release/qnero-wallet keygen
+export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pre>
+            </div>
+            <div class="prose">
+              <h3>The node's own miner</h3>
+              <p>
+                Every authoring node runs an in-process RandomX miner in light mode, one thread by
+                default, so a devnet produces blocks with no rig attached.
+              </p>
+              <pre><code>nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
+  --rewards-miner-key "$QNERO_MINER_KEY" --rewards-inner-hash &lt;hash&gt;</code></pre>
+              <p>
+                <code>--mining-threads N</code> sets the thread count and <code>0</code> turns the
+                in-process miner off, so only external rigs mine. Values above the machine's own
+                parallelism are refused. Light mode is an order of magnitude slower than a rig
+                carrying the full 2 GiB dataset.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="wrap">
+          <span class="band__label">02 / Point a rig at it</span>
+          <h2>Open the stratum port, then run a stock xmrig</h2>
+          <div class="split">
+            <div class="prose">
+              <h3>On the node</h3>
+              <pre><code>nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
+  --rewards-miner-key "$QNERO_MINER_KEY" --rewards-inner-hash &lt;hash&gt; \
+  --stratum-port 3333 --mining-threads 0</code></pre>
+              <h3>On the rig</h3>
+              <pre><code>nice -n 19 xmrig --threads=2 --algo rx/0 \
+  -o 127.0.0.1:3333 -u qnero-rig -p x --no-color</code></pre>
+            </div>
+            <div class="prose">
+              <h3>Nothing is paid to the login</h3>
+              <p>
+                The <code>-u</code> login is a worker label. This is a solo-mining endpoint: every
+                block the rig finds pays a shielded note to the key in
+                <code>--rewards-miner-key</code>, whatever the login says.
+              </p>
+              <p>
+                <code>--stratum-host</code> defaults to loopback. A rig on another machine needs
+                <code>0.0.0.0</code> and a firewall rule you chose.
+              </p>
+              <p>
+                The endpoint speaks the Monero stratum dialect xmrig uses: <code>login</code>,
+                <code>job</code> pushes with <code>blob</code>, <code>target</code>,
+                <code>seed_hash</code> and <code>next_seed_hash</code>, <code>submit</code> and
+                <code>keepalived</code>. A stale share is answered with a retryable message so the
+                rig keeps its pool. An authoring pause closes sessions with a retryable message too,
+                and rigs reconnect on their own timer.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">03 / The endpoint</span>
+          <h2>Stratum flags</h2>
+          <div class="table-wrap">
+            <table class="table--mid">
+              <thead>
+                <tr>
+                  <th scope="col">Flag</th>
+                  <th scope="col">Default</th>
+                  <th scope="col">What it does</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><code>--stratum-port PORT</code></th>
+                  <td>off</td>
+                  <td>Opens the endpoint xmrig connects to. Requires an authoring node</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>--stratum-host ADDR</code></th>
+                  <td><code>127.0.0.1</code></td>
+                  <td>Bind address. A rig on another machine needs <code>0.0.0.0</code> and a firewall rule you chose</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>--stratum-share-difficulty D</code></th>
+                  <td>5000</td>
+                  <td>Per-connection share difficulty, clamped per job to the block difficulty</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>--stratum-max-connections-per-ip N</code></th>
+                  <td>16</td>
+                  <td>Connections one address may hold. Several rigs behind one NAT gateway arrive from a single address</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>--stratum-share-timeout S</code></th>
+                  <td>600, rising with the share difficulty</td>
+                  <td>How long a logged-in session has to produce an accepted share before it is closed. The ceiling is 7200 s</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note">
+            The port is off by default and binds loopback by default. When it is open it is bounded
+            like anything an unauthenticated peer can reach: 8 KiB lines, 64 connections, a
+            per-address cap, a 30-second login window from connection open, one accepted share per
+            share timeout after login, a write deadline, a bounded number of share hashes in flight
+            and a per-connection submit budget. What it cannot bound is a peer that reconnects every
+            window and mines nothing. That is the known limit of an unauthenticated endpoint, and a
+            port exposed to a network belongs behind an address allowlist or a pool.
+          </p>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="wrap">
+          <span class="band__label">04 / Schedule</span>
+          <h2>Seed rotation and difficulty</h2>
+          <div class="split">
+            <div class="prose">
+              <h3>The seed rotates the way Monero's does</h3>
+              <p>
+                Every 2048 blocks, lagged 64 blocks, resolved along the block's own ancestry. Both
+                constants are runtime constants and are read by the node.
+              </p>
+              <p>
+                At the 120-second target, 2048 blocks is 2.84 days, which is Monero's own rotation
+                cadence to the hour. The block count and the wall clock both match, so a rig pays
+                the same dataset rebuild here as it pays there and no more often. The lag of 64
+                blocks is 2.1 hours. Whether to raise it above the maximum reorg depth is the one
+                part of the schedule still open.
+              </p>
+            </div>
+            <div class="prose">
+              <h3>Difficulty adjusts per block</h3>
+              <p>
+                The adjustment is Homestead's and its buckets scale with the target, so at 120
+                seconds the neutral band is 100 to 200 seconds: an honest block leaves difficulty
+                flat, a faster one raises it by 1/2048 and a much slower one lowers it by up to
+                99/2048. The floor is 128, so a chain at the floor can climb.
+              </p>
+              <p>
+                A chain climbing from the floor to a live difficulty costs about 13 600 blocks and
+                about 2.4 days for one 3.5 kH/s rig. The band is dead in both directions and a chain
+                settles at whichever edge it arrives from: climbing, it stops at the bottom and sits
+                at about 100-second blocks; falling, it stops at the top and sits at about 200. A
+                network that has lost its miners runs at double the target until hash rate comes
+                back.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">05 / Measured</span>
+          <h2>The devnet figures, and what they are not</h2>
+          <p class="band__intro">
+            One workstation, 20 cores, WSL2, on a <code>--dev --tmp</code> chain at the 12-second
+            dev preset. None of these is a network hash rate, because no network exists.
+          </p>
+          <div class="figures figures--3">
+            <div>
+              <span class="figure__label">Node miner, light mode</span>
+              <span class="figure__value">32.9 H/s</span>
+              <span class="figure__note">One thread, cache only, 256 MiB plus 2 MiB per VM</span>
+            </div>
+            <div>
+              <span class="figure__label">xmrig 6.21.3, full dataset</span>
+              <span class="figure__value">~3.5 kH/s</span>
+              <span class="figure__note">Two threads, 2336 MiB, about 40 shares a second at difficulty 175</span>
+            </div>
+            <div>
+              <span class="figure__label">Argon2d cache fill</span>
+              <span class="figure__value">372 ms</span>
+              <span class="figure__note">Once per seed epoch, 256 MiB. The node holds two caches, so an epoch boundary costs nothing again</span>
+            </div>
+            <div>
+              <span class="figure__label">xmrig dataset build</span>
+              <span class="figure__value">3809 ms</span>
+              <span class="figure__note">20 threads, 2080 MiB</span>
+            </div>
+            <div>
+              <span class="figure__label">Block verification</span>
+              <span class="figure__value">~30 ms</span>
+              <span class="figure__note">Per block, light mode</span>
+            </div>
+            <div>
+              <span class="figure__label">The run itself</span>
+              <span class="figure__value">66 blocks</span>
+              <span class="figure__note">3 minutes 48 seconds: 50 mined in process, 14 by xmrig. Difficulty 128 at block 1, 189 at block 66</span>
+            </div>
+          </div>
+          <p class="table-note">
+            The node is about two orders of magnitude slower per thread than the rig, and that is
+            the intended shape: the in-process miner exists so a devnet produces blocks with no rig
+            attached. Read the 32.9 H/s figure as one thread of light-mode RandomX on one box. Read
+            the 3.5 kH/s figure as one rig on one box. Neither says anything about a network.
+          </p>
+        </div>
+      </section>
+
+      <section class="band band--accent">
+        <div class="wrap">
+          <span class="band__label">06 / Testnet</span>
+          <h2>When there is something to point a rig at</h2>
+          <div class="prose">
+            <p>
+              A public testnet is the next milestone: a chain spec and a genesis both wallets can
+              bind to, seed nodes and a bootnode list, released node builds, a public RPC endpoint,
+              a faucet, and Qloak and silQ Road pointed at it through the one runtime JSON each
+              already reads. The design draft estimates 10 to 12 weeks to a private testnet.
+            </p>
+            <p>These are the addresses it will use. None of them answers yet.</p>
+          </div>
+          <div class="cards">
+            <div class="card">
+              <h3>Public RPC</h3>
+              <p><code>wss://rpc.qnero.io</code></p>
+              <p class="card__foot"><span class="tag">testnet, coming online</span></p>
+            </div>
+            <div class="card">
+              <h3>Faucet</h3>
+              <p><code>https://faucet.qnero.io</code></p>
+              <p class="card__foot"><span class="tag">testnet, coming online</span></p>
+            </div>
+            <div class="card">
+              <h3>Stratum</h3>
+              <p>
+                Mining stays solo. The endpoint a rig connects to is the one your own node opens
+                with <code>--stratum-port</code>, and the reward is a note for the key that node was
+                started with.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <div class="wrap">
+        <nav class="footer-nav" aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/how-it-works.html">How it works</a>
+          <a href="/wallet.html">Qloak</a>
+          <a href="/mine.html">Mine</a>
+          <a href="/explorer.html">silQ Road</a>
+          <a href="/docs.html">Docs</a>
+          <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">Source</a>
+        </nav>
+        <p>
+          Qnero is MIT licensed and maintained by DigitalGuards. Pre-alpha, devnet only, and no
+          part of Qnero's own code has been audited. Read the code before you trust any of it.
+        </p>
+        <p>This site sets no cookies, runs no analytics and loads nothing from a third party.</p>
+        <p>
+          Site design follows MyMonero's, BSD-3-Clause, Copyright (c) 2014-2019 MyMonero.com. See
+          <a href="/about.html#notice">NOTICE</a>.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

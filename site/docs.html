@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Qnero documents</title>
+    <meta name="description" content="The index to the repository: the design draft, the circuit specification, the measurement log, the wallet reference and the mining guide.">
+    <link rel="canonical" href="https://qnero.io/docs.html">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Qnero">
+    <meta property="og:title" content="Qnero documents">
+    <meta property="og:description" content="The index to the repository: the design draft, the circuit specification, the measurement log, the wallet reference and the mining guide.">
+    <meta property="og:url" content="https://qnero.io/docs.html">
+    <meta property="og:image" content="https://qnero.io/img/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Qnero: Monero's principles, rebuilt without elliptic curves.">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="theme-color" content="#161416" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f2f0" media="(prefers-color-scheme: light)">
+    <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
+    <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="stylesheet" href="/css/site.css">
+    <script>
+      try {
+        var t = localStorage.getItem('qnero-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
+    <script src="/js/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="status-strip">
+      <div class="wrap">
+        <span class="dot" aria-hidden="true"></span>
+        <p>
+          <strong>Pre-alpha.</strong> Devnet only. No public testnet. No part of Qnero's own code
+          has been audited.
+        </p>
+      </div>
+    </div>
+    <header class="site-header">
+      <div class="wrap">
+        <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
+        <nav class="nav" aria-label="Main">
+        <a href="/how-it-works.html">How it works</a>
+        <a href="/wallet.html">Wallet</a>
+        <a href="/mine.html">Mine</a>
+        <a href="/explorer.html">Explorer</a>
+        <a href="/docs.html" aria-current="page">Docs</a>
+        <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
+          <button class="theme-toggle" type="button" data-theme-toggle hidden>Theme: dark</button>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <section class="band band--hero hero">
+        <div class="wrap">
+          <h1>Documents</h1>
+          <p class="lede">The repository is the documentation. This page is the index.</p>
+          <p class="sub">
+            Every claim and every figure on this site comes from one of these files. Each link goes
+            to the file on GitHub, on the <code>main</code> branch. Read them in this order and the
+            design reads in a day, which is what the design claims for itself.
+          </p>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">01 / Start here</span>
+          <h2>What each file answers</h2>
+          <ul class="linklist">
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/README.md">README.md</a>
+              <p>
+                What Qnero is, what runs today, the Monero mapping, the numbers, the five-project
+                comparison, the build and run commands, the status and the caveats. Start here.
+              </p>
+            </li>
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/docs/DESIGN.md">docs/DESIGN.md</a>
+              <p>
+                The design draft, v0.1. The four priorities, the Monero-to-Qnero replacement table,
+                the primitives, the runtime layout, the milestone log and the open questions.
+              </p>
+            </li>
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/docs/CIRCUIT.md">docs/CIRCUIT.md</a>
+              <p>
+                The circuit specification: the leaf's fragments and public-input layout, the two
+                aggregation layers, settlement, and section 10.7, which lists everything a v1 block
+                publishes.
+              </p>
+            </li>
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/docs/BENCH.md">docs/BENCH.md</a>
+              <p>
+                The measurement log. Every gate count, proof size, proving time, memory figure and
+                mining run on this site is in here with the command that produced it.
+              </p>
+            </li>
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/docs/WALLET.md">docs/WALLET.md</a>
+              <p>
+                The wallet reference: scanning rules, how a leaf's kind is decided, and what a lying
+                node can and cannot do.
+              </p>
+            </li>
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/chain/MINING.md">chain/MINING.md</a>
+              <p>
+                Mining: the miner key, the node's own miner, the stratum flags and what the endpoint
+                bounds, seed rotation and difficulty.
+              </p>
+            </li>
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/docs/OPS-DEV.md">docs/OPS-DEV.md</a>
+              <p>
+                Build preconditions and the end-to-end devnet transcripts, including the known
+                limits of an unauthenticated stratum endpoint.
+              </p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="wrap">
+          <span class="band__label">02 / The applications</span>
+          <h2>Qloak, silQ Road and the chain</h2>
+          <ul class="linklist">
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/wallet-web/README.md">wallet-web/README.md</a>
+              <p>
+                Qloak: the build, the runtime JSON that points it at a chain, what a host has to
+                send, the seven screens, and the threat model in full.
+              </p>
+            </li>
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/explorer/README.md">explorer/README.md</a>
+              <p>
+                silQ Road: the routes, the configuration, the deploy shape, the eight refusals and
+                the two decoder seams.
+              </p>
+            </li>
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/chain/README.md">chain/README.md</a>
+              <p>The forked chain: its own workspace, its build, and how to run a node.</p>
+            </li>
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/LICENSE">LICENSE</a>
+              <p>MIT. Qnero is MIT licensed, and the upstream notices are kept where the licence requires them.</p>
+            </li>
+            <li>
+              <a href="https://github.com/DigitalGuards/qnero">The repository</a>
+              <p>
+                All of it. Clone it, build it, run a devnet, and check every figure on this site
+                against your own machine.
+              </p>
+            </li>
+          </ul>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <div class="wrap">
+        <nav class="footer-nav" aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/how-it-works.html">How it works</a>
+          <a href="/wallet.html">Qloak</a>
+          <a href="/mine.html">Mine</a>
+          <a href="/explorer.html">silQ Road</a>
+          <a href="/docs.html">Docs</a>
+          <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">Source</a>
+        </nav>
+        <p>
+          Qnero is MIT licensed and maintained by DigitalGuards. Pre-alpha, devnet only, and no
+          part of Qnero's own code has been audited. Read the code before you trust any of it.
+        </p>
+        <p>This site sets no cookies, runs no analytics and loads nothing from a third party.</p>
+        <p>
+          Site design follows MyMonero's, BSD-3-Clause, Copyright (c) 2014-2019 MyMonero.com. See
+          <a href="/about.html#notice">NOTICE</a>.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

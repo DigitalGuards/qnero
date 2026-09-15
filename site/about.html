@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>About Qnero</title>
+    <meta name="description" content="Maintained by DigitalGuards, MIT licensed. The status, the audits as they stand, the open caveats, the upstream credits and this site's own provenance notice.">
+    <link rel="canonical" href="https://qnero.io/about.html">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Qnero">
+    <meta property="og:title" content="About Qnero">
+    <meta property="og:description" content="Maintained by DigitalGuards, MIT licensed. The status, the audits as they stand, the open caveats, the upstream credits and this site's own provenance notice.">
+    <meta property="og:url" content="https://qnero.io/about.html">
+    <meta property="og:image" content="https://qnero.io/img/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Qnero: Monero's principles, rebuilt without elliptic curves.">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="theme-color" content="#161416" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f2f0" media="(prefers-color-scheme: light)">
+    <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
+    <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="stylesheet" href="/css/site.css">
+    <script>
+      try {
+        var t = localStorage.getItem('qnero-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
+    <script src="/js/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="status-strip">
+      <div class="wrap">
+        <span class="dot" aria-hidden="true"></span>
+        <p>
+          <strong>Pre-alpha.</strong> Devnet only. No public testnet. No part of Qnero's own code
+          has been audited.
+        </p>
+      </div>
+    </div>
+    <header class="site-header">
+      <div class="wrap">
+        <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
+        <nav class="nav" aria-label="Main">
+        <a href="/how-it-works.html">How it works</a>
+        <a href="/wallet.html">Wallet</a>
+        <a href="/mine.html">Mine</a>
+        <a href="/explorer.html">Explorer</a>
+        <a href="/docs.html">Docs</a>
+        <a href="/about.html" aria-current="page">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
+          <button class="theme-toggle" type="button" data-theme-toggle hidden>Theme: dark</button>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <section class="band band--hero hero">
+        <div class="wrap">
+          <h1>About</h1>
+          <p class="lede">Qnero is maintained by DigitalGuards, and it is MIT licensed.</p>
+          <p class="sub">
+            There is no foundation, no token sale, no pre-sale, no advisory board and no admin key.
+            There is a repository. Read it, build it, run it, and disagree with it in public.
+          </p>
+        </div>
+      </section>
+
+      <section class="band band--raised" id="status">
+        <div class="wrap">
+          <span class="band__label">01 / Status</span>
+          <h2>Where the work stands</h2>
+          <div class="prose">
+            <p>
+              Ten milestones are done: the note crate, the leaf circuit, the two aggregators,
+              <code>pallet-shielded</code> and a local dev chain end to end, the wallet CLI, v1
+              mandatory privacy, RandomX proof of work, a measured browser prover, the silQ Road
+              explorer and the Qloak browser wallet.
+            </p>
+            <p>
+              The next milestone is a public testnet: a chain spec and a genesis both wallets can
+              bind to, seed nodes and a bootnode list, released node builds, a public RPC endpoint,
+              a faucet, and both applications pointed at it. The design draft estimates 10 to 12
+              weeks to a private testnet.
+            </p>
+            <p>
+              Queued after M8's measurement: wasm threads, which is the measured gap and needs a
+              nightly toolchain and cross-origin isolation to try; then a device test to replace the
+              2-to-4 proxy factor; then real key storage, a hash pin on the first tagged circuit
+              release, and hiding the real-transfer count.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="audits">
+        <div class="wrap">
+          <span class="band__label">02 / Audits</span>
+          <h2>Exactly as they stand</h2>
+          <div class="prose">
+            <p>
+              <strong>The audits are upstream's.</strong> Eiger on the Wormhole circuits
+              (2026-03-20), a Substrate audit of the chain (2026-05-13), and a proof-of-work and
+              Poseidon review.
+            </p>
+            <p>
+              <strong>No external audit of the Qnero delta exists.</strong> That delta is the leaf
+              circuit's note fragments, the public-input layouts at all three layers, the aggregator
+              rules, and <code>pallet-shielded</code>. The design claims a reviewer can read it in a
+              day. Plonky2's 100-bit security here is a conjecture, and the RandomX engine is
+              unreviewed.
+            </p>
+            <p>
+              So the fourth priority, "audited parts only", describes the primitives and the
+              circuits that came from upstream. No part of Qnero's own code has been audited.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised" id="caveats">
+        <div class="wrap">
+          <span class="band__label">03 / Caveats</span>
+          <h2>Open, and written down</h2>
+          <div class="prose">
+            <ul>
+              <li>
+                <strong>Key storage is dev grade.</strong> 32 bytes of hex in a <code>0600</code>
+                file, with no passphrase and no encryption, beside a note store holding every
+                <code>rho</code> and <code>r</code> in clear text.
+              </li>
+              <li>
+                <strong>Weights are unbenchmarked</strong>, and admission work is unpaid per
+                gossiped blob: a settlement walk and a verify each, with no rate limit.
+              </li>
+              <li>
+                <strong>Two runtime constants are undiscoverable over RPC</strong>, so a runtime and
+                a wallet built apart diverge silently, the chain refusing the proof after its cost
+                is paid.
+              </li>
+              <li>
+                <strong>The real-transfer count is public.</strong> A padding slot publishes zero
+                commitments, which the chain needs in order to append correctly.
+              </li>
+              <li>
+                <strong>One transfer per submission today.</strong> Six slots, one filled, so 150908
+                bytes carries one transfer, and about 22 KB each when full.
+              </li>
+              <li>
+                <strong>Tail emission is undesigned, and the genesis allocation is undecided.</strong>
+                A 2 percent placeholder sits in the design and may be removed. Neither is a
+                commitment, and this site makes neither.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="credits">
+        <div class="wrap">
+          <span class="band__label">04 / Credits</span>
+          <h2>What this is built on</h2>
+          <div class="prose">
+            <p>
+              Qnero is MIT licensed, with <code>LICENSE</code> at the repository root. The upstream
+              copyright notices are kept where the licence requires them.
+            </p>
+            <ul>
+              <li>
+                <strong>Upstream chain and circuits, the Quantus Network, MIT.</strong>
+                <code>chain/</code> is a subtree of the upstream Substrate chain at
+                <code>f1176ce</code>. Its Poseidon tree, nullifier set and ML-DSA-87 accounts come
+                as is, and its mixer pallet's verify flow is forked as <code>pallet-shielded</code>.
+                Parts of <code>qnero-circuit</code> and <code>qnero-aggregator</code> derive from
+                the upstream <code>qp-zk-circuits</code> at 4.4.0. All five carry a
+                <code>NOTICE</code> and a <code>CHANGES.md</code>; the layouts, the padding rule and
+                the forwarding contract are Qnero's own.
+              </li>
+              <li>
+                <strong>Hegemon, Pauli-Group/Hegemon, MIT.</strong>
+                <code>qnero-pqcrypto</code> vendors its <code>crypto</code> crate at
+                <code>b819911</code>, carrying its own <code>NOTICE</code> and
+                <code>CHANGES.md</code>.
+              </li>
+              <li>
+                <strong>Plonky2, of the Polygon lineage</strong>, through
+                <code>qp-plonky2</code> and <code>qp-plonky2-verifier</code> at
+                <code>=1.5.5</code>, with <code>qp-poseidon-core</code> 3.1.0 off circuit, tied to
+                the in-circuit hash by a parity check. The upstream CLI was read while the wallet
+                was written, and no code was copied.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--accent" id="notice">
+        <div class="wrap">
+          <span class="band__label">05 / Notice</span>
+          <h2>This site's own provenance</h2>
+          <div class="prose">
+            <p>
+              The page structure of this site follows MyMonero's site, and its component system
+              follows MyMonero's web wallet. Both are BSD-3-Clause, Copyright (c) 2014-2019
+              MyMonero.com.
+            </p>
+            <p>
+              <strong>What is carried over</strong> is the design system those stylesheets state by
+              repetition: the band layout, the surface ramp, the text ramp above it, the two-part
+              elevation recipe of a half-pixel inset highlight over a one-pixel dark shadow, the
+              13/12/11/10 px type scale with 0.5 px tracking, the 3 px and 5 px radii, the 24 px
+              status strip and the label-over-value field row. No file was copied.
+              <code>site/css/site.css</code> states those values as custom properties, which the
+              original does not have.
+            </p>
+            <p>
+              <strong>What is not carried over</strong> is the accent colour, which is the one value
+              in that palette that carries MyMonero's identity, and the <code>Native-*</code>
+              typefaces, which are a licensed retail family outside the BSD grant. The type roles
+              here are filled by system stacks. BSD-3-Clause clause 3 forbids using the copyright
+              holder's or contributors' names to endorse or promote products derived from the
+              software, so the MyMonero name and logo appear on no page of this site as a badge, an
+              endorsement or a lineage claim. This paragraph is a statement of provenance.
+            </p>
+            <p>
+              Full licence text:
+              <a href="https://github.com/mymonero/mymonero-web-js/blob/master/LICENSE.txt">mymonero-web-js/LICENSE.txt</a>.
+              The same notice ships as
+              <a href="https://github.com/DigitalGuards/qnero/blob/main/site/NOTICE">site/NOTICE</a>
+              in the repository.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised" id="contact">
+        <div class="wrap">
+          <span class="band__label">06 / Contact</span>
+          <h2>The repository is the contact</h2>
+          <div class="prose">
+            <p>
+              Issues, patches and disagreements belong at
+              <a href="https://github.com/DigitalGuards/qnero">github.com/DigitalGuards/qnero</a>.
+              There is no mailing list to join and no newsletter to sign up for. A finding in the
+              cryptography is worth more than any of that, and the code is all there.
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <div class="wrap">
+        <nav class="footer-nav" aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/how-it-works.html">How it works</a>
+          <a href="/wallet.html">Qloak</a>
+          <a href="/mine.html">Mine</a>
+          <a href="/explorer.html">silQ Road</a>
+          <a href="/docs.html">Docs</a>
+          <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">Source</a>
+        </nav>
+        <p>
+          Qnero is MIT licensed and maintained by DigitalGuards. Pre-alpha, devnet only, and no
+          part of Qnero's own code has been audited. Read the code before you trust any of it.
+        </p>
+        <p>This site sets no cookies, runs no analytics and loads nothing from a third party.</p>
+        <p>
+          Site design follows MyMonero's, BSD-3-Clause, Copyright (c) 2014-2019 MyMonero.com. See
+          <a href="/about.html#notice">NOTICE</a>.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

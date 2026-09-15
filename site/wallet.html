@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Qloak, a Qnero wallet</title>
+    <meta name="description" content="A wallet that runs in a page: keys created and sealed in the browser, payments proved in a worker, one WebSocket to a node. Dev grade and browser hosted, with the threat model in plain words.">
+    <link rel="canonical" href="https://qnero.io/wallet.html">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Qnero">
+    <meta property="og:title" content="Qloak, a Qnero wallet">
+    <meta property="og:description" content="A wallet that runs in a page: keys created and sealed in the browser, payments proved in a worker, one WebSocket to a node. Dev grade and browser hosted, with the threat model in plain words.">
+    <meta property="og:url" content="https://qnero.io/wallet.html">
+    <meta property="og:image" content="https://qnero.io/img/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Qnero: Monero's principles, rebuilt without elliptic curves.">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="theme-color" content="#161416" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f2f0" media="(prefers-color-scheme: light)">
+    <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
+    <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="stylesheet" href="/css/site.css">
+    <script>
+      try {
+        var t = localStorage.getItem('qnero-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
+    <script src="/js/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="status-strip">
+      <div class="wrap">
+        <span class="dot" aria-hidden="true"></span>
+        <p>
+          <strong>Pre-alpha.</strong> Devnet only. No public testnet. No part of Qnero's own code
+          has been audited.
+        </p>
+      </div>
+    </div>
+    <header class="site-header">
+      <div class="wrap">
+        <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
+        <nav class="nav" aria-label="Main">
+        <a href="/how-it-works.html">How it works</a>
+        <a href="/wallet.html" aria-current="page">Wallet</a>
+        <a href="/mine.html">Mine</a>
+        <a href="/explorer.html">Explorer</a>
+        <a href="/docs.html">Docs</a>
+        <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
+          <button class="theme-toggle" type="button" data-theme-toggle hidden>Theme: dark</button>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <section class="band band--hero hero">
+        <div class="wrap">
+          <h1>Qloak</h1>
+          <p class="lede">A wallet that runs in a page.</p>
+          <p class="sub">
+            It creates a spending key there, encrypts it there, scans the chain there, proves a
+            payment there in a background worker, and contacts nothing but the node you configure.
+            There is no server component and there is no account. The only thing between the page
+            and a chain is one WebSocket to a node.
+          </p>
+          <div class="actions">
+            <a class="btn btn--ghost" href="https://github.com/DigitalGuards/qnero/tree/main/wallet-web">Source and full README</a>
+            <span class="btn btn--ghost" aria-disabled="true">wallet.qnero.io: testnet, coming online</span>
+          </div>
+          <div class="panel status-panel">
+            <span class="panel__label">Read this first</span>
+            <p>
+              <strong>This is dev grade and browser hosted. Use it on a dev chain.</strong> Whoever
+              serves these files can serve different ones tomorrow, and the different ones can send
+              the seed somewhere. There is no code signing in a browser, and no way for a page to
+              prove to you that it is the page you read the source of. That is the whole trust
+              assumption, and nothing on this page softens it.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">01 / What it does</span>
+          <h2>What it does</h2>
+          <div class="cards">
+            <div class="card">
+              <h3>Create a wallet</h3>
+              <p>
+                32 bytes from <code>crypto.getRandomValues</code>, shown once as eight groups of
+                eight hex characters, then three of the eight groups asked back before the wallet is
+                written. Somebody who wrote nothing down cannot answer, which is the point: that
+                screen is the last moment the key is recoverable.
+              </p>
+              <p>
+                Hex and no code beside it. A QR of a spend key is harvested by any camera, screen
+                share or shoulder in the room in one frame, and nothing in this wallet scans one.
+              </p>
+            </div>
+            <div class="card">
+              <h3>Restore from a seed</h3>
+              <p>
+                The 64 hex characters and nothing else. There is no restore height, because a scan
+                that started at a height the wallet named would tell the node roughly when the
+                wallet was created.
+              </p>
+            </div>
+            <div class="card">
+              <h3>Lock</h3>
+              <p>
+                PBKDF2-SHA-256 at 600,000 iterations over a 16-byte salt derives one
+                non-extractable AES-256-GCM key. Each note's <code>rho</code>, <code>r</code>,
+                nullifier and memo, and the seed itself, are sealed under it with a fresh 12-byte IV
+                per record per write, bound to their own slot. The eight-character floor is enforced
+                at the key derivation, where the only path to a key is.
+              </p>
+            </div>
+            <div class="card">
+              <h3>Sync</h3>
+              <p>
+                Every ciphertext on the chain is read by leaf index in batches and tried against
+                this wallet's viewing key in the worker. Coinbase notes are rebuilt from the miner
+                key. The whole settled nullifier set is paged and spent status is decided locally.
+                The node is told nothing about which leaves or which nullifiers belong to this
+                wallet.
+              </p>
+            </div>
+            <div class="card">
+              <h3>Balance and receive</h3>
+              <p>
+                The balance screen reads out of the local store, so a locked wallet still shows one.
+                The receive screen holds the 2571-character address.
+              </p>
+            </div>
+            <div class="card">
+              <h3>Settings</h3>
+              <p>
+                The node endpoint is chosen here at runtime, which is why one build serves a devnet
+                and a testnet. The screen names the prover module the origin allowed, threaded or
+                single, and it offers stopping the worker, which is the one thing that gives its
+                memory back.
+              </p>
+            </div>
+            <div class="card">
+              <h3>Send</h3>
+              <p>
+                The payment is proved in the worker and submitted over the same socket. Measured in
+                the suite's own browser on the development workstation: 11.2 s to prove a payment on
+                four threads against 37.6 s on one, and 24.6 s from pressing send to a settled block
+                against 53.4 s.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="wrap">
+          <span class="band__label">02 / What it cannot do</span>
+          <h2>Shielding is a command-line step</h2>
+          <div class="prose">
+            <p>
+              Entering the pool is a signed extrinsic, and the signature is ML-DSA-87 under the FIPS
+              204 context. The wasm module exports no signing at all. So a browser wallet can
+              predict and recognise a shield, and it cannot make one.
+            </p>
+            <p>
+              Fund it from <code>qnero-wallet shield</code> followed by a <code>send</code>, or from
+              a node configured with its miner key. Closing this properly means a wasm-clean crate
+              split and an ML-DSA-87 signer in the module, and that work is queued.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">03 / Threat model</span>
+          <h2>In plain words</h2>
+          <div class="prose">
+            <ul>
+              <li>
+                <strong>The page host can do anything the page can.</strong> Whoever serves these
+                files can serve different ones tomorrow, and the different ones can send the seed
+                somewhere.
+              </li>
+              <li>
+                <strong>A locked wallet is only as strong as its passphrase.</strong> 600,000
+                PBKDF2 iterations is about a second per guess on this workstation, and far less on a
+                machine built for guessing. A short passphrase is a short delay, and eight
+                characters is a floor. The iteration count a store was written under is recorded in
+                the store and is what opens it, so raising this build's figure seals new wallets
+                harder and leaves existing ones readable.
+              </li>
+              <li>
+                <strong>Zeroing buys one buffer and no more.</strong> A JavaScript string is
+                immutable and garbage collected, so a seed that has ever been a string cannot be
+                wiped, and <code>crypto.subtle.decrypt</code> hands back a buffer allocated before
+                this code sees it. Secrets are carried as <code>Uint8Array</code> and zeroed when
+                done, which erases that one buffer.
+              </li>
+              <li>
+                <strong>IndexedDB is evictable, and the seed is what recovers from that.</strong>
+                The wallet asks for persistent storage and reports the answer. Write the seed down.
+                Every note re-derives from it, because every note's plaintext is on the chain inside
+                its ciphertext, so an eviction costs a full rescan and the record of which notes are
+                spent. Without the seed it costs the wallet.
+              </li>
+              <li>
+                <strong>The store keeps the value graph in the clear.</strong> Four fields are
+                sealed, plus the seed: <code>rho</code>, <code>r</code>, the nullifier and the memo.
+                Everything else is plaintext by choice, so that a locked wallet can still show a
+                balance and still sync: the address, and per note its commitment, its leaf index,
+                its block, its value, its origin and whether it is spent. A copied browser profile
+                therefore gives up this wallet's complete receive history mapped onto public leaf
+                indices, with no passphrase guess needed, which is the linkage the pool exists to
+                hide. A threat model that wants the graph hidden has to seal the value and the leaf
+                index too, and give up the locked balance screen.
+              </li>
+              <li>
+                <strong>What a chain reader sees</strong> is a settlement, its fee, its anchor
+                block, two commitments and two ciphertexts of a fixed size. The amounts, the sender,
+                the recipient and which output is the change all stay hidden. The gap between a
+                spend's anchor block and its inclusion block is public, and it tracks the speed of
+                the machine that proved it.
+              </li>
+              <li>
+                <strong>What the node learns</strong> is your network address, that a wallet syncs
+                from it and roughly how often, and the exact bytes of every settlement submitted
+                through it. Which leaf and which nullifier are yours stay unasked. The one request
+                that names a nullifier is the confirmation of a settlement this wallet has just
+                broadcast, whose proof published both of them a moment ago.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="wrap">
+          <span class="band__label">04 / Run it</span>
+          <h2>Against a chain you start yourself</h2>
+          <div class="split">
+            <div class="prose">
+              <p>
+                Start a local node and fund an address with the command-line wallet first. The
+                repository README carries the build preconditions. Then:
+              </p>
+              <pre><code>cd wallet-web
+nice -n 19 npm ci
+./scripts/stage-wasm.sh --threaded
+nice -n 19 npm run dev</code></pre>
+              <p>
+                That serves the wallet at <code>http://127.0.0.1:5173</code> against the node on
+                port 9944. One runtime JSON file points a built copy at a different chain, so one
+                build serves a devnet and a testnet.
+              </p>
+            </div>
+            <div class="prose">
+              <h3>What a host has to send</h3>
+              <p>
+                <code>Cross-Origin-Opener-Policy: same-origin</code> and
+                <code>Cross-Origin-Embedder-Policy: require-corp</code>, which is what a page needs
+                before <code>SharedArrayBuffer</code> exists, and therefore before the threaded
+                prover can run. Without them the page falls back to the single-threaded module and
+                the settings screen says which one it got.
+              </p>
+              <p>
+                The built page carries its own content policy, so a static drop is already covered.
+                It refuses every <code>http(s)</code> destination, every third-party script, style,
+                image and font, every <code>&lt;base&gt;</code> rewrite and every form post.
+              </p>
+              <h3>The residual path</h3>
+              <p>
+                <strong>The wide policy still permits a WebSocket to any host.</strong> With
+                <code>connect-src 'self' ws: wss:</code>, a socket opened to an arbitrary host
+                raises no violation. That is the residual exfiltration path, and it is the price of
+                choosing the endpoint at runtime from the settings screen. A deployment with a fixed
+                node closes it at build time.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--accent">
+        <div class="wrap">
+          <span class="band__label">05 / Threads</span>
+          <h2>Four threads, on purpose</h2>
+          <div class="prose">
+            <p>
+              Proving runs in a dedicated worker, always. On a cross-origin isolated origin the
+              worker loads the threaded module and starts a rayon pool of
+              <code>min(hardwareConcurrency, 4)</code>.
+            </p>
+            <p>
+              The cap is four on purpose. Beyond four the measured return falls off, every thread
+              reserves its own stack against a shared memory whose maximum is declared at build
+              time, and a wallet that takes every core of the machine it is a tab on is a wallet
+              somebody closes. The circuits hold most of a gigabyte of linear memory once built and
+              wasm linear memory never shrinks, so the circuits are built once per worker and every
+              later payment is answered from that build. The settings screen offers stopping the
+              worker by name, which is the one thing that gives the memory back.
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <div class="wrap">
+        <nav class="footer-nav" aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/how-it-works.html">How it works</a>
+          <a href="/wallet.html">Qloak</a>
+          <a href="/mine.html">Mine</a>
+          <a href="/explorer.html">silQ Road</a>
+          <a href="/docs.html">Docs</a>
+          <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">Source</a>
+        </nav>
+        <p>
+          Qnero is MIT licensed and maintained by DigitalGuards. Pre-alpha, devnet only, and no
+          part of Qnero's own code has been audited. Read the code before you trust any of it.
+        </p>
+        <p>This site sets no cookies, runs no analytics and loads nothing from a third party.</p>
+        <p>
+          Site design follows MyMonero's, BSD-3-Clause, Copyright (c) 2014-2019 MyMonero.com. See
+          <a href="/about.html#notice">NOTICE</a>.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>

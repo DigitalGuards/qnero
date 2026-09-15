@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>How a Qnero transfer works</title>
+    <meta name="description" content="One leaf proof is one shielded transfer: two inputs, two outputs, a public fee, a 16-level Merkle path. Two recursive layers above it, and the full list of what a block publishes.">
+    <link rel="canonical" href="https://qnero.io/how-it-works.html">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Qnero">
+    <meta property="og:title" content="How a Qnero transfer works">
+    <meta property="og:description" content="One leaf proof is one shielded transfer: two inputs, two outputs, a public fee, a 16-level Merkle path. Two recursive layers above it, and the full list of what a block publishes.">
+    <meta property="og:url" content="https://qnero.io/how-it-works.html">
+    <meta property="og:image" content="https://qnero.io/img/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Qnero: Monero's principles, rebuilt without elliptic curves.">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="theme-color" content="#161416" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f2f0" media="(prefers-color-scheme: light)">
+    <link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
+    <link rel="alternate icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="stylesheet" href="/css/site.css">
+    <script>
+      try {
+        var t = localStorage.getItem('qnero-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
+    <script src="/js/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="status-strip">
+      <div class="wrap">
+        <span class="dot" aria-hidden="true"></span>
+        <p>
+          <strong>Pre-alpha.</strong> Devnet only. No public testnet. No part of Qnero's own code
+          has been audited.
+        </p>
+      </div>
+    </div>
+    <header class="site-header">
+      <div class="wrap">
+        <a class="wordmark" href="/"><span class="mark">Q</span>nero</a>
+        <nav class="nav" aria-label="Main">
+        <a href="/how-it-works.html" aria-current="page">How it works</a>
+        <a href="/wallet.html">Wallet</a>
+        <a href="/mine.html">Mine</a>
+        <a href="/explorer.html">Explorer</a>
+        <a href="/docs.html">Docs</a>
+        <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">GitHub</a>
+          <button class="theme-toggle" type="button" data-theme-toggle hidden>Theme: dark</button>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <section class="band band--hero hero">
+        <div class="wrap">
+          <h1>How a transfer works</h1>
+          <p class="lede">
+            One leaf proof is one shielded transfer. Two recursive layers sit above it, and the
+            chain settles the result.
+          </p>
+          <p class="sub">
+            This page is the long form of the mechanism. It ends with what a block publishes, which
+            is the half a privacy claim is worth nothing without.
+          </p>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">01 / Keys</span>
+          <h2>Keys, addresses and notes</h2>
+          <div class="split">
+            <div class="prose">
+              <h3>The split is Monero's</h3>
+              <p>
+                Spending authority is <code>ask = H("qnero/ask", sk)</code>. The address half that
+                receives is <code>pk = H(PK, ak, nk)</code>. The viewing side is an ML-KEM
+                decapsulation key, <code>dk</code>, which opens the AEAD ciphertext on each output
+                the way a view key opens an ECDH stealth address, and <code>nk</code> carries spent
+                status on its own.
+              </p>
+              <p>
+                An address <code>qn1...</code> is 2571 characters, most of it the 1568-byte
+                ML-KEM-1024 key. Scanning is the same linear trial decryption of every output a
+                Monero wallet does.
+              </p>
+            </div>
+            <div class="prose">
+              <h3>A note, and the tree it lives in</h3>
+              <p>
+                A note commits as <code>cm = H(CM, H(NOTE, pk, rho, r), v)</code>. Commitments are
+                appended to a 4-ary Poseidon Merkle tree, and each block header carries the tree
+                root. The anonymity set is the tree: every note ever appended. Ring size 16 with
+                decoys has no equivalent here.
+              </p>
+              <p>
+                A spend publishes <code>nf = H(NF, nk, rho, r)</code>, the nullifier, into
+                <code>UsedNullifiers</code>. The chain refuses a nullifier it has already seen, so a
+                note spends once. A padding input slot publishes a nullifier over no note, under a
+                <code>NF_DUMMY</code> tag, and the two are the same uniform hash in the public
+                record.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="wrap">
+          <span class="band__label">02 / The circuit</span>
+          <h2>Up to 2 inputs, exactly 2 outputs, a public fee</h2>
+          <figure class="diagram">
+            <svg viewBox="0 0 944 232" role="img" aria-labelledby="flow-title flow-desc">
+              <title id="flow-title">From a note to a settled block</title>
+              <desc id="flow-desc">
+                Five steps left to right: your notes, a leaf proof, a private batch of six leaf
+                proofs, an optional public batch of fifty-three private batches, and settlement on
+                chain. The first four steps are proved locally. Only the last is in the block.
+              </desc>
+              <text class="d-meta" x="8" y="20">ONE TRANSFER, THREE PROVING LAYERS, ONE SETTLEMENT</text>
+              <rect class="d-surface" x="8" y="42" width="160" height="92" rx="5" />
+              <text class="d-label" x="88" y="72" text-anchor="middle">Your notes</text>
+              <text class="d-meta" x="88" y="94" text-anchor="middle">up to 2 inputs</text>
+              <text class="d-meta" x="88" y="110" text-anchor="middle">2 outputs, 1 fee</text>
+              <rect class="d-surface" x="200" y="42" width="160" height="92" rx="5" />
+              <text class="d-label" x="280" y="72" text-anchor="middle">Leaf proof</text>
+              <text class="d-meta" x="280" y="94" text-anchor="middle">320 gates</text>
+              <text class="d-meta" x="280" y="110" text-anchor="middle">105500 bytes</text>
+              <rect class="d-surface" x="392" y="42" width="160" height="92" rx="5" />
+              <text class="d-label" x="472" y="72" text-anchor="middle">Private batch</text>
+              <text class="d-meta" x="472" y="94" text-anchor="middle">N = 6, ZK</text>
+              <text class="d-meta" x="472" y="110" text-anchor="middle">150908 bytes</text>
+              <rect class="d-surface" x="584" y="42" width="160" height="92" rx="5" />
+              <text class="d-label" x="664" y="72" text-anchor="middle">Public batch</text>
+              <text class="d-meta" x="664" y="94" text-anchor="middle">n = 53, optional</text>
+              <text class="d-meta" x="664" y="110" text-anchor="middle">237544 bytes</text>
+              <rect class="d-accent" x="776" y="42" width="160" height="92" rx="5" />
+              <text class="d-label" x="856" y="72" text-anchor="middle">Settlement</text>
+              <text class="d-meta" x="856" y="94" text-anchor="middle">pallet-shielded</text>
+              <text class="d-meta" x="856" y="110" text-anchor="middle">nullifiers + leaves</text>
+              <path class="d-line" d="M174 88 H 192" />
+              <path class="d-arrow" d="M192 84 l 8 4 l -8 4 z" />
+              <path class="d-line" d="M366 88 H 384" />
+              <path class="d-arrow" d="M384 84 l 8 4 l -8 4 z" />
+              <path class="d-line" d="M558 88 H 576" />
+              <path class="d-arrow" d="M576 84 l 8 4 l -8 4 z" />
+              <path class="d-line" d="M750 88 H 768" />
+              <path class="d-arrow" d="M768 84 l 8 4 l -8 4 z" />
+              <path class="d-line" d="M8 168 V 160 H 744 V 168" stroke-dasharray="3 3" />
+              <text class="d-meta" x="376" y="186" text-anchor="middle">PROVED IN YOUR WALLET, OR BY AN AGGREGATOR</text>
+              <path class="d-line" d="M776 168 V 160 H 936 V 168" />
+              <text class="d-meta" x="856" y="186" text-anchor="middle">IN THE BLOCK</text>
+            </svg>
+            <figcaption>
+              The public batch is an aggregator's non-ZK bundle and is optional. A wallet submits a
+              private batch on its own today.
+            </figcaption>
+          </figure>
+          <div class="prose">
+            <p>
+              One leaf proof is one shielded transfer: up to 2 input notes, exactly 2 outputs, a
+              public fee, and <code>ct_digest</code> binding the output ciphertexts, as 26 public
+              inputs fixed in <code>qnero_circuit::layout</code>.
+            </p>
+            <p>
+              Per real input the circuit derives <code>pk</code> from <code>ask</code> and
+              <code>nk</code>, recomputes <code>cm</code>, walks a 16-level Merkle path to the
+              anchored header's <code>zk_tree_root</code>, and emits the nullifier. An input's
+              <code>pk</code> is never witnessed, so a wrong credential yields a commitment absent
+              from the tree. Outputs range-check to 62 bits, so the balance equation cannot wrap the
+              field.
+            </p>
+            <p>
+              An anchor expires after <code>BlockHashWindow</code>, 256 blocks, which is 8.5 hours
+              at the 120-second target. That is the only waiting rule on this chain.
+            </p>
+            <h3>Two layers above</h3>
+            <p>
+              N leaf proofs make a zero-knowledge private batch, which is the on-chain transaction
+              unit, and n of those make a public batch, an aggregator's non-ZK bundle. Both check
+              their inner proofs against a baked-in verifier key. The chain default is N = 6, and
+              the measured public batch is n = 53, carrying 318 real slots.
+            </p>
+            <h3>Settlement</h3>
+            <p>
+              <code>pallet-shielded</code> settles each real slot: both nullifiers marked used, both
+              commitments appended, <code>ct_digest</code> recomputed and compared. A segment
+              carrying an already-claimed nullifier is skipped and the rest settles, because
+              refusing it would let one participant destroy an aggregator's batch for free.
+              Settlements are unsigned and fee free, so the fee floors carry anti-spam alone.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">03 / Your node</span>
+          <h2>What the node you ask learns</h2>
+          <div class="prose">
+            <p>
+              Run your own node. Short of that, two rules hold over what a wallet asks, and both are
+              asserted in the test suite.
+            </p>
+            <p>
+              <strong>A sync never names a nullifier.</strong> Spent status is decided against a
+              local copy of <code>UsedNullifiers</code>, paged whole through
+              <code>state_getKeysPaged</code>. Probing that map with a wallet's own nullifiers would
+              hand a node, in the clear, the set of values that wallet will publish when it spends.
+            </p>
+            <p>
+              <strong>A spend never names a leaf.</strong> Merkle paths are rebuilt locally from the
+              leaf range at the anchor block. The explorer holds the same line: it makes no Merkle
+              proof call at all, and a lint rule fails the build on every spelling of that call.
+            </p>
+            <p>
+              A node still sees an IP address, a cadence and the submissions. Traffic analysis stays
+              open. The gap between a spend's anchor block and its inclusion block is public too,
+              and it tracks the speed of the machine that proved it.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="reveals">
+        <div class="wrap">
+          <span class="band__label">04 / Disclosure</span>
+          <h2>What a v1 block reveals</h2>
+          <p class="band__intro">
+            The full list, from <code>docs/CIRCUIT.md</code> section 10.7. A privacy claim is worth
+            what its disclosure list says.
+          </p>
+          <div class="table-wrap">
+            <table class="table--pairs">
+              <thead>
+                <tr>
+                  <th scope="col">Published</th>
+                  <th scope="col">What it ties together</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">A shield's payer, its value and the leaf it created</th>
+                  <td>The account that paid, the exact amount, and the note it became</td>
+                </tr>
+                <tr>
+                  <th scope="row">A coinbase note's value and its block</th>
+                  <td>How much was minted, and when. The recipient is inside an <code>inner</code> the chain cannot open</td>
+                </tr>
+                <tr>
+                  <th scope="row">Every leaf's commitment, and the tree root in each header</th>
+                  <td>The shape of the tree and its growth per block</td>
+                </tr>
+                <tr>
+                  <th scope="row">Every settled nullifier</th>
+                  <td>That some note was spent. The set does not say which one</td>
+                </tr>
+                <tr>
+                  <th scope="row">Each settlement's slot count and fee</th>
+                  <td>How many leaf slots a submission settled and what it paid</td>
+                </tr>
+                <tr>
+                  <th scope="row">Each settled slot's two nullifiers, its two commitments, both leaf indices and both ciphertexts</th>
+                  <td>The two notes one spend created, at consecutive leaf indices, publicly siblings and publicly tied to the two nullifiers spent alongside them</td>
+                </tr>
+                <tr>
+                  <th scope="row">A vesting payout's beneficiary and amount</th>
+                  <td>A genesis-fixed allocation, the account it went to, and when</td>
+                </tr>
+                <tr>
+                  <th scope="row">A burn's account and amount</th>
+                  <td>Value leaving circulation, and the account it left from</td>
+                </tr>
+                <tr>
+                  <th scope="row">A refused call's own arguments</th>
+                  <td>Who tried to send what to whom, though nothing moved</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="prose" style="margin-top: var(--space-4)">
+            <h3>The three edges worth stating twice</h3>
+            <p>
+              <strong>The entry is the sharp edge.</strong> <code>shield</code> is a signed
+              extrinsic, so the payer's account, the amount and the leaf index are all on chain
+              together, and value that enters the pool that way is linked to the account it came
+              from at the moment it enters. What is unlinked is everything after: the note's spends
+              are proofs, and the commitment a shield publishes is the last time that value has a
+              name. A wallet that wants its entry unlinked has to be paid from the pool.
+            </p>
+            <p>
+              <strong>A payment and its change are publicly a pair.</strong> The settlement event
+              names which two nullifiers were spent together and which two leaves that spend
+              created. Which of the two leaves is the change stays hidden, because the wallet draws
+              the payment's output slot per spend.
+            </p>
+            <p>
+              <strong>A refused transparent transfer publishes everything.</strong> The call filter
+              is checked at dispatch, so a transparent transfer is a valid extrinsic that enters a
+              block, pays its fee and then fails. Its arguments are in the block body and its
+              failure is in the events, permanently. One mistaken attempt publishes exactly the
+              sender, recipient and amount triple the policy exists to deny. A wallet should refuse
+              these calls client-side.
+            </p>
+            <p>
+              Two smaller leaks are recorded and open: a padding slot publishes zero commitments, so
+              the real-transfer count is public, and a ciphertext of a size other than 1792 bytes
+              stands out.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band--raised">
+        <div class="wrap">
+          <span class="band__label">05 / Numbers</span>
+          <h2>Every figure, and the machine it came from</h2>
+          <p class="band__intro">
+            One workstation, 20 cores, WSL2. <code>docs/BENCH.md</code> is the log. No figure below
+            was measured on a public network, because there is no public network.
+          </p>
+          <div class="table-wrap">
+            <table class="table--mid">
+              <thead>
+                <tr>
+                  <th scope="col">Measurement</th>
+                  <th scope="col">Figure</th>
+                  <th scope="col">Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Leaf proof</th>
+                  <td>105500 bytes</td>
+                  <td>320 gates, 26 public inputs. Prove mean 183 ms over 9 runs, single threaded, range 138 to 381 ms, the spread being 16 grinding bits. Verify 2.2 ms</td>
+                </tr>
+                <tr>
+                  <th scope="row">Private batch, N = 6</th>
+                  <td>150908 bytes</td>
+                  <td>131 felts. Prove 3.34 to 3.61 s on four threads. Verify 4.2 ms</td>
+                </tr>
+                <tr>
+                  <th scope="row">Private batch, N = 7</th>
+                  <td>24530 gates</td>
+                  <td>6.4 s and 2.06 GiB peak natively, 65.8 s and 1.72 GiB in a browser. About 2x the cost of six for one more slot</td>
+                </tr>
+                <tr>
+                  <th scope="row">Public batch, n = 53</th>
+                  <td>237544 bytes</td>
+                  <td>29 s to prove, 318 real slots, a 2.2x margin under <code>MAX_PROOF_BYTES</code> of 524288. Check 6.04 ms</td>
+                </tr>
+                <tr>
+                  <th scope="row">A payment in a browser, one thread</th>
+                  <td>33.6 s</td>
+                  <td>910.4 MiB of peak linear memory, on top of 12.1 s of circuit build once per worker. Natively on one thread the same batch is 9.82 s, so wasm costs about 3.3x</td>
+                </tr>
+                <tr>
+                  <th scope="row">A send on the command line</th>
+                  <td>6.47 to 7.81 s</td>
+                  <td>Picks two notes largest-first, rebuilds Merkle paths locally and proves the batch itself</td>
+                </tr>
+                <tr>
+                  <th scope="row">Verification</th>
+                  <td>2.2 to 6.04 ms</td>
+                  <td>Flat in what a proof wraps, all native. A private batch verifies in 14.1 ms of browser wasm against 3.7 ms for the same call natively, 3.8x, and the module's first verify costs 20.5 ms because V8 has yet to tier that code up</td>
+                </tr>
+                <tr>
+                  <th scope="row">Address</th>
+                  <td>2571 characters</td>
+                  <td>Mostly its 1568-byte ML-KEM-1024 key</td>
+                </tr>
+                <tr>
+                  <th scope="row">Amounts</th>
+                  <td>10<sup>10</sup> planck</td>
+                  <td>One pool quantum, which is 0.01 QNR. A <code>send</code> defaults to a fee of 8 quanta</td>
+                </tr>
+                <tr>
+                  <th scope="row">Emission</th>
+                  <td>411 quanta a block</td>
+                  <td>At genesis supply, against the 120-second target</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note">
+            <strong>There is no phone in these figures.</strong> A desktop core under headless
+            Chromium is the proxy, and the stated 2-to-4 factor is a floor, because its low end is a
+            peak single-core score ratio that leaves out both throttling and mobile browser engines.
+            A phone therefore lands at 67 to 134 s per payment or worse. The memory fits a 6 GB
+            device and the single-threaded clock misses the 60 s target, so threads are the measured
+            gap.
+          </p>
+          <p class="table-note">
+            One transfer per submission today: six slots, one filled, so 150908 bytes carries one
+            transfer, and about 22 KB each when full. The testnet targets are a proof per
+            transaction under 105 KB or amortized below it, proving under 5 s on a laptop and under
+            60 s on a phone, and no cryptographic component without a firm's review.
+          </p>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <div class="wrap">
+        <nav class="footer-nav" aria-label="Footer">
+          <a href="/">Home</a>
+          <a href="/how-it-works.html">How it works</a>
+          <a href="/wallet.html">Qloak</a>
+          <a href="/mine.html">Mine</a>
+          <a href="/explorer.html">silQ Road</a>
+          <a href="/docs.html">Docs</a>
+          <a href="/about.html">About</a>
+          <a href="https://github.com/DigitalGuards/qnero">Source</a>
+        </nav>
+        <p>
+          Qnero is MIT licensed and maintained by DigitalGuards. Pre-alpha, devnet only, and no
+          part of Qnero's own code has been audited. Read the code before you trust any of it.
+        </p>
+        <p>This site sets no cookies, runs no analytics and loads nothing from a third party.</p>
+        <p>
+          Site design follows MyMonero's, BSD-3-Clause, Copyright (c) 2014-2019 MyMonero.com. See
+          <a href="/about.html#notice">NOTICE</a>.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
