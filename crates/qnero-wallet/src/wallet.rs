@@ -95,12 +95,39 @@ pub enum MerkleSource {
     Rpc,
 }
 
-/// How long a submission is waited on before the wallet gives up.
+/// Block intervals a submission is waited on: the pool's five, plus the one it
+/// was submitted inside.
 ///
 /// An unsigned settlement has `longevity(5)`: it leaves the pool after five
 /// blocks and a byte-identical rebroadcast will not displace it, so the answer
-/// to a timeout is to prove again against a fresh anchor.
-const INCLUSION_TIMEOUT: Duration = Duration::from_secs(120);
+/// to a timeout is to prove again against a fresh anchor. Five blocks is the
+/// window in which the submission is still live and will almost certainly
+/// settle, so the wait is denominated in blocks and read from the chain. A flat
+/// 120 s was one block interval at the public target: the residual wait to the
+/// next block is exponential with a mean of one interval, so roughly a third of
+/// correct payments would have been reported as failures.
+const INCLUSION_TIMEOUT_BLOCKS: u64 = 6;
+
+/// The shortest inclusion wait, whatever the chain's interval.
+///
+/// Six 12 s blocks is 72 seconds, which is shorter than a single proof on one
+/// thread, so a fast dev chain keeps the old flat wait.
+const INCLUSION_TIMEOUT_FLOOR: Duration = Duration::from_secs(120);
+
+/// [`INCLUSION_TIMEOUT_BLOCKS`] of the chain's own interval, floored.
+///
+/// The interval is read here, because one node binary serves a 120 s public
+/// chain and a 12 s dev chain and no constant covers both. A node that
+/// cannot answer gets the floor: this is called after the bytes are already in
+/// the pool, so refusing the whole send over a failed constant read would throw
+/// away a payment that is on its way.
+fn inclusion_timeout(chain: &Chain) -> Duration {
+    match chain.target_block_time_ms() {
+        Ok(ms) => Duration::from_millis(ms.saturating_mul(INCLUSION_TIMEOUT_BLOCKS))
+            .max(INCLUSION_TIMEOUT_FLOOR),
+        Err(_) => INCLUSION_TIMEOUT_FLOOR,
+    }
+}
 
 /// How many shield entries the origin walk hashes before it gives up.
 ///
@@ -2161,7 +2188,8 @@ fn entry_rho_matches(block: u32, rho: &Digest, entries: u64) -> bool {
 /// rebroadcast of the same proof never displaces the copy already in the pool;
 /// there is nothing useful to do but wait and then prove again.
 fn wait_for_inclusion(chain: &Chain, extrinsic_hex: &str, from_block: u32) -> Result<u32> {
-    let deadline = Instant::now() + INCLUSION_TIMEOUT;
+    let timeout = inclusion_timeout(chain);
+    let deadline = Instant::now() + timeout;
     let mut next = from_block + 1;
     loop {
         let head = chain.head()?;
@@ -2181,7 +2209,7 @@ fn wait_for_inclusion(chain: &Chain, extrinsic_hex: &str, from_block: u32) -> Re
                 "the submission was not included within {} seconds (watched blocks {}..={}). An \
                  unsigned settlement leaves the pool after five blocks and a rebroadcast of the \
                  same bytes will not displace it: prove again against a fresh anchor.",
-                INCLUSION_TIMEOUT.as_secs(),
+                timeout.as_secs(),
                 from_block + 1,
                 head.number
             );

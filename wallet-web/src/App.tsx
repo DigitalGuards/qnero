@@ -1023,10 +1023,20 @@ export function App(): ReactNode {
                         ? (config?.expectedProvingSeconds.threaded ?? 12)
                         : (config?.expectedProvingSeconds.single ?? 36)
                     }
-                    // The block half of the wait, from the chain. No default:
-                    // the send button is behind a live connection, and a
-                    // connection carries the target it read at connect.
-                    blockSeconds={Math.round((connection.targetBlockTimeMs ?? 0) / 1000)}
+                    // The block half of the wait, from the chain, and null
+                    // until the chain has answered. `Session.connect` publishes
+                    // the context before `openConnection` writes the target
+                    // into this state, and `SendScreen` is mounted on the
+                    // wallet being open, with the connection's state reaching
+                    // no gate above it, so a send pressed inside that window
+                    // would otherwise quote
+                    // "one block interval of 0 seconds" to the one reader who
+                    // has no measured figure to correct it: a first payment.
+                    blockSeconds={
+                      connection.targetBlockTimeMs === undefined
+                        ? null
+                        : Math.round(connection.targetBlockTimeMs / 1000)
+                    }
                     checkAddress={(candidate) => session.prover.addressIsValid(candidate)}
                     circuitsBuilt={circuitsBuilt}
                     proverThreads={proverThreads}

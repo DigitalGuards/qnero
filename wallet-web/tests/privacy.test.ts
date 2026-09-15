@@ -235,6 +235,10 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
     // screen: the drift list above, and the anchor window a pending row is
     // measured against.
     constants: { blockHashWindow: 256 },
+    // The `dev` preset's cadence, because that is what these fixtures were
+    // captured against. A payment's inclusion wait is six of these, so a
+    // context without it gives `NaN` and the walk never runs.
+    targetBlockTimeMs: 12_000,
   } as unknown as ChainContext;
 
   return { context, calls };
@@ -551,6 +555,10 @@ function spendContext(options: { refuseSubmission?: boolean; leafCount?: number 
       },
     },
     storageDrift: [],
+    // The `dev` preset's cadence. `send` sizes its inclusion wait at six block
+    // intervals read from here, so a context without it waits `NaN` ms and
+    // looks in no block at all.
+    targetBlockTimeMs: 12_000,
   } as unknown as ChainContext;
 
   return { context, calls };

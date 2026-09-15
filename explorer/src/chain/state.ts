@@ -25,7 +25,8 @@ export interface ConsensusConstants {
   /** Blocks below the tip that a reorg may still replace. There is no finality gadget under this. */
   maxReorgDepth: number;
   /**
-   * The chain's target block time, in milliseconds.
+   * The chain's target block time, in milliseconds, or null when the node
+   * cannot say.
    *
    * Read rather than assumed. The interval is chain state since spec 104, so
    * one node binary serves a 120 000 ms public chain and a 12 000 ms dev chain,
@@ -33,22 +34,35 @@ export interface ConsensusConstants {
    * answer. The observed inter-block time stays what the hash-rate estimate
    * divides by: that is what the network is doing, and this is what it is
    * aiming at.
+   *
+   * Null is the spec-103 node. `QPoWApi` declares version 2 for this method and
+   * a node still on 103 declares version 1 and answers "function not found".
+   * That is a fact about that node, so the other three constants are read
+   * without it and survive it.
    */
-  targetBlockTimeMs: number;
+  targetBlockTimeMs: number | null;
 }
 
 export async function fetchConsensusConstants(context: ChainContext): Promise<ConsensusConstants> {
-  const [epoch, lag, reorg, target] = await Promise.all([
+  const [epoch, lag, reorg] = await Promise.all([
     stateCallInt(context, 'QPoWApi_get_seed_epoch_blocks'),
     stateCallInt(context, 'QPoWApi_get_seed_epoch_lag'),
     stateCallInt(context, 'QPoWApi_get_max_reorg_depth'),
-    stateCallInt(context, 'QPoWApi_get_target_block_time'),
   ]);
+  // Its own call, and its own failure. Sharing the promise above would have let
+  // a runtime that predates spec 104 cost this panel all four constants over
+  // the one method it does not have.
+  let targetBlockTimeMs: number | null = null;
+  try {
+    targetBlockTimeMs = Number(await stateCallInt(context, 'QPoWApi_get_target_block_time'));
+  } catch {
+    targetBlockTimeMs = null;
+  }
   return {
     seedEpochBlocks: Number(epoch),
     seedEpochLag: Number(lag),
     maxReorgDepth: Number(reorg),
-    targetBlockTimeMs: Number(target),
+    targetBlockTimeMs,
   };
 }
 

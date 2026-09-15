@@ -232,7 +232,9 @@ export function Home(): ReactNode {
                   ? 'last observed inter-block time'
                   : `mean over the last ${formatCount(bundle.config.recentBlocks)} blocks`
               }${
-                constants === null ? '' : `, against a target of ${formatSeconds(constants.targetBlockTimeMs)}`
+                constants === null || constants.targetBlockTimeMs === null
+                  ? ''
+                  : `, against a target of ${formatSeconds(constants.targetBlockTimeMs)}`
               }`
             }
           />
@@ -265,7 +267,7 @@ export function Home(): ReactNode {
               // hashes per block, so dividing by what the chain actually took
               // is what measures the network. A chain running ahead of or
               // behind its target reads as the rate it really has.
-              constants === null
+              constants === null || constants.targetBlockTimeMs === null
                 ? 'estimated from difficulty and the observed block time'
                 : `estimated from difficulty and the observed block time, not the ${formatSeconds(
                     constants.targetBlockTimeMs,
@@ -291,13 +293,22 @@ export function Home(): ReactNode {
             note={
               constants === null || untilRotation === null
                 ? missingConstants
-                : `rotates in ${formatCount(untilRotation)} blocks, about ${formatSpan(
-                    untilRotation * constants.targetBlockTimeMs,
-                  )} at this chain's target; epoch ${formatCount(
-                    constants.seedEpochBlocks,
-                  )} blocks (${formatSpan(
-                    constants.seedEpochBlocks * constants.targetBlockTimeMs,
-                  )}) lag ${formatCount(constants.seedEpochLag)}`
+                : constants.targetBlockTimeMs === null
+                  ? // A node that cannot say what it aims at. The block counts
+                    // are still the chain's, and turning them into hours is the
+                    // only part that needed the target.
+                    `rotates in ${formatCount(untilRotation)} blocks; epoch ${formatCount(
+                      constants.seedEpochBlocks,
+                    )} blocks, lag ${formatCount(
+                      constants.seedEpochLag,
+                    )}; this node does not report a target block time`
+                  : `rotates in ${formatCount(untilRotation)} blocks, about ${formatSpan(
+                      untilRotation * constants.targetBlockTimeMs,
+                    )} at this chain's target; epoch ${formatCount(
+                      constants.seedEpochBlocks,
+                    )} blocks (${formatSpan(
+                      constants.seedEpochBlocks * constants.targetBlockTimeMs,
+                    )}) lag ${formatCount(constants.seedEpochLag)}`
             }
           />
         </Fields>

@@ -83,7 +83,7 @@ testnet and nothing about a chain is compiled in.
   "chainName": "Qnero devnet",
   "wasmBase": "wasm/",
   "numLeaves": 6,
-  "expectedSendSeconds": { "threaded": 23, "single": 55 }
+  "expectedProvingSeconds": { "threaded": 12, "single": 36 }
 }
 ```
 
@@ -95,12 +95,15 @@ testnet and nothing about a chain is compiled in.
   runtime's embedded verifier. A proof built at another N has a public-input
   length that verifier cannot read, and the refusal arrives after the whole
   proving cost.
-- `expectedSendSeconds` is what this build tells somebody to expect while a
-  payment runs, per module, from the "Send to settled" column of the M10 table
-  in `docs/BENCH.md`. That interval rather than the proof's, because the
-  sending screen prints this beside a clock that starts at the send button: a
-  proving-only figure there is exceeded about halfway through every correct
-  payment. After the first payment the screen quotes what this machine actually
+- `expectedProvingSeconds` is the proof alone, per module, from the
+  `proveTransfer` rows of the M10 table in `docs/BENCH.md`. The proof is the
+  only half of the wait that belongs to this browser: the sending screen quotes
+  a payment as that figure plus one block interval, and it reads the interval
+  from the chain over `QPoWApi_get_target_block_time`, because one node binary
+  serves a 120 s public chain and a 12 s dev chain and no file here can know
+  which. It replaced `expectedSendSeconds`, a single send-to-settled number that
+  was right only on the chain it was measured against; that key is no longer
+  read. After the first payment the screen quotes what this machine actually
   took instead. The page prints the figure for the module it is running,
   because the threaded one proves in about a third of the time and a single
   figure beside a live thread count is wrong for one of the two. A plain number

@@ -514,11 +514,19 @@ export async function spend(
     encoded,
     submission.report.public_inputs.nullifiers,
     {
-      // The anchor window is the real bound, and it is comfortable: 256 blocks
-      // at a 12-second target is about 51 minutes. Two minutes is what a dev
-      // chain needs and what a person will wait before being told the answer
-      // is to prove again.
-      timeoutMs: 120_000,
+      // Six block intervals: the five an unsigned settlement keeps in the pool
+      // under `longevity(5)`, plus the one it was submitted inside. That window
+      // is the real bound, because inside it the submission is still live and
+      // will almost certainly land; past it the answer is to prove again
+      // against a fresh anchor, which is what this screen then says.
+      //
+      // Denominated in the chain's own interval, floored at the two minutes a
+      // dev chain used to get. A flat 120 000 ms was one whole block interval
+      // at the public 120 s target: the residual wait to the next block is
+      // exponential with a mean of one interval, so about a third of correct
+      // payments would have been reported as failed, their change row dropped
+      // and their inputs left unlatched while the settlement landed anyway.
+      timeoutMs: Math.max(120_000, context.targetBlockTimeMs * 6),
       // These bytes did not exist before the anchor, so no block at or below
       // it can carry them and none after it is skipped.
       fromBlock: anchor.block_number,

@@ -70,15 +70,22 @@ export function SendScreen({
    */
   provingSeconds: number;
   /**
-   * One block interval, in seconds, read from the chain.
+   * One block interval, in seconds, read from the chain, or null while the
+   * chain has not answered yet.
    *
    * The chain's half of the wait, and it is the chain's because the interval
    * is chain state: the same build faces a 120 s public chain and a 12 s dev
    * chain. A settled payment waits for the next block whatever the proof cost,
    * so a wait is quoted as the two halves and not as one number measured
    * somewhere else.
+   *
+   * Null is a real state and a short one. The connection is published the
+   * moment the socket is up, one round trip before the target read returns, and
+   * this screen is gated on the wallet being open, with the connection's own
+   * state reaching no gate above it. While it is null the screen quotes the proving half alone,
+   * which is the half it knows.
    */
-  blockSeconds: number;
+  blockSeconds: number | null;
   circuitsBuilt: boolean;
   proverThreads: number;
   /** The module's bech32m check, asked as the address is typed. */
@@ -150,7 +157,7 @@ export function SendScreen({
   if (running) {
     // Worst case, so the admission below fires late rather than early: the
     // block half is "up to" one interval and lands sooner on average.
-    const expectedSeconds = measuredSeconds ?? provingSeconds + blockSeconds;
+    const expectedSeconds = measuredSeconds ?? provingSeconds + (blockSeconds ?? 0);
     const expectedMillis = expectedSeconds * 1000;
     // The estimate stops being quoted the moment it is wrong. Two numbers in
     // one panel that disagree are worse than one number and an admission.
@@ -177,8 +184,14 @@ export function SendScreen({
               measuredSeconds === null ? (
                 <>
                   The published figure is about {provingSeconds} seconds of proving
-                  {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}, then up
-                  to one block interval of {blockSeconds} seconds before it settles.
+                  {proverThreads > 1 ? ` on ${proverThreads} threads` : ' on one thread'}
+                  {blockSeconds === null ? (
+                    ', then one block interval before it settles.'
+                  ) : (
+                    <>
+                      , then up to one block interval of {blockSeconds} seconds before it settles.
+                    </>
+                  )}
                 </>
               ) : (
                 <>
