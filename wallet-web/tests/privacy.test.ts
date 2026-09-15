@@ -167,9 +167,17 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
   const send = <T,>(method: string, params: unknown[]): Promise<T> => {
     calls.push({ method, params });
     if (method === 'chain_getBlockHash') {
-      const height = params[0] as number | undefined;
+      const height = params[0] as number | number[] | undefined;
       if (height === undefined) {
         return Promise.resolve(HEAD_HASH as T);
+      }
+      // A list of numbers is answered with a list of hashes, which is what
+      // Substrate does and what the header walk pages at 256. A node that
+      // answered one hash here would send the walk down its one-height
+      // fallback, and then this fixture would not be covering the path the
+      // wallet actually takes.
+      if (Array.isArray(height)) {
+        return Promise.resolve(height.map((number) => hashAt(number)) as T);
       }
       return Promise.resolve(hashAt(height) as T);
     }

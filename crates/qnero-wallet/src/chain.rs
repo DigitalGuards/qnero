@@ -201,6 +201,50 @@ impl<'a> Chain<'a> {
         hash.as_deref().map(decode_hash).transpose()
     }
 
+    /// The canonical hashes at a list of heights, in the order asked for.
+    ///
+    /// `chain_getBlockHash` takes a list of numbers and answers a list of
+    /// hashes, which is what turns the hash half of a header walk from one
+    /// round trip per block into one per page of [`HASH_PAGE`]. A node that
+    /// answers a list with anything else gets one request per height instead:
+    /// that is an older or a different implementation and not a lie, because
+    /// nothing is decided from these hashes on their own. They are addresses.
+    /// What makes the range a chain is the parent links checked over the
+    /// headers they fetch, in [`Chain::header_chain`].
+    ///
+    /// `None` is an ordinary answer for a height this node has no block at.
+    pub fn block_hashes_at(&self, numbers: &[u32]) -> Result<Vec<Option<[u8; 32]>>> {
+        if numbers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let listed: Value = self
+            .rpc
+            .call("chain_getBlockHash", json!([numbers]))
+            .with_context(|| {
+                format!(
+                    "no block hashes for the {} heights from {}",
+                    numbers.len(),
+                    numbers.first().copied().unwrap_or_default()
+                )
+            })?;
+        if let Some(answers) = listed.as_array() {
+            if answers.len() == numbers.len() {
+                return answers
+                    .iter()
+                    .map(|answer| match answer {
+                        Value::Null => Ok(None),
+                        Value::String(hash) => decode_hash(hash).map(Some),
+                        other => bail!("chain_getBlockHash answered {other} inside a list"),
+                    })
+                    .collect();
+            }
+        }
+        numbers
+            .iter()
+            .map(|number| self.block_hash_at_height(*number))
+            .collect()
+    }
+
     pub fn block_hash(&self, number: u32) -> Result<[u8; 32]> {
         let hash: Option<String> = self
             .rpc
@@ -239,18 +283,42 @@ impl<'a> Chain<'a> {
 
     /// The headers of `anchor..=head`, each authenticated by its own hash.
     ///
-    /// Walked **downward**, by `parentHash`, which is what makes the chain a
-    /// chain rather than a list of answers. Every header is fetched by the
-    /// hash its child named, its preimage is rehashed here, and the result has
-    /// to be that hash; so from a single trusted hash at the bottom, every
-    /// field of every header above it is authenticated: the `zkTreeRoot` a
-    /// leaf range is checked against, and the pre-runtime author label that
-    /// says whose block it is.
+    /// The walk used to descend by `parentHash`, one `chain_getHeader` at a
+    /// time, each header fetched by the hash its child named. That is one
+    /// round trip per block with nothing else in flight, and against a node
+    /// behind a CDN the round trip is the whole cost: at the public chain's
+    /// 120 s target a year of history is 262 000 of them in series.
     ///
-    /// The walk costs one `chain_getHeader` per block, and no
-    /// `chain_getBlockHash` at all, because each header names its parent. It
-    /// names nothing about this wallet: every wallet on the chain reads the
-    /// same headers.
+    /// So the two halves are separated and both are pipelined. The heights are
+    /// turned into hashes with `chain_getBlockHash` over a list of numbers,
+    /// paged at [`HASH_PAGE`], and the headers are then fetched by hash in
+    /// JSON-RPC batch arrays of [`HEADER_BATCH`]. A node that takes neither
+    /// gets one request per call and the walk is what it always was; see
+    /// [`Chain::block_hashes_at`] and [`RpcClient::call_many`].
+    ///
+    /// **Exactly what the descending walk verified is verified here, locally,
+    /// and nothing about which values are trusted changes.** The hashes are
+    /// the node's claim and decide nothing on their own:
+    ///
+    /// - every header's own number is the height it was asked for, or the walk
+    ///   is refused;
+    /// - every header is rehashed from its own preimage and the result has to
+    ///   be the hash it was fetched by, or the walk is refused;
+    /// - and every header names as its `parentHash` the hash this node
+    ///   answered for the height below it, or the walk is refused. That is the
+    ///   parent link the descending walk followed, checked rather than
+    ///   followed, so a hash answered for a number the header chain does not
+    ///   carry is a lie and is refused.
+    ///
+    /// Composed, those are the same equalities the descending walk produced:
+    /// the recomputed hash of each header is the hash the header above it names
+    /// as its parent, down to the bottom. So from a single trusted hash at the
+    /// bottom, every field of every header above it is authenticated: the
+    /// `zkTreeRoot` a leaf range is checked against, and the pre-runtime author
+    /// label that says whose block it is.
+    ///
+    /// It names nothing about this wallet: every wallet on the chain reads the
+    /// same headers, and a list of heights is the same list for all of them.
     ///
     /// The caller supplies the bottom of the chain and must compare
     /// `blocks[0].hash` against a hash it already trusts, which is the store's
@@ -285,12 +353,53 @@ impl<'a> Chain<'a> {
                 crate::wallet::HEADER_WALK_LIMIT
             );
         }
-        let span = usize::try_from(span).unwrap_or(usize::MAX);
-        let mut blocks = Vec::with_capacity(span.saturating_add(1));
-        let mut hash = head.hash;
-        let mut number = head.number;
-        loop {
-            let raw = self.header_at(&hash)?;
+        let span = span as usize;
+
+        // The hashes the headers are fetched by. The top's is the caller's,
+        // which is the head itself or a hash the caller is about to prove by
+        // walking down to one it already trusts, so it is never asked for
+        // again.
+        let mut hashes = vec![[0u8; 32]; span + 1];
+        hashes[span] = head.hash;
+        let mut height = anchor;
+        while height < head.number {
+            let end = (height as u64 + HASH_PAGE as u64).min(head.number as u64) as u32;
+            let numbers: Vec<u32> = (height..end).collect();
+            for (offset, answer) in self.block_hashes_at(&numbers)?.into_iter().enumerate() {
+                let number = height + offset as u32;
+                let hash = answer.ok_or_else(|| {
+                    anyhow!(
+                        "the chain has no block at height {number}, which is inside the range \
+                         {anchor} to {} this node reports a head above. A header walk cannot skip \
+                         a height: the chain it authenticates is the one with no gaps in it. \
+                         Nothing has been changed.",
+                        head.number
+                    )
+                })?;
+                hashes[(number - anchor) as usize] = hash;
+            }
+            height = end;
+        }
+
+        // The headers, fetched by hash, many calls to a request.
+        let mut raws: Vec<RawHeader> = Vec::with_capacity(span + 1);
+        for page in hashes.chunks(HEADER_BATCH) {
+            let calls: Vec<(&str, Value)> = page
+                .iter()
+                .map(|hash| ("chain_getHeader", json!([hex_0x(hash)])))
+                .collect();
+            for answer in self.rpc.call_many(&calls)? {
+                raws.push(
+                    serde_json::from_value(answer)
+                        .context("chain_getHeader returned a header this wallet cannot read")?,
+                );
+            }
+        }
+
+        let mut blocks = Vec::with_capacity(span + 1);
+        for (offset, raw) in raws.iter().enumerate() {
+            let number = anchor + offset as u32;
+            let hash = hashes[offset];
             let claimed = raw.block_number()?;
             if claimed != number {
                 bail!(
@@ -312,22 +421,36 @@ impl<'a> Chain<'a> {
                     hex::encode(hash)
                 );
             }
+            let parent_hash = decode_hash(&raw.parent_hash)?;
+            if offset > 0 && parent_hash != hashes[offset - 1] {
+                bail!(
+                    "this node gave {} as the hash of block {} and the header it served for \
+                     block {number} names {} as its parent. The hashes are only addresses and \
+                     the parent links are what make the range a chain, so a hash answered for a \
+                     number the header chain does not carry is refused. Nothing has been changed.",
+                    hex::encode(hashes[offset - 1]),
+                    number - 1,
+                    hex::encode(parent_hash)
+                );
+            }
             blocks.push(VerifiedBlock {
                 number,
                 hash,
-                parent_hash: decode_hash(&raw.parent_hash)?,
+                parent_hash,
                 zk_tree_root: Digest::from_bytes(&decode_hash(&raw.zk_tree_root)?).map_err(
                     |_| anyhow!("block {number}'s zkTreeRoot is not a canonical digest"),
                 )?,
                 author_label: raw.author_label()?,
             });
-            if number == anchor {
-                break;
-            }
-            hash = decode_hash(&raw.parent_hash)?;
-            number -= 1;
         }
-        blocks.reverse();
+        if blocks.len() != span + 1 {
+            bail!(
+                "this node answered {} headers for blocks {anchor} to {}. Nothing has been \
+                 changed.",
+                blocks.len(),
+                head.number
+            );
+        }
         Ok(blocks)
     }
 
@@ -1103,6 +1226,25 @@ const LEAF_HASH_BATCH: usize = 256;
 
 /// Keys read per `state_getKeysPaged` call.
 const KEY_PAGE: usize = 1000;
+
+/// Block numbers per `chain_getBlockHash` call.
+///
+/// The same width as the wide leaf page, and for the same reason: the answer
+/// is 32 bytes a number, so a page is about 16 KiB of hex either way. The
+/// browser wallet's `HASH_PAGE` is this number.
+pub const HASH_PAGE: usize = 256;
+
+/// `chain_getHeader` calls per JSON-RPC batch array.
+///
+/// A header walk is latency bound and not bandwidth bound: the work per block
+/// is one hash and one comparison, and the wait is the round trip. Sixty-four
+/// headers is about 40 KiB of answer, which is one comfortable response, and
+/// it is the same number the leaf scan already reads per storage query.
+///
+/// The browser wallet pipelines the same walk differently, with 32 JSON-RPC
+/// ids outstanding on its one socket, because a `WsProvider` multiplexes and
+/// has no batch array. Both come to a handful of round trips per chunk.
+pub const HEADER_BATCH: usize = 64;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TreeState {

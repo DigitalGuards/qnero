@@ -1,10 +1,19 @@
 //! The JSON-RPC client.
 //!
-//! Blocking HTTP, one request per call. The node serves JSON-RPC over both
-//! HTTP and WebSocket on the same port, and nothing this wallet does needs a
-//! subscription: inclusion is polled, because an unsigned settlement drops out
-//! of the pool after five blocks and has to be resubmitted, and waiting on it
-//! achieves nothing (`docs/CIRCUIT.md` section 9.10).
+//! Blocking HTTP. The node serves JSON-RPC over both HTTP and WebSocket on the
+//! same port, and nothing this wallet does needs a subscription: inclusion is
+//! polled, because an unsigned settlement drops out of the pool after five
+//! blocks and has to be resubmitted, and waiting on it achieves nothing
+//! (`docs/CIRCUIT.md` section 9.10).
+//!
+//! One request per call, except where a caller has a list of calls and no use
+//! for the answers one at a time. [`RpcClient::call_many`] sends those as a
+//! JSON-RPC batch array, which this chain's node accepts: a header walk is
+//! latency bound, and 64 headers in one request is one round trip where 64
+//! requests is 64. A node that does not take batch arrays is an ordinary
+//! answer and not a refusal to be reported, so the first batch a process sends
+//! is also the probe, and a node that does not take it gets one request per
+//! call from then on.
 
 use std::time::Duration;
 
@@ -15,10 +24,25 @@ use serde_json::{json, Value};
 /// Default endpoint of a `--dev` node.
 pub const DEFAULT_NODE_URL: &str = "http://127.0.0.1:9944";
 
+/// Whether this node takes JSON-RPC batch arrays, as far as this process knows.
+///
+/// Asked once, by sending one. `Unknown` until the first batch goes out,
+/// `Refused` after one comes back as anything but an array of answers, and
+/// there is no way back to `Taken` inside a process: a node does not grow the
+/// feature mid-command, and re-probing would pay the failed round trip again
+/// on every page of a walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchSupport {
+    Unknown,
+    Taken,
+    Refused,
+}
+
 pub struct RpcClient {
     url: String,
     agent: ureq::Agent,
     next_id: std::cell::Cell<u64>,
+    batches: std::cell::Cell<BatchSupport>,
 }
 
 impl std::fmt::Debug for RpcClient {
@@ -37,7 +61,13 @@ impl RpcClient {
             url: url.to_string(),
             agent,
             next_id: std::cell::Cell::new(1),
+            batches: std::cell::Cell::new(BatchSupport::Unknown),
         }
+    }
+
+    /// What this process has learned about batch arrays on this node.
+    pub fn batch_support(&self) -> BatchSupport {
+        self.batches.get()
     }
 
     pub fn url(&self) -> &str {
@@ -75,6 +105,116 @@ impl RpcClient {
         let result = self.call(method, params)?;
         serde_json::from_value(result)
             .with_context(|| format!("{method} returned a result this wallet cannot read"))
+    }
+
+    /// Many calls in one JSON-RPC batch array, answered in the order given.
+    ///
+    /// The whole point is the round trip: a header walk over a thousand blocks
+    /// is a thousand requests one after another otherwise, and against a node
+    /// behind a CDN the wide-area round trip is the entire cost. Sixty-four
+    /// calls in one array is one of them.
+    ///
+    /// A node that will not take an array is answered around rather than
+    /// refused: this falls back to one request per call and records that, so
+    /// the rest of the command does not pay a failed batch per page. What is
+    /// **not** a refusal to batch is an error inside a batch that came back as
+    /// an array: that is the node answering one of the calls, and it is
+    /// returned as an error the way a single call's would be.
+    ///
+    /// The answers are matched to the calls by JSON-RPC id, because a batch
+    /// answer may arrive in any order and this chain's node does reorder them.
+    pub fn call_many(&self, calls: &[(&str, Value)]) -> Result<Vec<Value>> {
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
+        if calls.len() == 1 {
+            let (method, params) = &calls[0];
+            return Ok(vec![self.call(method, params.clone())?]);
+        }
+        if self.batches.get() != BatchSupport::Refused {
+            match self.try_batch(calls) {
+                Ok(Some(values)) => {
+                    self.batches.set(BatchSupport::Taken);
+                    return Ok(values);
+                }
+                Ok(None) => self.batches.set(BatchSupport::Refused),
+                Err(error) => return Err(error),
+            }
+        }
+        calls
+            .iter()
+            .map(|(method, params)| self.call(method, params.clone()))
+            .collect()
+    }
+
+    /// One batch attempt. `Ok(None)` is a node that does not take batches.
+    fn try_batch(&self, calls: &[(&str, Value)]) -> Result<Option<Vec<Value>>> {
+        let first = self.next_id.get();
+        self.next_id.set(first + calls.len() as u64);
+        let body = Value::Array(
+            calls
+                .iter()
+                .enumerate()
+                .map(|(offset, (method, params))| {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": first + offset as u64,
+                        "method": method,
+                        "params": params,
+                    })
+                })
+                .collect(),
+        );
+        let response = match self
+            .agent
+            .post(&self.url)
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string())
+        {
+            Ok(response) => response,
+            // A status this client will not read, which is what a front end
+            // that rejects an array body answers with. The caller is about to
+            // make the same calls one at a time, so an endpoint that is simply
+            // unreachable fails there with its own message.
+            Err(_) => return Ok(None),
+        };
+        let text = match response.into_string() {
+            Ok(text) => text,
+            Err(_) => return Ok(None),
+        };
+        let parsed: Value = match serde_json::from_str(&text) {
+            Ok(parsed) => parsed,
+            Err(_) => return Ok(None),
+        };
+        let Some(answers) = parsed.as_array() else {
+            return Ok(None);
+        };
+        if answers.len() != calls.len() {
+            return Ok(None);
+        }
+        let mut by_id: std::collections::HashMap<u64, &Value> = std::collections::HashMap::new();
+        for answer in answers {
+            let Some(id) = answer.get("id").and_then(Value::as_u64) else {
+                return Ok(None);
+            };
+            by_id.insert(id, answer);
+        }
+        let mut out = Vec::with_capacity(calls.len());
+        for (offset, (method, _)) in calls.iter().enumerate() {
+            let Some(answer) = by_id.get(&(first + offset as u64)) else {
+                return Ok(None);
+            };
+            if let Some(error) = answer.get("error") {
+                bail!("{method} returned an RPC error: {error}");
+            }
+            out.push(
+                answer
+                    .get("result")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("{method} returned no result field"))?,
+            );
+        }
+        Ok(Some(out))
     }
 
     /// `state_getStorage`, decoded from `0x`-hex. `None` is an absent key.

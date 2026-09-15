@@ -24,7 +24,15 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ChainContext } from '../src/chain/api';
-import { fetchLeafHashes, fetchLeaves, fetchTreeShape, fetchTreeTotals } from '../src/chain/reads';
+import {
+  fetchHeaderRange,
+  fetchLeafHashes,
+  fetchLeaves,
+  fetchTreeShape,
+  fetchTreeTotals,
+  HEADER_SPAN_LIMIT,
+} from '../src/chain/reads';
+import { HEADER_WALK_LIMIT } from '../src/wallet/sync';
 import { waitForInclusion } from '../src/chain/submit';
 
 const AT = `0x${'aa'.repeat(32)}`;
@@ -503,5 +511,156 @@ describe('waiting for a settlement to land', () => {
     // Asked twice: once for the null, once for the answer. A cursor that
     // advanced past the null would have asked once and waited out the timeout.
     expect(asked()).toBe(2);
+  });
+});
+
+/**
+ * A node that serves a header chain, with the two ways to cost a walk a round
+ * trip built in.
+ *
+ * Every answer is deferred by a microtask hop before it resolves, and the
+ * headers come back in the order the promises settle rather than the order
+ * they were asked for, because that is what a pipelined walk gets: 32 requests
+ * are outstanding on one socket and the node answers them as it pleases. A
+ * walk that assembled the range by arrival would build a different chain every
+ * run.
+ */
+function headerNode(options: {
+  head: number;
+  /** Answers a list of numbers with one hash, the way an older node does. */
+  refuseHashLists?: boolean;
+  /** A height whose header carries a number that is not the one asked for. */
+  misnumbered?: number;
+  /** A height whose header names a parent that is not the hash below it. */
+  brokenParent?: number;
+}): {
+  context: ChainContext;
+  calls: { method: string; params: unknown[] }[];
+  /** The heights this node answered a header for, in the order it answered. */
+  answered: number[];
+} {
+  const calls: { method: string; params: unknown[] }[] = [];
+  const hashAt = (height: number): string => `0x${String(height).padStart(64, '0')}`;
+  const headerAt = (height: number): unknown => ({
+    parentHash:
+      options.brokenParent === height ? `0x${'ff'.repeat(32)}` : hashAt(Math.max(height - 1, 0)),
+    number: `0x${(options.misnumbered === height ? height + 1 : height).toString(16)}`,
+    stateRoot: `0x${'22'.repeat(32)}`,
+    extrinsicsRoot: `0x${'33'.repeat(32)}`,
+    zkTreeRoot: `0x${'44'.repeat(32)}`,
+    digest: { logs: [] },
+  });
+  const answered: number[] = [];
+  const send = async <T,>(method: string, params: unknown[]): Promise<T> => {
+    calls.push({ method, params });
+    // One hop, so a caller with many requests in flight has them all issued
+    // before any of them resolves.
+    await Promise.resolve();
+    if (method === 'chain_getBlockHash') {
+      const asked = params[0] as number | number[] | undefined;
+      if (Array.isArray(asked)) {
+        if (options.refuseHashLists === true) {
+          return hashAt(asked[0] ?? options.head) as T;
+        }
+        return asked.map((height) => hashAt(height)) as T;
+      }
+      return hashAt(asked ?? options.head) as T;
+    }
+    if (method === 'chain_getHeader') {
+      const height = Number(String(params[0]).replace(/^0x0*/, '') || '0');
+      // Deliberately out of order. A node with 32 requests outstanding answers
+      // them as it pleases, and a walk that assembled the range by arrival
+      // would build a different chain on every run.
+      for (let hop = 0; hop <= (height * 7) % 11; hop += 1) {
+        await Promise.resolve();
+      }
+      answered.push(height);
+      return headerAt(height) as T;
+    }
+    throw new Error(`this fixture answers no ${method}`);
+  };
+  return { context: { send } as unknown as ChainContext, calls, answered };
+}
+
+describe('the header walk', () => {
+  const hashAt = (height: number): string => `0x${String(height).padStart(64, '0')}`;
+
+  it('is climbed in the same chunk both wallets use', () => {
+    // The read layer bounds the span for itself, because it now holds the
+    // chunk it is fetching, and `wallet/sync.ts` is what chunks a longer
+    // range. Two numbers for one thing is a walk that allocates more than the
+    // caller thinks it asked for.
+    expect(HEADER_SPAN_LIMIT).toBe(HEADER_WALK_LIMIT);
+  });
+
+  it('reads the hashes as a list and the headers with many in flight', async () => {
+    const { context, calls, answered } = headerNode({ head: 300 });
+    const seen: number[] = [];
+    await fetchHeaderRange(context, 0, { number: 300, hash: hashAt(300) }, (header) => {
+      seen.push(Number(BigInt(header.number)));
+    });
+    // Ascending, whatever order the answers landed in, and this node answered
+    // them in a different order from the one they were asked in.
+    expect(answered).not.toEqual([...answered].sort((a, b) => a - b));
+    expect(seen).toEqual(Array.from({ length: 301 }, (_value, index) => index));
+    // 300 heights below the top, paged at 256: two calls, not three hundred.
+    // The top's own hash is the caller's and is never asked for.
+    const hashCalls = calls.filter((call) => call.method === 'chain_getBlockHash');
+    expect(hashCalls.length).toBe(2);
+    expect((hashCalls[0]?.params[0] as number[]).length).toBe(256);
+    expect((hashCalls[1]?.params[0] as number[]).length).toBe(44);
+    expect(calls.filter((call) => call.method === 'chain_getHeader').length).toBe(301);
+  });
+
+  it('asks one height at a time when the node will not answer a list', async () => {
+    const { context, calls } = headerNode({ head: 4, refuseHashLists: true });
+    const seen: number[] = [];
+    await fetchHeaderRange(context, 0, { number: 4, hash: hashAt(4) }, (header) => {
+      seen.push(Number(BigInt(header.number)));
+    });
+    expect(seen).toEqual([0, 1, 2, 3, 4]);
+    // The list, then one call per height it could not read as a list. Nothing
+    // about the answer is trusted differently: the hashes are addresses and
+    // the parent links are what the walk checks.
+    const hashCalls = calls.filter((call) => call.method === 'chain_getBlockHash');
+    expect(hashCalls.length).toBe(5);
+    expect(hashCalls.slice(1).map((call) => call.params[0])).toEqual([0, 1, 2, 3]);
+  });
+
+  it('refuses a header answered for a height that is not its own', async () => {
+    const { context } = headerNode({ head: 6, misnumbered: 3 });
+    await expect(
+      fetchHeaderRange(context, 0, { number: 6, hash: hashAt(6) }, () => undefined),
+    ).rejects.toThrow(/answered a header numbered 4 for the hash it gave as block 3/);
+  });
+
+  it('refuses a parent link the hashes it answered do not carry', async () => {
+    const { context } = headerNode({ head: 6, brokenParent: 4 });
+    await expect(
+      fetchHeaderRange(context, 0, { number: 6, hash: hashAt(6) }, () => undefined),
+    ).rejects.toThrow(/names ff+ as its parent/);
+  });
+
+  it('hands the caller nothing at all when it refuses', async () => {
+    const { context } = headerNode({ head: 6, brokenParent: 4 });
+    const seen: number[] = [];
+    await expect(
+      fetchHeaderRange(context, 0, { number: 6, hash: hashAt(6) }, (header) => {
+        seen.push(Number(BigInt(header.number)));
+      }),
+    ).rejects.toThrow();
+    expect(seen).toEqual([]);
+  });
+
+  it('refuses a span longer than one chunk', async () => {
+    const { context } = headerNode({ head: HEADER_SPAN_LIMIT + 1 });
+    await expect(
+      fetchHeaderRange(
+        context,
+        0,
+        { number: HEADER_SPAN_LIMIT + 1, hash: hashAt(HEADER_SPAN_LIMIT + 1) },
+        () => undefined,
+      ),
+    ).rejects.toThrow(/one walk carries at most 1024/);
   });
 });

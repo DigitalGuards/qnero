@@ -128,19 +128,25 @@ export interface SyncChain {
   >;
   usedNullifiers(at: string, onProgress?: (seen: number) => void): Promise<Set<string>>;
   /**
-   * Every header from `anchor` up to `top`, walked downward by `parentHash`
-   * so the range is a chain rather than a list of answers, handed over one at
-   * a time as it is fetched.
+   * Every header from `anchor` up to `top`, verified as one chain and handed
+   * over one at a time in **ascending** order, `anchor` first.
+   *
+   * The read layer turns the heights into hashes with one `chain_getBlockHash`
+   * per page of 256 numbers and then fetches the headers by hash with many
+   * requests in flight, so a chunk costs a handful of round trips rather than
+   * one per block. What it verifies is what the descending walk verified: each
+   * header's own number is the height asked for, and each header names as its
+   * parent the hash this node answered for the height below it. See
+   * `chain/reads.ts`.
    *
    * A callback rather than an array: the caller climbs the whole range in
    * chunks of `HEADER_WALK_LIMIT` and holds one chunk at a time, where an
    * array of the range let a node's claimed head decide how much this page
    * allocates before a single leaf was read.
    *
-   * The headers arrive **descending**, `top` first, because that is the order
-   * the parent links can be followed in. See `chain/reads.ts`. The caller
-   * rehashes every one of them and compares the bottom against a hash it
-   * already trusts.
+   * The caller rehashes every one of them and compares the bottom against a
+   * hash it already trusts, which is what makes the chunk a chain descending
+   * from something this wallet had before it asked.
    */
   headers(
     anchor: number,
@@ -512,8 +518,10 @@ function strip0x(hex: string): string {
  * climbed in chunks, each authenticated against the hash below it and
  * checkpointed before the next is read, and only one chunk is ever resident.
  *
- * The same number as the command-line wallet's `HEADER_WALK_LIMIT`, and
- * `docs/BENCH.md` carries the per-block cost beside it.
+ * The same number as the command-line wallet's `HEADER_WALK_LIMIT` and as the
+ * read layer's `HEADER_SPAN_LIMIT`, which refuses a longer span for itself
+ * because the walk holds the chunk it is fetching. `tests/chain.test.ts` holds
+ * the two equal and `docs/BENCH.md` carries the per-block cost beside them.
  */
 export const HEADER_WALK_LIMIT = 1024;
 
@@ -582,8 +590,8 @@ export async function authenticateLeaves(
     const topHash =
       top === head.number ? strip0x(head.hash) : strip0x(await hashAtHeightOrRefuse(chain, top));
 
-    // The chunk, streamed in descending order and reversed once. Only this
-    // many headers are ever resident.
+    // The chunk, ascending, `bottomNumber` first. Only this many headers are
+    // ever resident.
     const raw: RawChainHeader[] = [];
     await chain.headers(
       bottomNumber,
@@ -595,14 +603,15 @@ export async function authenticateLeaves(
         // Counted from where the walk stands rather than from a running sum
         // of the chunks. Each chunk re-fetches the block it stands on, so
         // adding chunk lengths counted every boundary twice and a multi-chunk
-        // sync reported more headers than the range holds.
+        // sync reported more headers than the range holds. The count is of
+        // headers answered rather than of heights reached, because the walk
+        // keeps many requests in flight and they land out of order.
         progress(
           'headers',
           `${bottomNumber - trusted.number + done} of ${head.number - trusted.number + 1} block headers`,
         );
       },
     );
-    raw.reverse();
     if (raw.length !== top - bottomNumber + 1) {
       throw new NodeRefusedError(
         `this node answered ${raw.length} headers for blocks ${bottomNumber} to ${top}. ` +

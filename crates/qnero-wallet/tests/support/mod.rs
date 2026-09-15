@@ -128,6 +128,39 @@ pub struct NodeState {
     /// label included, and omitting it is the cheapest way to try: no rule of
     /// either wallet may rest on a label being present.
     pub unlabelled: BTreeSet<u32>,
+    /// Heights whose header is built with a block number that is not the
+    /// height it sits at.
+    ///
+    /// The header still hashes to its own name, so this is not a header served
+    /// with a field changed afterwards: it is a real header of one height
+    /// answered for another, which is the lie a walk that fetches by height
+    /// rather than by parent link has to catch for itself.
+    pub renumbered_headers: BTreeMap<u32, u32>,
+    /// Heights whose header is built naming a parent that is not the block
+    /// below it.
+    ///
+    /// The header hashes to its own name and carries the number it sits at, so
+    /// every check but one passes: what it is, is a block out of a second
+    /// chain spliced into this one. The descending walk could not be shown
+    /// this at all, because it fetched each header by the hash its child
+    /// named; the pipelined walk fetches by height and checks the parent
+    /// links instead.
+    pub spliced_parents: BTreeSet<u32>,
+    /// Set when this node answers a JSON-RPC batch array with an error rather
+    /// than a list of answers.
+    ///
+    /// The header walk sends its `chain_getHeader` calls as a batch, and a node
+    /// that will not take one is an ordinary answer rather than a refusal to
+    /// report: the wallet falls back to one request per call. This is what
+    /// drives that path.
+    pub refuse_batches: bool,
+    /// Set when this node answers `chain_getBlockHash` over a list of numbers
+    /// with a single hash rather than a list.
+    ///
+    /// The same shape of fallback for the other half of the walk. An older
+    /// node answers the first number and nothing else, which is a list this
+    /// wallet cannot read as one and is not a lie about any height.
+    pub refuse_hash_lists: bool,
     /// The chain this node's storage implies, kept until that storage moves.
     ///
     /// [`ChainView::build`] folds the tree and hashes a header per block, and
@@ -145,11 +178,22 @@ impl NodeState {
         self.requests.iter().any(|body| body.contains(needle))
     }
 
+    /// How many calls of this method the wallet has made.
+    ///
+    /// Counted per call and not per request body, because a request body may
+    /// be a JSON-RPC batch array carrying many of them: the header walk sends
+    /// sixty-four `chain_getHeader` calls in one.
     pub fn calls(&self, method: &str) -> usize {
+        let needle = format!("\"method\":\"{method}\"");
         self.requests
             .iter()
-            .filter(|body| body.contains(&format!("\"method\":\"{method}\"")))
-            .count()
+            .map(|body| body.matches(needle.as_str()).count())
+            .sum()
+    }
+
+    /// How many HTTP requests the wallet has made, batch arrays counting once.
+    pub fn round_trips(&self) -> usize {
+        self.requests.len()
     }
 
     pub fn put_storage(&mut self, key: &[u8], value: &[u8]) {
@@ -290,9 +334,22 @@ impl ChainView {
             } else {
                 vec![format!("0x{}", hex::encode(pre_runtime_item(&label)))]
             };
+            // Two splices, each applied before the header is hashed, so the
+            // header still hashes to its own name and the lie is in what it
+            // says rather than in the bytes.
+            if state.spliced_parents.contains(&number) {
+                parent = qnero_wallet::scale::blake2_256(
+                    &[b"a second chain", &number.to_le_bytes()[..]].concat(),
+                );
+            }
+            let claimed = state
+                .renumbered_headers
+                .get(&number)
+                .copied()
+                .unwrap_or(number);
             let header = HeaderInputs::new(
                 Digest::from_bytes(&parent).expect("a canonical parent"),
-                number,
+                claimed,
                 state_root,
                 [0x22u8; 32],
                 root,
@@ -302,7 +359,7 @@ impl ChainView {
             let hash = header.block_hash().to_bytes();
             headers.push(json!({
                 "parentHash": format!("0x{}", hex::encode(parent)),
-                "number": format!("0x{number:x}"),
+                "number": format!("0x{claimed:x}"),
                 "stateRoot": format!("0x{}", hex::encode(state_root)),
                 "extrinsicsRoot": format!("0x{}", hex::encode([0x22u8; 32])),
                 "zkTreeRoot": format!("0x{}", root.to_hex()),
@@ -406,17 +463,54 @@ fn serve(mut stream: TcpStream, state: Arc<Mutex<NodeState>>) -> std::io::Result
     let body = String::from_utf8_lossy(&body).into_owned();
 
     let request: Value = serde_json::from_str(&body).expect("the wallet sends JSON");
-    let method = request["method"].as_str().unwrap_or_default().to_string();
-    let params = request["params"].clone();
-    let id = request["id"].clone();
 
     let response = {
         let mut state = state.lock().expect("the node state is not poisoned");
         state.requests.push(body.clone());
-        match dispatch(&mut state, &method, &params) {
-            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-            Err(message) => {
-                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": message}})
+        match request.as_array() {
+            // A JSON-RPC batch array. Answered as an array, in the order it
+            // arrived, which is one of the two orders a real node may answer
+            // in: the wallet matches answers to calls by id and not by
+            // position, so `answer_batch` reverses the list to keep it honest.
+            Some(calls) if !state.refuse_batches => {
+                let mut answers: Vec<Value> = calls
+                    .iter()
+                    .map(|call| {
+                        let method = call["method"].as_str().unwrap_or_default().to_string();
+                        let params = call["params"].clone();
+                        let id = call["id"].clone();
+                        match dispatch(&mut state, &method, &params) {
+                            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                            Err(message) => json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {"code": -32000, "message": message},
+                            }),
+                        }
+                    })
+                    .collect();
+                answers.reverse();
+                Value::Array(answers)
+            }
+            // A node that does not take batch arrays. This is what one
+            // answers: one error object, no id, and no list.
+            Some(_) => json!({
+                "jsonrpc": "2.0",
+                "id": Value::Null,
+                "error": {"code": -32600, "message": "batch requests are not supported"},
+            }),
+            None => {
+                let method = request["method"].as_str().unwrap_or_default().to_string();
+                let params = request["params"].clone();
+                let id = request["id"].clone();
+                match dispatch(&mut state, &method, &params) {
+                    Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    Err(message) => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {"code": -32000, "message": message},
+                    }),
+                }
             }
         }
     };
@@ -453,14 +547,37 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
             Ok(header)
         }
         "chain_getBlockHash" => {
+            let one = |state: &NodeState, number: u32| -> Value {
+                if number > state.head_number || state.missing_hashes.contains(&number) {
+                    Value::Null
+                } else {
+                    json!(format!("0x{}", hex::encode(state.hash_at(number))))
+                }
+            };
+            // A list of numbers is answered with a list of hashes, which is
+            // what Substrate does and what the header walk pages at 256. A
+            // node with `refuse_hash_lists` answers the first number alone,
+            // which is what an implementation that reads the parameter as one
+            // number does, and the wallet then asks one height at a time.
+            if let Some(numbers) = params.get(0).and_then(Value::as_array) {
+                let heights: Vec<u32> = numbers
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|number| number as u32)
+                    .collect();
+                if state.refuse_hash_lists {
+                    let first = heights.first().copied().unwrap_or(state.head_number);
+                    return Ok(one(state, first));
+                }
+                return Ok(Value::Array(
+                    heights.iter().map(|number| one(state, *number)).collect(),
+                ));
+            }
             let number = params
                 .get(0)
                 .and_then(Value::as_u64)
                 .unwrap_or(u64::from(state.head_number)) as u32;
-            if number > state.head_number || state.missing_hashes.contains(&number) {
-                return Ok(Value::Null);
-            }
-            Ok(json!(format!("0x{}", hex::encode(state.hash_at(number)))))
+            Ok(one(state, number))
         }
         "chain_getBlock" => {
             let chain = state.chain();

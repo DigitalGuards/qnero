@@ -121,30 +121,113 @@ export async function headerAt(context: ChainContext, hash: string): Promise<unk
 }
 
 /**
- * Every header from `anchor` up to `top`, walked **downward** by `parentHash`,
- * handed to a callback one at a time.
+ * How many block numbers one `chain_getBlockHash` carries.
  *
- * Downward, and by the parent link, is what makes the range a chain rather
- * than a list of answers: each header is fetched by the hash its child names,
- * so one trusted hash at the bottom authenticates every field of every header
- * above it once the caller rehashes them. That is where a block's
- * `zkTreeRoot` and its pre-runtime author label come from, and those are what
- * decide a leaf's kind.
+ * Substrate's `chain_getBlockHash` takes a list of numbers and answers a list
+ * of hashes, which is what turns the hash half of a header walk from one round
+ * trip per block into one per page. 256 is the width the wide leaf page
+ * already uses (`LEAF_HASH_BATCH`): the answer is 32 bytes a number, so a page
+ * is about 16 KiB of hex.
+ */
+export const HASH_PAGE = 256;
+
+/**
+ * How many `chain_getHeader` requests are outstanding at once.
  *
- * One `chain_getHeader` per block and no `chain_getBlockHash` at all, because
- * each header names its parent. It asks nothing about this wallet: every
- * wallet on the chain reads the same headers.
+ * The provider multiplexes JSON-RPC ids over the one socket, so this is a
+ * count of ids in flight rather than of connections: the wallet opens no
+ * second socket and contacts nothing else. What it buys is the round trip.
+ * A header walk is latency bound, not bandwidth bound, and against a node
+ * behind a CDN one sequential walk pays the wide-area round trip once per
+ * block: a year of 120 s blocks is 262 000 of them.
  *
- * A callback rather than an array, and nothing accumulates here: `top.number`
- * is a height the caller learned from the node, and building an array of the
- * range let one answer decide how much this page allocates. `wallet/sync.ts`
- * climbs a longer range in chunks of `HEADER_WALK_LIMIT` blocks and holds one
- * chunk at a time.
+ * 32 rather than the whole chunk. Every answer is resident until the walk
+ * verifies the range, and a node answers a request it was sent whether or not
+ * the wallet is ready for it.
+ */
+export const HEADERS_IN_FLIGHT = 32;
+
+/**
+ * The longest span one call walks, which is the caller's chunk.
  *
- * The headers arrive **descending**, `top` first, which is the order the
- * parent links can be followed in. The caller must rehash every one and
- * compare `anchor`'s against a hash it already trusts; `wallet/sync.ts` does
- * both.
+ * `wallet/sync.ts` climbs a longer range in chunks of `HEADER_WALK_LIMIT`,
+ * the same number, and the two are held equal by a test. The bound is here as
+ * well because this function now holds the chunk: `top.number` is a height the
+ * node answers with, and a walk that allocated one hash and one header per
+ * unit of it let one answer decide how much the page allocates before a leaf
+ * was read.
+ */
+export const HEADER_SPAN_LIMIT = 1024;
+
+/**
+ * The canonical hashes at a list of heights, in the order asked for.
+ *
+ * One request for the whole list where the node takes one, and one request per
+ * height where it does not. A node that answers a list with anything but a
+ * list of the right length is an older or a different implementation, not a
+ * liar: nothing is decided from these hashes on their own. They are addresses,
+ * and what makes the range a chain is the parent links checked over the
+ * headers they fetch.
+ *
+ * `null` is an ordinary answer for a height this node has no block at.
+ */
+export async function blockHashesAt(
+  context: ChainContext,
+  numbers: readonly number[],
+): Promise<(string | null)[]> {
+  if (numbers.length === 0) {
+    return [];
+  }
+  const listed = await context.send<unknown>('chain_getBlockHash', [[...numbers]]);
+  if (Array.isArray(listed) && listed.length === numbers.length) {
+    return listed.map((hash) => (typeof hash === 'string' ? hash : null));
+  }
+  const out: (string | null)[] = [];
+  for (const number of numbers) {
+    out.push(await blockHashAt(context, number));
+  }
+  return out;
+}
+
+/**
+ * Every header from `anchor` up to `top`, verified as one chain and handed to
+ * a callback in ascending order.
+ *
+ * The walk used to descend by `parentHash`, one `chain_getHeader` at a time,
+ * each fetched by the hash its child named. That is one round trip per block
+ * with nothing else in flight, and against a node behind a CDN the round trip
+ * is the whole cost: at the public chain's 120 s target a year of history is
+ * 262 000 of them in series, which is the "39 of 250 block headers" a person
+ * watches crawl.
+ *
+ * So the two halves are separated and both are pipelined. The heights are
+ * turned into hashes with `chain_getBlockHash` over a list of numbers, paged
+ * at [`HASH_PAGE`], and the headers are then fetched by hash with
+ * [`HEADERS_IN_FLIGHT`] requests outstanding on the one socket.
+ *
+ * **Exactly what the sequential walk verified is verified here, locally, and
+ * nothing about which values are trusted changes.** The hashes are the node's
+ * claim and decide nothing on their own:
+ *
+ * - every header's own `number` is the height it was asked for, or the walk is
+ *   refused;
+ * - every header names as its `parentHash` the hash this node answered for the
+ *   height below it, or the walk is refused. That is the parent link the
+ *   descending walk followed, checked rather than followed, so a hash answered
+ *   for a number the header chain does not carry is a lie and is refused;
+ * - and the caller rehashes every header from its own preimage and compares
+ *   against the hash its child names, `anchor`'s against a hash it already
+ *   trusts. `wallet/sync.ts` does that, unchanged.
+ *
+ * Composed, those are the same equalities the descending walk produced: the
+ * recomputed hash of each header is the hash the header above it names as its
+ * parent, down to a hash the wallet already trusted. No proof of work is
+ * verified here and none was before; `docs/WALLET.md` carries that bound.
+ *
+ * The headers arrive **ascending**, `anchor` first, which is the order they
+ * are verified in and the order the caller folds leaves in. They are emitted
+ * only after the whole range checks out, so a refusal hands the caller
+ * nothing.
  */
 export async function fetchHeaderRange(
   context: ChainContext,
@@ -156,10 +239,86 @@ export async function fetchHeaderRange(
   if (anchor > top.number) {
     throw new Error(`a header walk was asked for block ${anchor} down from block ${top.number}`);
   }
-  let hash = top.hash;
-  let seen = 0;
-  for (let number = top.number; ; number -= 1) {
-    const header = parseRawHeader(await context.send<unknown>('chain_getHeader', [hash]));
+  const span = top.number - anchor;
+  if (span > HEADER_SPAN_LIMIT) {
+    throw new Error(
+      `a header walk was asked for blocks ${anchor} to ${top.number}, which is ${span} blocks ` +
+        `where one walk carries at most ${HEADER_SPAN_LIMIT}. The head is a number this node ` +
+        'answers with and this walk holds one header per unit of it, so the range is climbed in ' +
+        'chunks rather than in one allocation. Nothing has been changed.',
+    );
+  }
+
+  // The hashes the headers are fetched by. The top's is the caller's, which is
+  // the head itself or a hash the caller is about to prove by walking down to
+  // one it already trusts, so it is never asked for again.
+  const hashes: string[] = new Array<string>(span + 1);
+  hashes[span] = top.hash;
+  for (let start = anchor; start < top.number; start += HASH_PAGE) {
+    const end = Math.min(start + HASH_PAGE, top.number);
+    const numbers: number[] = [];
+    for (let number = start; number < end; number += 1) {
+      numbers.push(number);
+    }
+    const page = await blockHashesAt(context, numbers);
+    for (let index = 0; index < numbers.length; index += 1) {
+      const hash = page[index];
+      const number = numbers[index] ?? 0;
+      if (typeof hash !== 'string') {
+        throw new Error(
+          `this node has no block at height ${number}, which is inside the range ${anchor} to ` +
+            `${top.number} it reports a head above. A header walk cannot skip a height: the ` +
+            'chain it authenticates is the one with no gaps in it. Nothing has been changed.',
+        );
+      }
+      hashes[number - anchor] = hash;
+    }
+  }
+
+  // The headers, with many requests outstanding at once. Each worker takes the
+  // next height nobody has claimed, so the answers land out of order and the
+  // range is assembled by index rather than by arrival.
+  const headers: (RawChainHeader | undefined)[] = new Array<RawChainHeader | undefined>(span + 1);
+  let next = 0;
+  let done = 0;
+  let stop = false;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      if (stop) {
+        return;
+      }
+      const slot = next;
+      next += 1;
+      if (slot > span) {
+        return;
+      }
+      try {
+        headers[slot] = parseRawHeader(
+          await context.send<unknown>('chain_getHeader', [hashes[slot]]),
+        );
+      } catch (error) {
+        // One refusal ends the walk. The requests already in flight are
+        // answered and dropped: a node answers what it was sent whatever this
+        // page does with it.
+        stop = true;
+        throw error;
+      }
+      done += 1;
+      onProgress?.(done);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(HEADERS_IN_FLIGHT, span + 1) }, () => worker()),
+  );
+
+  for (let offset = 0; offset <= span; offset += 1) {
+    const header = headers[offset];
+    const number = anchor + offset;
+    if (header === undefined) {
+      throw new Error(
+        `this node answered no header for block ${number}. Nothing has been changed.`,
+      );
+    }
     const claimed = Number(BigInt(header.number));
     if (claimed !== number) {
       throw new Error(
@@ -169,13 +328,22 @@ export async function fetchHeaderRange(
           'changed.',
       );
     }
-    onHeader(header);
-    seen += 1;
-    onProgress?.(seen);
-    if (number === anchor) {
-      break;
+  }
+  for (let offset = 0; offset < span; offset += 1) {
+    const child = headers[offset + 1];
+    const wanted = normaliseHash(hashes[offset] ?? '');
+    if (child === undefined || normaliseHash(child.parentHash) !== wanted) {
+      throw new Error(
+        `this node gave ${wanted} as the hash of block ${anchor + offset} and the header it ` +
+          `served for block ${anchor + offset + 1} names ${normaliseHash(child?.parentHash ?? '')} as ` +
+          'its parent. The hashes are only addresses and the parent links are what make the ' +
+          'range a chain, so a hash answered for a number the header chain does not carry is ' +
+          'refused. Nothing has been changed.',
+      );
     }
-    hash = header.parentHash;
+  }
+  for (let offset = 0; offset <= span; offset += 1) {
+    onHeader(headers[offset] as RawChainHeader);
   }
 }
 
