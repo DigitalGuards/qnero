@@ -966,3 +966,237 @@ Pillars, in this order:
    encapsulation, nothing for Shor to break.
 4. Audited parts only. Standardized primitives and firm-audited circuits.
    No novel cryptography.
+
+
+## 12. Scaling and bloat: decisions (2026-09-15)
+
+Editor's record over three proposals and two reviews. Agreed review positions are taken;
+where they split, the proposal with fewer proven errors wins. Figures both reviews refuted
+are excluded: the 482 KB block, 5.3 tps, 3x weight headroom, 11.5 tps at 8 MiB, the 512 KB
+median floor, 175 B of public inputs.
+
+### 12.0 Corrected baseline
+
+| Quantity | Value |
+|---|---|
+| Normal block length (5 MiB x 0.75) | 3 932 160 B |
+| Wire cost per transfer | 3584 B ciphertext + 747 B proof = 4331 B |
+| Full public batch extrinsic (318 settlements) | 1 377 256 B |
+| Length ceiling | 908 settlements/block |
+| Weight of one full batch | 1.578 s (0.317 verify, 0.525 DB, 0.723 ct_digest) |
+| Weight ceiling | 893 to 907 settlements/block |
+| Throughput | about 7.5 transfers per second |
+
+**Length and declared weight bind at the same point.** Two full batches are 70 percent of the
+length limit and 3.16 s of the 4.5 s weight budget, so any capacity change is a two-constant
+change.
+
+### 12.1 Q1, the change output
+
+**Decision: keep two full-length ML-KEM-1024 ciphertexts per transfer. Reject the
+sender-derived short change output. Add a settlement rule that every output ciphertext is
+exactly the fixed length for its `crypto_suite` id.**
+
+| Option | Bytes/transfer | Effect |
+|---|---|---|
+| Two real outputs (today) | 4331 | change indistinguishable from payment |
+| Sender-derived change | 2987 | lengths differ, so the change flag leaks |
+| Chaff dummy of 1568 B | 4331 | zero saving |
+
+Cost: 1568 bytes per transfer kept forever, plus a few lines beside the `ct_digest`
+comparison. Leaks or forecloses nothing. The rule is only available while the bytes are in
+hand, at settlement.
+
+Dissent, resolved: a flat length rule would refuse a later ML-KEM-768 suite, so it is keyed
+to the suite id. The cryptography review refutes two supporting arguments, that ML-KEM
+ciphertexts are distinguishable from uniform (operator-first) and that the short variant
+breaks seed-only recovery (privacy-first).
+
+### 12.2 Q2, the note-channel KEM
+
+**Decision: keep ML-KEM-1024. Record open question 1 as closed in this pass.**
+
+| Axis | 1024 | 768 |
+|---|---|---|
+| Padded output pair | 3584 B | 2624 B |
+| Bech32m address | 2571 chars | about 1950 chars |
+
+Cost: 960 bytes per transfer. Forecloses nothing on the wire, since `crypto_suite` is already
+there, though the choice is one-shot in practice: two suites publish two ciphertext lengths,
+splitting the anonymity set by wallet, so a later 768 gets padded up and the saving
+evaporates.
+
+Recorded conditional: reopen at once if Q3 is ever rejected, because 768 then cuts permanent
+state 27 percent. Section 9 should state the real requirement, key privacy and ciphertext
+pseudorandomness under chosen-ciphertext attack.
+
+### 12.3 Q3, where the ciphertexts live
+
+**Decision: ciphertexts move out of the state trie into block bodies, authenticated against
+the header `extrinsicsRoot`. Ship `CiphertextRetentionBlocks = 0` with a no-op prune branch
+in the same bump.**
+
+| Layout | Raw state/transfer | State at 1 tps over ten years |
+|---|---|---|
+| Ciphertexts in state (today) | 4.1 to 4.3 KB | about 1.7 TB, unprunable |
+| Bodies; state keeps commitments and nullifiers | 600 to 750 B | about 100 GB pruned plus a 90-day body window |
+
+About 8 to 9x. Both reviews refuted operator-first's 15x, and the disk multiplier is
+unmeasured.
+
+Cost: archive nodes carry older history, and every wallet gains a body fetch per settlement
+block, a capability probe, and a named failure below the retention watermark.
+
+Leaks: a small concentration of history on archive nodes. Authentication holds, since
+`extrinsicsRoot` sits in the header preimage beside `stateRoot` and a body checked against it
+is complete by construction.
+
+`UsedNullifiers` still grows 32 bytes per spent note forever, and truncating that key to 16
+bytes is refused, because padding-slot nullifiers are prover-chosen and grindable.
+
+Dissent: ship-first would keep ciphertexts in state because M13 roughly doubles. The systems
+review finds that overstated, since the extrinsic decoder already exists and the binding
+adopted here removes the replay ship-first objects to.
+
+### 12.4 Q4, block size
+
+**Decision: keep 5 MiB and the 6 s `ref_time` at genesis. No dynamic rule before genesis.
+Spend the pre-genesis effort on the two weight levers.**
+
+| Lever | Effect on the 1.578 s batch |
+|---|---|
+| Stop charging `ct_digest` twice | to about 1.22 s, a 1.3x gain |
+| Re-measure `POSEIDON_EVAL_REF_TIME_PS` (10 us ceiling, 3.3 us native) | multiplier on the 0.723 s term |
+| Raise `RuntimeBlockLength` alone | zero, because weight co-binds |
+
+The double charge is a soundness question first: a general-format extrinsic reaches dispatch
+with no origin and no `pre_dispatch`, so `ensure_none` does not establish that validation ran,
+and caching the digest needs an answer to that.
+
+Cost of deferring: the fee floor is close to free, so a funded party can fill 7.5 tps cheaply.
+Forecloses nothing, since a later penalised reward stretches emission with no supply lost.
+
+A later dynamic rule must carry a quadratic penalty under a hard ceiling with a reward floor,
+a long-term median beside the short one (the short median alone is the big-bang attack), a
+median floor clearing one full batch extrinsic plus the coinbase inherent, and stated integer
+rounding with a KAT per boundary case.
+
+Dissent: privacy-first wanted 8 MiB now, operator-first wanted the median pre-genesis, and
+both reviews refuted the load-bearing number under each.
+
+### 12.5 Q5, tree depth
+
+**Decision: raise the circuit depth constant from 16 to 20 before genesis, gated on one
+build. Keep 16 if that build moves the leaf circuit off `degree_bits = 9`.**
+
+| Item | Depth 16 | Depth 20 |
+|---|---|---|
+| Capacity (4-ary) | 4.29e9 leaves | 1.10e12 leaves |
+| Leaf gates in 512 padded rows | 320 | 344 to 416 |
+| `degree_bits` | 9 | 9, subject to measurement |
+| Proof bytes, leaf / private / public | 105 500 / 150 908 / 237 544 | unchanged |
+| `FINALIZE_BASE_POSEIDON_EVALS`, frontier digests | 19, 48 | 23, 60 (+384 B) |
+
+Exhaustion is a chain halt, because `insert_commitment` refuses an append past capacity.
+Raising the cap changes no existing root: depth grows lazily and the circuit selects active
+levels. The constants are `qnero_circuit::chain::MAX_TREE_DEPTH` and
+`pallet_zk_tree::CIRCUIT_MAX_TREE_DEPTH`; the pallet's `MAX_TREE_DEPTH` is 32 already.
+
+Cost: regenerated verifier artifacts and KATs, shared with the bundle. Forecloses nothing.
+
+Dissent: ship-first proposed 18, arguing every prover pays the extra levels forever. The leaf
+pads to 512 rows either way, so 18 and 20 cost the same in practice.
+
+### 12.6 Q6, wallet scanning
+
+**Decision: a browser wallet is a full-scan wallet to about 1 tps of chain and no further.
+No view tag. No detection keys. State both in `docs/WALLET.md` as designed limits.**
+
+| Chain rate | Ciphertext bytes per day | Browser feasible |
+|---|---|---|
+| 1 tps | about 310 MB | yes, about 13 MB an hour |
+| 10 tps | about 3.1 GB | no |
+| 50 tps | about 15.5 GB | no |
+
+A view tag is structurally unavailable: FIPS 203 decapsulation returns a pseudorandom secret
+on any input and cannot fail early, so any tag checkable beforehand derives from the
+recipient's public address and becomes a public label on every payment to it. Detection keys
+are declined because their ambiguity degrades with observations.
+
+Wallet work, all leak-free: the coarse public epoch birthday (an exact birthday is a
+fingerprint across syncs), the checkpointed frontier, the worker-pool scan with pipelined
+windows, the change-commitment match, and skipping coinbase leaves, which carry no payload.
+
+Cost: up to about 1.9 GB of one-time rescan at a 1 048 576-leaf epoch, and both wallets must
+agree that constant. Forecloses nothing, while a detection key handed to a server once is a
+key that server keeps.
+
+### 12.7 Q7, the order of work
+
+### Step 0, measure first
+
+1. ML-KEM-1024 decapsulation, native and wasm. Every Q6 number is parametric on it and
+   `docs/BENCH.md` names it unmeasured twice.
+2. The leaf circuit rebuilt at depth 20, gates and `degree_bits` read out. This gates Q5.
+3. Real trie and RocksDB overhead per transfer, the multiplier under every state table, plus
+   `state_getReadProof` bytes per key at a page of 64 and its wasm verify time.
+
+### Step 1, the pre-genesis consensus bundle, one spec bump
+
+One `spec_version` bump, one artifact regeneration, one KAT pass, one review. Each item is a
+constant today and a hard fork after genesis.
+
+1. Q5, circuit depth 16 to 20, gated on the depth-20 build.
+2. Q3, ciphertexts out of state into bodies, with the settlement and weight changes.
+3. `CiphertextRetentionBlocks = 0` plus the no-op prune branch, so the constant is in
+   metadata at genesis and both wallets implement "absent below the retention window is
+   expected" before it is ever non-zero. Taken whichever way Q3 goes.
+4. Q1, the per-suite exact-length settlement rule.
+5. RandomX seed lag 64 to 128 (open question 3, already flagged for decision before launch).
+6. The call filter moved from dispatch to a `TransactionExtension` (section 7.2), since a
+   mistaken transparent transfer today fails with `CallFiltered` and leaves sender, recipient
+   and amount in the body forever. It moves `transaction_version`.
+7. Q2 recorded as closed. No code.
+
+Refused, with the refusal written into section 9 as a decision:
+
+- **Open question 7, the positional level-tagged tree hash.** It ends the claim that the
+  tree is the audited upstream's as-is, which section 10 rests on, and M13 closes the same
+  three holes with no consensus change. Dissent: operator-first argues the per-sync saving is
+  permanent while read proofs are paid forever, and the systems review calls that the better
+  argument on the merits.
+- **Any block size change and the dynamic rule** (12.4).
+- **Nullifier key truncation** (12.3).
+
+### Step 2, wallet-only, on wallet cadence
+
+The coarse-epoch birthday constant, the checkpointed frontier, the worker-pool scan, the
+change-commitment match, the retention-aware absence rule, coinbase-leaf skipping, the scan
+benchmark in `docs/BENCH.md`, and the `docs/WALLET.md` statements on the view-key and 1 tps
+limits.
+
+### Step 3, how M13 changes (open question 6)
+
+M13 today reads every per-leaf storage value with `state_getReadProof` against the header
+`stateRoot`. Under Q3 it splits in two against that same header, and open question 6 is
+rewritten to say ciphertexts are no longer state.
+
+**Part one, against `stateRoot`, unchanged:** `ZkTree::LeafCount`, `ZkTree::Leaves(i)`,
+`Shielded::LeafBlocks(i)`, `Shielded::CoinbaseValues(i)`, `Shielded::EntryCount` and the
+`UsedNullifiers` pages, so the `sp-trie` wasm module and its size cost stay.
+
+**Part two, against `extrinsicsRoot`, new:** fetch the body, recompute the root against the
+already-authenticated header, hand-walk the extrinsic envelope (the typed decode fails on the
+7219-byte ML-DSA-87 signature array), then parse the public inputs with the pallet's
+parse-without-verify path. The 14.1 ms per-settlement verify open
+question 6 prices against this route does not apply, because the wallet needs the public
+inputs and the chain has already verified the proof.
+
+**Binding:** decrypt an output, derive the note, compute the commitment, and require it at a
+proven leaf index inside that block's folded leaf range. A moved, substituted or withheld
+ciphertext fails that test, and no append-order replay is needed.
+
+**Scope: roughly flat.** One trie proof page per ciphertext gives way to one body fetch per
+settlement block a scanning wallet would make anyway. Added: the commitment search, a
+capability probe, a retention-watermark failure, and an adversarial test matrix. All three
+bounds M13 closes, position, depth and ciphertext binding, still close.
