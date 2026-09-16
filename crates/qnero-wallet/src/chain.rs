@@ -824,20 +824,12 @@ impl<'a> Chain<'a> {
     /// from `from` and stops at the first leaf `Shielded::LeafBlocks` dates
     /// above `top_block`.
     ///
-    /// **The size of the read is a property of an honest node's dating.** On
-    /// one, a chunk holds its own blocks' leaves and a chain far ahead of the
-    /// checkpoint never holds every leaf's ciphertext at once, which is the
-    /// figure `docs/BENCH.md` carries for the chunked walk. The stop condition
-    /// is `Shielded::LeafBlocks`, which the node answers, so a node that dates
-    /// the whole range into the chunk's top block makes one chunk read the
-    /// whole range: the memory is spent first and the refusal comes after it.
-    /// What that node does not get is a wrong answer, and the refusal is by
-    /// name: `crate::typing` folds exactly these leaves and compares against
-    /// each block's own `zkTreeRoot`, so an under-reported chunk range reaches
-    /// a short fold and an over-reported one reaches a long fold, and the pass
-    /// stops with nothing written. Bounding the read itself would need a
-    /// per-block ceiling on appended leaves, which is a consensus number this
-    /// wallet does not have over RPC.
+    /// The stop condition uses `Shielded::LeafBlocks` authenticated against
+    /// the selected header's state root. The configured provider/checkpoint
+    /// policy still determines which header chain is selected. A chunk holds
+    /// the leaves dated within its own blocks; its memory use depends on that
+    /// chain's actual leaf density. `crate::typing` also folds those leaves and
+    /// checks each block's `zkTreeRoot` before scan progress is committed.
     pub fn leaves_up_to_block(
         &self,
         from: u64,

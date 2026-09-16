@@ -27,7 +27,7 @@ import { parseRawHeader, type RawChainHeader } from './anchor';
 import { storage, type ChainContext } from './api';
 import { authenticatedValues, authenticatedPrefix, authenticatedHeaderHash } from './authenticated';
 
-/** Leaves per `state_queryStorageAt` when four items are read per leaf. */
+/** Leaves per `state_getReadProof` when four items are read per leaf. */
 export const LEAF_BATCH = 64;
 
 /** Leaves per call when one item is read per leaf, so the page is wider. */
@@ -438,14 +438,11 @@ export async function fetchHeaderRange(
  * Three public reads: the head, the hash of the epoch block, and the leaf
  * count that block's state carried. None of them names this wallet.
  *
- * The leaf count becomes the watermark, and nothing here checks it. The first
- * sync that has leaves to scan folds the leaves under it and compares against
- * the `zkTreeRoot` the epoch block's own header published, which refuses a
- * count recorded too **high** and does not pin one that is too low; a pass
- * with nothing above the watermark to scan is left with the roots the chunk's
- * own headers carry. `wallet/model.ts` and `docs/WALLET.md` carry what that
- * settles and what it does not, and both refusals a too-high count trips name
- * this birthday and the rescan that drops it.
+ * A state-trie proof authenticates the leaf count before it becomes the
+ * watermark. The first sync with leaves to scan also checks the commitment
+ * fold against the epoch header's `zkTreeRoot`. The configured node remains
+ * trusted for selecting that header's chain. A refusal involving a birthday
+ * watermark names the birthday and the rescan that drops it.
  */
 export async function fetchBirthday(
   context: ChainContext,
@@ -817,24 +814,16 @@ function withheld(key: string, index: number, leafCount: number, at: string): Er
  *   `Ciphertexts` only where the author encrypted a payload, which under v1
  *   never happens.
  *
- * Nothing removes any of them, so below the count there is a commitment and a
- * block at every index and a ciphertext at every index that is not a coinbase.
- * An absent one there is a node withholding an answer at a block it has just
- * told this wallet the tree is that long. Read as "nothing here" it is silent
- * and permanent, because the scan steps over the leaf and the caller then
- * writes a watermark past it, so a payment on that leaf is never looked at
- * again without a rescan. Each is refused by name instead, and the pass with
- * it.
+ * Commitments and creation blocks remain in state. Ciphertexts have a bounded
+ * retention window, so an absent transfer payload is recovered at its proven
+ * creation block, linked to this selected head. Missing proof nodes or an
+ * unavailable historical payload refuse the pass before progress is saved.
  *
- * The ciphertext rule here is the coarse half of a rule that is finished one
- * layer up. Presence of `CoinbaseValues` does **not** decide that a leaf is a
- * coinbase: presence is the node's to write, and eight invented bytes beside
- * an incoming transfer used to route it onto the coinbase rebuild and hide the
- * payment. What decides is where the block headers put the leaf, which
- * `wallet/sync.ts` works out from the header chain and the root each block
- * published. So this refuses only the shape that is wrong whatever kind the
- * leaf turns out to be, a leaf carrying neither key, and the typed rules
- * refuse the rest by name.
+ * The state proof authenticates CoinbaseValues presence and absence. The
+ * typing pass in `wallet/sync.ts` additionally checks that marker against the
+ * leaf positions and roots in the header chain. A leaf carrying neither a
+ * ciphertext nor a coinbase value after archive recovery is refused here;
+ * the typing pass checks the remaining per-kind requirements.
  *
  * `Chain::leaves` and `Wallet::sync_with` in the command-line wallet refuse
  * the identical set.

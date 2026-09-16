@@ -430,7 +430,7 @@ Scans from the last synced leaf to the tree's current leaf count, pinned to one
 block hash so a leaf appended mid-scan cannot be counted and then read as
 absent. For each leaf it reads `ZkTree::Leaves`, `Shielded::Ciphertexts`,
 `Shielded::LeafBlocks` and `Shielded::CoinbaseValues` in batches of 64 through
-`state_queryStorageAt`. All four maps are `Identity` hashed on the leaf index,
+`state_getReadProof`. All four maps are `Identity` hashed on the leaf index,
 so paging is by index and never by `state_getKeysPaged`.
 
 It also walks the headers of every block between the block it last
@@ -453,10 +453,12 @@ leaf's other keys in the same call. Three writers, and this is the whole set:
 | a settled slot, per output | yes | yes | yes | no |
 | the coinbase inherent | yes | only with a payload, which under v1 is never | yes | yes |
 
-So below the count, read at the same block hash every leaf is, there is a
-commitment and a block at every index and a ciphertext at every index that is
-not a coinbase. An absent answer for one of those is a node withholding it, and
-each of the three used to be stepped over in silence: the leaf was counted as
+Below the authenticated count, every index carries a commitment and a creation
+block. Transfer ciphertexts remain in the current state for the retention
+window; older payloads are recovered with creation-block state proofs linked
+to the selected head. Missing required proof nodes or unavailable historical
+payloads refuse the pass. Previously missing per-leaf data could be stepped
+over in silence: the leaf was counted as
 scanned, the pass saved `next_leaf` and a checkpoint above it, and every later
 sync started above it, so a payment on that leaf was out of the balance
 permanently with no error, no warning and no line in the report. The three hide
@@ -470,10 +472,9 @@ nothing is written. `Chain::leaves` refuses them in the read layer and
 identical set in `wallet-web/src/chain/reads.ts` and again in `runSync`.
 
 The rule above covers the two keys every leaf has, `ZkTree::Leaves` and
-`Shielded::LeafBlocks`. Whether a leaf owes a ciphertext or a coinbase value is
-not a flat requirement: it depends on what kind of leaf it is, and that is
-decided by the section below. The one shape refused whatever the kind is a leaf
-carrying neither, which the read layer refuses on its own.
+`Shielded::LeafBlocks`. The leaf's kind decides whether it needs a ciphertext
+or a coinbase value, as described below. A leaf carrying neither after the
+archive lookup is refused in the read layer.
 
 An absent answer *above* the count is ordinary: a window may run past the end
 of the tree and nothing is being withheld there.

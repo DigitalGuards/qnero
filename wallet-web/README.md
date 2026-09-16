@@ -169,13 +169,12 @@ has the bug too.
   the fork walk rewinds through it; the screen says what was recorded and whose
   claim it is.
 
-  The leaf count beside it is the same kind of claim and nothing checks it when
-  it is written. The first sync that has leaves to scan folds the leaves under
-  it against that block's own `zkTreeRoot`, which refuses a count recorded too
-  high; while the watermark is still that number, any refusal resting on it
-  names the birthday and the rescan on the Settings screen, because a watermark
-  that was wrong when it was written is not a node being behind and no other
-  node can satisfy it.
+  The leaf count is authenticated by a state-trie proof before it is recorded.
+  The first sync that has leaves to scan also folds the leaves under it against
+  that block's `zkTreeRoot`. Chain selection remains the configured node's
+  responsibility. A refusal involving a birthday watermark names the birthday
+  and the rescan on the Settings screen, which drops that watermark while
+  keeping the wallet's notes.
 - **Restore from a seed.** The 64 hex characters, and one optional field: "the
   chain height when this wallet was created, leave empty to scan everything".
   Empty reads the whole chain from leaf zero, which is always correct, and the
@@ -392,8 +391,9 @@ the sync and the spend, the spent reconciliation in both directions, the widths
 every storage value is decoded at and the tree capacity `ZkTree::LeafCount` is
 bounded by, the refusal of each per-leaf key withheld below that count, one
 test per key on both the read layer and the scan, the refusal of the tree's own
-pad answered as a leaf below that count, the substituted ciphertext that
-nothing refuses and the rescan that recovers the payment, the merge that
+pad answered as a leaf below that count, authenticated storage and complete
+nullifier-prefix reads, historical ciphertext recovery and its refusal when
+archive data is unavailable, the merge that
 keeps a spend's own writes when a scan commits over them, the bound on the
 shield-origin walk, the pipelined header walk against a node that answers
 headers out of order or a hash for a number its own header chain does not

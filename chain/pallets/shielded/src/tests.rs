@@ -1389,7 +1389,7 @@ fn a_segment_anchored_above_the_current_height_is_skipped_not_fatal() {
 	});
 }
 
-/// `shield` writes its ciphertext into the same never-pruned `Ciphertexts` map
+/// `shield` writes its ciphertext into the same bounded live `Ciphertexts` map
 /// a settled slot writes two of, so it carries the same proof-size term. The
 /// runtime leaves `proof_size` uncapped today, so this is a declaration and
 /// nothing is metered against it yet. The day it is capped, an under-declared

@@ -80,7 +80,10 @@ fn a_sync_never_names_this_wallets_nullifiers_to_the_node() {
         state.calls("state_getKeysPaged") > 0,
         "the settled set is paged, not probed"
     );
-    assert!(!state.asked_about(&unspent.to_hex()), "an unpublished nullifier stays local");
+    assert!(
+        !state.asked_about(&unspent.to_hex()),
+        "an unpublished nullifier stays local"
+    );
     // Proof requests may echo the entire public page. They must include the
     // stranger's entry alongside our already published nullifier.
     for request in &state.requests {
@@ -88,7 +91,10 @@ fn a_sync_never_names_this_wallets_nullifiers_to_the_node() {
         if request["method"] == "state_getReadProof" {
             let keys = request["params"][0].to_string();
             if keys.contains(&mine.to_hex()) {
-                assert!(keys.contains(&stranger.to_hex()), "public proof pages stay broad");
+                assert!(
+                    keys.contains(&stranger.to_hex()),
+                    "public proof pages stay broad"
+                );
             }
         }
     }

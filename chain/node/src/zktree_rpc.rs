@@ -191,7 +191,7 @@ pub const ZKTREE_GET_MERKLE_PROOF_RUNTIME_CALL: &str = "ZkTreeApi_get_merkle_pro
 /// `is_trusted` follows the per-connection `DenyUnsafe` policy: a trusted
 /// caller (local connection, or `--rpc-methods unsafe`) keeps the node's full
 /// archive functionality and may build proofs at any historical block. Every
-/// node here is forced to `ArchiveCanonical`, so history-reading operators
+/// node here is forced to `ArchiveAll`, so history-reading operators
 /// (indexers, explorers) that run their own node still get the deep reads they
 /// run an archive node for. An untrusted (public) caller is bounded to the
 /// proof window, which closes the unauthenticated griefing vector.
@@ -337,14 +337,14 @@ where
 /// `archive_v1_call` replacement that applies the same trust/window gate as
 /// [`GatedStateCall`] before the executor loads historical state.
 ///
-/// The service crate merges the RPC-v2 archive module on archive nodes — and
-/// this node forces `ArchiveCanonical` + `KeepFinalized`, so that is every
+/// The service crate merges the RPC-v2 archive module on archive nodes, and
+/// this node forces `ArchiveAll` + `KeepAll`, so that is every
 /// node. Its `archive_v1_call` reaches `client.executor().call(..)` with a
 /// caller-chosen block hash and no `Extensions`, so it cannot read
 /// `DenyUnsafe`: an untrusted caller could rebuild the exact deep-history
 /// merkle-proof DoS that the `state_call` gate closes. The service crate
-/// drops that method and this wire-compatible handler — which does receive
-/// `Extensions` — is merged in its place.
+/// drops that method and this wire-compatible handler, which receives
+/// `Extensions`, is merged in its place.
 #[rpc(server)]
 pub trait ArchiveCallApi {
 	/// Call a runtime API method at a block's state (RPC-v2 archive shape).
