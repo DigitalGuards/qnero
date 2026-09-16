@@ -7,7 +7,16 @@ import { fetchLeaves, findCommitment } from '../chain/leaves';
 import { blockForHash, classifyQuery, findExtrinsic, findNullifierBlock } from '../chain/search';
 import { fetchSnapshot, nullifierSeen } from '../chain/state';
 import { formatCount } from '../lib/units';
-import { Empty, ErrorBox, Field, Fields, Loading, Notice, Panel } from '../components/ui';
+import {
+  Empty,
+  ErrorBox,
+  Field,
+  Fields,
+  Loading,
+  Notice,
+  PageSkeleton,
+  Panel,
+} from '../components/ui';
 
 export function Search({ query }: { query: string }): ReactNode {
   const kind = classifyQuery(query);
@@ -105,7 +114,7 @@ function HashResult({ hash }: { hash: string }): ReactNode {
   const { bundle } = useChain();
 
   if (bundle === null) {
-    return <Loading what="the chain" />;
+    return <PageSkeleton title={null} panels={[{ title: 'As a block hash', fields: 1 }]} />;
   }
 
   return (

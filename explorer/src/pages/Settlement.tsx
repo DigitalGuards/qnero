@@ -6,7 +6,17 @@ import { useAsync } from '../app/useAsync';
 import { fetchDetail, settlementOf, type BlockDetail } from '../chain/blocks';
 import { findExtrinsic } from '../chain/search';
 import { formatBytes, formatCount } from '../lib/units';
-import { Empty, Field, Fields, Hash, Loading, NotRead, Notice, Panel } from '../components/ui';
+import {
+  Empty,
+  Field,
+  Fields,
+  Hash,
+  Loading,
+  NotRead,
+  Notice,
+  PageSkeleton,
+  Panel,
+} from '../components/ui';
 import { Problem } from './parts/Problem';
 import { SettlementView } from './parts/SettlementView';
 
@@ -71,7 +81,15 @@ export function Settlement({ hash, at }: { hash: string; at: string | null }): R
   );
 
   if (bundle === null) {
-    return <Loading what="the chain head" />;
+    return (
+      <PageSkeleton
+        title={null}
+        panels={[
+          { title: 'Submission', fields: 4 },
+          { title: 'Slots', fields: 4 },
+        ]}
+      />
+    );
   }
   if (located.status === 'loading') {
     return (

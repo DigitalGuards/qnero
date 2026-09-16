@@ -14,7 +14,16 @@ import {
 import { decodeU512, formatDifficulty } from '../lib/difficulty';
 import { seedHeight } from '../lib/seed';
 import { formatBytes, formatCount, formatQnr, REFERENCE_CIPHERTEXT_BYTES } from '../lib/units';
-import { Empty, Field, Fields, Hash, Loading, NotRead, Notice, Panel } from '../components/ui';
+import {
+  Empty,
+  Field,
+  Fields,
+  Hash,
+  NotRead,
+  Notice,
+  PageSkeleton,
+  Panel,
+} from '../components/ui';
 import { Problem } from './parts/Problem';
 import { SettlementLink, SettlementView } from './parts/SettlementView';
 
@@ -66,7 +75,15 @@ export function Block({ id }: { id: string }): ReactNode {
     );
   }
   if (bundle === null || detail.status === 'loading' || resolved.status === 'loading') {
-    return <Loading what="the block" />;
+    return (
+      <PageSkeleton
+        title={null}
+        panels={[
+          { title: 'Summary', fields: 5 },
+          { title: 'Header', fields: 6 },
+        ]}
+      />
+    );
   }
   if (detail.status === 'error') {
     return (

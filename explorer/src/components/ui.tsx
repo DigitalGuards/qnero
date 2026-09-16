@@ -98,6 +98,67 @@ export function Loading({ what }: { what: string }): ReactNode {
   );
 }
 
+export interface SkeletonPanel {
+  title: string;
+  fields?: number;
+  rows?: number;
+}
+
+/**
+ * The shape of the page that is coming.
+ *
+ * A page whose figures are all read live used to paint one 11 px muted line
+ * for the whole connect, under a wordmark whose third line read "no chain".
+ * One line on 667 px of screen reads as a broken page rather than as progress.
+ *
+ * So the head and the panel frames render at once with their titles, and the
+ * values are short muted rules until they are values. The movement that says
+ * the page is working is the one 2 px bar under the header, not here. The
+ * rules carry no information, so they are hidden from a reader who is being
+ * read to; the masthead's status slot is what speaks.
+ */
+export function PageSkeleton({
+  title,
+  panels,
+}: {
+  title: string | null;
+  panels: readonly SkeletonPanel[];
+}): ReactNode {
+  return (
+    <>
+      <header className="page__head">
+        {title === null ? (
+          <span className="skeleton skeleton--h1" aria-hidden="true" />
+        ) : (
+          <h1>{title}</h1>
+        )}
+      </header>
+      {panels.map((panel) => (
+        <section className="panel" key={panel.title}>
+          <h2 className="panel__title">{panel.title}</h2>
+          {panel.rows === undefined ? null : (
+            <div aria-hidden="true">
+              {Array.from({ length: panel.rows }, (_unused, index) => (
+                <span className="skeleton skeleton--row" key={index} />
+              ))}
+            </div>
+          )}
+          {panel.fields === undefined ? null : (
+            <div className="fields" aria-hidden="true">
+              {Array.from({ length: panel.fields }, (_unused, index) => (
+                <div className="field" key={index}>
+                  <span className="skeleton skeleton--label" />
+                  <span className="skeleton skeleton--value" />
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      ))}
+    </>
+  );
+}
+
 /** A hash, shortened for the eye with the whole value one hover or one copy away. */
 export function Hash({
   value,

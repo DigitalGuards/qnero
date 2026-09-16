@@ -16,7 +16,17 @@ import { countNullifiers, fetchSnapshot } from '../chain/state';
 import { estimateHashrate, formatDifficulty, formatHashrate } from '../lib/difficulty';
 import { blocksToNextSeed, nextSeedHeight, seedHeight } from '../lib/seed';
 import { formatCount, formatQnr, formatSeconds, formatSpan } from '../lib/units';
-import { Empty, ErrorBox, Field, Fields, Hash, Loading, Notice, Panel } from '../components/ui';
+import {
+  Empty,
+  ErrorBox,
+  Field,
+  Fields,
+  Hash,
+  Loading,
+  Notice,
+  PageSkeleton,
+  Panel,
+} from '../components/ui';
 import { RecentBlocks } from './parts/RecentBlocks';
 
 /**
@@ -84,8 +94,16 @@ function nullifierNote(settled: SettledNullifiers): string {
   return `at least ${formatCount(settled.count)}: ${gaps.join('; ')}`;
 }
 
+/** The frames the chain page paints while it is reading, in the order they land. */
+const SKELETON = [
+  { title: 'Head', fields: 5 },
+  { title: 'Proof of work', fields: 4 },
+  { title: 'Shielded pool', fields: 5 },
+  { title: 'Recent blocks', rows: 6 },
+];
+
 export function Home(): ReactNode {
-  const { bundle, head } = useChain();
+  const { bundle, chainName, head } = useChain();
   const headHash = head?.hash ?? null;
   const headNumber = head?.header.number ?? null;
 
@@ -136,7 +154,7 @@ export function Home(): ReactNode {
   );
 
   if (bundle === null || head === null) {
-    return <Loading what="the chain head" />;
+    return <PageSkeleton title={chainName} panels={SKELETON} />;
   }
   if (bundle.context.storageDrift.length > 0) {
     return (

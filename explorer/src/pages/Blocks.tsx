@@ -5,7 +5,7 @@ import { href } from '../app/router';
 import { useAsync } from '../app/useAsync';
 import { fetchRecent } from '../chain/blocks';
 import { formatCount } from '../lib/units';
-import { Empty, ErrorBox, Loading, Panel } from '../components/ui';
+import { Empty, ErrorBox, Loading, PageSkeleton, Panel } from '../components/ui';
 import { RecentBlocks } from './parts/RecentBlocks';
 
 const PAGE_SIZE = 20;
@@ -24,7 +24,7 @@ export function Blocks({ before }: { before: number | null }): ReactNode {
   );
 
   if (bundle === null || top === null) {
-    return <Loading what="the chain head" />;
+    return <PageSkeleton title="Blocks" panels={[{ title: 'Blocks', rows: 12 }]} />;
   }
 
   const older = top - PAGE_SIZE;

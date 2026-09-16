@@ -683,3 +683,38 @@ tbody tr:hover .dim {
   color: var(--text-muted);
   font-size: var(--fs-meta);
 }
+
+/* The page's shape while it is being read: short muted rules where the values
+   will be. They carry nothing, so they are hidden from assistive technology
+   and the masthead's status slot does the speaking. */
+.skeleton {
+  display: block;
+  max-width: 100%;
+  background: var(--bg-raised);
+  border-radius: var(--radius-sm);
+}
+
+.skeleton--h1 {
+  width: 180px;
+  height: 20px;
+}
+
+.skeleton--label {
+  width: 72px;
+  height: 9px;
+  margin-bottom: var(--space-1);
+}
+
+.skeleton--value {
+  width: 124px;
+  height: 14px;
+}
+
+.skeleton--row {
+  width: 100%;
+  height: 14px;
+}
+
+.skeleton--row + .skeleton--row {
+  margin-top: var(--space-2);
+}

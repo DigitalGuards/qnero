@@ -28,7 +28,31 @@
     <script src="./theme.js"></script>
   </head>
   <body>
-    <div id="root"></div>
+    <!--
+      The shell, painted before the bundle.
+
+      The bundle is 1.2 MB, 440 kB compressed, and index.html used to ship an
+      empty #root, so a phone on a slow link had a blank page until it was
+      parsed and then one 11 px muted line for the length of the connect. This
+      is the same header the app renders, so the first paint is the page's own
+      shape rather than nothing, and React replaces it when it mounts.
+    -->
+    <div id="root">
+      <header class="masthead">
+        <a class="masthead__brand" href="#/">silQ Road</a>
+        <span class="masthead__status">
+          <span class="dot"></span>
+          <span>connecting</span>
+        </span>
+      </header>
+      <nav class="nav" aria-label="Sections">
+        <a class="nav__link" href="#/">Chain</a>
+        <a class="nav__link" href="#/blocks">Blocks</a>
+        <a class="nav__link" href="#/search">Search</a>
+        <a class="nav__link" href="#/reveals">Reveals</a>
+      </nav>
+      <div class="indeterminate"></div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
