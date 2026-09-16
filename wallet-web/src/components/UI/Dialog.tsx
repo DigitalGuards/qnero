@@ -46,13 +46,14 @@ export function DialogContent({
       <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/60" />
       <DialogPrimitive.Content
         className={cn(
-          'fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 ' +
-            '-translate-y-1/2 rounded-panel border border-edge bg-panel p-4 ' +
+          'fixed left-1/2 top-1/2 z-50 w-[min(35rem,calc(100vw-2rem))] -translate-x-1/2 ' +
+            '-translate-y-1/2 max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-panel ' +
+            'border border-edge bg-panel p-5 sm:p-6 ' +
             'shadow-[var(--shadow-modal)]',
           className,
         )}
       >
-        <DialogPrimitive.Title className="mb-2 text-body font-semibold text-ink">
+        <DialogPrimitive.Title className="mb-3 pr-10 text-body font-semibold text-ink">
           {title}
         </DialogPrimitive.Title>
         {description !== undefined && (
@@ -70,9 +71,9 @@ export function DialogContent({
           <Button
             variant="quiet"
             aria-label="Close"
-            className="absolute right-1 top-1 size-11 no-underline sm:right-2 sm:top-2 sm:size-8"
+            className="absolute right-2 top-2 size-11 p-0 no-underline"
           >
-            <X className="size-3.5" aria-hidden />
+            <X className="size-5" aria-hidden />
           </Button>
         </DialogPrimitive.Close>
       </DialogPrimitive.Content>

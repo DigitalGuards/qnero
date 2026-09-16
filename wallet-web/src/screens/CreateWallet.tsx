@@ -1,13 +1,12 @@
 /**
- * Creating a wallet: show the seed once, take it back in writing, then lock it.
+ * Creating a wallet: show the seed, optionally check the backup, then lock it.
  *
  * The confirmation is MyMonero's shape, adapted to what a Qnero seed is. That
  * wallet shows a mnemonic and asks for some of its words back. This one holds
  * 32 raw bytes, so it shows them as eight groups of eight hex characters and
  * asks for three of the groups back, chosen at random after the seed is
- * hidden. Somebody who wrote nothing down cannot answer, which is the whole
- * point: the seed is shown exactly once and this is the last moment it is
- * recoverable.
+ * hidden. The user can skip that check and proceed to the same passphrase
+ * setup. Both paths encrypt the original seed before creating the wallet.
  *
  * The two forms are `react-hook-form`'s, as they are in the sibling web
  * wallet: the validation rule sits beside the field it is about rather than in
@@ -97,8 +96,8 @@ export function CreateWallet({
       <Panel title="Your new spend key">
         <Prose>
           <p>
-            <strong className="text-ink">Write this down before you go on.</strong> It is shown
-            once. It is the only thing that recovers this wallet, and nobody else has a copy: not a
+            <strong className="text-ink">Write this down before you go on.</strong> It is the
+            only thing that recovers this wallet, and nobody else has a copy: not a
             server, not this page after you leave it, not the node you connect to.
           </p>
           {storageWarning !== null && <p>{storageWarning}</p>}
@@ -166,8 +165,8 @@ export function CreateWallet({
       <Panel title="Confirm what you wrote">
         <Prose>
           <p>
-            Type these groups back, by the numbers they were shown under. The seed is hidden now,
-            and it will not be shown again.
+            Type these groups back, by the numbers they were shown under, or skip this check to
+            continue to passphrase setup.
           </p>
         </Prose>
         <form
@@ -223,6 +222,18 @@ export function CreateWallet({
             </Button>
           </div>
         </form>
+        <Button
+          type="button"
+          variant="destructive"
+          className="mt-3 w-full"
+          data-testid="skip-seed-confirmation"
+          disabled={busy}
+          onClick={() => {
+            setStep('lock');
+          }}
+        >
+          Skip confirmation
+        </Button>
       </Panel>
     );
   }
@@ -233,7 +244,7 @@ export function CreateWallet({
         <p>
           The seed and the secrets behind every transfer are encrypted with this passphrase before
           they are written to this browser&apos;s storage. It is not recoverable and it is not stored
-          anywhere: forgetting it means restoring from the seed you just wrote down.
+          anywhere: forgetting it means restoring from your seed.
         </p>
       </Prose>
       <form

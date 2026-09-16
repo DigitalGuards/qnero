@@ -10,10 +10,9 @@ import { cn } from '../../utils/cn';
  * Three variants and they are not decoration. `action` is the one thing a
  * screen is for and there is at most one per screen; `utility` is everything
  * else; `destructive` is a button that destroys something this browser holds
- * the only copy of. The geometry is that wallet's: 3 px radius, 13 px semibold
- * for the action and 12 px with half a pixel of tracking for the utility, with
- * the two-part elevation on the raised ones. The height comes from the tokens,
- * which is 32 px where a pointer is and 40 px in a hand, 44 for the action.
+ * the only copy of. The original radius and elevation accompany readable
+ * labels and generous targets: 44 px for utilities and 48 px for actions at
+ * the default browser text size.
  *
  * A disabled button keeps its opacity. Fading one to half takes its label to
  * about 2:1 and says "this is broken" where the true answer is "not yet": what
@@ -37,7 +36,7 @@ import { cn } from '../../utils/cn';
  */
 const buttonVariants = cva(
   'inline-flex min-h-[var(--control-h)] select-none items-center justify-center gap-2 ' +
-    'rounded-control disabled:pointer-events-none',
+    'rounded-control py-2 disabled:pointer-events-none',
   {
     variants: {
       variant: {
@@ -58,7 +57,7 @@ const buttonVariants = cva(
       },
       size: {
         default: 'px-4',
-        small: 'min-h-0 h-6 px-2 text-meta',
+        small: 'px-3 text-meta',
         block: 'w-full px-4',
       },
     },

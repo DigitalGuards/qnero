@@ -184,4 +184,4 @@ Qnero is MIT licensed (`LICENSE` at the repository root, DigitalGuards). The ups
 
 Design: `docs/DESIGN.md`. Circuit: `docs/CIRCUIT.md`.
 
-Maintained by DigitalGuards at https://github.com/DigitalGuards/qnero.
+Maintained by DigitalGuards at https://github.com/DigitalGuards/qnero. Community on Discord: https://discord.gg/A9spXHteN.
