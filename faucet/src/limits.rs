@@ -96,14 +96,10 @@ impl Refusal {
                 "This connection has had its {limit} claims. It can claim again in {}.",
                 human(*retry_after)
             ),
-            Self::Drained => {
-                "The faucet is empty. The operator has to refill it.".to_string()
-            }
+            Self::Drained => "The faucet is empty. The operator has to refill it.".to_string(),
             Self::CaptchaMissing => "The challenge was not completed.".to_string(),
             Self::CaptchaRefused => "The challenge was refused.".to_string(),
-            Self::Busy { .. } => {
-                "Every proving slot is busy. Try again in a minute.".to_string()
-            }
+            Self::Busy { .. } => "Every proving slot is busy. Try again in a minute.".to_string(),
         }
     }
 }

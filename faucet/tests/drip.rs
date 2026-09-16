@@ -626,7 +626,10 @@ async fn a_claim_knows_which_step_it_is_on() {
         let (status, body, _) = request(
             "POST",
             format!("{}/drip", harness.base),
-            Some(serde_json::json!({ "address": an_address(&format!("phase-{attempt}")) }).to_string()),
+            Some(
+                serde_json::json!({ "address": an_address(&format!("phase-{attempt}")) })
+                    .to_string(),
+            ),
             Some("203.0.113.21"),
         )
         .await;
@@ -634,13 +637,24 @@ async fn a_claim_knows_which_step_it_is_on() {
         ids.push(body["id"].as_i64().expect("a claim id"));
     }
 
-    let (_, first, _) = request("GET", format!("{}/drip/{}", harness.base, ids[0]), None, None).await;
+    let (_, first, _) = request(
+        "GET",
+        format!("{}/drip/{}", harness.base, ids[0]),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(first["status"], serde_json::json!("queued"));
     assert_eq!(first["phase"], serde_json::json!("proving"));
     assert_eq!(first["ahead"], serde_json::json!(0));
 
-    let (_, second, _) =
-        request("GET", format!("{}/drip/{}", harness.base, ids[1]), None, None).await;
+    let (_, second, _) = request(
+        "GET",
+        format!("{}/drip/{}", harness.base, ids[1]),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(second["status"], serde_json::json!("queued"));
     assert_eq!(second["phase"], serde_json::json!("queued"));
     assert_eq!(second["ahead"], serde_json::json!(1));
@@ -654,7 +668,13 @@ async fn a_claim_knows_which_step_it_is_on() {
         .expect("the ledger")
         .mark_submitted(ids[0], now_secs())
         .expect("submitted");
-    let (_, first, _) = request("GET", format!("{}/drip/{}", harness.base, ids[0]), None, None).await;
+    let (_, first, _) = request(
+        "GET",
+        format!("{}/drip/{}", harness.base, ids[0]),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(first["phase"], serde_json::json!("waiting"));
 }
 
