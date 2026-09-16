@@ -81,6 +81,24 @@ describe('the proving expectation', () => {
   });
 });
 
+describe('the chain the shipped file names', () => {
+  const shipped = parseConfig(
+    JSON.parse(
+      readFileSync(join(import.meta.dirname, '..', 'public', 'config.json'), 'utf8'),
+    ) as Record<string, unknown>,
+  );
+
+  it('is the public testnet, because the header prints it to whoever opens the page', () => {
+    // The testnet has been live since 2026-09-15 and this file is what a built
+    // directory carries: a build shipped naming a devnet on 127.0.0.1 is a
+    // header that is false for every reader and a wallet that connects to
+    // nothing. A node of your own is the settings field, which is what
+    // persists.
+    expect(shipped.rpcEndpoint).toBe('wss://rpc.qnero.io');
+    expect(shipped.chainName).toBe('Qnero testnet');
+  });
+});
+
 describe('the endpoint', () => {
   it('has to be a WebSocket URL, because a head needs a subscription', () => {
     expect(() => parseConfig({ ...MINIMAL, rpcEndpoint: 'http://127.0.0.1:9944' })).toThrow(

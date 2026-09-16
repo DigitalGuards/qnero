@@ -75,12 +75,13 @@ cd ../crates/qnero-prover-wasm
 ## Configuration
 
 `public/config.json` is read at startup, so one build serves a devnet and a
-testnet and nothing about a chain is compiled in.
+testnet and nothing about a chain is compiled in. What ships names the public
+testnet, which has been live since 2026-09-15:
 
 ```json
 {
-  "rpcEndpoint": "ws://127.0.0.1:9944",
-  "chainName": "Qnero devnet",
+  "rpcEndpoint": "wss://rpc.qnero.io",
+  "chainName": "Qnero testnet",
   "wasmBase": "wasm/",
   "numLeaves": 6,
   "expectedProvingSeconds": { "threaded": 12, "single": 36 }
@@ -88,7 +89,10 @@ testnet and nothing about a chain is compiled in.
 ```
 
 - `rpcEndpoint` is the default. The settings screen overrides it and that
-  choice is what persists.
+  choice is what persists, so a chain of your own is a field rather than a
+  rebuild: point it at `ws://127.0.0.1:9944` for a local `--dev` node. The
+  header names the chain this file does, so a build served to readers has to
+  carry the chain it is actually on.
 - `wasmBase` is where the prover is served from, relative to the page. The
   threaded module, when there is one, lives at `wasmBase + "threaded/"`.
 - `numLeaves` is the private batch's leaf-slot count and has to match the

@@ -1,6 +1,6 @@
 {
-  "rpcEndpoint": "ws://127.0.0.1:9944",
-  "chainName": "Qnero devnet",
+  "rpcEndpoint": "wss://rpc.qnero.io",
+  "chainName": "Qnero testnet",
   "wasmBase": "wasm/",
   "numLeaves": 6,
   "expectedProvingSeconds": {
