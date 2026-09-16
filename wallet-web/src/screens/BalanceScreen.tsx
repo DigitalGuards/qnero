@@ -30,7 +30,7 @@ import { Num, Table, TableScroll } from '../components/UI/Table';
 import { formatCount, formatStepsAsQnr } from '../lib/units';
 import { formatDuration } from '../lib/format';
 import { renderMemo } from '../lib/memo';
-import { SYNC_PHASES, syncFraction, syncPhaseIndex } from './syncPhases';
+import { advanceSyncFraction, isCountedDetail, SYNC_PHASES, syncPhaseIndex } from './syncPhases';
 import type { Balances, NoteRow, RejectedNote } from '../wallet/model';
 import type { SyncReport } from '../wallet/sync';
 
@@ -52,14 +52,31 @@ function Stat({
   value: string;
   testId?: string;
 }): ReactNode {
+  /*
+   * On a phone the term is a word, not a control.
+   *
+   * The dotted underline is already gone on touch, and what was left was a
+   * 69 x 16 button: a focusable element well under the 44 px floor, a stop for
+   * a screen reader that announces a control, and nothing at all when it is
+   * pressed, because a tooltip has no touch gesture. The notices under this
+   * panel carry the same sentences at full length whichever device this is.
+   */
+  const [hoverable] = useState(
+    () =>
+      typeof matchMedia === 'function' && matchMedia('(hover: hover) and (pointer: fine)').matches,
+  );
   return (
     <div className="flex justify-between gap-2">
       <dt className="min-w-0">
-        <Tooltip label={explains}>
-          <button type="button" className="mm-term text-muted">
-            {term}
-          </button>
-        </Tooltip>
+        {hoverable ? (
+          <Tooltip label={explains}>
+            <button type="button" className="mm-term text-muted">
+              {term}
+            </button>
+          </Tooltip>
+        ) : (
+          <span className="text-muted">{term}</span>
+        )}
       </dt>
       <dd className="font-mono tabular-nums text-ink" data-testid={testId}>
         {value}
@@ -112,13 +129,28 @@ function SyncProgress({
   elapsed: number;
 }): ReactNode {
   const current = syncPhaseIndex(stage?.stage ?? null);
-  const detail = current < 0 ? null : stage?.detail;
+  const detail = current < 0 ? null : (stage?.detail ?? null);
+  /*
+   * The bar's floor for this pass.
+   *
+   * Adjusted during render, the way the sending screen adjusts its phase: the
+   * reading belongs to the frame that produced it, and React re-renders before
+   * anything is painted. It is a running maximum, so a second render of the
+   * same frame reaches the same number. This block is mounted only while a
+   * sync runs, so the floor is created with the pass and goes with it.
+   */
+  const [floor, setFloor] = useState(0);
+  const reached = advanceSyncFraction(floor, stage?.stage ?? null, detail);
+  if (reached !== floor) {
+    setFloor(reached);
+  }
+  const counted = isCountedDetail(detail);
   return (
     <div className="mt-3 border-t border-edge pt-3" data-testid="sync-progress">
       <div className="elev-inset h-1 w-full overflow-hidden rounded-full bg-field">
         <div
           className="h-full bg-accent-fill transition-[width] duration-300 motion-reduce:transition-none"
-          style={{ width: `${Math.min(100, syncFraction(stage?.stage ?? null, detail ?? null) * 100)}%` }}
+          style={{ width: `${Math.min(100, reached * 100)}%` }}
         />
       </div>
       <ul className="mt-3 list-none space-y-1 p-0 text-meta" data-testid="sync-phases">
@@ -134,14 +166,19 @@ function SyncProgress({
           >
             <span>
               {phase.label}
-              {index === current && detail !== null && detail !== undefined ? ` ${detail}` : ''}
+              {index === current && counted ? ` ${detail ?? ''}` : ''}
             </span>
             {index < current && <Check className="mt-0.5 size-3 shrink-0" aria-hidden />}
           </li>
         ))}
       </ul>
-      <p className="mt-2 font-mono tabular-nums text-meta text-muted" data-testid="sync-elapsed">
-        {formatDuration(elapsed)} elapsed
+      {/* The clock, and whatever the running stage is saying that is not a
+          count. The figure keeps the tabular mono every elapsed time on this
+          surface is set in; the sentence beside it is prose and is set as
+          prose. */}
+      <p className="mt-2 text-meta text-muted" data-testid="sync-elapsed">
+        <span className="font-mono tabular-nums">{formatDuration(elapsed)}</span> elapsed
+        {counted || detail === null ? '' : `, ${detail}`}
       </p>
       <p className="mm-note mt-1 text-muted">Your viewing key never leaves this page.</p>
     </div>
@@ -201,6 +238,9 @@ export function BalanceScreen({
   const showOffChain = balances.offChain > 0n;
   const showCount = balances.noteCount > 0;
   const showStats = showReachable || showPending || showOffChain || showCount;
+  // Whether anything has ever arrived here, which is what decides if a prompt
+  // about a payment that has not arrived is addressed to this reader at all.
+  const everPaid = balances.noteCount > 0 || balances.pending > 0n;
   return (
     <div className="space-y-3">
       <Panel>
@@ -311,12 +351,19 @@ export function BalanceScreen({
         this pass gave up or could not verify, and each one is rare. The
         ciphertext hint fires on nearly every sync, because almost every entry
         on the chain is somebody else's, so rendering it as a warning made the
-        rare signal beside it look like the constant one; it is 180 words of
-        what two unbound values buy an attacker, which is theory, and theory in
-        this wallet reads on request. It is a prompt for an operator waiting on
-        a payment, and the summary is that prompt.
+        rare signal beside it look like the constant one; it is theory, and
+        theory in this wallet reads on request. It is a prompt for an operator
+        waiting on a payment, and the summary is that prompt.
+
+        Which is why it is not shown to a wallet that has never been paid. On
+        a wallet created seconds ago, at block 8, with the faucet button still
+        on screen under it, "Expecting a payment that is not here?" reads as an
+        error the wallet has just found, and what it goes on to advise is a
+        rescan against a second node, which is nobody's answer to a first drip
+        that has not landed yet. A reader with transfers behind them is the one
+        this prompt is for.
       */}
-      {report !== null && report.hints.length > 0 && (
+      {report !== null && report.hints.length > 0 && everPaid && (
         <details className="px-1">
           <summary className="cursor-pointer text-meta text-muted">
             Expecting a payment that is not here?

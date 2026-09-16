@@ -1,6 +1,7 @@
 import { Monitor, Moon, Sun } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 
+import { applyTheme, readTheme, storeTheme, type Theme } from '../../app/theme';
 import { Button } from './Button';
 
 /**
@@ -9,41 +10,17 @@ import { Button } from './Button';
  * Three states rather than two. The tokens are defined light first with both
  * the media query and `data-theme` redefining the same names, so a page whose
  * JavaScript has not run still reads and the toggle wins in both directions.
+ *
+ * The key, the read and the write live in `app/theme.ts`, because `main.tsx`
+ * applies the same choice before the first paint and this screen is where it
+ * is changed. One rule, two call sites.
  */
-type Theme = 'system' | 'light' | 'dark';
-
-const KEY = 'qnero-wallet-theme';
-
-function read(): Theme {
-  try {
-    const stored = localStorage.getItem(KEY);
-    return stored === 'light' || stored === 'dark' ? stored : 'system';
-  } catch {
-    // A private window, or site data blocked. A remembered theme is a
-    // convenience and its absence is not a failure.
-    return 'system';
-  }
-}
-
 export function ThemeToggle(): ReactNode {
-  const [theme, setTheme] = useState<Theme>(read);
+  const [theme, setTheme] = useState<Theme>(readTheme);
 
   useEffect(() => {
-    const root = document.documentElement;
-    if (theme === 'system') {
-      root.removeAttribute('data-theme');
-    } else {
-      root.setAttribute('data-theme', theme);
-    }
-    try {
-      if (theme === 'system') {
-        localStorage.removeItem(KEY);
-      } else {
-        localStorage.setItem(KEY, theme);
-      }
-    } catch {
-      // See `read`.
-    }
+    applyTheme(theme);
+    storeTheme(theme);
   }, [theme]);
 
   const next: Theme = theme === 'system' ? 'dark' : theme === 'dark' ? 'light' : 'system';

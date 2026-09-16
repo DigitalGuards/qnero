@@ -17,8 +17,19 @@ import { cn } from '../../utils/cn';
  *
  * A disabled button keeps its opacity. Fading one to half takes its label to
  * about 2:1 and says "this is broken" where the true answer is "not yet": what
- * a disabled control owes a reader is the raised ground, the muted label, and
- * a line nearby that says why.
+ * a disabled control owes a reader is the raised ground, a label it can still
+ * read, and a line nearby that says why. The muted ink was 3.75:1 on the
+ * raised ground in dark, under the 4.5:1 every other text pair on this surface
+ * clears; the secondary ink measures 4.39:1 in dark and 6.79:1 in light, and
+ * still reads as out of reach. The strong border carries the shape, because a
+ * raised fill against the panel is about 1.4:1 and is no edge at all. It is
+ * the recipe `faucet/src/assets/app.css` settled on for the same pair.
+ *
+ * No colour transition. A theme swap is not a hover, and 150 ms of it caught
+ * every label on the screen mid-fade: `Show my address` and the faucet button
+ * rendered in a grey neither theme owns, 120 ms after the attribute changed.
+ * The three motions this surface keeps are the progress width, the switch
+ * thumb and the indeterminate bar.
  *
  * Built the way the sibling web wallet builds its buttons: `cva` for the
  * variants and `@radix-ui/react-slot` so `asChild` can hand the styling to a
@@ -26,21 +37,23 @@ import { cn } from '../../utils/cn';
  */
 const buttonVariants = cva(
   'inline-flex min-h-[var(--control-h)] select-none items-center justify-center gap-2 ' +
-    'rounded-control transition-colors disabled:pointer-events-none',
+    'rounded-control disabled:pointer-events-none',
   {
     variants: {
       variant: {
         utility:
           'elev-raised bg-raised text-ink text-ui tracking-label hover:bg-hover ' +
-          'disabled:bg-raised disabled:text-muted',
+          'disabled:border disabled:border-edge-strong disabled:bg-raised disabled:text-ink-2',
         action:
           'min-h-[var(--primary-h)] bg-accent-fill text-on-accent text-body font-semibold ' +
           'hover:bg-accent-fill-hover shadow-[inset_0_0.5px_0_0_rgba(255,255,255,0.2)] ' +
-          'disabled:bg-raised disabled:text-muted disabled:shadow-none',
+          'disabled:border disabled:border-edge-strong disabled:bg-raised disabled:text-ink-2 ' +
+          'disabled:shadow-none',
         destructive:
           'min-h-[var(--primary-h)] bg-destructive-fill text-on-destructive text-body ' +
           'font-semibold shadow-[inset_0_0.5px_0_0_rgba(255,255,255,0.2)] hover:opacity-90 ' +
-          'disabled:bg-raised disabled:text-muted disabled:shadow-none',
+          'disabled:border disabled:border-edge-strong disabled:bg-raised disabled:text-ink-2 ' +
+          'disabled:shadow-none',
         quiet: 'min-h-0 text-muted text-meta hover:text-ink underline underline-offset-2',
       },
       size: {

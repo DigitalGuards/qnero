@@ -18,6 +18,21 @@ import { readThreadCap } from './proverMode';
 export interface ConnectionState {
   kind: 'offline' | 'connecting' | 'live' | 'failed';
   endpoint: string;
+  /**
+   * When the next automatic attempt is due, as `Date.now()` milliseconds, on
+   * a `failed` connection.
+   *
+   * A wallet opened in a tunnel or on flaky Wi-Fi reached "no node" after the
+   * 15 s connect deadline and then never tried again: the provider was
+   * disconnected in the catch and nothing scheduled another attempt, so the
+   * wallet stayed dead after the network came back until the reader found
+   * Settings and pressed Connect with the same endpoint. The header and the
+   * wallet's status line count this down, so the wait is a wait rather than a
+   * verdict.
+   */
+  retryAt?: number;
+  /** How many attempts on this endpoint have failed in a row. */
+  attempts?: number;
   head?: number;
   chainName?: string;
   specName?: string;

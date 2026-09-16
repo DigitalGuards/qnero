@@ -26,6 +26,7 @@ import { describe, expect, it } from 'vitest';
 import { parseQnrToSteps } from '../src/lib/format';
 import { formatStepsAsQnr, splitAmountForDisplay } from '../src/lib/units';
 import { PHASES, progressFraction } from '../src/screens/sendPhases';
+import { addressCheckLine } from '../src/screens/SendScreen';
 
 describe('the balance', () => {
   it('dims padding and nothing else', () => {
@@ -164,5 +165,44 @@ describe('the sending bar', () => {
     for (let index = 1; index < readings.length; index += 1) {
       expect(readings[index] ?? 0).toBeGreaterThan(readings[index - 1] ?? 0);
     }
+  });
+});
+
+/**
+ * The line under the address field on the send screen.
+ *
+ * A Qnero address is 2,571 characters and the field is three rows, so after a
+ * paste the only thing on screen is its tail with the first visible line cut
+ * through its glyphs. The hint under it read "a qn1 address" whatever was
+ * there, so nothing on the screen confirmed what had landed and a partial
+ * paste was refused only on submit, after the rest of the form was filled in.
+ * Head, tail and the length are what a reader checks a pasted address by, and
+ * it is the line the faucet's own address field carries.
+ */
+describe('the address a payment is going to', () => {
+  const address = `qn1q84a${'x'.repeat(2558)}lcge2v`;
+
+  it('says what a field with nothing in it is for', () => {
+    expect(addressCheckLine('')).toBe('a qn1 address');
+    expect(addressCheckLine('   ')).toBe('a qn1 address');
+    expect(addressCheckLine(undefined)).toBe('a qn1 address');
+  });
+
+  it('names the head, the tail and the length of what landed', () => {
+    expect(address).toHaveLength(2571);
+    expect(addressCheckLine(address)).toBe('qn1q84a…lcge2v, 2,571 characters');
+  });
+
+  it('counts what was pasted rather than what was typed around it', () => {
+    expect(addressCheckLine(`  ${address}\n`)).toBe('qn1q84a…lcge2v, 2,571 characters');
+  });
+
+  it('shows a short value whole, because eliding six characters hides nothing', () => {
+    expect(addressCheckLine('qn1q84a')).toBe('qn1q84a, 7 characters');
+    expect(addressCheckLine('qn1q84alcge2v')).toBe('qn1q84alcge2v, 13 characters');
+  });
+
+  it('elides as soon as there is something to elide', () => {
+    expect(addressCheckLine('qn1q84alcge2vZZ')).toBe('qn1q84a…ge2vZZ, 15 characters');
   });
 });

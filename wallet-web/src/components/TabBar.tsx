@@ -32,8 +32,10 @@ export function TabBar(): ReactNode {
               data-testid={tab.testId}
               className={({ isActive }): string =>
                 cn(
+                  // No colour transition: see `UI/Button.tsx`. A theme swap
+                  // animated every tab label through a grey neither theme owns.
                   'flex h-14 flex-col items-center justify-center gap-1 text-label uppercase',
-                  'tracking-label transition-colors',
+                  'tracking-label',
                   isActive ? 'text-accent' : 'text-muted hover:text-ink',
                 )
               }

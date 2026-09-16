@@ -32,6 +32,11 @@ import { blockHashAt, fetchBirthday, fetchHead } from './chain/reads';
 import { chainAdapter, cryptoAdapter } from './app/adapters';
 import { readEndpoint, writeEndpoint } from './app/endpoint';
 import { readMeasuredSendSeconds, writeMeasuredSendSeconds } from './app/proverMode';
+import {
+  RECONNECT_ATTEMPTS_BEFORE_SETTINGS,
+  reconnectDelayMs,
+  secondsUntil,
+} from './app/reconnect';
 import { Session, type ConnectionState } from './app/session';
 import { Notice } from './components/UI/Notice';
 import { Panel } from './components/UI/Panel';
@@ -112,6 +117,17 @@ const BIRTHDAY_READS: BirthdayReads = {
  * Getters rather than values: the whole point of the wait is that these two
  * are `null` now and will not be in a moment.
  */
+/**
+ * Whether this browser has asked for stillness.
+ *
+ * Read on each call rather than subscribed to: the one thing it gates is a
+ * once-a-second interval, and a reader who changes the setting mid-wait gets
+ * the answer at the next failed attempt.
+ */
+function stillness(): boolean {
+  return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
 function birthdaySources(current: Session): BirthdaySources {
   return {
     context: () => current.context,
@@ -168,6 +184,14 @@ export function App(): ReactNode {
     kind: 'offline',
     endpoint: '',
   });
+  /**
+   * The clock the reconnect countdown is read against.
+   *
+   * Set at the moment an attempt fails and then once a second while one is
+   * pending. Its own state rather than a `Date.now()` in render, because a
+   * value read in render does not re-render anything when it changes.
+   */
+  const [tick, setTick] = useState(() => Date.now());
   const [proverThreads, setProverThreads] = useState(1);
   /**
    * What the last payment on this machine cost end to end, in seconds, or
@@ -326,7 +350,14 @@ export function App(): ReactNode {
   const openConnection = useCallback(
     async (endpoint: string): Promise<void> => {
       const current = session;
-      setConnection({ kind: 'connecting', endpoint });
+      // Leaving `failed` is what cancels any scheduled attempt: the timer
+      // below lives on that state, so a press of Connect, a changed endpoint
+      // and the scheduled attempt itself all supersede it by moving off it.
+      setConnection((held) => ({
+        kind: 'connecting',
+        endpoint,
+        attempts: held.endpoint === endpoint ? held.attempts : 0,
+      }));
       try {
         const context = await current.connect(endpoint, {
           onStatus: (kind) => {
@@ -364,11 +395,20 @@ export function App(): ReactNode {
           drift: context.storageDrift,
         });
       } catch (connectError) {
-        setConnection({
-          kind: 'failed',
-          endpoint,
-          error: (connectError as Error).message,
+        setConnection((held) => {
+          const attempts = (held.endpoint === endpoint ? (held.attempts ?? 0) : 0) + 1;
+          return {
+            kind: 'failed',
+            endpoint,
+            error: (connectError as Error).message,
+            retryAt: Date.now() + reconnectDelayMs(attempts),
+            attempts,
+          };
         });
+        // The countdown's anchor, set at the same moment the deadline is, so
+        // the first frame after a failure reads the whole wait rather than
+        // whatever this clock last held.
+        setTick(Date.now());
       }
     },
     [],
@@ -429,6 +469,56 @@ export function App(): ReactNode {
       abandoned.abort();
     };
   }, [openConnection, refresh]);
+
+  /**
+   * The scheduled attempt, which is a timer that lives on the failed state.
+   *
+   * A wallet that reached "no node" used to stay there: the provider was
+   * disconnected in the catch above and nothing scheduled another attempt, so
+   * a phone that opened Qloak in a tunnel was dead until the reader found
+   * Settings and pressed Connect with the same endpoint. Because the timer
+   * hangs off `retryAt`, every way out of `failed` cancels it through this
+   * effect's cleanup: a manual Connect, an endpoint change, and the attempt
+   * itself, which moves the state to `connecting` before it does anything.
+   */
+  const retryAt = connection.kind === 'failed' ? connection.retryAt : undefined;
+  const retryEndpoint = connection.endpoint;
+  useEffect(() => {
+    if (retryAt === undefined) {
+      return;
+    }
+    const timer = setTimeout(
+      () => {
+        void openConnection(retryEndpoint);
+      },
+      Math.max(0, retryAt - Date.now()),
+    );
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [retryAt, retryEndpoint, openConnection]);
+
+  /**
+   * The countdown to that attempt, in whole seconds, or null.
+   *
+   * It ticks once a second while an attempt is pending and holds still under
+   * reduced motion, where a number changing every second is the motion. The
+   * figure is still shown there: what the setting asks for is stillness, and
+   * the whole wait is the honest thing to show when it cannot move.
+   */
+  useEffect(() => {
+    if (retryAt === undefined || stillness()) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setTick(Date.now());
+    }, 1000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [retryAt]);
+  const retrySeconds = retryAt === undefined ? null : secondsUntil(retryAt, tick);
+  const pointAtSettings = (connection.attempts ?? 0) >= RECONNECT_ATTEMPTS_BEFORE_SETTINGS;
 
   // The worker's progress, wherever it comes from.
   useEffect(() => {
@@ -1094,6 +1184,9 @@ export function App(): ReactNode {
                     : 'size-[7px] shrink-0 rounded-full bg-muted'
               }
             />
+            {/* Tabular figures, because the block number and the countdown
+                both change in place and a proportional digit shifts the
+                sentence around them once a second. */}
             <span className="truncate tabular-nums">
               {chainName}
               {connection.kind === 'live' && connection.head !== undefined
@@ -1101,7 +1194,9 @@ export function App(): ReactNode {
                 : connection.kind === 'connecting'
                   ? ' · connecting'
                   : connection.kind === 'failed'
-                    ? ' · no node'
+                    ? retrySeconds === null
+                      ? ' · no node'
+                      : ` · no node · retrying in ${retrySeconds} s`
                     : ''}
             </span>
           </span>
@@ -1239,9 +1334,15 @@ export function App(): ReactNode {
                     // Why it is off, in the line beside it. A control that
                     // refuses and says nothing is the wallet having stopped.
                     syncBlocked={
-                      connection.kind !== 'live'
-                        ? 'no node: check Settings'
-                        : !proverRunning
+                      connection.kind === 'connecting'
+                        ? 'connecting to the node'
+                        : connection.kind !== 'live'
+                          ? retrySeconds === null
+                            ? 'no node: check Settings'
+                            : pointAtSettings
+                              ? `no node: retrying in ${retrySeconds} s, or check Settings`
+                              : `no node: retrying in ${retrySeconds} s`
+                          : !proverRunning
                           ? 'prover stopped: check Settings'
                           : spendRunning
                             ? 'a payment is being proved'

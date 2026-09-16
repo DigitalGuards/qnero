@@ -40,7 +40,10 @@ export function Switch({
       className={cn(
         // The switch is 16 x 28 and the target around it is 44 px tall in a
         // hand: `before` is the hit area, the track is what is drawn.
-        'elev-inset relative h-4 w-7 shrink-0 rounded-full border border-edge transition-colors',
+        // The track does not animate its colour: see `UI/Button.tsx`. The
+        // thumb's travel is one of the three motions this surface keeps, and
+        // it is the one that says the switch was thrown.
+        'elev-inset relative h-4 w-7 shrink-0 rounded-full border border-edge',
         'before:absolute before:-inset-y-3.5 before:-inset-x-2 before:content-[""]',
         'sm:before:hidden',
         checked ? 'bg-accent-fill' : 'bg-field',
@@ -50,7 +53,7 @@ export function Switch({
     >
       <SwitchPrimitive.Thumb
         className={cn(
-          'block size-3 rounded-full bg-panel transition-transform',
+          'block size-3 rounded-full bg-panel motion-safe:transition-transform',
           checked ? 'translate-x-3.5' : 'translate-x-0.5',
         )}
       />

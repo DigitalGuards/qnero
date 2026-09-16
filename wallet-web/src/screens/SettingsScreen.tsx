@@ -106,25 +106,44 @@ export function SettingsScreen({
             seed, so the switch below goes back on first.
           </p>
         )}
-        <p className="mm-note mt-2 text-muted">
-          A rescan drops this wallet&apos;s watermark and its record of which blocks it has seen,
-          then walks the node&apos;s whole tree again. It runs add only: spent flags and orphaned
-          transfers are not reconciled, because the evidence for reconciling them is the node gate
-          the rescan bypassed. Run an ordinary sync against a current node afterwards.
-        </p>
-        <p className="mm-note mt-2 text-muted">
-          Storage is {persisted ? 'marked persistent' : 'not marked persistent'} in this browser.
+        {/* 118 words of prose sat here, between the two buttons above and
+            the Remove below, which put Remove at y 493 and the node endpoint
+            at y 633 on a 667 px phone: a reader who came to point the wallet
+            at another node scrolled past the rescan mechanics and the storage
+            essay to reach it. What a rescan does is sync theory and reads on
+            request; the storage line is one sentence, because the spend-key
+            step already says what the 32 bytes are for. */}
+        <p className="mm-note mt-2 text-muted" data-testid="storage-line">
+          Storage is {persisted ? 'marked persistent' : 'not marked persistent'} in this browser
           {persisted
-            ? ' The browser has been asked not to evict it under storage pressure.'
-            : ' A browser under storage pressure may drop it. Everything this wallet holds' +
-              " re-derives from the seed, because each transfer's plaintext is on the chain inside" +
-              ' its ciphertext, so what a drop costs is a full rescan and the record of what has' +
-              ' been spent. Without the 32 bytes written down it costs the wallet.'}
+            ? ', so it will not be evicted under storage pressure.'
+            : '; a drop costs a rescan, and the seed is the only way back.'}
         </p>
+        <details className="mt-2">
+          <summary className="cursor-pointer text-meta text-muted">What a rescan does</summary>
+          <p className="mm-note mt-2 text-muted">
+            It drops this wallet&apos;s watermark and its record of which blocks it has seen, then
+            walks the node&apos;s whole tree again. It runs add only: spent flags and orphaned
+            transfers are not reconciled, because the evidence for reconciling them is the node
+            gate the rescan bypassed. Run an ordinary sync against a current node afterwards.
+          </p>
+          {!persisted && (
+            <p className="mm-note mt-2 text-muted">
+              A browser under storage pressure may drop this wallet&apos;s records. Everything it
+              holds re-derives from the seed, because each transfer&apos;s plaintext is on the
+              chain inside its ciphertext, so what a drop costs is a full rescan and the record of
+              what has been spent.
+            </p>
+          )}
+        </details>
         <div className="mt-4 border-t border-edge pt-3">
           <Dialog>
+            {/* The trigger is not the erase. Red on this page put the
+                destructive colour twice on one act, once on a screen that
+                carries no amber at all and once inside the dialog where the
+                act actually happens. The dialog's button keeps it. */}
             <DialogTrigger asChild>
-              <Button variant="destructive">Remove this wallet</Button>
+              <Button data-testid="remove-wallet">Remove this wallet</Button>
             </DialogTrigger>
             <DialogContent
               title="Erase this wallet?"
@@ -254,9 +273,15 @@ export function SettingsScreen({
         </div>
       </Panel>
 
-      <Panel title="What this wallet tells the node">
+      {/* No panel title: the summary under it read "What the node learns"
+          over a title reading "What this wallet tells the node", which is two
+          headings for one disclosure and a 40 px row on a phone. The summary
+          is the row, set like a panel title. */}
+      <Panel>
         <details open={argumentOpen} data-testid="node-learns">
-          <summary className="cursor-pointer text-meta text-muted">What the node learns</summary>
+          <summary className="cursor-pointer text-label uppercase tracking-label text-muted">
+            What the node learns
+          </summary>
           <div className="mt-2">
             <Prose>
               <p>

@@ -29,13 +29,38 @@ import { PHASES, progressFraction } from './sendPhases';
 import { Num, Table, TableScroll } from '../components/UI/Table';
 import { formatBytes, formatDuration, parseQnrToSteps } from '../lib/format';
 import { memoByteLength, memoIsPlainAscii, memoRefusal } from '../lib/memo';
-import { formatStepsAsQnr } from '../lib/units';
+import { formatCount, formatStepsAsQnr } from '../lib/units';
 import type { SpendProgress, SpendResult } from '../wallet/send';
 
 interface SendForm {
   to: string;
   amount: string;
   memo: string;
+}
+
+/**
+ * What landed in the address field, as a line under it.
+ *
+ * A Qnero address is 2,571 characters. Three rows of a textarea show the last
+ * three lines of it with the first cut through its glyphs, so after a paste
+ * the only thing on screen is a tail, and the static hint under it said "a qn1
+ * address" whatever was there. A partial paste was then refused on submit,
+ * after the reader had filled in the rest of the form. Head, tail and the
+ * length are what a reader checks a pasted address by, which is the line the
+ * faucet's own address field carries.
+ */
+export function addressCheckLine(value: string | undefined): string {
+  const address = (value ?? '').trim();
+  if (address.length === 0) {
+    return 'a qn1 address';
+  }
+  if (address.length <= 14) {
+    return `${address}, ${formatCount(address.length)} characters`;
+  }
+  return (
+    `${address.slice(0, 7)}…${address.slice(-6)}, ` +
+    `${formatCount(address.length)} characters`
+  );
 }
 
 export function SendScreen({
@@ -111,6 +136,7 @@ export function SendScreen({
   // `useWatch` rather than `form.watch`: the subscription form is the one the
   // React compiler can reason about, and it re-renders this field alone.
   const memo = useWatch({ control: form.control, name: 'memo' });
+  const to = useWatch({ control: form.control, name: 'to' });
   const [elapsed, setElapsed] = useState(0);
   /**
    * Which phase is running, and what the clock read when it started.
@@ -252,13 +278,6 @@ export function SendScreen({
 
   return (
     <Panel title="Send Qnero">
-      {syncing && (
-        <Notice className="mb-3" testId="send-blocked">
-          A scan is running. It reads everything this wallet holds before it starts and commits at
-          the end, so a payment settling underneath it would write the same rows from a later moment.
-          This button comes back when the scan finishes.
-        </Notice>
-      )}
       <form
         onSubmit={(event) => {
           void form.handleSubmit((values) => {
@@ -269,7 +288,7 @@ export function SendScreen({
         <Field
           label="To"
           htmlFor="send-to"
-          hint="a qn1 address"
+          hint={addressCheckLine(to)}
           error={form.formState.errors.to?.message}
         >
           <Textarea
@@ -297,6 +316,16 @@ export function SendScreen({
                 );
               },
             })}
+            // A 2,571-character paste lands scrolled to its end, so the three
+            // rows show a tail and cut the first line through its glyphs. The
+            // head is what a reader checks against what they copied, and the
+            // line under the field names the same head.
+            onPaste={(event) => {
+              const field = event.currentTarget;
+              requestAnimationFrame(() => {
+                field.scrollTop = 0;
+              });
+            }}
           />
         </Field>
         <Field
@@ -372,6 +401,15 @@ export function SendScreen({
           </Notice>
         )}
 
+        {/* The wait is on the button and on one reserved line under it.
+            It was a 138 px notice above the To field: App.tsx syncs on every
+            head, so on the public testnet that notice appeared about every
+            120 s, moved the To field from y 132 to y 282 and pushed Send off
+            the first screen, under the thumb already reaching for it. The
+            line below is always in the layout, so a pass starting moves
+            nothing. Why a payment and a scan do not overlap is a comment in
+            this file and a paragraph in `docs/WALLET.md`, which is where the
+            rule about commit ordering belongs. */}
         <Button
           type="submit"
           variant="action"
@@ -380,8 +418,11 @@ export function SendScreen({
           data-testid="do-send"
           disabled={syncing}
         >
-          Send
+          {syncing ? 'Reading the chain' : 'Send'}
         </Button>
+        <p className="mt-2 min-h-[1.1em] text-meta text-muted" data-testid="send-blocked">
+          {syncing ? 'Sending waits for the sync to finish, a few seconds.' : ''}
+        </p>
       </form>
     </Panel>
   );

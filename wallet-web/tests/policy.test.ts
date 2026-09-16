@@ -27,12 +27,19 @@
  * they show.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { readFileSync } from 'node:fs';
 
 import { CONTENT_SECURITY_POLICY, cspDirectives } from '../vite.config';
 import { RECONNECT_DELAY_MS, watchConnection, type ChainContext } from '../src/chain/api';
+import {
+  RECONNECT_ATTEMPTS_BEFORE_SETTINGS,
+  RECONNECT_SCHEDULE_MS,
+  reconnectDelayMs,
+  secondsUntil,
+} from '../src/app/reconnect';
+import { applyTheme, readTheme, storeTheme, THEME_KEY } from '../src/app/theme';
 
 /** One directive's sources, by name, as the policy spells them. */
 function sources(name: string): string[] {
@@ -355,6 +362,177 @@ describe('the wordmark', () => {
       for (const found of source.matchAll(/qloak/gi)) {
         expect(`${file}: ${found[0]}`).toBe(`${file}: Qloak`);
       }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The theme, which has to be on the page before the first paint.
+// ---------------------------------------------------------------------------
+
+/** A `localStorage` that answers, and one that throws the way a locked one does. */
+function fakeStorage(seed: Record<string, string> = {}): Storage {
+  const held = new Map(Object.entries(seed));
+  return {
+    get length(): number {
+      return held.size;
+    },
+    clear: (): void => {
+      held.clear();
+    },
+    getItem: (key: string): string | null => held.get(key) ?? null,
+    key: (index: number): string | null => [...held.keys()][index] ?? null,
+    removeItem: (key: string): void => {
+      held.delete(key);
+    },
+    setItem: (key: string, value: string): void => {
+      held.set(key, value);
+    },
+  };
+}
+
+describe('the theme this browser chose', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(globalThis, 'localStorage');
+    Reflect.deleteProperty(globalThis, 'document');
+  });
+
+  it('reads the two real answers and treats everything else as the system', () => {
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: fakeStorage({ [THEME_KEY]: 'light' }),
+    });
+    expect(readTheme()).toBe('light');
+    localStorage.setItem(THEME_KEY, 'dark');
+    expect(readTheme()).toBe('dark');
+    localStorage.setItem(THEME_KEY, 'sepia');
+    expect(readTheme()).toBe('system');
+    localStorage.removeItem(THEME_KEY);
+    expect(readTheme()).toBe('system');
+  });
+
+  it('is the system theme when site data is blocked, rather than a failure', () => {
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get: () => {
+        throw new Error('the browser refuses site data on this origin');
+      },
+    });
+    expect(readTheme()).toBe('system');
+    expect(() => {
+      storeTheme('dark');
+    }).not.toThrow();
+  });
+
+  it('puts a choice on the root element and takes it off again for the system', () => {
+    const attributes = new Map<string, string>();
+    Object.defineProperty(globalThis, 'document', {
+      configurable: true,
+      value: {
+        documentElement: {
+          setAttribute: (name: string, value: string): void => {
+            attributes.set(name, value);
+          },
+          removeAttribute: (name: string): void => {
+            attributes.delete(name);
+          },
+        },
+      },
+    });
+    applyTheme('light');
+    expect(attributes.get('data-theme')).toBe('light');
+    applyTheme('dark');
+    expect(attributes.get('data-theme')).toBe('dark');
+    applyTheme('system');
+    expect(attributes.has('data-theme')).toBe(false);
+  });
+
+  /**
+   * The rule that matters is where it is called from.
+   *
+   * Only `ThemeToggle` used to write `data-theme`, and that component mounts
+   * on the settings screen alone: a reader who chose light on a dark-system
+   * phone was handed the dark wallet on every open, unlock screen included,
+   * until they opened Settings, at which point the page flipped mid-session.
+   * Nothing in a unit suite sees that, so the call site is read here.
+   */
+  it('is applied before the root is mounted, not by the screen that sets it', () => {
+    const main = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
+    const applied = main.indexOf('applyTheme(readTheme())');
+    const mounted = main.indexOf('createRoot(');
+    expect(applied, 'main.tsx applies no stored theme').toBeGreaterThan(-1);
+    expect(applied, 'the theme is applied after the root is mounted').toBeLessThan(mounted);
+  });
+
+  it('spells the storage key in one module, which both call sites import', () => {
+    // Two copies of a key is how a stored choice becomes unreadable by half
+    // the app after a rename that looks harmless in both diffs.
+    const toggle = readFileSync(
+      new URL('../src/components/UI/ThemeToggle.tsx', import.meta.url),
+      'utf8',
+    );
+    const main = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
+    for (const [name, source] of [
+      ['ThemeToggle.tsx', toggle],
+      ['main.tsx', main],
+    ] as const) {
+      expect(`${name} spells the key itself: ${String(source.includes(THEME_KEY))}`).toBe(
+        `${name} spells the key itself: false`,
+      );
+      expect(source, `${name} does not import app/theme`).toContain('app/theme');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The retry a dead endpoint gets, which is the difference between a wallet
+// that comes back when the network does and one that does not.
+// ---------------------------------------------------------------------------
+
+describe('the schedule a failed connection is retried on', () => {
+  it('waits seconds first, because the common failure is a network changing', () => {
+    expect(RECONNECT_SCHEDULE_MS[0]).toBe(5_000);
+    expect(reconnectDelayMs(1)).toBe(5_000);
+    expect(reconnectDelayMs(2)).toBe(15_000);
+    expect(reconnectDelayMs(3)).toBe(60_000);
+  });
+
+  it('holds at the last wait rather than growing without bound', () => {
+    expect(reconnectDelayMs(4)).toBe(60_000);
+    expect(reconnectDelayMs(40)).toBe(60_000);
+  });
+
+  it('never returns a wait of zero, whatever it is asked', () => {
+    expect(reconnectDelayMs(0)).toBe(5_000);
+    expect(reconnectDelayMs(-3)).toBe(5_000);
+  });
+
+  it('points a reader at Settings only after the third failure', () => {
+    // Two failures is a network settling. Three is an endpoint that is wrong
+    // or gone, which is the only case where Settings is the answer.
+    expect(RECONNECT_ATTEMPTS_BEFORE_SETTINGS).toBe(3);
+    expect(RECONNECT_ATTEMPTS_BEFORE_SETTINGS).toBe(RECONNECT_SCHEDULE_MS.length);
+  });
+
+  it('counts down in whole seconds and stops at zero', () => {
+    // A fixed clock rather than the wall one: the countdown is what a reader
+    // reads, and a test that drifted by a millisecond would read one second
+    // fewer at random.
+    const now = 1_700_000_000_000;
+    expect(secondsUntil(now + 12_000, now)).toBe(12);
+    // Rounded up, so the last second of a wait reads as one second and never
+    // as "retrying in 0 s" over a connection nothing has tried yet.
+    expect(secondsUntil(now + 11_400, now)).toBe(12);
+    expect(secondsUntil(now + 1, now)).toBe(1);
+    expect(secondsUntil(now, now)).toBe(0);
+    expect(secondsUntil(now - 5_000, now)).toBe(0);
+  });
+
+  it('counts the whole wait down from the moment an attempt fails', () => {
+    const failedAt = 1_700_000_000_000;
+    for (const attempt of [1, 2, 3, 9]) {
+      const delay = reconnectDelayMs(attempt);
+      expect(secondsUntil(failedAt + delay, failedAt)).toBe(delay / 1000);
     }
   });
 });

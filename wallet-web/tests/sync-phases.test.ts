@@ -16,7 +16,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   SYNC_PHASES,
+  advanceSyncFraction,
   countedFraction,
+  isCountedDetail,
   syncFraction,
   syncPhaseIndex,
 } from '../src/screens/syncPhases';
@@ -88,5 +90,99 @@ describe('how far along the bar is', () => {
     // past the phase it is in.
     expect(countedFraction('900 of 640')).toBe(1);
     expect(syncFraction('scan', '900 of 640')).toBeCloseTo(1, 5);
+  });
+
+  it('falls back to the phase start when the running stage stops counting', () => {
+    // Which is the arithmetic the screen has to cover for: a stage detail
+    // with no count in it reports nothing about the phase's own progress.
+    expect(syncFraction('headers', '5 of 5 entry hashes')).toBeGreaterThan(
+      syncFraction('headers', 'checking each block against the tree it published'),
+    );
+  });
+});
+
+/**
+ * The bar the screen draws, which is the arithmetic above with one rule over
+ * it.
+ *
+ * The real sequence that broke it: `headers` counts entry hashes to "5 of 5",
+ * then the same phase says "checking each block against the tree it published"
+ * with nothing to count. The bar fell from 155 px of its 309 px track to 79 px
+ * in two frames 0.3 s apart and the 300 ms width transition animated the
+ * retreat, which is the "stuck" reading the phase list exists to prevent.
+ */
+describe('the bar over one pass', () => {
+  /** The stages of one pass, in order, as `wallet/sync.ts` reports them. */
+  const PASS: { stage: string; detail: string | null }[] = [
+    { stage: 'chain', detail: 'checking the chain this node serves' },
+    { stage: 'gates', detail: 'head is block 2,048' },
+    { stage: 'spend markers', detail: 'reading what the chain has spent' },
+    { stage: 'spend markers', detail: '512 read' },
+    { stage: 'headers', detail: '1 of 5 entry hashes' },
+    { stage: 'headers', detail: '5 of 5 entry hashes' },
+    { stage: 'headers', detail: 'checking each block against the tree it published' },
+    { stage: 'headers', detail: '1,024 of 2,048 block headers' },
+    { stage: 'scan', detail: '64 of 640 entries' },
+    { stage: 'scan', detail: '128 entries tried' },
+    { stage: 'scan', detail: '640 of 640 entries' },
+  ];
+
+  it('never narrows, over every frame of a real pass', () => {
+    let floor = 0;
+    let previous = 0;
+    for (const frame of PASS) {
+      floor = advanceSyncFraction(floor, frame.stage, frame.detail);
+      expect(floor, `the bar narrowed at ${frame.stage}: ${frame.detail ?? 'no detail'}`)
+        .toBeGreaterThanOrEqual(previous);
+      previous = floor;
+    }
+    expect(floor).toBeLessThanOrEqual(1);
+  });
+
+  it('holds the counted share when the same phase stops counting', () => {
+    const counted = advanceSyncFraction(0, 'headers', '5 of 5 entry hashes');
+    const sentence = advanceSyncFraction(
+      counted,
+      'headers',
+      'checking each block against the tree it published',
+    );
+    expect(sentence).toBe(counted);
+    // And the raw arithmetic under it is what would have gone backwards.
+    expect(
+      syncFraction('headers', 'checking each block against the tree it published'),
+    ).toBeLessThan(counted);
+  });
+
+  it('starts from zero for the next pass, because the floor is per pass', () => {
+    const late = advanceSyncFraction(0, 'scan', '640 of 640 entries');
+    expect(advanceSyncFraction(0, 'chain', 'checking the chain this node serves')).toBeLessThan(
+      late,
+    );
+  });
+});
+
+/**
+ * Which details read beside a phase label, and which do not.
+ *
+ * "checking the node checking the chain this node serves" is a stutter rather
+ * than a phase and its progress, and so is "reading the chain checking each
+ * block against the tree it published". A count reads: "reading the chain
+ * 5 of 5 entry hashes". The sentence ones go on the elapsed line, the way the
+ * sending screen puts its own there.
+ */
+describe('what the phase row shows beside its label', () => {
+  it('takes a count', () => {
+    expect(isCountedDetail('5 of 5 entry hashes')).toBe(true);
+    expect(isCountedDetail('1,024 of 2,048 block headers')).toBe(true);
+    expect(isCountedDetail('64 of 640 entries')).toBe(true);
+  });
+
+  it('leaves a sentence, and nothing at all, off the row', () => {
+    expect(isCountedDetail('checking the chain this node serves')).toBe(false);
+    expect(isCountedDetail('checking each block against the tree it published')).toBe(false);
+    expect(isCountedDetail('reading what the chain has spent')).toBe(false);
+    expect(isCountedDetail('512 read')).toBe(false);
+    expect(isCountedDetail(null)).toBe(false);
+    expect(isCountedDetail(undefined)).toBe(false);
   });
 });

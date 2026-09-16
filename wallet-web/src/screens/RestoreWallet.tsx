@@ -130,11 +130,15 @@ export function RestoreWallet({
 
   return (
     <Panel title="Use an existing wallet">
-      <p className="text-body text-ink-2">
-        Paste the 32-byte spend key, as 64 hex characters. Spaces and line breaks are ignored.
-      </p>
+      {/* The intro paragraph said what the first field's label and hint say,
+          and cost a 40 px row above them; "What this number does" cost
+          another between the height field and the passphrase. Together they
+          put "Restore wallet" at y 568 of a 667 px viewport, which is under
+          the browser chrome on a real phone, on the form whose whole job is
+          that button. The disclosure is under the button row now, where a
+          reader who wants it is not between the reader and the form. */}
       <form
-        className="mt-3"
+        className="mt-0"
         onSubmit={(event) => {
           void form.handleSubmit((values) => {
             onRestore(
@@ -148,7 +152,7 @@ export function RestoreWallet({
         <Field
           label="Spend key"
           htmlFor="restore-seed"
-          hint={`${typed.length} of 64 hex characters`}
+          hint={`${typed.length} of 64 hex characters; spaces and line breaks are ignored`}
           error={form.formState.errors.seed?.message}
         >
           <Textarea
@@ -189,19 +193,6 @@ export function RestoreWallet({
             })}
           />
         </Field>
-        <details className="mb-3">
-          <summary className="cursor-pointer text-meta text-muted">
-            What this number does
-          </summary>
-          <p className="mm-note mt-2 text-muted">
-            It is recorded rounded down to the nearest {BIRTHDAY_EPOCH} blocks, so what the nodes
-            this wallet syncs against are told is a coarse epoch rather than the day it was made.
-            A height <strong className="text-ink">above</strong> the block a transfer arrived in is
-            a transfer this wallet never reads and a balance quietly short, so if you are not sure,
-            leave it empty or give a height you are sure is early.
-            {head !== null && ` Empty reads the whole chain: ${fullScanEstimate(head)}.`}
-          </p>
-        </details>
         <Field
           label="Passphrase"
           htmlFor="passphrase"
@@ -251,6 +242,19 @@ export function RestoreWallet({
             {busy ? 'Opening…' : 'Restore wallet'}
           </Button>
         </div>
+        <details className="mt-3">
+          <summary className="cursor-pointer text-meta text-muted">
+            What the start block does
+          </summary>
+          <p className="mm-note mt-2 text-muted">
+            It is recorded rounded down to the nearest {BIRTHDAY_EPOCH} blocks, so what the nodes
+            this wallet syncs against are told is a coarse epoch rather than the day it was made.
+            A height <strong className="text-ink">above</strong> the block a transfer arrived in is
+            a transfer this wallet never reads and a balance quietly short, so if you are not sure,
+            leave it empty or give a height you are sure is early.
+            {head !== null && ` Empty reads the whole chain: ${fullScanEstimate(head)}.`}
+          </p>
+        </details>
       </form>
     </Panel>
   );

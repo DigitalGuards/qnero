@@ -58,6 +58,43 @@ export function countedFraction(detail: string | null): number | null {
   return Math.min(1, Math.max(0, done / total));
 }
 
+/**
+ * Whether a detail is a count, which is the only kind the phase row shows.
+ *
+ * A counted detail reads beside its label: "reading the chain 5 of 5 entry
+ * hashes". A sentence one does not: "checking the node checking the chain this
+ * node serves" and "reading the chain checking each block against the tree it
+ * published" are a stutter rather than a phase and its progress. The sending
+ * screen puts its sentence details on the elapsed line, and this screen does
+ * the same.
+ */
+export function isCountedDetail(detail: string | null | undefined): boolean {
+  return detail !== null && detail !== undefined && countedFraction(detail) !== null;
+}
+
+/**
+ * The bar's share for the next frame of one pass, which only ever grows.
+ *
+ * A stage detail with no count reports nothing, and `syncFraction` reads that
+ * as its phase's start. "reading the chain" counting "5 of 5 entry hashes"
+ * and then saying "checking each block against the tree it published" took the
+ * bar from 155 px of its 309 px track to 79 px in two frames 0.3 s apart, with
+ * the 300 ms width transition animating the retreat. A bar that visibly slides
+ * backwards is the exact "this is stuck" reading the phase list exists to
+ * prevent, and on a chain at block 2,000 that phase is seconds long.
+ *
+ * The floor is per pass. `SyncProgress` is mounted only while a sync runs, so
+ * the ref holding the previous value is created when a pass starts and goes
+ * with it when the pass ends.
+ */
+export function advanceSyncFraction(
+  previous: number,
+  stage: string | null,
+  detail: string | null,
+): number {
+  return Math.max(previous, syncFraction(stage, detail));
+}
+
 /** How far along the whole pass is: phases finished, plus this one's share. */
 export function syncFraction(stage: string | null, detail: string | null): number {
   const current = syncPhaseIndex(stage);
