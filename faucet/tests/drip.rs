@@ -718,6 +718,37 @@ async fn a_claim_knows_which_step_it_is_on() {
     )
     .await;
     assert_eq!(first["phase"], serde_json::json!("waiting"));
+
+    // A failed claim answers with the code the operator's log carries and the
+    // sentence the page prints. The page used to interpolate the code, so the
+    // one line a requester saw after a two-minute wait read "The drip did not
+    // settle (send-failed)."
+    harness
+        .store
+        .lock()
+        .expect("the ledger")
+        .mark_failed(ids[1], "no-spendable-funds", now_secs())
+        .expect("failed");
+    let (_, failed, _) = request(
+        "GET",
+        format!("{}/drip/{}", harness.base, ids[1]),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(failed["status"], serde_json::json!("failed"));
+    assert_eq!(failed["reason"], serde_json::json!("no-spendable-funds"));
+    let message = failed["message"]
+        .as_str()
+        .expect("a sentence beside the code");
+    assert_eq!(message, "The faucet could not fund the payment.");
+    assert!(
+        !message.contains("no-spendable-funds"),
+        "the sentence carries the code: {message}"
+    );
+    // A claim that has not failed carries no failure sentence at all, so the
+    // page cannot print one over a claim that is still being proved.
+    assert_eq!(first["message"], serde_json::Value::Null);
 }
 
 /// The per-client limit counts an IPv6 requester by its /64, through the whole

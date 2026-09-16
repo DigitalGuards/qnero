@@ -97,15 +97,30 @@ async function refreshStatus() {
     if (typeof body.chainHead === 'number') parts.push(`Block ${body.chainHead}`);
     if (typeof body.balanceQnr === 'string') parts.push(`${body.balanceQnr} QNR in the faucet`);
     const left = dripsLeft(body);
-    if (left !== null && left > 0) parts.push(left === 1 ? '1 drip left' : `${left} drips left`);
-    if (typeof body.queued === 'number' && body.queued > 0) {
+    const queued = typeof body.queued === 'number' ? body.queued : 0;
+    // With a queue the figure that matters is the wait, not the stock: four
+    // parts ran to two lines at 375 px and the break fell after a numeral, so
+    // line one ended "260 drips left · 3". The line arrives after first paint,
+    // so the panel and the button under it dropped 20 px while a reader was
+    // reaching for them, and busy periods are exactly when a queue shows.
+    if (left !== null && left > 0 && queued === 0) {
+      parts.push(left === 1 ? '1 drip left' : `${left} drips left`);
+    }
+    if (queued > 0) {
       parts.push(
-        body.queued === 1
-          ? '1 claim waiting, about 30 s'
-          : `${body.queued} claims waiting, about 30 s each`,
+        queued === 1 ? '1 claim waiting, about 30 s' : `${queued} claims waiting, about 30 s each`,
       );
     }
-    status.textContent = parts.join(' · ');
+    // A span per part, so a wrap can only happen at a separator and never
+    // inside "260 drips left".
+    status.replaceChildren(
+      ...parts.flatMap((part, index) => {
+        const piece = document.createElement('span');
+        piece.className = 'status__part';
+        piece.textContent = part;
+        return index === 0 ? [piece] : [document.createTextNode(' · '), piece];
+      }),
+    );
     if (left !== null) showWhetherItCanPay(left > 0);
   } catch (error) {
     /* A status line that cannot be fetched is a status line that stays empty. */
@@ -243,7 +258,12 @@ async function poll(id, startedAt) {
     // address's cooldown on a payment nobody watched.
     submit.textContent = 'Try again';
     submit.disabled = false;
-    say(`The drip did not settle (${body.reason}). Try again in a few minutes.`, 'bad');
+    // The server's sentence, which it derives from the same code it logs. The
+    // code itself used to be interpolated here, so the one line a requester
+    // saw after a two-minute wait read "The drip did not settle
+    // (send-failed)." A build old enough to answer without a `message` still
+    // gets a sentence rather than an identifier.
+    say(`${body.message || 'The node did not take the payment.'} Try again in a few minutes.`, 'bad');
     return;
   }
   if (Date.now() - startedAt > POLL_LIMIT_MS) {
@@ -315,6 +335,15 @@ form.addEventListener('submit', async (event) => {
       if (body.reason === 'bad-address') {
         address.setAttribute('aria-invalid', 'true');
         address.setAttribute('aria-describedby', 'result');
+      }
+      // A refusal explains itself, because `limits.rs` writes those sentences
+      // for the reader. A fault does not: the one a reader would have seen is
+      // the ledger being unavailable, which names an internal they can do
+      // nothing about and which appears exactly when the service is least
+      // healthy.
+      if (response.status >= 500) {
+        say('The faucet hit a fault. Try again in a minute.', 'bad');
+        return;
       }
       say(body.message || 'The faucet refused that request.', 'bad');
       return;

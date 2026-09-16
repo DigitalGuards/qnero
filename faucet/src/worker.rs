@@ -118,6 +118,29 @@ fn failure_code(error: &anyhow::Error) -> &'static str {
     }
 }
 
+/// What a reader is told a failure was, as a sentence.
+///
+/// The codes above are for the operator's log and for the store, where a short
+/// stable token is the right shape. The page used to interpolate one straight
+/// into the sentence a requester reads after a two-minute wait: "The drip did
+/// not settle (send-failed)." A hyphenated identifier in the one message a
+/// reader ever sees is the thing the refusal path had already been cleaned of
+/// in `limits.rs`, and this path was missed.
+///
+/// Every code `failure_code` can return has an arm here, plus `interrupted`,
+/// which `store::INTERRUPTED` writes when the faucet restarts mid-drip. An
+/// unknown code reads as the node refusing the payment, which is the truthful
+/// general case and is what the reader does the same thing about.
+pub fn failure_sentence(code: &str) -> &'static str {
+    match code {
+        "no-spendable-funds" => "The faucet could not fund the payment.",
+        "fee-floor" => "The payment fee fell below the floor.",
+        "not-included" => "No block took the payment in time.",
+        crate::store::INTERRUPTED => "The faucet restarted during the payment.",
+        _ => "The node did not take the payment.",
+    }
+}
+
 /// The wallet thread. Owns the wallet, the prover and the transparent key for
 /// the life of the process.
 pub struct Worker {
@@ -573,5 +596,51 @@ mod tests {
             assert!(!code.contains("127.0.0.1"), "{code} leaks the node URL");
             assert!(code.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
         }
+    }
+
+    /// And every code a claim can carry has a sentence, because the code is
+    /// what the page used to print: "The drip did not settle (send-failed)."
+    /// A reader waits two minutes for that line and it is the only account of
+    /// the failure they get.
+    #[test]
+    fn every_failure_code_has_a_sentence_a_reader_can_read() {
+        let codes = [
+            "no-spendable-funds",
+            "fee-floor",
+            "not-included",
+            "send-failed",
+            crate::store::INTERRUPTED,
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for code in codes {
+            let sentence = failure_sentence(code);
+            assert!(
+                !sentence.contains(code),
+                "{code}: the sentence still carries the code"
+            );
+            assert!(
+                !sentence.contains('-') || sentence.contains("Try again"),
+                "{code}: {sentence} reads like an identifier"
+            );
+            let first = sentence.chars().next().expect("a sentence");
+            assert!(
+                first.is_ascii_uppercase(),
+                "{code}: {sentence} is not sentence case"
+            );
+            assert!(
+                sentence.ends_with('.'),
+                "{code}: {sentence} does not end a sentence"
+            );
+            seen.insert(sentence);
+        }
+        // Five codes, five sentences: a reader who reports one is reporting
+        // something the operator can tell apart from the other four.
+        assert_eq!(seen.len(), codes.len(), "two codes read the same: {seen:?}");
+        // A code this build has never emitted reads as the general case
+        // rather than as an empty line or as the code itself.
+        assert_eq!(
+            failure_sentence("send-failed"),
+            failure_sentence("something this build has never emitted")
+        );
     }
 }
