@@ -617,10 +617,10 @@ The scan reports both counts: `coinbase_leaves` is every coinbase leaf it
 walked, which is one per block in the range, and `coinbase_received` is how many
 of them were this wallet's.
 
-A pass that read leaves and received nothing prints the shared chain-selection
-trust hint: storage reads are authenticated to the selected headers, while the
-configured node remains trusted for chain selection because the wallet does not
-verify proof of work.
+A pass that read leaves and received nothing prints a chain-selection trust
+hint. The command-line wallet names authenticated storage and its lack of proof
+of work verification. The browser uses a shorter explanation and suggests a
+rescan with another trusted node when a payment is missing.
 
 A pass also prints a `warning` line for every leaf where a ciphertext this
 wallet's own key opened sat beside a commitment that note does not open. That
@@ -1623,16 +1623,17 @@ because that is where the circuit is.
 `leaf` is the one exception on a screen and it is deliberate, because a leaf
 index is what a reader hands a second node and the substitution detector has
 nothing else to name. It survives in three places: the four per-leaf
-substitution warnings and the ciphertext hint, the last-sync detail table and
+substitution warnings, the last-sync detail table and
 the sync progress counters, and the settings copy explaining what a scan reads
 off the chain. Where a leaf index was only a label for a position it is gone.
 The balance table and the rejected table head that column "Entry", and the
 settings button reads "Rescan from the start".
 
 The command-line wallet keeps the circuit's words outside the sentences the
-parity test binds. `CIPHERTEXT_SUBSTITUTION_HINT` and the four per-leaf
-warnings are held byte for byte identical across the two wallets, so those
-moved together and read the same in both. Everything else `qnero-wallet`
+parity test binds. The four per-leaf warnings stay byte for byte identical
+across the two wallets. `CIPHERTEXT_SUBSTITUTION_HINT` uses short browser copy
+and a technical native explanation; a separate test checks their shared trust
+boundary and the browser's vocabulary. Everything else `qnero-wallet`
 prints, the `balance` table and the `sync` and `send` lines, still says note,
 output and nullifier, because its reader is an operator running a node beside
 it and those are the words the chain, the pallet and `docs/CIRCUIT.md` use.

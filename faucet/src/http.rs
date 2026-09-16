@@ -22,7 +22,7 @@ use crate::config::Config;
 use crate::limits::{self, Refusal};
 use crate::page;
 use crate::store::{now_secs, ClaimStatus, Store};
-use crate::worker::{Job, Shared};
+use crate::worker::{failure_sentence, Job, Shared};
 
 /// How stale the node's last answer may be before `/health` reports 503. Three
 /// block intervals at the 120 s target, so an ordinary wait for a block never
@@ -256,7 +256,7 @@ async fn drip(
     //    hold, because between here and there this task awaits.
     let (last_claim, in_window) = {
         let Ok(store) = state.store.lock() else {
-            return internal("the claims ledger is poisoned");
+            return internal("The claims ledger is unavailable.");
         };
         let hash = store.ip_hash(&client);
         let last = store.last_claim_for_address(&wanted).unwrap_or(None);
@@ -314,7 +314,7 @@ async fn drip(
     let amount = state.config.drip_quanta;
     let claim_id = {
         let Ok(store) = state.store.lock() else {
-            return internal("the claims ledger is poisoned");
+            return internal("The claims ledger is unavailable.");
         };
         let hash = store.ip_hash(&client);
         let last = store.last_claim_for_address(&wanted).unwrap_or(None);
@@ -333,7 +333,7 @@ async fn drip(
             Ok(id) => id,
             Err(error) => {
                 eprintln!("faucet      could not record a claim: {error:#}");
-                return internal("the claims ledger could not be written");
+                return internal("The claims ledger could not be written.");
             }
         }
     };
@@ -396,7 +396,7 @@ fn phase_of(claim: &crate::store::Claim, ahead: usize) -> &'static str {
 async fn claim_status(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
     let (claim, ahead) = {
         let Ok(store) = state.store.lock() else {
-            return internal("the claims ledger is poisoned");
+            return internal("The claims ledger is unavailable.");
         };
         let claim = store.claim(id).unwrap_or(None);
         let ahead = store
@@ -424,6 +424,15 @@ async fn claim_status(State(state): State<AppState>, Path(id): Path<i64>) -> Res
         // Only ever a reason code (`worker::failure_code`), never an error
         // carrying the node URL or the wallet store path.
         "reason": claim.detail,
+        // The same fact as a sentence, which is what the page prints. A
+        // refusal already answers with a `message` and this path did not, so
+        // the one line a requester saw after a two-minute wait carried a
+        // hyphenated identifier: "The drip did not settle (send-failed)."
+        "message": claim
+            .detail
+            .as_deref()
+            .filter(|_| claim.status == ClaimStatus::Failed)
+            .map(failure_sentence),
         "requestedAt": claim.requested_at,
         "settledAt": claim.settled_at,
     }))

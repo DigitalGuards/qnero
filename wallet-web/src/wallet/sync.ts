@@ -43,10 +43,11 @@ import { formatStepsAsQnr } from '../lib/units';
 import { ENTRY_WALK_LIMIT } from '../worker/protocol';
 import { birthdayWatermarkNote, MAX_CHECKPOINTS, unscannedBirthday, type NoteOrigin, type NoteSecret, type RejectedNote, type StoreMeta, type StoredNote, type SyncCheckpoint } from './model';
 
-/** The remaining chain-selection trust boundary, shared with the CLI. */
+/** A short explanation of provider trust for the wallet screen. The CLI and
+ * docs/WALLET.md state the header and storage-proof boundary in detail. */
 export const CIPHERTEXT_SUBSTITUTION_HINT =
-  'Storage reads are authenticated to the selected headers. This wallet trusts the configured ' +
-  'node for chain selection and does not verify proof of work.';
+  'The wallet checks payment data and trusts your node to follow the right chain. ' +
+  'If a payment is missing after syncing, rescan with another trusted node.';
 
 /** What a scan needs out of the chain, so a test can supply it. */
 export interface SyncChain {
@@ -537,8 +538,8 @@ export function fullScanSeconds(blocks: number): number {
  */
 export const FULL_SCAN_ESTIMATE =
   'this wallet records no birthday, so the first sync reads the chain from block zero: ' +
-  '{blocks} block headers, {spell} at the rate this build measured, and the leaves under them ' +
-  'on top of that';
+  '{blocks} block headers, {spell} at the rate this build measured, and the transfers under ' +
+  'them on top of that';
 
 /** That estimate as a sentence, for a wallet about to read a chain whole. */
 export function fullScanEstimate(blocks: number): string {

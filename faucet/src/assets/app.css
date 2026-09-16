@@ -288,6 +288,29 @@ h1 {
   color: var(--text-secondary);
 }
 
+/* Each part of the status line is one unbreakable piece, so a line that does
+   not fit wraps at a separator rather than inside "260 drips left", which is
+   where the break used to fall: line one ended "260 drips left · 3". */
+.status__part {
+  white-space: nowrap;
+}
+
+/* And the reserved height is what the line actually takes on a phone.
+   One row was never enough there: measured on the served page, the idle line
+   "Block 509 · 2607.44 QNR in the faucet · 260 drips left" is two rows at
+   320 px and the busy one is two rows up to 414 px. The line arrives after
+   first paint, so the second row appeared under a reader's thumb and took the
+   panel and the button with it. Two rows are the most it can take at any
+   phone width, because the two longest parts share a row at 280 px. The
+   bottom margin comes down to keep the block about the height it was when the
+   line is one row. */
+@media (max-width: 640px) {
+  .status {
+    min-height: 40px;
+    margin-bottom: var(--space-1);
+  }
+}
+
 /* A chip in running text with a raised ground and a border is 22.6 px tall in
    a 28.5 px line, which reads as a control: in the fold screenshot it was the
    second most button-like thing on the screen and it did nothing. The box

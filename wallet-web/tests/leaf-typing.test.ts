@@ -1,3 +1,6 @@
+// These tests exercise the consistency layer through an injected SyncChain.
+// Production storage is authenticated before reaching this layer; state-proofs.test.ts
+// and the real WASM worker smoke cover that boundary.
 /**
  * What decides which rule opens a leaf, and what a node cannot do about it.
  *
@@ -403,8 +406,10 @@ describe('a leaf whose kind the headers decide', () => {
     // beside the rare coinbase-label warning it was the constant entry that
     // made the list stop being read. The balance screen renders it under the
     // warnings and at less weight.
+    //
+    // A consistency-only fixture still carries the routine provider-trust hint.
     expect(hidden.report.warnings).toEqual([]);
-    expect(hidden.report.hints.some((hint) => hint.includes('does not verify proof of work'))).toBe(true);
+    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
 
     // An honest node serving the same headers recovers nothing on an ordinary
     // pass: no checkpoint moves, so the scan starts above the leaf.
@@ -582,9 +587,8 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.notes).toHaveLength(0);
     expect(hidden.report.warnings).toEqual([]);
     expect(hidden.meta.nextLeaf).toBe(3);
-    // What the operator is given instead: the hint, which states the whole
-    // bound because one rescan is the recovery for every part of it.
-    expect(hidden.report.hints.some((hint) => hint.includes('does not verify proof of work'))).toBe(true);
+    // The routine hint explains the remaining provider trust.
+    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
 
     // An honest node serving the same headers recovers nothing on an ordinary
     // pass: no checkpoint moves, so the scan starts above the leaf.
@@ -683,9 +687,7 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.report.received).toBe(0);
     expect(hidden.report.warnings).toEqual([]);
     expect(hidden.meta.nextLeaf).toBe(8);
-    expect(
-      hidden.report.hints.some((hint) => hint.includes('does not verify proof of work')),
-    ).toBe(true);
+    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
 
     const ordinary = await runSync(
       {
@@ -770,11 +772,7 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.report.received).toBe(0);
     expect(hidden.report.leavesScanned).toBe(2);
     expect(hidden.meta.nextLeaf).toBe(2);
-    expect(
-      hidden.report.hints.some((hint) =>
-        hint.includes('does not verify proof of work'),
-      ),
-    ).toBe(true);
+    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
 
     // An ordinary pass against the honest node recovers nothing, and says so
     // loudly. The watermark this pass wrote sits above leaves block 8 really
@@ -1321,28 +1319,14 @@ describe('the fold these bound tests are modelled on', () => {
 });
 
 describe('the sentences both wallets print', () => {
-  /**
-   * Every text both wallets emit, byte for byte, read out of the command-line
-   * wallet's own source.
-   *
-   * `docs/WALLET.md` says the two wallets print identical sentences, and
-   * nothing held them to it: the closing hint had drifted apart in its final
-   * clause, so two operators looking at one bound were told two different
-   * things. The cap and the four per-leaf sentences beside it are the same
-   * kind of duplicated text, so they are all read from the Rust source here.
-   * A sentence edited on one side alone fails this file.
-   *
-   * The Rust literals are `&str`s with backslash line continuations, which
-   * strip the newline and the indentation of the line below them, and format
-   * placeholders, which are filled here with the values the browser call is
-   * given. `{}` is the positional one, `leaves_word`.
-   */
+  /** Shared warning literals stay identical across wallets. The routine hint
+   * uses short browser copy and a detailed native explanation; a separate
+   * assertion below holds both to the current trust boundary. */
   const RUST = readFileSync(
     new URL('../../crates/qnero-wallet/src/wallet.rs', import.meta.url),
     'utf8',
   );
 
-  /** The first string literal after a marker, with its continuations folded. */
   function rustLiteral(marker: string): string {
     const from = RUST.indexOf(marker);
     if (from < 0) {
@@ -1379,12 +1363,6 @@ describe('the sentences both wallets print', () => {
 
   const CASES: { name: string; marker: string; values: Record<string, string>; browser: string }[] =
     [
-      {
-        name: 'the hint a pass that received nothing carries',
-        marker: 'pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =',
-        values: {},
-        browser: CIPHERTEXT_SUBSTITUTION_HINT,
-      },
       {
         name: 'the warning for a leaf its own block holds elsewhere',
         marker: 'fn moved_leaf_warning(',
@@ -1431,6 +1409,22 @@ describe('the sentences both wallets print', () => {
 
   it.each(CASES)('$name is identical in both wallets', ({ marker, values, browser }) => {
     expect(rustSentence(marker, values)).toBe(browser);
+  });
+
+  it('keeps the current trust boundary in the copy and documentation', () => {
+    const rust = rustLiteral('pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =');
+    const doc = readFileSync(new URL('../../docs/WALLET.md', import.meta.url), 'utf8');
+    expect(rust).toContain('Storage reads are authenticated to the selected headers');
+    expect(rust).toContain('trusts the configured node for chain selection');
+    expect(rust).toContain('does not verify proof of work');
+    expect(doc).toMatch(/state-trie proof/);
+    expect(doc).toMatch(/do not verify\s+RandomX proof of work/);
+    expect(CIPHERTEXT_SUBSTITUTION_HINT).toContain('trusts your node to follow the right chain');
+    expect(CIPHERTEXT_SUBSTITUTION_HINT).toContain('rescan with another trusted node');
+    expect(CIPHERTEXT_SUBSTITUTION_HINT.length).toBeLessThan(200);
+    expect(CIPHERTEXT_SUBSTITUTION_HINT).not.toMatch(
+      /\b(leaf|leaves|nullifier|commitment|note)s?\b/i,
+    );
   });
 
   it('quotes the same measured rate in both wallets', () => {

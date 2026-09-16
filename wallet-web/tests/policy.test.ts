@@ -29,7 +29,8 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { CONTENT_SECURITY_POLICY, cspDirectives } from '../vite.config';
 import { RECONNECT_DELAY_MS, watchConnection, type ChainContext } from '../src/chain/api';
@@ -40,6 +41,7 @@ import {
   secondsUntil,
 } from '../src/app/reconnect';
 import { applyTheme, readTheme, storeTheme, THEME_KEY } from '../src/app/theme';
+import { CIPHERTEXT_SUBSTITUTION_HINT, fullScanEstimate } from '../src/wallet/sync';
 
 /** One directive's sources, by name, as the policy spells them. */
 function sources(name: string): string[] {
@@ -534,5 +536,76 @@ describe('the schedule a failed connection is retried on', () => {
       const delay = reconnectDelayMs(attempt);
       expect(secondsUntil(failedAt + delay, failedAt)).toBe(delay / 1000);
     }
+  });
+});
+
+
+/**
+ * The words this project spends in the explorer and nowhere else.
+ *
+ * A Qnero wallet screen talks about payments and transfers. `leaf`, `note`,
+ * `commitment`, `nullifier` and `output` are the names of the things the chain
+ * publishes, they are what the explorer is for, and on a wallet screen they
+ * explain a reader's balance in a vocabulary nothing on that screen defines.
+ *
+ * It is a rule about prose, so it is checked over prose: the two texts a sync
+ * always produces, and the words the screens themselves render between tags.
+ * The per-entry warnings are out of it deliberately. Those fire only when a
+ * pass has actually found an anomaly, they are held byte for byte against the
+ * command-line wallet's own literals by `tests/leaf-typing.test.ts`, and the
+ * sentences are the operator's, so they are named in this project's open
+ * issues rather than quietly asserted to be something they are not.
+ */
+describe('the words a wallet screen spends', () => {
+  const EXPLORER_WORDS = /\b(leaf|leaves|note|notes|commitment|commitments|nullifier|nullifiers|output|outputs)\b/i;
+
+  /**
+   * `leaves` is also an ordinary verb, and "your viewing key never leaves this
+   * page" is the sentence on the balance screen that says where the key goes.
+   */
+  const NOT_THE_NOUN = [/\bleaves (this|the) page\b/gi];
+
+  function prose(text: string): string {
+    return NOT_THE_NOUN.reduce((rest, verb) => rest.replace(verb, ''), text);
+  }
+
+  it('keeps them out of the two texts every sync can produce', () => {
+    expect(prose(CIPHERTEXT_SUBSTITUTION_HINT)).not.toMatch(EXPLORER_WORDS);
+    expect(prose(fullScanEstimate(262_980))).not.toMatch(EXPLORER_WORDS);
+  });
+
+  it('keeps them out of what the screens render', () => {
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const name of readdirSync(dir)) {
+        const path = join(dir, name);
+        if (statSync(path).isDirectory()) {
+          walk(path);
+        } else if (path.endsWith('.tsx')) {
+          files.push(path);
+        }
+      }
+    };
+    walk('src/screens');
+    walk('src/components');
+    expect(files.length).toBeGreaterThan(10);
+
+    const offences: string[] = [];
+    for (const file of files) {
+      // Comments first: this rule is about what a reader is shown, and the
+      // reasoning above a line of JSX is free to name what the chain writes.
+      const source = readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/\/\/[^\n]*/g, ' ');
+      // Text between tags, which is the prose. An expression in braces is an
+      // identifier, and identifiers are the code's own words.
+      for (const match of source.matchAll(/>([^<>{}]+)</g)) {
+        const line = (match[1] ?? '').replace(/\s+/g, ' ').trim();
+        if (line !== '' && EXPLORER_WORDS.test(prose(line))) {
+          offences.push(`${file}: ${line}`);
+        }
+      }
+    }
+    expect(offences).toEqual([]);
   });
 });

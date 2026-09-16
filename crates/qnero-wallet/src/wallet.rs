@@ -217,8 +217,8 @@ pub fn full_scan_seconds(blocks: u32) -> u32 {
 /// the same thing.
 pub const FULL_SCAN_ESTIMATE: &str =
     "this wallet records no birthday, so the first sync reads the chain from block zero: \
-     {blocks} block headers, {spell} at the rate this build measured, and the leaves under them \
-     on top of that";
+     {blocks} block headers, {spell} at the rate this build measured, and the transfers under \
+     them on top of that";
 
 /// That estimate as a sentence, for a wallet about to read a chain whole.
 pub fn full_scan_estimate(blocks: u32) -> String {
@@ -2546,7 +2546,7 @@ pub struct SyncReport {
     pub bypassed_refusal: Option<String>,
 }
 
-/// The remaining trust boundary, shared verbatim with the browser wallet.
+/// The remaining trust boundary; the browser uses shorter phone-facing copy.
 /// State proofs authenticate values relative to the selected header chain;
 /// configured node and checkpoint policy still select that chain.
 pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =
