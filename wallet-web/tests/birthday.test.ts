@@ -18,11 +18,17 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ChainContext } from '../src/chain/api';
-import { fetchBirthday } from '../src/chain/reads';
+import { blockHashAt, fetchBirthday } from '../src/chain/reads';
 import { readRestoreField, restoreHeightOf } from '../src/screens/RestoreWallet';
+import {
+  birthdayNoticeFor,
+  readBirthday,
+  type BirthdayClock,
+  type BirthdayReads,
+} from '../src/wallet/birthday';
 import { deriveKey, newSalt, bytesToHex } from '../src/wallet/crypto';
 import { BIRTHDAY_EPOCH, birthdayEpochOf, STORE_VERSION } from '../src/wallet/model';
-import { createStore, openDatabase, DB_NAME } from '../src/wallet/store';
+import { createStore, openDatabase, DB_NAME, type WalletStore } from '../src/wallet/store';
 
 const MAX_TREE_DEPTH = 16;
 
@@ -129,6 +135,145 @@ describe('reading a birthday off a node', () => {
   });
 });
 
+/**
+ * A clock that never really waits, so a bounded wait is a loop count.
+ *
+ * `waitMs` and `pollMs` are the real ones' shape: the loop gives up when
+ * `now()` has passed the deadline, and `now()` moves by one poll each time the
+ * loop sleeps. So "the socket settled after three polls" is a fact this test
+ * states rather than a timeout it hopes for.
+ */
+function loopClock(polls: number): BirthdayClock & { slept: () => number } {
+  let clock = 0;
+  let slept = 0;
+  return {
+    now: () => clock,
+    sleep: (ms: number) => {
+      slept += 1;
+      clock += ms;
+      return Promise.resolve();
+    },
+    waitMs: polls * 10,
+    pollMs: 10,
+    slept: () => slept,
+  };
+}
+
+const REAL_READS: BirthdayReads = {
+  birthdayAt: fetchBirthday,
+  genesisHash: (context) => blockHashAt(context, 0),
+};
+
+describe('the birthday read at the wizard\'s last step', () => {
+  it('waits for a socket that settles after the wizard does', async () => {
+    // The failure this drives: the wizard is three screens long, the socket is
+    // opened at boot, and the read used to look once. On a slow network it
+    // looked while the context was still null, recorded no birthday, and the
+    // wallet read the chain from block zero.
+    const head = 4 * BIRTHDAY_EPOCH;
+    const { context } = nodeWith(head, (height) => height);
+    let polls = 0;
+    const clock = loopClock(20);
+    const outcome = await readBirthday(
+      {
+        // Three passes with nothing, then the socket.
+        context: () => (polls++ < 3 ? null : context),
+        limits: () => ({ max_tree_depth: MAX_TREE_DEPTH }),
+      },
+      REAL_READS,
+      null,
+      clock,
+    );
+    expect(outcome.kind).toBe('read');
+    expect(clock.slept()).toBe(3);
+    if (outcome.kind !== 'read') {
+      return;
+    }
+    expect(outcome.birthday.checkpoint.blockNumber).toBe(4 * BIRTHDAY_EPOCH);
+    expect(outcome.birthday.genesisHash).toHaveLength(64);
+  });
+
+  it('waits for the prover as well, which is where the tree depth comes from', async () => {
+    const { context } = nodeWith(2 * BIRTHDAY_EPOCH, (height) => height);
+    let polls = 0;
+    const outcome = await readBirthday(
+      {
+        context: () => context,
+        limits: () => (polls++ < 2 ? null : { max_tree_depth: MAX_TREE_DEPTH }),
+      },
+      REAL_READS,
+      null,
+      loopClock(20),
+    );
+    expect(outcome.kind).toBe('read');
+  });
+
+  it('records the typed height rather than the head once the socket lands', async () => {
+    const head = 5 * BIRTHDAY_EPOCH;
+    const { context } = nodeWith(head, (height) => height);
+    let polls = 0;
+    const outcome = await readBirthday(
+      {
+        context: () => (polls++ < 2 ? null : context),
+        limits: () => ({ max_tree_depth: MAX_TREE_DEPTH }),
+      },
+      REAL_READS,
+      2 * BIRTHDAY_EPOCH + 600,
+      loopClock(20),
+    );
+    expect(outcome.kind).toBe('read');
+    if (outcome.kind !== 'read') {
+      return;
+    }
+    // The typed height, at the epoch below it. Not the head, and not zero.
+    expect(outcome.birthday.checkpoint.blockNumber).toBe(2 * BIRTHDAY_EPOCH);
+    expect(outcome.restoreHeight).toBe(2 * BIRTHDAY_EPOCH + 600);
+  });
+
+  it('hands a typed height back when nothing answers, rather than dropping it', async () => {
+    const clock = loopClock(4);
+    const outcome = await readBirthday(
+      { context: () => null, limits: () => null },
+      REAL_READS,
+      197_000,
+      clock,
+    );
+    expect(outcome).toEqual({ kind: 'no-node', restoreHeight: 197_000 });
+    // Bounded: a wizard that waits forever is a wizard that never finishes.
+    expect(clock.slept()).toBe(4);
+    expect(birthdayNoticeFor(outcome)).toContain('197000');
+  });
+
+  it('says what a node refused, and keeps the height out of the store', async () => {
+    const { context } = nodeWith(100, () => 10);
+    const outcome = await readBirthday(
+      { context: () => context, limits: () => ({ max_tree_depth: MAX_TREE_DEPTH }) },
+      REAL_READS,
+      500,
+      loopClock(2),
+    );
+    expect(outcome.kind).toBe('refused');
+    if (outcome.kind !== 'refused') {
+      return;
+    }
+    expect(outcome.message).toMatch(/names a block nobody has yet/);
+    expect(outcome.restoreHeight).toBe(500);
+  });
+
+  it('says nothing at all for a wallet created now that read its birthday', async () => {
+    const { context } = nodeWith(2 * BIRTHDAY_EPOCH, (height) => height);
+    const outcome = await readBirthday(
+      { context: () => context, limits: () => ({ max_tree_depth: MAX_TREE_DEPTH }) },
+      REAL_READS,
+      null,
+      loopClock(2),
+    );
+    // The status line on the wallet screen carries it. A banner over the
+    // balance was 22% of the first screen.
+    expect(birthdayNoticeFor(outcome)).toBeNull();
+  });
+});
+
 describe('the restore field', () => {
   it('reads a bare number as a height', () => {
     expect(readRestoreField('197000', 200_000, 120_000)).toEqual({
@@ -174,6 +319,92 @@ describe('the restore field', () => {
     expect(restoreHeightOf(field)).toBeNull();
     // A block number wants no head at all.
     expect(readRestoreField('4200', null, null)).toEqual({ kind: 'height', value: 4200 });
+  });
+});
+
+/** Delete the test database, so each store case starts from nothing. */
+async function freshDatabase(): Promise<IDBDatabase> {
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(DB_NAME);
+    request.onsuccess = (): void => {
+      resolve();
+    };
+    request.onerror = (): void => {
+      reject(request.error ?? new Error('the test database could not be deleted'));
+    };
+    request.onblocked = (): void => {
+      reject(new Error('a connection to the test database is still open'));
+    };
+  });
+  return openDatabase();
+}
+
+/** A store with no birthday, the way a wallet made with no node is written. */
+async function storeWithNoBirthday(db: IDBDatabase): Promise<WalletStore> {
+  const saltHex = bytesToHex(newSalt());
+  const key = await deriveKey('correct horse battery staple', saltHex);
+  return createStore(db, {
+    address: 'qn1late',
+    seedHex: '7f'.repeat(32),
+    key,
+    saltHex,
+    iterations: 1000,
+    birthday: null,
+  });
+}
+
+describe('a birthday recorded after the wallet was made', () => {
+  it('writes the meta and the checkpoint, so the first sync starts there', async () => {
+    const db = await freshDatabase();
+    const store = await storeWithNoBirthday(db);
+    expect((await store.meta()).birthday).toBeNull();
+
+    const checkpoint = { blockNumber: 3 * BIRTHDAY_EPOCH, blockHash: 'ab'.repeat(32), nextLeaf: 91 };
+    expect(await store.recordBirthday({ checkpoint, genesisHash: 'cd'.repeat(32) })).toBe(true);
+
+    const meta = await store.meta();
+    expect(meta.birthday).toEqual(checkpoint);
+    expect(meta.lastSyncedBlock).toBe(3 * BIRTHDAY_EPOCH);
+    expect(meta.nextLeaf).toBe(91);
+    expect(meta.genesisHash).toBe('cd'.repeat(32));
+    expect(await store.checkpoints()).toEqual([checkpoint]);
+    db.close();
+  });
+
+  it('refuses to move a birthday that is already there', async () => {
+    const db = await freshDatabase();
+    const saltHex = bytesToHex(newSalt());
+    const key = await deriveKey('correct horse battery staple', saltHex);
+    const first = { blockNumber: BIRTHDAY_EPOCH, blockHash: 'ab'.repeat(32), nextLeaf: 42 };
+    const store = await createStore(db, {
+      address: 'qn1already',
+      seedHex: '7f'.repeat(32),
+      key,
+      saltHex,
+      iterations: 1000,
+      birthday: { checkpoint: first, genesisHash: 'cd'.repeat(32) },
+    });
+
+    const later = { blockNumber: 9 * BIRTHDAY_EPOCH, blockHash: 'ef'.repeat(32), nextLeaf: 900 };
+    expect(await store.recordBirthday({ checkpoint: later, genesisHash: 'cd'.repeat(32) })).toBe(
+      false,
+    );
+    expect((await store.meta()).birthday).toEqual(first);
+    db.close();
+  });
+
+  it('refuses one on a wallet that has already read part of the chain', async () => {
+    const db = await freshDatabase();
+    const store = await storeWithNoBirthday(db);
+    // A sync has run: the watermark is up, and a birthday written under it
+    // would put the header walk below rows this wallet has already typed.
+    const meta = await store.meta();
+    await store.putMeta({ ...meta, lastSyncedBlock: 4000, nextLeaf: 12 });
+
+    const checkpoint = { blockNumber: BIRTHDAY_EPOCH, blockHash: 'ab'.repeat(32), nextLeaf: 5 };
+    expect(await store.recordBirthday({ checkpoint, genesisHash: 'cd'.repeat(32) })).toBe(false);
+    expect((await store.meta()).birthday).toBeNull();
+    db.close();
   });
 });
 

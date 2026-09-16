@@ -29,7 +29,6 @@ import { Navigate, Route, Routes, useNavigate } from 'react-router';
 
 import { loadConfig, type WalletConfig } from './chain/config';
 import { blockHashAt, fetchBirthday, fetchHead } from './chain/reads';
-import { normaliseHash } from './lib/hex';
 import { chainAdapter, cryptoAdapter } from './app/adapters';
 import { readEndpoint, writeEndpoint } from './app/endpoint';
 import { readMeasuredSendSeconds, writeMeasuredSendSeconds } from './app/proverMode';
@@ -56,15 +55,15 @@ import {
   WrongPassphraseError,
 } from './wallet/crypto';
 import { createStore, WalletStore } from './wallet/store';
-import type {
-  Balances,
-  NoteRow,
-  RejectedNote,
-  StoreMeta,
-  StoredNote,
-  SyncCheckpoint,
-} from './wallet/model';
+import type { Balances, NoteRow, RejectedNote, StoreMeta, StoredNote } from './wallet/model';
 import { collapseRows, reachableTotal, spendable } from './wallet/select';
+import {
+  birthdayNoticeFor,
+  readBirthday,
+  type BirthdayReads,
+  type BirthdaySources,
+  type RecordedBirthday,
+} from './wallet/birthday';
 import { runSync, type SyncReport } from './wallet/sync';
 import {
   chainMismatchRefusal,
@@ -101,6 +100,25 @@ const EMPTY_BALANCES: Balances = {
  */
 const session = new Session();
 
+/** The two chain reads a birthday is made of, as this page makes them. */
+const BIRTHDAY_READS: BirthdayReads = {
+  birthdayAt: fetchBirthday,
+  genesisHash: (context) => blockHashAt(context, 0),
+};
+
+/**
+ * The session fields a birthday read polls, read fresh on every pass.
+ *
+ * Getters rather than values: the whole point of the wait is that these two
+ * are `null` now and will not be in a moment.
+ */
+function birthdaySources(current: Session): BirthdaySources {
+  return {
+    context: () => current.context,
+    limits: () => current.limits,
+  };
+}
+
 export function App(): ReactNode {
   const navigate = useNavigate();
   const [config, setConfig] = useState<WalletConfig | null>(null);
@@ -116,6 +134,15 @@ export function App(): ReactNode {
    * wallet quietly starting above a note is a balance quietly short.
    */
   const [birthdayNotice, setBirthdayNotice] = useState<string | null>(null);
+  /**
+   * A restore height typed while nothing was answering, still to be recorded.
+   *
+   * The wizard's last step waits for the socket before it reads the birthday
+   * (see `wallet/birthday.ts`). When that wait runs out the number is held
+   * here rather than dropped, and the effect below writes it into the store
+   * the moment a node answers.
+   */
+  const [pendingBirthday, setPendingBirthday] = useState<number | null>(null);
 
   const [address, setAddress] = useState('');
   const [minerKey, setMinerKey] = useState<string | null>(null);
@@ -395,6 +422,51 @@ export function App(): ReactNode {
   }, []);
 
   /**
+   * The restore height the wizard could not record, written when a node answers.
+   *
+   * A wallet made while nothing was answering has no birthday, and the height
+   * somebody typed is a number that is still true a minute later. So it is
+   * held and recorded here, once, before anything has been read: the store
+   * refuses to move a birthday it already has and refuses one on a wallet that
+   * has synced, so a late arrival can never lower a watermark under rows that
+   * have been typed.
+   */
+  useEffect(() => {
+    if (pendingBirthday === null || connection.kind !== 'live' || !storeUnlocked) {
+      return;
+    }
+    const abandoned = new AbortController();
+    void (async (): Promise<void> => {
+      const current = session;
+      const outcome = await readBirthday(
+        birthdaySources(current),
+        BIRTHDAY_READS,
+        pendingBirthday,
+        // No wait: this runs on a live connection, so either the context is
+        // there or this edge is not the one to read on.
+        { now: () => Date.now(), sleep: () => Promise.resolve(), waitMs: 0 },
+      );
+      if (abandoned.signal.aborted) {
+        return;
+      }
+      if (outcome.kind === 'read') {
+        const store = current.store;
+        if (store !== null && (await store.recordBirthday(outcome.birthday))) {
+          setBirthdayNotice(birthdayNoticeFor(outcome));
+          await refresh();
+        }
+        setPendingBirthday(null);
+      } else if (outcome.kind === 'refused') {
+        setBirthdayNotice(birthdayNoticeFor(outcome));
+        setPendingBirthday(null);
+      }
+    })();
+    return () => {
+      abandoned.abort();
+    };
+  }, [pendingBirthday, connection.kind, storeUnlocked, refresh]);
+
+  /**
    * Create or restore a wallet, and record where it starts reading the chain.
    *
    * `restoreHeight` is the chain height somebody restoring says this wallet was
@@ -444,51 +516,27 @@ export function App(): ReactNode {
         // half a birthday in it. `restoreHeight === undefined` is a wallet
         // being created now, which starts at the head; `null` is a restore
         // that asked for the whole chain.
-        let birthday: { checkpoint: SyncCheckpoint; genesisHash: string } | null = null;
+        //
+        // The read waits for the socket rather than looking once: the wizard
+        // is three screens long and the connection is opened at boot, so
+        // looking once lost the race on a slow network and took a typed
+        // restore height down with it. See `wallet/birthday.ts`.
+        let birthday: RecordedBirthday | null = null;
         if (restoreHeight !== null) {
-          const context = current.context;
-          const limits = current.limits;
-          if (context === null || limits === null) {
-            setBirthdayNotice(
-              'This wallet records no birthday, because it was made without a node to read a ' +
-                'head from. Its first sync reads the chain from block zero, which is correct ' +
-                'and slow.',
-            );
-          } else {
-            try {
-              const read = await fetchBirthday(
-                context,
-                restoreHeight ?? null,
-                limits.max_tree_depth,
-              );
-              const genesis = await blockHashAt(context, 0);
-              if (genesis === null) {
-                throw new Error('this node has no block zero, so it cannot say which chain it serves');
-              }
-              birthday = {
-                checkpoint: {
-                  blockNumber: read.blockNumber,
-                  blockHash: read.blockHash,
-                  nextLeaf: read.nextLeaf,
-                },
-                // Normalised, like the birthday's own block hash beside it and
-                // like the genesis every sync records: one spelling in the
-                // store is one spelling every later comparison reads, and the
-                // refusals that quote this field quote what was stored.
-                genesisHash: normaliseHash(genesis),
-              };
-              setBirthdayNotice(
-                `This wallet starts at block ${read.blockNumber}, where the chain held ` +
-                  `${read.nextLeaf} leaves. That is this node's claim, like every checkpoint: ` +
-                  'an honest node that disagrees at that height rewinds it.',
-              );
-            } catch (birthdayError) {
-              setBirthdayNotice(
-                `This wallet records no birthday: ${(birthdayError as Error).message} Its first ` +
-                  'sync reads the chain from block zero, which is correct and slow.',
-              );
-            }
+          const outcome = await readBirthday(
+            birthdaySources(current),
+            BIRTHDAY_READS,
+            restoreHeight ?? null,
+          );
+          if (outcome.kind === 'read') {
+            birthday = outcome.birthday;
+            setPendingBirthday(null);
+          } else if (outcome.kind === 'no-node' && outcome.restoreHeight !== null) {
+            // Kept, not dropped. A height is a number somebody typed and it
+            // is still true when the node comes back.
+            setPendingBirthday(outcome.restoreHeight);
           }
+          setBirthdayNotice(birthdayNoticeFor(outcome));
         }
         const store = await createStore(db, {
           address: account.address,
@@ -832,6 +880,7 @@ export function App(): ReactNode {
    * after the erase rendered the erased wallet's payment.
    */
   const clearWalletView = useCallback((): void => {
+    setBirthdayNotice(null);
     setSpendProgress(null);
     setSpendResult(null);
     setSpendError(null);
@@ -860,6 +909,7 @@ export function App(): ReactNode {
     setRejected([]);
     setBalances(EMPTY_BALANCES);
     setSyncReport(null);
+    setPendingBirthday(null);
     clearWalletView();
     setPhase({ kind: 'landing' });
   }, [clearWalletView]);

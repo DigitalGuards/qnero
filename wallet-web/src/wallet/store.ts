@@ -368,6 +368,44 @@ export class WalletStore {
    * index, the block and the sealed secrets, comes from the chain the pass was
    * pinned to and nothing else in this wallet writes them.
    */
+  /**
+   * Record a birthday on a wallet that was made without one, and nothing else.
+   *
+   * The wizard reads the birthday at its last step, and a wallet created while
+   * the socket was still settling has none: the height somebody typed is kept
+   * by the page and written here the moment a node answers. One transaction
+   * over the meta record and the checkpoint, the way `createStore` writes the
+   * pair.
+   *
+   * It refuses to move a birthday that is already there, and it refuses a
+   * wallet that has read anything: the birthday is the bottom of the header
+   * walk, and lowering the watermark of a store that already holds transfers
+   * would put the walk under rows it has typed. Both refusals are silent
+   * answers rather than throws, because the caller is a reconnection and not a
+   * person.
+   */
+  async recordBirthday(birthday: {
+    checkpoint: SyncCheckpoint;
+    genesisHash: string;
+  }): Promise<boolean> {
+    const meta = await this.meta();
+    if (meta.birthday !== null || meta.lastSyncedBlock !== 0 || meta.nextLeaf !== 0) {
+      return false;
+    }
+    const transaction = this.db.transaction([STORE_META, STORE_CHECKPOINTS], 'readwrite');
+    transaction.objectStore(STORE_META).put({
+      ...meta,
+      genesisHash: birthday.genesisHash,
+      birthday: birthday.checkpoint,
+      lastSyncedBlock: birthday.checkpoint.blockNumber,
+      nextLeaf: birthday.checkpoint.nextLeaf,
+      updatedAt: Date.now(),
+    });
+    transaction.objectStore(STORE_CHECKPOINTS).put(birthday.checkpoint);
+    await transactionDone(transaction);
+    return true;
+  }
+
   async commitSync(update: {
     meta: StoreMeta;
     notes: StoredNote[];
