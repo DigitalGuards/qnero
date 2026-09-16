@@ -1080,6 +1080,31 @@ tbody tr:hover td.col-self {
   min-width: 660px;
 }
 
+/* A wide table on a phone showed one data column at a time with a 176 px row
+   label eating 53 percent of the viewport. The label sticks to the left edge
+   instead, at 7rem, so the question stays on screen while the answers scroll
+   past it: 112 px of label and 221 px of data at 375 px. The background has to
+   be opaque or the scrolled cells read through it, and the hover rule outranks
+   it so a hovered row still lights up whole. */
+@media (max-width: 640px) {
+  .table--wide tbody th,
+  .table--mid tbody th {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    min-width: 7rem;
+    background: var(--bg-panel);
+  }
+
+  .table--wide thead th:first-child,
+  .table--mid thead th:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--bg-panel);
+  }
+}
+
 /* Two columns: below 640 px each row becomes a label over its value, which
    reads better than two 180 px columns of ragged text. */
 @media (max-width: 640px) {
