@@ -5,6 +5,73 @@ import { formatCount, REFERENCE_CIPHERTEXT_BYTES } from '../lib/units';
 import { Panel } from '../components/ui';
 
 /**
+ * The page's sections, in the order they are set.
+ *
+ * The list and the headings come from the same array, so a contents entry that
+ * points at nothing is not a thing that can be written here.
+ */
+const SECTIONS = [
+  'The block itself',
+  'Emission',
+  'Settlements',
+  'Entries',
+  'Refused calls',
+  'Totals',
+  'Recipients',
+  'Amounts',
+  'What a settled nullifier stands for',
+  'The miner’s wallet',
+] as const;
+
+function slug(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+/** A section heading, with the id its contents entry points at. */
+function Section({ title }: { title: (typeof SECTIONS)[number] }): ReactNode {
+  return (
+    <h3 id={slug(title)} tabIndex={-1}>
+      {title}
+    </h3>
+  );
+}
+
+/**
+ * The contents.
+ *
+ * The routes on this site live in the fragment, so a plain in-page anchor
+ * would be read by the router as a route and would render the not-a-page view
+ * over the section it was pointing at. It moves the reader itself, the way the
+ * skip link does, and takes focus with it.
+ */
+function Contents(): ReactNode {
+  return (
+    <Panel title="On this page" prose>
+      <ul className="contents">
+        {SECTIONS.map((title) => (
+          <li key={title}>
+            <a
+              href={`#${slug(title)}`}
+              onClick={(event) => {
+                event.preventDefault();
+                const heading = document.getElementById(slug(title));
+                heading?.scrollIntoView();
+                heading?.focus();
+              }}
+            >
+              {title}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </Panel>
+  );
+}
+
+/**
  * What an observer learns, and what stays hidden.
  *
  * Taken from `docs/CIRCUIT.md` section 10.7 and `docs/WALLET.md`. It is linked
@@ -31,8 +98,10 @@ export function Reveals(): ReactNode {
         </p>
       </header>
 
+      <Contents />
+
       <Panel title="What an observer learns from one block" prose>
-        <h3>The block itself</h3>
+        <Section title="The block itself" />
         <p>
           Its height and hash, its parent, the state and extrinsic roots, and the commitment tree
           root as of that block. The proof of work: the difficulty it was mined against, the seal
@@ -46,7 +115,7 @@ export function Reveals(): ReactNode {
           that does not exist.
         </p>
 
-        <h3>Emission</h3>
+        <Section title="Emission" />
         <p>
           Every block after genesis mints one coinbase note and publishes its value, its leaf index
           and the block it belongs to; a block that mints none leaves its share to the next one.
@@ -55,7 +124,7 @@ export function Reveals(): ReactNode {
           takes the matching coinbase viewing key together with the miner&rsquo;s address.
         </p>
 
-        <h3>Settlements</h3>
+        <Section title="Settlements" />
         <p>
           Each accepted submission publishes how many of its circuit segments settled, how many
           leaf slots settled with them, and the fee those slots paid. A segment the chain skipped,
@@ -87,7 +156,7 @@ export function Reveals(): ReactNode {
           hash over a note nothing on chain opens.
         </p>
 
-        <h3>Entries</h3>
+        <Section title="Entries" />
         <p>
           A shield is the one linkable event in the system, and it is linkable by construction: it
           burns transparent balance, so the payer&rsquo;s account, the exact amount and the leaf
@@ -95,7 +164,7 @@ export function Reveals(): ReactNode {
           shield publishes is the last time that value has a name.
         </p>
 
-        <h3>Refused calls</h3>
+        <Section title="Refused calls" />
         <p>
           The runtime&rsquo;s call filter is checked at dispatch, so a transparent transfer is a
           valid extrinsic: it enters a block, pays its fee, and then fails. Its arguments stay in
@@ -104,7 +173,7 @@ export function Reveals(): ReactNode {
           where the chain put them.
         </p>
 
-        <h3>Totals</h3>
+        <Section title="Totals" />
         <p>
           The pool value, the number of entries ever made, every leaf commitment, the tree depth and
           root, the whole settled nullifier set, and every transparent account balance. A vesting
@@ -113,14 +182,14 @@ export function Reveals(): ReactNode {
       </Panel>
 
       <Panel title="What stays hidden" prose>
-        <h3>Recipients</h3>
+        <Section title="Recipients" />
         <p>
           A note is a hash over a public key, a nonce and a randomiser, and the chain only ever
           hashes it. Nothing on chain opens one, so no note names a recipient and no commitment on
           this site is ever an address.
         </p>
 
-        <h3>Amounts</h3>
+        <Section title="Amounts" />
         <p>
           Note values live inside the commitment and are never published, for every note a
           settlement creates. Two exceptions are structural and both are above: a shield publishes
@@ -129,7 +198,7 @@ export function Reveals(): ReactNode {
           can total emission and total entries, and can total nothing about the notes in between.
         </p>
 
-        <h3>What a settled nullifier stands for</h3>
+        <Section title="What a settled nullifier stands for" />
         <p>
           The settled set holds presence only, keyed by the nullifier. Membership marks one input
           position of one settlement consumed. It says nothing about which note, because nothing on
@@ -140,7 +209,7 @@ export function Reveals(): ReactNode {
           strongest linkage the system has.
         </p>
 
-        <h3>The miner&rsquo;s wallet</h3>
+        <Section title="The miner’s wallet" />
         <p>
           No event and no storage item names a block&rsquo;s author. The mining-rewards pallet omits
           it deliberately, and the header&rsquo;s label rotates every block, so the coinbase notes

@@ -333,11 +333,11 @@ h2 {
   font-size: 14px;
 }
 
-/* A section heading is never smaller than the body it heads, and it binds
-   downward: a heading with equal space above and below reads as a paragraph
-   break rather than as the start of a section. */
+/* A section heading sits above the body it heads, and it binds downward: a
+   heading with equal space above and below reads as a paragraph break rather
+   than as the start of a section. */
 h3 {
-  font-size: var(--fs-body);
+  font-size: 14px;
 }
 
 .panel h3 {
@@ -503,6 +503,26 @@ p {
 .copy:hover {
   color: var(--text-primary);
   background: var(--bg-hover);
+}
+
+/* The ten sections of a long prose page, one per line. It is 3,761 px tall at
+   375 px, 5.6 screens, and a phone reader scrolled it blind. */
+.contents {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.contents a {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+}
+
+@media (max-width: 640px) {
+  .contents a {
+    min-height: 40px;
+  }
 }
 
 /* Notices ------------------------------------------------------------- */

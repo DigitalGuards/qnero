@@ -370,6 +370,16 @@ test('genesis and an unknown hash are pages, not stack traces', async ({ page })
 test('the reveals page states both halves in plain words', async ({ page }) => {
   await open(page, '#/reveals');
   await expect(page.getByRole('heading', { name: 'What this chain reveals' })).toBeVisible();
+
+  // The page is 5.6 screens at phone width, so it opens with its ten sections
+  // as a list. The routes live in the fragment, so a contents link moves the
+  // reader itself rather than navigating: following one as a link would render
+  // the not-a-page view over the section it points at.
+  const contents = panel(page, 'On this page').locator('a');
+  await expect(contents).toHaveCount(10);
+  await contents.nth(6).click();
+  expect(await page.evaluate(() => window.location.hash)).toBe('#/reveals');
+  await expect(page.locator(':focus')).toHaveText('Recipients');
   await expect(panel(page, 'What an observer learns from one block')).toContainText(
     'Total emission is therefore auditable block by block',
   );

@@ -75,8 +75,11 @@
   --masthead-h: 44px;
   --nav-h: 40px;
   /* Reading measure, on the container rather than on the paragraph: a `ch` cap
-     tracks the child's font size and an 11px note would stop at half a box. */
-  --measure: 640px;
+     tracks the child's font size and an 11px note would stop at half a box.
+     At 13 px system sans with 0.5 px letter-spacing the average advance is
+     about 6.9 px, so 640 px held about 93 characters per line and 560 holds
+     about 80. A line is read comfortably between 45 and 75. */
+  --measure: 560px;
 
   --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
     'Open Sans', 'Helvetica Neue', sans-serif;
@@ -146,4 +149,17 @@
   --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
   --shadow-edge: rgba(255, 255, 255, 0.22);
   --shadow-edge-fade: rgba(255, 255, 255, 0);
+}
+
+/*
+ * A label is 11 px in a hand.
+ *
+ * 10 px is MyMonero's scale and MyMonero's scale is a pointer's. It carries
+ * every field label, every panel title, every table header and every tag on
+ * this site, so on a phone it is one step up and nothing else moves.
+ */
+@media (max-width: 640px) {
+  :root {
+    --fs-label: 11px;
+  }
 }
