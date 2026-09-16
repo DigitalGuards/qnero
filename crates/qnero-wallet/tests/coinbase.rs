@@ -117,16 +117,9 @@ fn a_mined_block_becomes_a_spendable_note() {
     assert_eq!(wallet.store.spendable().len(), 2);
 }
 
-/// A coinbase value the node withholds refuses the pass.
-///
-/// `Shielded::CoinbaseValues` is the one per-leaf key a leaf is allowed not to
-/// have, since presence in that map is what makes a leaf a coinbase. So the
-/// rule that catches a withheld one is the ciphertext rule beside it: under v1
-/// the inherent refuses a payload, so a coinbase leaf carries no ciphertext,
-/// and a node that withholds the value leaves a leaf below the count with
-/// neither. Without the refusal that leaf is read as somebody else's and the
-/// miner's own block reward is stepped over, with a watermark written above
-/// it: the whole of a mining wallet's income, gone with no error anywhere.
+/// An inconsistent selected state with neither coinbase value nor recoverable
+/// ciphertext refuses the pass. The fixture commits this state into its header;
+/// missing proof nodes against an unchanged header are covered by state_proofs.
 #[test]
 fn a_coinbase_value_withheld_below_the_leaf_count_refuses_the_pass() {
     let dir = support::scratch_dir("coinbase-withheld-value");
@@ -150,9 +143,10 @@ fn a_coinbase_value_withheld_below_the_leaf_count_refuses_the_pass() {
         .expect_err("a coinbase leaf with neither value nor ciphertext is refused");
     let message = format!("{refused:#}");
     assert!(
-        message.contains("no Shielded::Ciphertexts(0)"),
-        "the leaf carries neither key, and the refusal names the one that must \
-         be there for a leaf that is not a coinbase: {message}"
+        message.contains("Shielded::Ciphertexts archive has no authenticated payload for leaf 0")
+            && message.contains("creation block 3"),
+        "the leaf carries neither value nor payload, including at its authenticated \
+         creation state: {message}"
     );
     assert_eq!(wallet.store.next_leaf, 0);
     assert!(wallet.store.notes.is_empty());

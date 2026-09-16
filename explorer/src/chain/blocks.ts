@@ -95,11 +95,10 @@ export interface BlockState {
  * miss, so taking it once and using it twice halves the cost of a block and
  * cuts a twenty-row list by a third.
  *
- * Both reads need state, and a node keeps state for a bounded number of
- * finalized blocks. Below that window they fail, and that is an ordinary
- * answer rather than an error: the header and the body are still there, so a
- * failure here empties the panels that read events and leaves the rest of the
- * page standing.
+ * Both reads need historical state, whose availability depends on the node's
+ * pruning or archive policy. Missing state empties these panels while retaining
+ * any header and body data the node can still serve. Genesis-only finality
+ * supplies no fixed-depth historical-state retention guarantee.
  */
 export async function fetchBlockState(context: ChainContext, hash: string): Promise<BlockState> {
   try {

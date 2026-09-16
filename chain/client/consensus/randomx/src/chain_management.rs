@@ -1,41 +1,29 @@
 use codec::{Decode, Encode};
-use primitive_types::{H256, U512};
-use sc_client_api::{AuxStore, Finalizer};
-use sp_api::ProvideRuntimeApi;
+use primitive_types::U512;
+use sc_client_api::AuxStore;
 use sp_blockchain::HeaderBackend;
-use sp_consensus::Error as ConsensusError;
-use sp_consensus_qpow::QPoWApi;
-use sp_runtime::traits::{Block as BlockT, Header, One, Zero};
-use std::fmt;
+use sp_runtime::traits::{Block as BlockT, Zero};
 
 const ACHIEVED_WORK_PREFIX: &[u8] = b"QPow:AchievedWork:";
 
-#[derive(Debug)]
-pub enum ChainManagementError {
-	ChainLookup(String),
-	FinalizationFailed(String),
-	RuntimeApiError(String),
-}
-
-impl fmt::Display for ChainManagementError {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::ChainLookup(msg) => write!(f, "Chain lookup error: {}", msg),
-			Self::FinalizationFailed(msg) => write!(f, "Finalization failed: {}", msg),
-			Self::RuntimeApiError(msg) => write!(f, "Runtime API error: {}", msg),
-		}
+/// Refuse a database carrying irreversible checkpoints from the legacy client.
+///
+/// Qnero chooses cumulative work and keeps confirmations reversible. A local
+/// finalized prefix cannot be undone by importing a heavier chain. Operators
+/// must replay into a separate archive database when adopting this policy.
+pub fn ensure_pow_database<B: BlockT, C: HeaderBackend<B>>(
+	client: &C,
+) -> Result<(), sp_blockchain::Error> {
+	let info = client.info();
+	if !info.finalized_number.is_zero() || info.finalized_hash != info.genesis_hash {
+		return Err(sp_blockchain::Error::Backend(format!(
+			"Qnero requires reversible proof-of-work confirmations; this database has \
+             a finalized checkpoint at {:?}. Preserve it and replay the chain into a \
+             separate archive database before starting this client.",
+			info.finalized_number,
+		)));
 	}
-}
-
-impl std::error::Error for ChainManagementError {}
-
-impl From<ChainManagementError> for ConsensusError {
-	fn from(err: ChainManagementError) -> Self {
-		match err {
-			ChainManagementError::ChainLookup(msg) => ConsensusError::ChainLookup(msg),
-			other => ConsensusError::Other(Box::new(other)),
-		}
-	}
+	Ok(())
 }
 
 /// Store cumulative achieved work for a block in auxiliary storage.
@@ -85,7 +73,7 @@ pub fn get_cumulative_achieved_work<B: BlockT, C: AuxStore>(
 }
 
 /// Delete cumulative achieved work for a block from auxiliary storage.
-/// Used to clean up entries for finalized blocks that no longer need fork choice data.
+/// Used to roll back auxiliary work when a block import fails.
 pub fn delete_cumulative_achieved_work<B: BlockT, C: AuxStore>(
 	client: &C,
 	block_hash: B::Hash,
@@ -157,141 +145,4 @@ pub fn is_heavier<N: PartialOrd>(
 ) -> bool {
 	candidate_work > current_work ||
 		(candidate_work == current_work && candidate_number > current_number)
-}
-
-/// Finalizes blocks that are `max_reorg_depth` blocks behind the current best block,
-/// keeping exactly `max_reorg_depth` blocks reorganizable to match the configured window.
-/// This should be called synchronously after each block import to ensure finalization
-/// happens before the next block is imported.
-///
-/// Cleans up achieved work entries for canonical blocks that are now finalized.
-/// Note: Non-canonical fork blocks are not cleaned up since we cannot enumerate them
-/// by height. This is acceptable because fork blocks require valid PoW to create,
-/// making accumulation attacks expensive, and the entries are small (~96 bytes each).
-pub fn finalize_canonical_at_depth<B, C, BE>(client: &C) -> Result<(), ConsensusError>
-where
-	B: BlockT<Hash = H256>,
-	C: ProvideRuntimeApi<B> + HeaderBackend<B> + AuxStore + Finalizer<B, BE>,
-	C::Api: QPoWApi<B>,
-	BE: sc_client_api::Backend<B>,
-{
-	log::debug!("✓✓✓ Starting finalization process");
-
-	// Get the current best block
-	let best_hash = client.info().best_hash;
-	log::debug!("Current best hash: {:?}", best_hash);
-
-	if best_hash == Default::default() {
-		log::debug!("✓ No blocks to finalize - best hash is default");
-		return Ok(()); // No blocks to finalize
-	}
-
-	let best_header = client
-		.header(best_hash)
-		.map_err(|e| {
-			log::error!("Failed to get header for best hash: {:?}, error: {:?}", best_hash, e);
-			ChainManagementError::ChainLookup(format!("Blockchain error: {:?}", e))
-		})?
-		.ok_or_else(|| {
-			log::error!("Missing header for best hash: {:?}", best_hash);
-			ChainManagementError::ChainLookup("Missing current best header".into())
-		})?;
-
-	let best_number = *best_header.number();
-	log::debug!("Current best block number: {:?}", best_number);
-
-	let max_reorg_depth = client.runtime_api().get_max_reorg_depth(best_hash).map_err(|e| {
-		log::error!("Failed to get max reorg depth: {:?}", e);
-		ChainManagementError::RuntimeApiError(format!("Failed to get max reorg depth: {:?}", e))
-	})?;
-
-	// Keep the full maximum reorganization window unfinalized.
-	let finalize_depth = max_reorg_depth;
-
-	// Only finalize if we have enough blocks
-	if best_number <= finalize_depth.into() {
-		log::debug!(
-			"✓ Chain not long enough for finalization. Best number: {:?}, Required: > {}",
-			best_number,
-			finalize_depth
-		);
-		return Ok(()); // Chain not long enough yet
-	}
-
-	// Calculate block number to finalize
-	let finalize_number = best_number - finalize_depth.into();
-	log::debug!("Target block number to finalize: {:?}", finalize_number);
-
-	// Get the hash for that block number in the current canonical chain
-	let finalize_hash = client
-		.hash(finalize_number)
-		.map_err(|e| {
-			log::error!("Failed to get hash for block #{:?}: {:?}", finalize_number, e);
-			ChainManagementError::ChainLookup(format!(
-				"Failed to get hash at #{:?}: {:?}",
-				finalize_number, e
-			))
-		})?
-		.ok_or_else(|| {
-			log::error!("No block found at #{:?} for finalization", finalize_number);
-			ChainManagementError::ChainLookup(format!("No block found at #{:?}", finalize_number))
-		})?;
-
-	log::debug!("✓ Found hash for finalization target: {:?}", finalize_hash);
-
-	// Get last finalized block before attempting finalization
-	let last_finalized_before = client.info().finalized_number;
-	log::debug!("Last finalized block before attempt: {:?}", last_finalized_before);
-
-	// Finalize the block
-	client.finalize_block(finalize_hash, None, true).map_err(|e| {
-		log::error!(
-			"Failed to finalize block #{:?} ({:?}): {:?}",
-			finalize_number,
-			finalize_hash,
-			e
-		);
-		ChainManagementError::FinalizationFailed(format!(
-			"Failed to finalize block #{:?}: {:?}",
-			finalize_number, e
-		))
-	})?;
-
-	// Check if finalization was successful
-	let last_finalized_after = client.info().finalized_number;
-
-	log::debug!(
-		"✓ Finalization stats: best={:?}, finalized={:?}, finalize_depth={}, target_finalize={:?}",
-		best_number,
-		last_finalized_after,
-		finalize_depth,
-		finalize_number
-	);
-
-	log::debug!("✓ Finalized block #{:?} ({:?})", finalize_number, finalize_hash);
-
-	// Clean up achieved work entries for blocks that are now below the finalized tip.
-	// Delete entries from last_finalized_before up to (not including) last_finalized_after.
-	// The finalized tip's entry must be preserved as it's the parent work source for children.
-	//
-	// The loop naturally handles edge cases:
-	// - If finalization didn't advance (after <= before): zero iterations
-	// - If multi-step jump (e.g., bursty sync): cleans all intermediate entries
-	let mut height_to_clean = last_finalized_before;
-	while height_to_clean < last_finalized_after {
-		if let Ok(Some(hash_to_clean)) = client.hash(height_to_clean) {
-			if let Err(e) = delete_cumulative_achieved_work::<B, C>(client, hash_to_clean) {
-				// Non-fatal: log warning but don't fail the finalization
-				log::warn!(
-					target: "qpow",
-					"Failed to clean up achieved work for block #{:?}: {:?}",
-					height_to_clean,
-					e
-				);
-			}
-		}
-		height_to_clean += One::one();
-	}
-
-	Ok(())
 }

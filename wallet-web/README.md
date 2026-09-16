@@ -72,6 +72,38 @@ cd ../crates/qnero-prover-wasm
 ./scripts/build-threaded-wasm.sh       # the threaded one, nightly + -Z build-std
 ```
 
+## Authenticated reads and archive service
+
+Qloak verifies native V1 state-trie proofs in its existing Rust/WASM worker.
+Every storage value and absence used by scanning and spending is checked against a
+rehashed selected header. Public nullifier pages are traversed as a complete
+prefix, and proof requests echo public pages without selecting private notes.
+There is no unproven storage fallback.
+
+Storage namespaces and key encodings are fixed locally. The active protocol
+profile is authenticated and matched to the compiled module. Other runtime
+metadata, such as fee constants and call indices, remains node-supplied
+compatibility information.
+
+Older ciphertexts require creation-block state proofs from an archive provider.
+The creation header is linked to the selected scan head before historical values
+are accepted. Missing archive data stops sync before progress is committed.
+Wallets still trust their configured node for chain selection and freshness;
+Qloak does not verify RandomX work. Use a verified full node or an explicitly
+trusted provider/checkpoint policy. See [Authenticated reads](../docs/AUTHENTICATED_READS.md)
+for limits and deployment requirements. Deploy the updated WASM module together
+with this app: older modules lack the required state-proof verification export.
+
+The worker smoke check uses both real staged modules without constructing
+proving circuits. Generate its deterministic fixture from the workspace root,
+start the wallet's Vite dev server, and run the smoke from `wallet-web/`:
+
+```sh
+cargo run -p qnero-state-proof --features fixtures --example browser_fixture > /tmp/qnero-proof.json
+# In wallet-web, with the dev server already running:
+node scripts/smoke-state-proof.js /tmp/qnero-proof.json
+```
+
 ## Configuration
 
 `public/config.json` is read at startup, so one build serves a devnet and a
@@ -120,13 +152,13 @@ has the bug too.
 
 ## What it does
 
-- **Create a wallet.** 32 bytes from `crypto.getRandomValues`, shown once as
-  eight groups of eight hex characters, then three of the eight groups asked
-  back before the wallet is written. Somebody who wrote nothing down cannot
-  answer, which is the point: that screen is the last moment the key is
-  recoverable. Hex and no code beside it: a QR of a spend key is harvested by
-  any camera, screen share or shoulder in the room in one frame, and nothing
-  in this wallet scans one.
+- **Create a wallet.** 32 bytes from `crypto.getRandomValues`, shown as eight
+  groups of eight hex characters. An optional backup check asks for three
+  groups; the user can show the seed again or skip the check. Both paths lead
+  to passphrase setup and encrypt the seed before writing the wallet. Keep a
+  backup of the seed to recover the wallet. Hex and no code beside it: a QR of
+  a spend key is harvested by any camera, screen share or shoulder in the room
+  in one frame, and nothing in this wallet scans one.
 
   A new wallet records its **birthday**: the head the node it is connected to
   is at, rounded down to a multiple of 1024 blocks, with the leaf count that
@@ -137,13 +169,12 @@ has the bug too.
   the fork walk rewinds through it; the screen says what was recorded and whose
   claim it is.
 
-  The leaf count beside it is the same kind of claim and nothing checks it when
-  it is written. The first sync that has leaves to scan folds the leaves under
-  it against that block's own `zkTreeRoot`, which refuses a count recorded too
-  high; while the watermark is still that number, any refusal resting on it
-  names the birthday and the rescan on the Settings screen, because a watermark
-  that was wrong when it was written is not a node being behind and no other
-  node can satisfy it.
+  The leaf count is authenticated by a state-trie proof before it is recorded.
+  The first sync that has leaves to scan also folds the leaves under it against
+  that block's `zkTreeRoot`. Chain selection remains the configured node's
+  responsibility. A refusal involving a birthday watermark names the birthday
+  and the rescan on the Settings screen, which drops that watermark while
+  keeping the wallet's notes.
 - **Restore from a seed.** The 64 hex characters, and one optional field: "the
   chain height when this wallet was created, leave empty to scan everything".
   Empty reads the whole chain from leaf zero, which is always correct, and the
@@ -222,43 +253,12 @@ has the bug too.
   `docs/WALLET.md` carries the per-position table and the section "What a lying
   node can and cannot do", and the same rules are in the command-line wallet's
   `crates/qnero-wallet/src/typing.rs`.
-- **Two per-leaf values are bound to a leaf by nothing, and both are open.**
-  The first is the ciphertext: `Shielded::Ciphertexts(i)` is tied to leaf `i`
-  by nothing on chain, because the commitment the tree authenticates carries no
-  ciphertext and `ct_digest` binds the bytes only inside the settlement
-  extrinsic at inclusion, which a storage-only reader never fetches. The second
-  is where a commitment sits inside its block's own leaf range: the tree sorts
-  a node's four children before hashing them, which is what lets a path carry
-  siblings with no position, and it mixes in neither the level nor the child
-  slot. So a block's `zkTreeRoot` pins that block's leaf multiset and each
-  internal node's child multiset and nothing else. Sibling swaps compose at
-  every level, so a payment can be moved to any position the range's aligned
-  subtrees allow, across group boundaries and onto the coinbase position where
-  no ciphertext is owed; and a shorter tree of internal node values served as
-  leaves folds to the same root, so the root pins neither the leaf count nor
-  the height inside a block. Every root and every header still checks out in
-  each case.
-- **One part of that the scan catches on its own.** A move that leaves this
-  wallet's ciphertext where the chain published it puts a payload that opens
-  under this wallet's key beside a commitment that note does not open, and
-  opening is authenticated: ML-KEM decapsulation plus an AEAD over this
-  wallet's own `pk`. The pass searches that block's own folded leaf range for
-  the commitment the note opens, records the note there and puts a warning on
-  the balance screen naming both indices. A commitment the block holds nowhere
-  is warned and skipped, because a sender who encrypts a payload opening a
-  commitment it never published produces the same reading and a refusal would
-  be a sync denial anyone could buy with one transaction. What
-  stays hidden is a move that takes this wallet's ciphertext with it, and the
-  checkpoint fork walk does not recover it, because the headers agree. **A
-  rescan against a second node is the recovery**, and a pass that read leaves
-  and received nothing says so on the balance screen, as a hint under the
-  warnings and at less weight. That sentence is the ordinary case on most
-  passes, so it reads as a prompt to check against a second node, and it is the
-  command-line wallet's word for word. `docs/WALLET.md` states the whole bound
-  and `docs/DESIGN.md` open question 6 records the closure, reading every
-  per-leaf value with a `state_getReadProof` trie proof against the header's
-  own `stateRoot`, as the next wallet milestone, beside the consensus-level
-  alternative that would pin the position and the height in the tree hash.
+- **Authenticated storage.** Counts, indices, ciphertexts, coinbase values,
+  and spent markers are reconstructed from proofs against the selected header.
+  The sorted commitment tree remains an additional consistency check. A missing
+  archived ciphertext or incomplete nullifier prefix refuses the pass before
+  progress is saved. Header selection still depends on the trusted node and
+  checkpoint policy described above.
 - **One scan at a time with a payment**, in both directions: a scan reads every note before it starts and
   commits them at the end, and a payment writes `spent` on those same rows the
   moment it settles, so the Settings screen's rescan is disabled while a
@@ -391,8 +391,9 @@ the sync and the spend, the spent reconciliation in both directions, the widths
 every storage value is decoded at and the tree capacity `ZkTree::LeafCount` is
 bounded by, the refusal of each per-leaf key withheld below that count, one
 test per key on both the read layer and the scan, the refusal of the tree's own
-pad answered as a leaf below that count, the substituted ciphertext that
-nothing refuses and the rescan that recovers the payment, the merge that
+pad answered as a leaf below that count, authenticated storage and complete
+nullifier-prefix reads, historical ciphertext recovery and its refusal when
+archive data is unavailable, the merge that
 keeps a spend's own writes when a scan commits over them, the bound on the
 shield-origin walk, the pipelined header walk against a node that answers
 headers out of order or a hash for a number its own header chain does not

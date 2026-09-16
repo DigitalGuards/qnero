@@ -24,6 +24,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ChainContext } from '../src/chain/api';
+import { storagePrefix, indexKey } from './fixtures/storage-key';
+import { bindFixtureProofs, fixtureProof, fixtureHeader } from './fixtures/state-proof';
 import {
   fetchHeaderRange,
   fetchLeafHashes,
@@ -51,30 +53,27 @@ function entry(prefix: string): unknown {
 }
 
 const KEYS = {
-  leaves: '0xleaves-',
-  ciphertexts: '0xciphertexts-',
-  leafBlocks: '0xleafblocks-',
-  coinbaseValues: '0xcoinbase-',
-  leafCount: '0xleafcount',
-  depth: '0xdepth',
-  entryCount: '0xentrycount',
+  leaves: storagePrefix('ZkTree', 'Leaves'),
+  ciphertexts: storagePrefix('Shielded', 'Ciphertexts'),
+  leafBlocks: storagePrefix('Shielded', 'LeafBlocks'),
+  coinbaseValues: storagePrefix('Shielded', 'CoinbaseValues'),
+  leafCount: storagePrefix('ZkTree', 'LeafCount'),
+  depth: storagePrefix('ZkTree', 'Depth'),
+  entryCount: storagePrefix('Shielded', 'EntryCount'),
 } as const;
 
 /** A node that answers exactly the values this test hands it. */
 function nodeWith(values: Map<string, string>): ChainContext {
   const send = <T,>(method: string, params: unknown[]): Promise<T> => {
-    if (method !== 'state_queryStorageAt') {
+    if (method === 'chain_getHeader') return Promise.resolve(fixtureHeader(9) as T);
+    if (method !== 'state_getReadProof') {
       throw new Error(`this fixture answers no ${method}`);
     }
     const keys = params[0] as string[];
-    return Promise.resolve([
-      {
-        block: String(params[1]),
-        changes: keys.map((key) => [key, values.get(key) ?? null] as [string, string | null]),
-      },
-    ] as T);
+    return Promise.resolve(fixtureProof(String(params[1]),
+      keys.map((key) => [key, values.get(key) ?? null])) as T);
   };
-  return {
+  return bindFixtureProofs({
     send,
     api: {
       query: {
@@ -91,21 +90,21 @@ function nodeWith(values: Map<string, string>): ChainContext {
         },
       },
     },
-  } as unknown as ChainContext;
+  } as unknown as ChainContext, () => AT);
 }
 
 /** The same node, with the key lists of every request it was handed. */
 function recordingNode(values: Map<string, string>, asked: string[][]): ChainContext {
   const inner = nodeWith(values);
-  return {
+  return bindFixtureProofs({
     ...inner,
     send: <T,>(method: string, params: unknown[]): Promise<T> => {
-      if (method === 'state_queryStorageAt') {
+      if (method === 'state_getReadProof') {
         asked.push(params[0] as string[]);
       }
       return inner.send<T>(method, params);
     },
-  };
+  }, () => AT);
 }
 
 /** A `Vec<u8>` whose one-byte compact prefix is written by hand. */
@@ -140,10 +139,10 @@ function leafRow(
       values.set(key, chosen);
     }
   };
-  set(`${KEYS.leaves}${index}`, row.commitment, `0x${'cd'.repeat(32)}`);
-  set(`${KEYS.ciphertexts}${index}`, row.ciphertext, vec(4, '00112233'));
-  set(`${KEYS.leafBlocks}${index}`, row.leafBlock, '0x09000000');
-  set(`${KEYS.coinbaseValues}${index}`, row.coinbaseValue, null);
+  set(`${KEYS.leaves}${indexKey(index)}`, row.commitment, `0x${'cd'.repeat(32)}`);
+  set(`${KEYS.ciphertexts}${indexKey(index)}`, row.ciphertext, vec(4, '00112233'));
+  set(`${KEYS.leafBlocks}${indexKey(index)}`, row.leafBlock, '0x09000000');
+  set(`${KEYS.coinbaseValues}${indexKey(index)}`, row.coinbaseValue, null);
   return values;
 }
 
@@ -248,7 +247,7 @@ describe('a key the node withholds below its own leaf count', () => {
     // same payment hidden through the key beside the commitment.
     const values = leafRow(new Map<string, string>(), 0, { ciphertext: null });
     await expect(fetchLeaves(nodeWith(values), 0, 1, AT, 1)).rejects.toThrow(
-      new RegExp(`no Shielded::Ciphertexts\\(0\\) at block ${AT}, where it reports 1 leaves`),
+      /Shielded::Ciphertexts archive has no authenticated payload/,
     );
   });
 
@@ -272,7 +271,7 @@ describe('a key the node withholds below its own leaf count', () => {
       coinbaseValue: null,
     });
     await expect(fetchLeaves(nodeWith(values), 0, 1, AT, 1)).rejects.toThrow(
-      /no Shielded::Ciphertexts\(0\)/,
+      /Shielded::Ciphertexts archive has no authenticated payload/,
     );
   });
 
@@ -396,8 +395,8 @@ describe('the leaf range a tree is rebuilt from', () => {
     // with "sync again: the node may have appended a leaf", which fixes
     // nothing and names nothing.
     const values = new Map<string, string>([
-      [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
-      [`${KEYS.leaves}1`, `0x${'cd'.repeat(33)}`],
+      [`${KEYS.leaves}${indexKey(0)}`, `0x${'cd'.repeat(32)}`],
+      [`${KEYS.leaves}${indexKey(1)}`, `0x${'cd'.repeat(33)}`],
     ]);
     await expect(fetchLeafHashes(nodeWith(values), 0, 2, AT, 2)).rejects.toThrow(
       /ZkTree::Leaves\(1\) is 33 bytes, expected 32/,
@@ -409,7 +408,7 @@ describe('the leaf range a tree is rebuilt from', () => {
     // substitutes `empty_hash()` for an unset slot, so a local rebuild pads
     // the way the chain does. Below the count the same answer is refused, by
     // the two tests under this one.
-    const values = new Map<string, string>([[`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`]]);
+    const values = new Map<string, string>([[`${KEYS.leaves}${indexKey(0)}`, `0x${'cd'.repeat(32)}`]]);
     const bytes = await fetchLeafHashes(nodeWith(values), 0, 2, AT, 1);
     expect(bytes).toHaveLength(64);
     expect([...bytes.slice(32)]).toEqual(Array.from({ length: 32 }, () => 0));
@@ -425,8 +424,8 @@ describe('the leaf range a tree is rebuilt from', () => {
     // compares. The pass would then write a watermark above indices the chain
     // has not filled and never read the leaves that land there.
     const values = new Map<string, string>([
-      [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
-      [`${KEYS.leaves}1`, `0x${'00'.repeat(32)}`],
+      [`${KEYS.leaves}${indexKey(0)}`, `0x${'cd'.repeat(32)}`],
+      [`${KEYS.leaves}${indexKey(1)}`, `0x${'00'.repeat(32)}`],
     ]);
     await expect(fetchLeafHashes(nodeWith(values), 0, 2, AT, 2)).rejects.toThrow(
       /ZkTree::Leaves\(1\) with the all-zero digest/,
@@ -438,8 +437,8 @@ describe('the leaf range a tree is rebuilt from', () => {
     // the tree is rebuilt from, so a pad accepted here is a pad folded into a
     // path that then roots correctly against a count the chain never reached.
     const values = new Map<string, string>([
-      [`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`],
-      [`${KEYS.leaves}1`, '00'.repeat(32)],
+      [`${KEYS.leaves}${indexKey(0)}`, `0x${'cd'.repeat(32)}`],
+      [`${KEYS.leaves}${indexKey(1)}`, '00'.repeat(32)],
     ]);
     await expect(fetchLeafHashes(nodeWith(values), 0, 2, AT, 2)).rejects.toThrow(
       /ZkTree::Leaves\(1\) with the all-zero digest/,
@@ -447,7 +446,7 @@ describe('the leaf range a tree is rebuilt from', () => {
   });
 
   it('refuses a leaf hash the node withholds below the count', async () => {
-    const values = new Map<string, string>([[`${KEYS.leaves}0`, `0x${'cd'.repeat(32)}`]]);
+    const values = new Map<string, string>([[`${KEYS.leaves}${indexKey(0)}`, `0x${'cd'.repeat(32)}`]]);
     await expect(fetchLeafHashes(nodeWith(values), 0, 2, AT, 2)).rejects.toThrow(
       /no ZkTree::Leaves\(1\)/,
     );
@@ -475,7 +474,7 @@ function reorgingNode(gapHeight: number, encoded: string): { context: ChainConte
       return Promise.resolve(`0x${String(height).padStart(64, 'c')}` as T);
     }
     if (method === 'chain_getHeader') {
-      return Promise.resolve({ number: `0x${(gapHeight + 1).toString(16)}` } as T);
+      return Promise.resolve(fixtureHeader(gapHeight + 1) as T);
     }
     if (method === 'chain_getBlock') {
       const at = String(params[0]);
@@ -483,11 +482,9 @@ function reorgingNode(gapHeight: number, encoded: string): { context: ChainConte
         block: { extrinsics: at === `0x${'bb'.repeat(32)}` ? [encoded] : [] },
       } as T);
     }
-    if (method === 'state_queryStorageAt') {
-      const keys = params[0] as string[];
-      return Promise.resolve([
-        { block: String(params[1]), changes: keys.map((key) => [key, '0x'] as [string, string]) },
-      ] as T);
+    if (method === 'state_getReadProof') {
+      return Promise.resolve(fixtureProof(String(params[1]),
+        (params[0] as string[]).map((key) => [key, '0x'])) as T);
     }
     throw new Error(`this fixture answers no ${method}`);
   };
@@ -495,6 +492,7 @@ function reorgingNode(gapHeight: number, encoded: string): { context: ChainConte
     send,
     api: { query: { shielded: { usedNullifiers: entry('0xusednullifiers-') } } },
   } as unknown as ChainContext;
+  bindFixtureProofs(context, () => `0x${'bb'.repeat(32)}`);
   return { context, asked: () => askedForGap };
 }
 

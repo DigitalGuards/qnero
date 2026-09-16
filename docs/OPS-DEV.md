@@ -1,5 +1,11 @@
 # Running the Qnero dev chain
 
+**Runtime 105 policy:** confirmations remain reversible, genesis is the only
+irreversible checkpoint, and nodes retain all branch states and block bodies.
+Wallets authenticate storage and require the matching protocol profile. Read
+[NATIVE-UPGRADE.md](NATIVE-UPGRADE.md) before changing an existing database or
+network. Dated entries below describe the implementation at their recorded time.
+
 The chain lives in `chain/`, a git subtree of Quantus-Network/chain at
 `f1176ce` (v1.0.1). It is its own Cargo workspace with its own toolchain and
 lock file; the Qnero root workspace excludes it, and the two meet only through

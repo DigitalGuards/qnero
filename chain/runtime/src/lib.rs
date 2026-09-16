@@ -1,6 +1,11 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(all(feature = "shielded-budget-bench", feature = "on-chain-release-build"))]
+compile_error!(
+	"shielded-budget-bench is an offline measurement feature and cannot enter an on-chain release"
+);
+
 extern crate alloc;
 #[cfg(feature = "std")]
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
@@ -9,6 +14,8 @@ pub mod apis;
 #[cfg(feature = "runtime-benchmarks")]
 mod benchmarks;
 pub mod configs;
+#[cfg(feature = "shielded-budget-bench")]
+pub mod shielded_budget;
 
 // ML-DSA-87 is the transparent entry's only signature scheme. The upstream
 // `DilithiumSignatureScheme` enum still carries a second variant, and
@@ -111,6 +118,9 @@ impl_opaque_keys! {
 // a node answers `get_target_block_time` before calling it and reading a
 // "function not found" back: a spec-103 node declares version 1, and the answer
 // is that it has no target to give.
+// 105 adds early privacy-policy validity checks, an authenticated protocol
+// profile, and bounded ciphertext retention. Storage and transaction acceptance
+// change; signed extrinsic encoding remains at transaction_version 7.
 // `the_runtime_identity_is_pinned` in `tests/call_filter.rs` is the tripwire.
 //
 // Bump `impl_version` when the emitted wasm changes under an unchanged
@@ -129,7 +139,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
 	spec_name: alloc::borrow::Cow::Borrowed("qnero"),
 	impl_name: alloc::borrow::Cow::Borrowed("qnero-node"),
 	authoring_version: 1,
-	spec_version: 104,
+	spec_version: 105,
 	impl_version: 2,
 	apis: apis::RUNTIME_API_VERSIONS,
 	transaction_version: 7,

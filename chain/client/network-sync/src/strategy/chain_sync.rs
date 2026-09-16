@@ -81,6 +81,10 @@ const MAX_IMPORTING_BLOCKS: usize = 2048;
 /// Maximum blocks to download ahead of any gap.
 const MAX_DOWNLOAD_AHEAD: u32 = 2048;
 
+/// Hash-only bookmarks retained while locating a fork's known ancestor. Responses and imports
+/// remain bounded by the block request limit. Older bookmarks can be reconstructed from the tip.
+const MAX_FORK_SYNC_ANCHORS: usize = 2048;
+
 /// Maximum blocks to look backwards. The gap is the difference between the highest block and the
 /// common block of a node.
 const MAX_BLOCKS_TO_LOOK_BACKWARDS: u32 = MAX_DOWNLOAD_AHEAD / 2;
@@ -274,6 +278,68 @@ struct ForkTarget<B: BlockT> {
 	number: NumberFor<B>,
 	parent_hash: Option<B::Hash>,
 	peers: HashSet<PeerId>,
+	/// Next reverse request, or the original target when no cursor is present.
+	cursor: Option<(B::Hash, NumberFor<B>)>,
+	/// Chunks to refetch after their parents are queued, newest first and oldest last.
+	pending: Vec<(B::Hash, NumberFor<B>)>,
+}
+
+impl<B: BlockT> ForkTarget<B> {
+	fn new(number: NumberFor<B>, parent_hash: Option<B::Hash>) -> Self {
+		Self { number, parent_hash, peers: HashSet::new(), cursor: None, pending: Vec::new() }
+	}
+
+	/// Follow a checked, ascending response back to a known parent. Keep only hash bookmarks
+	/// while searching; every body is refetched in a bounded response before import.
+	fn accept_response(
+		&mut self,
+		tip: B::Hash,
+		blocks: &[BlockData<B>],
+		peer: &PeerId,
+		finalized: NumberFor<B>,
+		known_parent: impl Fn(&B::Hash) -> bool,
+	) -> Result<bool, BadPeer> {
+		let first = blocks
+			.first()
+			.and_then(|b| b.header.as_ref())
+			.ok_or(BadPeer(*peer, rep::BAD_RESPONSE))?;
+		let last = blocks
+			.last()
+			.and_then(|b| b.header.as_ref())
+			.ok_or(BadPeer(*peer, rep::BAD_RESPONSE))?;
+		let expected = self.cursor.unwrap_or((tip, self.number));
+		if last.hash() != expected.0 ||
+			*last.number() != expected.1 ||
+			blocks.windows(2).any(|pair| match (&pair[0].header, &pair[1].header) {
+				(Some(parent), Some(child)) =>
+					child.parent_hash() != &pair[0].hash ||
+						*child.number() != parent.number().saturating_add(One::one()) ||
+						child.number() <= parent.number(),
+				_ => true,
+			}) {
+			return Err(BadPeer(*peer, rep::BAD_RESPONSE));
+		}
+
+		if known_parent(first.parent_hash()) {
+			self.cursor = self.pending.pop();
+			return Ok(true);
+		}
+		if *first.number() <= finalized.saturating_add(One::one()) {
+			return Err(BadPeer(*peer, rep::UNKNOWN_ANCESTOR));
+		}
+
+		// The original tip is always retained by the map key. For extremely deep forks,
+		// discard the farthest bookmark and reconstruct that gap from the tip later.
+		// This bounds memory at the cost of another backward pass through the gap.
+		if last.hash() != tip {
+			if self.pending.len() == MAX_FORK_SYNC_ANCHORS {
+				self.pending.remove(0);
+			}
+			self.pending.push((last.hash(), *last.number()));
+		}
+		self.cursor = Some((*first.parent_hash(), first.number().saturating_sub(One::one())));
+		Ok(false)
+	}
 }
 
 /// The state of syncing between a Peer and ourselves.
@@ -499,11 +565,7 @@ where
 						metrics.fork_targets.inc();
 					}
 
-					ForkTarget {
-						number,
-						parent_hash: Some(*announce.header.parent_hash()),
-						peers: Default::default(),
-					}
+					ForkTarget::new(number, Some(*announce.header.parent_hash()))
 				})
 				.peers
 				.insert(peer_id);
@@ -567,7 +629,7 @@ where
 					metrics.fork_targets.inc();
 				}
 
-				ForkTarget { number, peers: Default::default(), parent_hash: None }
+				ForkTarget::new(number, None)
 			})
 			.peers
 			.extend(peers);
@@ -1054,7 +1116,7 @@ where
 	}
 
 	/// Median of the heights our peers claim in their handshakes and
-	/// announcements. Unverified by construction — for display and monitoring
+	/// announcements. Unverified by construction, for display and monitoring
 	/// only, never for gating.
 	fn median_claimed_height(&self) -> Option<NumberFor<B>> {
 		let mut claims: Vec<_> = self.peers.values().map(|peer| peer.best_number).collect();
@@ -1314,13 +1376,37 @@ where
 							return Err(BadPeer(*peer_id, rep::NO_BLOCK));
 						}
 					},
-					PeerSyncState::DownloadingStale(_) => {
+					PeerSyncState::DownloadingStale(tip) => {
+						let tip = *tip;
 						peer.state = PeerSyncState::Available;
 						if blocks.is_empty() {
 							debug!(target: LOG_TARGET, "Empty block response from {peer_id}");
 							return Err(BadPeer(*peer_id, rep::NO_BLOCK));
 						}
 						validate_blocks::<B>(&blocks, peer_id, Some(request))?;
+						if let Some(target) = self.fork_targets.get_mut(&tip) {
+							let queue = &self.queue_blocks;
+							let client = &self.client;
+							if !target.accept_response(
+								tip,
+								&blocks,
+								peer_id,
+								client.info().finalized_number,
+								|parent| {
+									queue.contains(parent) ||
+										matches!(
+											client.block_status(*parent),
+											Ok(BlockStatus::InChainWithState | BlockStatus::Queued)
+										)
+								},
+							)? {
+								return Ok(());
+							}
+						} else {
+							// Another completed import can remove the target while its request
+							// runs.
+							return Ok(());
+						}
 						blocks
 							.into_iter()
 							.map(|b| {
@@ -1428,7 +1514,7 @@ where
 								peer.common_number,
 							);
 							if peer.common_number < peer.best_number &&
-								peer.best_number < self.best_queued_number
+								peer.best_number <= self.best_queued_number
 							{
 								trace!(
 									target: LOG_TARGET,
@@ -1443,11 +1529,7 @@ where
 											metrics.fork_targets.inc();
 										}
 
-										ForkTarget {
-											number: peer.best_number,
-											parent_hash: None,
-											peers: Default::default(),
-										}
+										ForkTarget::new(peer.best_number, None)
 									})
 									.peers
 									.insert(*peer_id);
@@ -1900,6 +1982,17 @@ where
 			return Vec::new();
 		}
 		let transport_catch_up = self.has_download_catch_up_work();
+		let mut active_forks: HashSet<_> = self
+			.peers
+			.values()
+			.filter_map(|peer| {
+				if let PeerSyncState::DownloadingStale(hash) = peer.state {
+					Some(hash)
+				} else {
+					None
+				}
+			})
+			.collect();
 		let attrs = self.required_block_attributes();
 		let blocks = &mut self.blocks;
 		let fork_targets = &mut self.fork_targets;
@@ -1997,6 +2090,7 @@ where
 					},
 					max_blocks_per_request,
 					metrics,
+					&mut active_forks,
 				) {
 					trace!(target: LOG_TARGET, "Downloading fork {hash:?} from {id}");
 					peer.state = PeerSyncState::DownloadingStale(hash);
@@ -2380,6 +2474,7 @@ fn fork_sync_request<B: BlockT>(
 	check_block: impl Fn(&B::Hash) -> BlockStatus,
 	max_blocks_per_request: u32,
 	metrics: Option<&Metrics>,
+	active_forks: &mut HashSet<B::Hash>,
 ) -> Option<(B::Hash, BlockRequest<B>)> {
 	fork_targets.retain(|hash, r| {
 		if r.number <= finalized {
@@ -2406,7 +2501,7 @@ fn fork_sync_request<B: BlockT>(
 		metrics.fork_targets.set(fork_targets.len().try_into().unwrap_or(u64::MAX));
 	}
 	for (hash, r) in fork_targets {
-		if !r.peers.contains(&id) {
+		if !r.peers.contains(&id) || active_forks.contains(hash) {
 			continue;
 		}
 		// Download the fork only if it is behind or not too far ahead our tip of the chain
@@ -2414,23 +2509,31 @@ fn fork_sync_request<B: BlockT>(
 		if r.number <= best_num ||
 			(r.number - best_num).saturated_into::<u32>() < max_blocks_per_request as u32
 		{
-			let parent_status = r.parent_hash.as_ref().map_or(BlockStatus::Unknown, check_block);
-			let count = if parent_status == BlockStatus::Unknown {
-				(r.number - finalized).saturated_into::<u32>() // up to the last finalized block
-			} else {
+			let (from, number) = r.cursor.unwrap_or((*hash, r.number));
+			let parent_status = r.parent_hash.as_ref().map_or(BlockStatus::Unknown, &check_block);
+			let count = if from == *hash && parent_status != BlockStatus::Unknown {
 				// request only single block
 				1
+			} else {
+				std::cmp::min(
+					number.saturating_sub(finalized).saturated_into::<u32>(),
+					max_blocks_per_request,
+				)
 			};
+			if count == 0 {
+				continue;
+			}
 			trace!(
 				target: LOG_TARGET,
 				"Downloading requested fork {hash:?} from {id}, {count} blocks",
 			);
+			active_forks.insert(*hash);
 			return Some((
 				*hash,
 				BlockRequest::<B> {
 					id: 0,
 					fields: attributes,
-					from: FromBlock::Hash(*hash),
+					from: FromBlock::Hash(from),
 					direction: Direction::Descending,
 					max: Some(count),
 				},
@@ -2730,6 +2833,203 @@ mod security_tests {
 		) -> sp_blockchain::Result<(KeyValueStates, usize)> {
 			unimplemented!()
 		}
+	}
+
+	fn fork_blocks(length: u64) -> Vec<BlockData<TestBlock>> {
+		let mut header = GenesisClient::new().genesis;
+		let mut blocks = Vec::new();
+		for number in 0..=length {
+			if number > 0 {
+				header = <<TestBlock as BlockT>::Header as HeaderT>::new(
+					number,
+					Default::default(),
+					Default::default(),
+					header.hash(),
+					Default::default(),
+				);
+			}
+			blocks.push(BlockData::<TestBlock> {
+				hash: header.hash(),
+				header: Some(header.clone()),
+				body: Some(Vec::new()),
+				indexed_body: None,
+				message_queue: None,
+				receipt: None,
+				justification: None,
+				justifications: None,
+			});
+		}
+		blocks
+	}
+
+	fn fork_response(
+		chain: &[BlockData<TestBlock>],
+		request: &BlockRequest<TestBlock>,
+		response_limit: usize,
+	) -> Vec<BlockData<TestBlock>> {
+		assert_eq!(request.direction, Direction::Descending);
+		let FromBlock::Hash(hash) = request.from else {
+			panic!("fork recovery must pin every request by hash");
+		};
+		let end = chain.iter().position(|block| block.hash == hash).unwrap();
+		let count = response_limit.min(request.max.unwrap() as usize).min(end);
+		chain[end + 1 - count..=end].iter().rev().cloned().collect()
+	}
+
+	/// Exercise actual request scheduling, ancestry completion, and the public import action.
+	/// Consensus verifies accumulated work after receiving these blocks.
+	fn recover_fork(local_height: u64, fork_height: u64, response_limits: &[usize]) {
+		let chain = fork_blocks(fork_height);
+		let tip = chain.last().unwrap().hash;
+		let client = Arc::new(GenesisClient::new());
+		let mut sync = ChainSync::new(
+			ChainSyncMode::Full,
+			client,
+			2,
+			8,
+			ProtocolName::Static(""),
+			Arc::new(MockBlockDownloader::new()),
+			None,
+			std::iter::empty(),
+		)
+		.unwrap();
+		sync.best_queued_number = local_height;
+		sync.best_queued_hash = H256::repeat_byte(17);
+		let first_peer = PeerId::random();
+		sync.peers.insert(
+			first_peer,
+			PeerSync {
+				peer_id: first_peer,
+				common_number: 0,
+				best_hash: tip,
+				best_number: fork_height,
+				state: PeerSyncState::AncestorSearch {
+					start: local_height,
+					current: 0,
+					state: AncestorSearchState::ExponentialBackoff(1),
+				},
+			},
+		);
+		sync.on_block_data(
+			&first_peer,
+			Some(ancestry_request::<TestBlock>(0)),
+			BlockResponse::<TestBlock> { id: 0, blocks: vec![chain[0].clone()] },
+		)
+		.unwrap();
+		assert!(sync.fork_targets.contains_key(&tip));
+		// Two honest sources must not concurrently advance the same target's cursor.
+		let second_peer = PeerId::random();
+		sync.peers.insert(
+			second_peer,
+			PeerSync {
+				peer_id: second_peer,
+				common_number: 0,
+				best_hash: tip,
+				best_number: fork_height,
+				state: PeerSyncState::Available,
+			},
+		);
+		sync.set_sync_fork_request(vec![first_peer, second_peer], &tip, fork_height);
+		let mut imported = HashSet::from([chain[0].hash]);
+		let mut imported_numbers = Vec::new();
+		let mut responses = 0;
+		while !imported.contains(&tip) {
+			assert!(responses < fork_height as usize * 6, "fork recovery must make progress");
+			let requests = sync.block_requests();
+			assert_eq!(requests.len(), 1);
+			let (peer, request) = requests.into_iter().next().unwrap();
+			assert!(request.max.unwrap() <= 8);
+			assert!(sync.block_requests().is_empty(), "one request per fork target");
+			let blocks =
+				fork_response(&chain, &request, response_limits[responses % response_limits.len()]);
+			sync.on_block_data(&peer, Some(request), BlockResponse::<TestBlock> { id: 0, blocks })
+				.unwrap();
+			for action in std::mem::take(&mut sync.actions) {
+				if let SyncingAction::ImportBlocks { blocks, .. } = action {
+					for block in blocks {
+						let header = block.header.unwrap();
+						assert!(
+							imported.contains(header.parent_hash()),
+							"parents must be queued first"
+						);
+						assert!(!block.skip_execution);
+						assert!(block.body.is_some());
+						assert!(imported.insert(block.hash), "queue must avoid duplicate imports");
+						imported_numbers.push(*header.number());
+					}
+				}
+			}
+			assert_eq!(sync.fork_targets.contains_key(&tip), !imported.contains(&tip));
+			responses += 1;
+		}
+		assert_eq!(imported_numbers, (1..=fork_height).collect::<Vec<_>>());
+		assert!(responses > (fork_height / 8) as usize);
+	}
+
+	#[test]
+	fn fork_sync_recovers_long_fork_from_truncated_responses() {
+		recover_fork(40, 37, &[3, 1, 5]);
+	}
+
+	#[test]
+	fn fork_sync_passes_shorter_and_equal_height_candidates_to_consensus() {
+		// Height cannot decide which candidate has the most work.
+		for local_height in [19, 80] {
+			recover_fork(local_height, 19, &[8]);
+		}
+	}
+
+	#[test]
+	fn fork_sync_reconstructs_gaps_when_anchor_cache_is_full() {
+		let chain = fork_blocks(MAX_FORK_SYNC_ANCHORS as u64 + 5);
+		let tip = chain.last().unwrap().hash;
+		let number = (chain.len() - 1) as u64;
+		let peer = PeerId::random();
+		let mut target = ForkTarget::<TestBlock>::new(number, None);
+		target.peers.insert(peer);
+		let mut targets = HashMap::from([(tip, target)]);
+		let mut known = HashSet::from([chain[0].hash]);
+		let mut reached_limit = false;
+		let mut responses = 0;
+		while !known.contains(&tip) {
+			assert!(responses < chain.len() * 6);
+			let (_, request) = fork_sync_request::<TestBlock>(
+				&peer,
+				&mut targets,
+				number + 10,
+				0,
+				BlockAttributes::HEADER | BlockAttributes::BODY,
+				|hash| {
+					if known.contains(hash) {
+						BlockStatus::InChainWithState
+					} else {
+						BlockStatus::Unknown
+					}
+				},
+				1,
+				None,
+				&mut HashSet::new(),
+			)
+			.unwrap();
+			let mut blocks = fork_response(&chain, &request, 1);
+			blocks.reverse();
+			validate_blocks::<TestBlock>(&blocks, &peer, Some(request)).unwrap();
+			let target = targets.get_mut(&tip).unwrap();
+			if target
+				.accept_response(tip, &blocks, &peer, 0, |hash| known.contains(hash))
+				.unwrap()
+			{
+				for block in blocks {
+					assert!(known.contains(block.header.as_ref().unwrap().parent_hash()));
+					known.insert(block.hash);
+				}
+			}
+			assert!(target.pending.len() <= MAX_FORK_SYNC_ANCHORS);
+			reached_limit |= target.pending.len() == MAX_FORK_SYNC_ANCHORS;
+			responses += 1;
+		}
+		assert!(reached_limit);
+		assert_eq!(known.len(), chain.len());
 	}
 
 	/// Active regression for the forged-handshake report: peers claiming an

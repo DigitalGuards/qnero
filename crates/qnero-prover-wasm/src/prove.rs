@@ -25,18 +25,8 @@ use crate::clock::timed;
 use crate::memory::{self, MemorySpan};
 use crate::request::{SubmissionPublicInputs, TransferRequest};
 
-/// The chain's leaf slots per private batch.
-///
-/// `qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS` is the definition, and that
-/// crate is a `std::fs` staging tool this module must not link, so the number
-/// is copied here and `the_chain_default_is_the_builders_default` holds the
-/// copy to the definition. That test reaches the builder through a
-/// dev-dependency, which never enters the cdylib and never appears in
-/// `cargo tree -e normal`, so the copy is checked without linking the tool. A
-/// set built at another `N` produces proofs whose public-input length the
-/// runtime's embedded verifier cannot read, and the rejection arrives only
-/// after the full proving cost has been paid.
-pub const CHAIN_NUM_LEAVES: usize = 6;
+/// Leaf slots in the shared release profile, negotiated before building.
+pub const CHAIN_NUM_LEAVES: usize = qnero_circuit::profile::RELEASE_NUM_LEAVES;
 
 /// Timings and memory for one call, in the shape the harness prints.
 #[derive(Debug, Serialize)]

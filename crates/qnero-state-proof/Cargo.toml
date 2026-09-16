@@ -1,0 +1,21 @@
+[package]
+name = "qnero-state-proof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared native and browser verification of Qnero state trie proofs"
+
+[dependencies]
+# Match the chain workspace. Keep std off so the browser does not acquire
+# networking, OS randomness, or the native trie cache implementation.
+sp-trie = { version = "=42.0.1", default-features = false }
+sp-core = { version = "=39.0.0", default-features = false }
+
+[features]
+default = []
+# Deterministic in-memory trie fixtures for downstream wallet regression tests.
+fixtures = []
+
+[[example]]
+name = "browser_fixture"
+required-features = ["fixtures"]

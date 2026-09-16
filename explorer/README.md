@@ -21,7 +21,7 @@ presentation rules behind that are in
 
 | Route | What it holds |
 |---|---|
-| `#/` | Head and finalized height, rolling block time, difficulty and an estimated hash rate, the RandomX seed height and its next rotation, tree leaves and depth, the settled nullifier count, pool value, the newest block's coinbase, and a live list of recent blocks |
+| `#/` | Head and node checkpoint height, rolling block time, difficulty and an estimated hash rate, the RandomX seed height and its next rotation, tree leaves and depth, the settled nullifier count, pool value, the newest block's coinbase, and a live list of recent blocks |
 | `#/blocks` | A paged list, newest first |
 | `#/block/<height or hash>` | A summary of when, how many and how much, then the header fields, the coinbase note, every settlement in full, every shield entry, refused calls, and every extrinsic summarised |
 | `#/settlement/<extrinsic hash>` | One settlement: its slots and the anchor window |
@@ -392,3 +392,16 @@ Known limit: the settled-nullifier baseline walk on the home page is keyed on
 the baseline height, so a reorg that replaces the block at that height keeps
 the walk from the abandoned branch until the page reloads or the baseline
 moves.
+
+## Confirmations and archive history
+
+Qnero uses greatest-work proof of work with probabilistic confirmations. The
+current protocol keeps genesis as its irreversible checkpoint. The explorer
+shows the node's checkpoint separately from the best height and does not turn
+`MaxReorgDepth` into a finality promise or a displayed confirmation threshold.
+
+Historical events require retained state. Header and block-body availability
+alone does not establish that old state queries or read proofs remain available.
+Wallet recovery of ciphertexts outside the live retention window currently
+requires an archive provider serving creation-block state proofs. See
+[Authenticated wallet reads](../docs/AUTHENTICATED_READS.md).

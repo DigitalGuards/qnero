@@ -1,18 +1,9 @@
-//! Everything the wallet reads out of the runtime's own metadata.
+//! Runtime discovery and protocol compatibility checks.
 //!
-//! Nothing here is a compiled-in copy of a chain value. The runtime moved
-//! `CiphertextBytesPerFeeQuantum` and added and removed a payload-ratio bound
-//! inside one `spec_version` during M4 (`docs/OPS-DEV.md`), so a pinned copy
-//! of a constant or a call index is a wallet that builds a proof against the
-//! wrong rule and finds out after paying for it. M6 reinforced it: the runtime
-//! shipped a new error variant and three changed event layouts before its
-//! version moved. The chain identifies as `qnero` at `spec_version` 101 and
-//! `transaction_version` 7 as of that milestone, and the wallet reads the
-//! pallet index, the three call indices and the fee constants out of
-//! `state_getMetadata` on every run regardless.
-//!
-//! The one number that has no metadata surface is `POOL_STEP`; see
-//! [`crate::POOL_STEP`].
+//! Call indices, fee constants and outer transaction formats are read from
+//! runtime metadata. The versioned protocol profile is compared with the
+//! wallet release and with authenticated `ActiveProtocolProfile` state before
+//! circuit construction. Genesis binding and header selection remain separate.
 
 use anyhow::{anyhow, bail, Context, Result};
 use codec::Decode;
@@ -22,6 +13,7 @@ use scale_info::{PortableRegistry, TypeDef};
 use serde_json::json;
 
 use crate::rpc::{decode_hex, RpcClient};
+use qnero_circuit::profile::{ensure_supported, ProtocolProfile};
 
 /// Names the wallet looks up. They are the `construct_runtime` names, which
 /// are also the storage prefixes.
@@ -85,6 +77,8 @@ pub const EXTRINSIC_FORMAT_VERSION: u8 = 5;
 /// What the wallet needs from the runtime, resolved once per command.
 #[derive(Debug, Clone)]
 pub struct ChainMetadata {
+    /// Versioned protocol and exact verifier artifact identity.
+    pub protocol_profile: ProtocolProfile,
     pub shielded_pallet_index: u8,
     pub submit_private_batch: u8,
     pub submit_public_batch: u8,
@@ -137,7 +131,10 @@ impl ChainMetadata {
     /// Fetch and parse `state_getMetadata`.
     pub fn fetch(rpc: &RpcClient) -> Result<Self> {
         let blob: String = rpc.call_as("state_getMetadata", json!([]))?;
-        Self::parse(&decode_hex(&blob)?)
+        let metadata = Self::parse(&decode_hex(&blob)?)?;
+        metadata.ensure_supported_profile()?;
+        metadata.ensure_active_profile(rpc, None)?;
+        Ok(metadata)
     }
 
     pub fn parse(blob: &[u8]) -> Result<Self> {
@@ -198,6 +195,10 @@ impl ChainMetadata {
             .ok_or_else(|| anyhow!("`{SHIELDED_PALLET}` declares no calls"))?;
 
         Ok(Self {
+            protocol_profile: shielded
+                .constant("ProtocolProfile")?
+                .try_into()
+                .map_err(|_| anyhow!("ProtocolProfile must encode exactly 192 bytes"))?,
             shielded_pallet_index: shielded.index,
             submit_private_batch: call_index(&types, call_type, "submit_private_batch")?,
             submit_public_batch: call_index(&types, call_type, "submit_public_batch")?,
@@ -214,6 +215,27 @@ impl ChainMetadata {
                 .flat_map(|pallet| pallet.storage.iter().cloned())
                 .collect(),
         })
+    }
+
+    /// Reject incompatible releases before circuit construction or proving.
+    pub fn ensure_supported_profile(&self) -> Result<()> {
+        ensure_supported(&self.protocol_profile, crate::wallet::NUM_LEAF_PROOFS)
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// Authenticate the runtime's profile statement at a selected block.
+    /// `RpcClient::storage` verifies the proof against that header's state root.
+    /// The wallet's existing genesis binding and header trust policy still apply.
+    pub fn ensure_active_profile(&self, rpc: &RpcClient, at: Option<&str>) -> Result<()> {
+        self.ensure_supported_profile()?;
+        let key = crate::scale::storage_prefix(SHIELDED_PALLET, "ActiveProtocolProfile");
+        let value = rpc.storage(&key, at)?
+            .ok_or_else(|| anyhow!("this chain has no authenticated active protocol profile; a compatible runtime upgrade is required"))?;
+        ensure_supported(&value, crate::wallet::NUM_LEAF_PROOFS).map_err(anyhow::Error::msg)?;
+        if value != self.protocol_profile {
+            bail!("the runtime metadata profile differs from its authenticated state profile");
+        }
+        Ok(())
     }
 
     /// The signed `shield` path refuses to sign a payload it cannot lay out.
@@ -438,6 +460,7 @@ fn call_index(types: &PortableRegistry, call_type: u32, call: &str) -> Result<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codec::Encode;
 
     /// A metadata blob captured from the M4 dev node, so the parse is covered
     /// without a running chain. Regenerate with
@@ -446,7 +469,82 @@ mod tests {
     /// http://127.0.0.1:9944 | jq -r .result > tests/fixtures/metadata.hex`.
     fn fixture() -> Vec<u8> {
         let hex_blob = include_str!("../tests/fixtures/metadata.hex");
-        decode_hex(hex_blob.trim()).expect("the fixture is hex")
+        let bytes = decode_hex(hex_blob.trim()).expect("the fixture is hex");
+        let mut metadata = RuntimeMetadataPrefixed::decode(&mut &bytes[..]).unwrap();
+        // Preserve the historical fee/call fixture and add the release profile
+        // to exercise the new discovery boundary without a running node.
+        match &mut metadata.1 {
+            RuntimeMetadata::V14(md) => {
+                let u8_id = md
+                    .types
+                    .types
+                    .iter()
+                    .find(|ty| {
+                        matches!(
+                            ty.ty.type_def,
+                            TypeDef::Primitive(scale_info::TypeDefPrimitive::U8)
+                        )
+                    })
+                    .unwrap()
+                    .id;
+                let profile_id = md.types.types.len() as u32;
+                md.types.types.push(scale_info::PortableType {
+                    id: profile_id,
+                    ty: scale_info::Type {
+                        path: scale_info::Path::default(),
+                        type_params: Vec::new(),
+                        type_def: TypeDef::Array(scale_info::TypeDefArray {
+                            len: qnero_circuit::profile::PROFILE_LEN as u32,
+                            type_param: u8_id.into(),
+                        }),
+                        docs: Vec::new(),
+                    },
+                });
+                let shielded = md
+                    .pallets
+                    .iter_mut()
+                    .find(|p| p.name == SHIELDED_PALLET)
+                    .unwrap();
+                shielded
+                    .constants
+                    .push(frame_metadata::v14::PalletConstantMetadata {
+                        name: "ProtocolProfile".into(),
+                        ty: profile_id.into(),
+                        value: qnero_circuit::profile::SUPPORTED_PROFILE.to_vec(),
+                        docs: Vec::new(),
+                    });
+            }
+            _ => panic!("the historical fixture is metadata v14"),
+        }
+        metadata.encode()
+    }
+
+    #[test]
+    fn incompatible_profile_is_refused_by_wallet_preflight() {
+        let mut md = ChainMetadata::parse(&fixture()).unwrap();
+        md.ensure_supported_profile().unwrap();
+        md.protocol_profile[qnero_circuit::profile::PRIVATE_DIGEST_OFFSET] ^= 1;
+        assert!(md.ensure_supported_profile().is_err());
+    }
+
+    #[test]
+    fn legacy_metadata_without_a_profile_is_refused() {
+        let legacy = decode_hex(include_str!("../tests/fixtures/metadata.hex").trim()).unwrap();
+        assert!(ChainMetadata::parse(&legacy)
+            .unwrap_err()
+            .to_string()
+            .contains("ProtocolProfile"));
+    }
+
+    #[test]
+    fn browser_and_native_profile_storage_keys_agree() {
+        assert_eq!(
+            hex::encode(crate::scale::storage_prefix(
+                SHIELDED_PALLET,
+                "ActiveProtocolProfile"
+            )),
+            "cad93014ca4e3d270e8f2677345d6f09f3593aefbef3dca83dba417658faf114"
+        );
     }
 
     #[test]

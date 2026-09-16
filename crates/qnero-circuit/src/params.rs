@@ -18,10 +18,11 @@
 //! artifact built over this exact public-input layout with one query round and
 //! no grinding deserializes cleanly and verifies forged proofs with high
 //! probability. Checking these parameters is not a substitute for pinning the
-//! artifact's hash, which is still to come; it is the floor that holds until
-//! there is a tagged release to pin.
+//! artifact's hash. [`crate::profile`] pins the release verifier bytes in
+//! addition to these structural checks.
 
-/// Claimed security level, in bits.
+/// Configured FRI security target, in bits. This is not an assessed end-to-end
+/// classical or quantum security level; see `docs/CRYPTOGRAPHY.md`.
 pub const SECURITY_BITS: usize = 100;
 
 /// Independent challenge repetitions of the PLONK argument.
@@ -71,12 +72,9 @@ pub const PRIVATE_BATCH_NUM_ROUTED_WIRES: usize = 60;
 ///
 /// `2^20` rows covers both layers at every supported dimension. The private
 /// batch is measured: seven leaves reach `degree_bits = 16`
-/// (`docs/BENCH.md`), one recursive verifier per slot, so 64 leaves stay
-/// several bits below the ceiling. The larger circuit is the public batch at
-/// the chain default of 53 inner proofs, which is 53 recursive verifiers over
-/// a `degree_bits = 16` inner plus an 8056-felt forwarded region, and which
-/// has not been built or measured yet (`docs/BENCH.md`). Its expected degree
-/// is about `2^18`. `qnero-circuit-builder` reads every verifier file it
+/// (`docs/BENCH.md`). The release dimensions are six leaves per private batch
+/// and 53 private proofs per public batch. That public batch was built and
+/// measured in the M5 benchmark record. `qnero-circuit-builder` reads every verifier file it
 /// publishes back through this ceiling, so a public batch that outgrew it
 /// would fail on the build host.
 pub const MAX_BATCH_DEGREE_BITS: usize = 20;

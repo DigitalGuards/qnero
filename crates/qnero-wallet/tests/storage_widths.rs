@@ -49,7 +49,7 @@ fn a_leaf_count_of_another_width_is_refused_by_name() {
     let chain = Chain::new(&rpc);
 
     let refused = chain
-        .leaf_count_at(&support::block_hash(4))
+        .leaf_count_at(&chain.head().expect("selected head").hash)
         .expect_err("a leaf count that is not eight bytes is refused");
     let message = format!("{refused:#}");
     assert!(
@@ -63,7 +63,7 @@ fn a_leaf_count_of_another_width_is_refused_by_name() {
         .put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(7));
     assert_eq!(
         chain
-            .leaf_count_at(&support::block_hash(4))
+            .leaf_count_at(&chain.head().expect("selected head").hash)
             .expect("eight bytes read back"),
         7
     );
@@ -84,7 +84,7 @@ fn a_leaf_count_above_the_trees_capacity_is_refused() {
     let chain = Chain::new(&rpc);
 
     let refused = chain
-        .leaf_count_at(&support::block_hash(4))
+        .leaf_count_at(&chain.head().expect("selected head").hash)
         .expect_err("a count above the tree's capacity is refused");
     let message = format!("{refused:#}");
     assert!(message.contains("4 ** 16"), "{message}");
@@ -100,7 +100,7 @@ fn a_leaf_count_above_the_trees_capacity_is_refused() {
     );
     assert_eq!(
         chain
-            .leaf_count_at(&support::block_hash(4))
+            .leaf_count_at(&chain.head().expect("selected head").hash)
             .expect("the capacity is a count this chain can reach"),
         TREE_CAPACITY
     );
@@ -118,7 +118,7 @@ fn an_entry_count_of_another_width_is_refused_by_name() {
     let chain = Chain::new(&rpc);
 
     let refused = chain
-        .entry_count_at(&support::block_hash(4))
+        .entry_count_at(&chain.head().expect("selected head").hash)
         .expect_err("an entry counter that is not eight bytes is refused");
     let message = format!("{refused:#}");
     assert!(
@@ -142,7 +142,7 @@ fn a_tree_depth_of_another_width_is_refused_by_name() {
     let chain = Chain::new(&rpc);
 
     let refused = chain
-        .tree_depth_at(&support::block_hash(4))
+        .tree_depth_at(&chain.head().expect("selected head").hash)
         .expect_err("a depth that is not one byte is refused");
     let message = format!("{refused:#}");
     assert!(message.contains("ZkTree::Depth is 2 bytes"), "{message}");
@@ -167,7 +167,7 @@ fn a_leaf_block_and_a_coinbase_value_of_another_width_are_refused_by_name() {
     let chain = Chain::new(&rpc);
 
     let refused = chain
-        .leaves(0..1, &support::block_hash(4), 1)
+        .leaves(0..1, &chain.head().expect("selected head").hash, 1)
         .expect_err("a block height that is not four bytes is refused");
     let message = format!("{refused:#}");
     assert!(
@@ -187,7 +187,7 @@ fn a_leaf_block_and_a_coinbase_value_of_another_width_are_refused_by_name() {
         );
     }
     let refused = chain
-        .leaves(0..1, &support::block_hash(4), 1)
+        .leaves(0..1, &chain.head().expect("selected head").hash, 1)
         .expect_err("a coinbase value that is not eight bytes is refused");
     let message = format!("{refused:#}");
     assert!(
@@ -201,7 +201,7 @@ fn a_leaf_block_and_a_coinbase_value_of_another_width_are_refused_by_name() {
         &encode_u64(42),
     );
     let leaves = chain
-        .leaves(0..1, &support::block_hash(4), 1)
+        .leaves(0..1, &chain.head().expect("selected head").hash, 1)
         .expect("the row reads back at the declared widths");
     assert_eq!(leaves[0].block_number, Some(3));
     assert_eq!(leaves[0].coinbase_value, Some(42));

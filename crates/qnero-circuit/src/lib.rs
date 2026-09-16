@@ -26,6 +26,7 @@ pub mod chain;
 pub mod layout;
 pub mod padding;
 pub mod params;
+pub mod profile;
 
 /// Plonky2 configuration shared by every Qnero circuit. `D = 2` is the field
 /// extension degree, `C` the Poseidon-over-Goldilocks config, `F` Goldilocks.

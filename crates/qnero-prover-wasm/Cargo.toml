@@ -15,6 +15,7 @@ qnero-prover = { workspace = true }
 qnero-notes = { workspace = true }
 qnero-circuit = { workspace = true }
 qnero-note-core = { workspace = true }
+qnero-state-proof = { workspace = true }
 qp-plonky2 = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 serde = { workspace = true }

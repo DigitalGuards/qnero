@@ -33,7 +33,8 @@ sp_api::decl_runtime_apis! {
 	/// symbol, which says nothing a client can act on.
 	#[api_version(2)]
 	pub trait QPoWApi {
-		/// Get the max possible reorg depth
+		/// Legacy depth API. Qnero returns u32::MAX to disable depth finalization
+		/// across its u32 height range; confirmations remain probabilistic.
 		fn get_max_reorg_depth() -> u32;
 
 		/// Get the max possible difficulty for work calculation

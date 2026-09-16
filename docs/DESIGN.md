@@ -1,12 +1,20 @@
 # Qnero design (draft v0.1, 2026-09-11)
 
+**Current native architecture:** [NATIVE-UPGRADE.md](NATIVE-UPGRADE.md) describes
+runtime 105, reversible work-based consensus, authenticated wallet state and
+bounded live ciphertext retention. [CRYPTOGRAPHY.md](CRYPTOGRAPHY.md) records the
+experimental proof-system profile and independent qualification still required.
+The dated design and milestone entries below retain their historical context.
+
 Qnero is a post-quantum private coin with Monero's policy: every transfer is
 shielded, sender, recipient and amount are hidden, and no call moves value
 between accounts a user chooses. The single transparent payout is
 `Vesting::claim`, whose payee and amount are both fixed at genesis and whose
 pot cannot sign (section 7.2). Qnero is built on the Quantus Network stack
 (MIT) so the post-quantum account layer, hash-based ZK proving and recursion,
-Merkle commitment tree and nullifier set are reused as audited code.
+Merkle commitment tree and nullifier set reuse upstream implementations with
+their own review history. Qnero's circuit and protocol composition requires
+independent assessment.
 
 Three things a v1 block publishes, stated here because the rest of this
 document is about what it hides. `shield`, the one door into the pool, is a
@@ -908,11 +916,10 @@ with seed nodes, multi-asset notes, diversified addresses, disclosure proofs.
 None of that is in Qnero yet, and 12 weeks will not close all of it.
 
 Where Qnero beats it, if we execute:
-1. Trust. Every cryptographic component in Qnero is either standardized
-   (ML-DSA, ML-KEM, SHA3) or externally audited by a firm (Plonky2 circuits,
-   Poseidon, Substrate runtime). Hegemon's soundness rests on a novel proof
-   backend that its own review package calls unsupported. For private money
-   this is the whole argument.
+1. Cryptographic qualification. Qnero reuses standardized primitives and
+   upstream implementations with review history. Its own circuits, recursive
+   composition and protocol remain experimental and require independent
+   assessment. `docs/CRYPTOGRAPHY.md` is the current security profile.
 2. Narrative. Monero has the largest privacy community in crypto and no
    post-quantum path. Qnero speaks Monero: spend key and view key, private by
    default, no call moving value between accounts a user chooses, every output
@@ -942,7 +949,7 @@ Where Qnero beats it, if we execute:
 Concrete "beat it" targets for the first testnet:
 - proof per tx smaller than 105 KB, or clearly amortized below it per batch
 - wallet proving under 5 s on a laptop, under 60 s on a phone
-- audit-grade claim: no cryptographic component without a firm's review
+- independent assessment of the exact Qnero primitives, circuits and composition
 - a running public testnet with the explorer and web wallet attached
 
 ## 11. Narrative
@@ -962,10 +969,11 @@ Pillars, in this order:
    stock constants, so a Monero rig points xmrig at a Qnero node and mines. No
    stake, no validators, no foundation keys in consensus, and no algorithm
    nobody has hardware or software for.
-3. Post-quantum from genesis. Hash-based proofs, lattice signatures and
-   encapsulation, nothing for Shor to break.
-4. Audited parts only. Standardized primitives and firm-audited circuits.
-   No novel cryptography.
+3. Post-quantum security as a qualification goal. Hash-based proofs and
+   lattice primitives avoid the elliptic-curve transaction path; their exact
+   composition requires classical and quantum analysis.
+4. Independent review. Upstream audit scope and Qnero-specific changes are
+   documented separately in `CRYPTOGRAPHY.md`. Mainnet presets remain gated.
 
 
 ## 12. Scaling and bloat: decisions (2026-09-15)

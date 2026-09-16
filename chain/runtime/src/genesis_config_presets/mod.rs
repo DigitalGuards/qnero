@@ -97,10 +97,17 @@ pub const PLANCK_RUNTIME_PRESET: &str = "planck";
 
 /// Identifier for the mainnet runtime preset.
 ///
-/// Genesis is produced only once `mainnet_vesting::FINALIZED` is flipped.
+/// Genesis requires finalized allocations and a qualified proof-system profile.
 /// The allocation table lives in `mainnet_vesting` so it can be audited
 /// without the rest of the preset machinery.
 pub const MAINNET_RUNTIME_PRESET: &str = "mainnet";
+
+/// Mainnet requires an independently assessed proof-system composition. The
+/// protocol profile remains experimental until that review and any resulting
+/// circuit migration have been completed. See `docs/CRYPTOGRAPHY.md`.
+fn mainnet_security_qualified() -> bool {
+	!pallet_shielded::EXPERIMENTAL_PROOF_SYSTEM
+}
 
 /// Identifier for the Qnero public testnet preset.
 ///
@@ -755,9 +762,15 @@ pub fn planck_config_genesis() -> Value {
 
 /// Mainnet genesis: the 2% placeholder TGE mint from `mainnet_vesting`, which is its one vesting
 /// row, the `SEED` endowments for the treasurers and the tech collective, and the treasury
-/// multisig derived from the treasurers. Refuses to build until `mainnet_vesting::FINALIZED`,
-/// which is `false` while that row pays a placeholder address.
+/// multisig derived from the treasurers. Requires a qualified proof-system
+/// profile and `mainnet_vesting::FINALIZED`, which remains false while the
+/// allocation contains a placeholder address.
 pub fn mainnet_config_genesis() -> Value {
+	assert!(
+		mainnet_security_qualified(),
+		"mainnet genesis is disabled: the Qnero proof-system profile is experimental; \
+		 complete independent cryptographic qualification before enabling this preset"
+	);
 	let treasury_signers = mainnet_vesting::treasurers();
 	let tech_collective = mainnet_vesting::tech_collective();
 	let treasury_account = mainnet_vesting::treasury_account();
@@ -893,7 +906,7 @@ pub fn preset_names() -> Vec<PresetId> {
 		PresetId::from(PLANCK_RUNTIME_PRESET),
 		PresetId::from(QNERO_TESTNET_RUNTIME_PRESET),
 	];
-	if mainnet_vesting::FINALIZED {
+	if mainnet_vesting::FINALIZED && mainnet_security_qualified() {
 		names.push(PresetId::from(MAINNET_RUNTIME_PRESET));
 	}
 	names
@@ -1324,7 +1337,7 @@ mod tests {
 			(PLANCK_RUNTIME_PRESET, 0),
 			(QNERO_TESTNET_RUNTIME_PRESET, 0),
 		];
-		if mainnet_vesting::FINALIZED {
+		if mainnet_vesting::FINALIZED && mainnet_security_qualified() {
 			expected.push((MAINNET_RUNTIME_PRESET, mainnet_vesting::schedules().len()));
 		}
 		let mut total = 0usize;
@@ -1423,9 +1436,9 @@ mod tests {
 	}
 
 	#[test]
-	fn mainnet_preset_is_gated_until_vesting_is_finalized() {
+	fn mainnet_preset_requires_final_allocations_and_security_qualification() {
 		let minted_total = mainnet_vesting::GENESIS_ALLOCATION + EXISTENTIAL_DEPOSIT;
-		if mainnet_vesting::FINALIZED {
+		if mainnet_vesting::FINALIZED && mainnet_security_qualified() {
 			let raw = get_preset(&PresetId::from(MAINNET_RUNTIME_PRESET)).expect("preset exists");
 			let (json, members) = prepare_genesis_build_input(raw).expect("well-formed");
 			let config: RuntimeGenesisConfig = serde_json::from_slice(&json).expect("deserializes");

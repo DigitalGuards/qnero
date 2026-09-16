@@ -38,17 +38,9 @@ use crate::typing::{
 use crate::units::qnr;
 use crate::POOL_STEP;
 
-/// Leaf slots in a private batch. Not a metadata value and not discoverable
-/// over RPC.
-///
-/// `chain/pallets/shielded/build.rs` resolves it as
-/// `QNERO_NUM_LEAF_PROOFS`, falling back to
-/// `qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS`, so the wallet resolves it
-/// the same way: one environment produces one `N` on both sides. Reading only
-/// the default would leave a wallet at six against a runtime someone built at
-/// eight, and the chain's embedded verifier would refuse the proof's
-/// public-input length after the full proving cost had been paid, with no
-/// local check to catch it first.
+/// Leaf slots compiled into the wallet. Runtime discovery verifies this count
+/// and the exact verifier profile before constructing circuits. Experimental
+/// environment overrides require a matching supported release profile.
 pub const NUM_LEAF_PROOFS: usize = match option_env!("QNERO_NUM_LEAF_PROOFS") {
     Some(text) => parse_leaf_proofs(text),
     None => qnero_circuit_builder::DEFAULT_NUM_LEAF_PROOFS,
@@ -1584,6 +1576,7 @@ impl Wallet {
         requested_fee: Option<u64>,
         memo: &str,
     ) -> Result<Preflight> {
+        metadata.ensure_supported_profile()?;
         ensure_memo_pad_fits(metadata)?;
         let plan = self.resolve_fee(metadata, to, memo, requested_fee)?;
         let target = amount
@@ -1720,6 +1713,8 @@ impl Wallet {
         memo: &str,
         merkle: MerkleSource,
     ) -> Result<PreparedSpend> {
+        metadata.ensure_active_profile(chain.rpc, None)?;
+        prover.ensure_supported_verifiers()?;
         metadata.ensure_known_storage()?;
         ensure_memo_pad_fits(metadata)?;
         // The chain this store belongs to. Every leaf index a selection hands
@@ -1764,6 +1759,7 @@ impl Wallet {
         // spend. `docs/WALLET.md` records it as an open issue.
         let head = chain.head()?;
         let (header, anchor_hash) = chain.anchor_header(head.number)?;
+        metadata.ensure_active_profile(chain.rpc, Some(&hex_0x(&anchor_hash)))?;
 
         let pk = self.key.pk();
         let derived = self.key.derived();
@@ -2550,31 +2546,12 @@ pub struct SyncReport {
     pub bypassed_refusal: Option<String>,
 }
 
-/// What a pass that read leaves and received nothing may also be, in one line.
-///
-/// See [`SyncReport::scanned_and_received_nothing`] for the bound. The
-/// sentence is here so the command-line wallet and `wallet-web` print one
-/// text, the way [`RESCAN_ADD_ONLY`] is shared, and the two copies are held
-/// byte for byte identical by a test: `wallet-web/tests/leaf-typing.test.ts`
-/// reads this literal out of this file and compares it against the browser's.
-///
-/// It names both values the chain leaves unbound and states the second one
-/// whole, because one rescan is the recovery for either: a substituted
-/// ciphertext and a leaf moved anywhere inside its block's range produce the
-/// same reading, a leaf that opens for nobody.
+/// The remaining trust boundary; the browser uses shorter phone-facing copy.
+/// State proofs authenticate values relative to the selected header chain;
+/// configured node and checkpoint policy still select that chain.
 pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =
-    "a pass that reads leaves and receives nothing is the ordinary case, and it is also what a \
-     substituted or moved leaf looks like. Two per-leaf values are bound to a leaf by nothing on \
-     chain: the bytes at Shielded::Ciphertexts, and where a leaf sits inside its block's own \
-     range. The tree sorts a node's children at every level and tags no level, so a \
-     block's root pins that block's leaf multiset and each internal node's child multiset and \
-     nothing further: sibling swaps composed at any level reach any position the range's aligned \
-     subtrees allow, the coinbase position included, and a shorter tree of internal node values \
-     served as leaves folds to the same root, so the root pins neither the leaf count nor the \
-     height inside a block. So a node with honest headers can answer a stranger's bytes at an \
-     incoming payment, or move that payment onto its block's coinbase position where no \
-     ciphertext is owed, and either way the leaf reads as somebody else's. If a payment was \
-     expected and is not here, rescan against a second node, which is the recovery for both.";
+    "Storage reads are authenticated to the selected headers. This wallet trusts the configured \
+     node for chain selection and does not verify proof of work.";
 
 /// What a rescan does not do, in one line, for the report and the CLI.
 ///
@@ -2592,7 +2569,7 @@ impl SyncReport {
         self.add_only.then_some(RESCAN_ADD_ONLY)
     }
 
-    /// The substituted-ciphertext hint, when this pass read leaves and took
+    /// The chain-selection trust hint, when this pass read leaves and took
     /// nothing out of them.
     pub fn ciphertext_hint(&self) -> Option<&'static str> {
         self.scanned_and_received_nothing

@@ -80,12 +80,23 @@ fn a_sync_never_names_this_wallets_nullifiers_to_the_node() {
         state.calls("state_getKeysPaged") > 0,
         "the settled set is paged, not probed"
     );
-    for nullifier in [mine, unspent] {
-        assert!(
-            !state.asked_about(&nullifier.to_hex()),
-            "the wallet named one of its own nullifiers to the node: {}",
-            nullifier.to_hex()
-        );
+    assert!(
+        !state.asked_about(&unspent.to_hex()),
+        "an unpublished nullifier stays local"
+    );
+    // Proof requests may echo the entire public page. They must include the
+    // stranger's entry alongside our already published nullifier.
+    for request in &state.requests {
+        let request: serde_json::Value = serde_json::from_str(request).unwrap();
+        if request["method"] == "state_getReadProof" {
+            let keys = request["params"][0].to_string();
+            if keys.contains(&mine.to_hex()) {
+                assert!(
+                    keys.contains(&stranger.to_hex()),
+                    "public proof pages stay broad"
+                );
+            }
+        }
     }
 }
 
@@ -123,7 +134,7 @@ fn a_rebuilt_tree_reaches_the_chains_root_without_asking_about_a_leaf() {
 
     let rpc = RpcClient::new(&node.url);
     let chain = Chain::new(&rpc);
-    let at = support::block_hash(7);
+    let at = chain.head().expect("selected head").hash;
     let tree = chain.rebuild_tree(&at).expect("the tree rebuilds");
 
     assert_eq!(tree.leaf_count(), leaves.len() as u64);

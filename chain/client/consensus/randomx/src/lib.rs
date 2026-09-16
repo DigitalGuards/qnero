@@ -34,9 +34,9 @@ pub mod target;
 pub mod vm;
 
 pub use chain_management::{
-	delete_cumulative_achieved_work, finalize_canonical_at_depth, get_chain_work,
+	delete_cumulative_achieved_work, ensure_pow_database, get_chain_work,
 	get_cumulative_achieved_work, initialize_genesis_achieved_work, is_heavier,
-	store_cumulative_achieved_work, ChainManagementError,
+	store_cumulative_achieved_work,
 };
 pub use seal::{Seal, SealError, SEAL_LEN};
 pub use vm::{EngineError, RandomxEngine, VmLease};
@@ -251,24 +251,10 @@ where
 /// lies about its height from buying an ancestry walk the length of a whole
 /// seed epoch plus a RandomX hash for a few hundred bytes of input.
 ///
-/// The finalized floor is the other half of the same argument, and it is what
-/// bounds which seed epochs an unauthenticated peer can name. A fork response
-/// carries up to `MaxReorgDepth` headers of which only the last is pinned to
-/// the hash that was asked for; the rest are free-form, and on an archive node
-/// their old parents all still resolve. Headers built on parents scattered
-/// across several epochs then each miss the two seed caches the engine holds,
-/// and every miss is a 256 MiB Argon2d fill before a single byte of the hash is
-/// compared against the target: hundreds of milliseconds of the import queue's
-/// one verification task for a header carrying no proof of work at all, and the
-/// evictions cost the live seed a re-fill on top. Refusing everything at or
-/// below the finalized height for two database reads leaves only the
-/// unfinalized window, which is `MaxReorgDepth` blocks wide and therefore spans
-/// at most two seed epochs: exactly what the cache pool already holds.
-///
-/// Nothing importable is lost by it. `sc-client` refuses the same blocks a few
-/// stages later with `NotInFinalizedChain`, and it carries the same exemption
-/// for the one legitimate case, a block filling the gap left by warp or fast
-/// sync.
+/// Existing finalized database boundaries are respected by this check. New
+/// Qnero databases retain genesis as their only finalized block, allowing an
+/// old valid branch to compete by cumulative work. Startup refuses legacy
+/// databases that already advanced irreversible finality.
 pub fn check_header_position<B, C>(
 	client: &C,
 	parent_hash: B::Hash,
@@ -511,7 +497,6 @@ where
 		+ HeaderBackend<B>
 		+ AuxStore
 		+ BlockOf
-		+ sc_client_api::Finalizer<B, BE>
 		+ 'static,
 	C::Api: BlockBuilderApi<B> + QPoWApi<B>,
 	CIDP: CreateInherentDataProviders<B, ()> + Send + Sync,
@@ -678,19 +663,8 @@ where
 			},
 		};
 
-		// Finalization prunes competing forks that are beyond max_reorg_depth. A
-		// failure must be surfaced (error log with block context) but must NOT gate
-		// block import: finalization is retried on every subsequent import, and
-		// halting on a transient error would harm liveness.
-		if let Err(e) = finalize_canonical_at_depth::<B, C, BE>(&*self.client) {
-			log::error!(
-				target: LOG_TARGET,
-				"Failed to finalize after importing block #{} ({:?}): {:?} (import not gated; will retry on next import)",
-				block_number_u64,
-				block_hash,
-				e
-			);
-		}
+		// Confirmations remain reversible. Retain work for every imported block
+		// so an older branch can become canonical when its cumulative work wins.
 
 		let info = self.client.info();
 		log::debug!(target: LOG_TARGET, "📦 Canonical tip: #{} ({:?})", info.best_number, info.best_hash);

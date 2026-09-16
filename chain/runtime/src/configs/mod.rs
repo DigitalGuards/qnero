@@ -454,7 +454,10 @@ impl Get<u64> for TimestampBucketSize {
 impl pallet_qpow::Config for Runtime {
 	type InitialDifficulty = QPoWInitialDifficulty;
 	type TargetBlockTime = TargetBlockTime;
-	type MaxReorgDepth = ConstU32<100>;
+	// Compatibility value for clients exposing the old depth API. The chain
+	// uses u32 heights, so legacy depth-based clients cannot finalize a new
+	// block with this value. Current clients keep genesis as their checkpoint.
+	type MaxReorgDepth = ConstU32<{ u32::MAX }>;
 	// Monero's own schedule, as constants rather than as literals in the
 	// client. Two things about these numbers are worth knowing before a
 	// launch, and both are a one-line change here because the client reads
@@ -466,14 +469,9 @@ impl pallet_qpow::Config for Runtime {
 	// a full-mode rig a 2 GiB dataset rebuild, and 2.84 days is how often
 	// Monero asks its miners to pay that.
 	//
-	// The lag is 64 blocks and `MaxReorgDepth` is 100, so the block a seed
-	// comes from is inside the window a legal reorg can still move. That
-	// cannot split the chain, because the seed is resolved along each
-	// candidate's own ancestry rather than by canonical height, but a deep
-	// reorg across an epoch boundary does change the seed under work already
-	// started. A lag above the reorg depth, 128, removes even that. In wall
-	// clock the lag is 2.1 hours and the reorg window 3.3 hours at a 120 s
-	// target, so the relationship between them is unchanged.
+	// The seed is resolved along each candidate's own ancestry. A deep fork
+	// can change an epoch seed; its work must be verified against that branch's
+	// seed even when it differs from the current best chain.
 	type SeedEpochBlocks = ConstU32<2_048>;
 	type SeedEpochLag = ConstU32<64>;
 	type WeightInfo = pallet_qpow::weights::SubstrateWeight<Runtime>;
@@ -543,13 +541,13 @@ parameter_types! {
 	// Per-account bound on ongoing referenda. `MaxActiveReferenda` is a shared resource and
 	// `SubmitOrigin` is members-only, so without this cap a single member could fill all
 	// 128 slots with refundable-deposit referenda and freeze the chain's only governance
-	// lane — including the referendum needed to remove them — for the 45-day
+	// lane : including the referendum needed to remove them : for the 45-day
 	// `UndecidingTimeout`, renewably. With at most `MaxMemberCount` (13) members at 8 slots
 	// each (104 < 128), the global bound is unreachable even if every member colludes, and
 	// 8 concurrent proposals per member is ample headroom for real use.
 	pub const MaxActiveReferendaPerAccount: u32 = 8;
 	// Max encoded length of a Lookup proposal. `submit` requests the preimage so `unnote`
-	// cannot delete it before enactment — which also lets the noter reclaim the preimage
+	// cannot delete it before enactment : which also lets the noter reclaim the preimage
 	// deposit while the bytes stay pinned. Cap the blob so that (a) `MaxActive` × size
 	// cannot approach hundreds of MiB of deposit-free state, and (b) the preimage deposit
 	// for a max-sized blob (0.1 UNIT + 0.0001 UNIT/byte ≈ 0.51 UNIT) stays under the
@@ -560,8 +558,8 @@ parameter_types! {
 	pub const MaxReferendaProposalSize: u32 = 4 * 1024;
 	// Submission deposit for referenda
 	pub const ReferendumSubmissionDeposit: Balance = scale_fee(UNIT);
-	// Undeciding timeout (45 days): a submitted referendum that is NOT in the track queue —
-	// e.g. one that never received a decision deposit — is rejected as TimedOut after this
+	// Undeciding timeout (45 days): a submitted referendum that is NOT in the track queue :
+	// e.g. one that never received a decision deposit : is rejected as TimedOut after this
 	// long. Referenda that ARE queued for deciding are exempt: the timeout check
 	// (pallets/referenda/src/lib.rs, `service_referendum`) is gated on `!status.in_queue`,
 	// so a queued referendum that simply never gets a free deciding slot is NOT timed out.
@@ -937,14 +935,14 @@ const _: () = assert!(
 /// A ZK leaf commits `amount / AMOUNT_SCALE_DOWN_FACTOR` as a `u32`, saturating at
 /// `u32::MAX`. A payout past that ceiling would move real funds while committing a
 /// clamped leaf, leaving the excess unexitable for a keyless beneficiary. Nothing in
-/// the runtime bounds a single vesting payout below the ceiling — total issuance does:
+/// the runtime bounds a single vesting payout below the ceiling : total issuance does:
 /// no payout can exceed the maximum supply.
 const _: () = assert!(
 	MAX_SUPPLY < (u32::MAX as Balance) * pallet_zk_tree::tree::AMOUNT_SCALE_DOWN_FACTOR,
 	"a single payout could exceed the ZK leaf's u32 amount ceiling"
 );
 
-/// The configured treasury account as an `Option` — unlike
+/// The configured treasury account as an `Option` : unlike
 /// `pallet_treasury::Pallet::account_id()`, this never panics on a chain whose
 /// genesis omitted the treasury; vesting admin calls fail with an explicit error instead.
 pub struct TreasuryAccountOption;
@@ -1012,8 +1010,8 @@ parameter_types! {
 	pub const MaxExpiryDuration: BlockNumber = 14 * DAYS;
 	// Maximum weight for inner calls executed via multisig: 1s of ref_time (a sixth
 	// of the 6s block budget, leaving room for multisig bookkeeping and other
-	// extrinsics) and 2.5 MiB of proof_size (uncharged today — the block's
-	// proof_size limit is uncapped — but bounded here so a future switch to metered
+	// extrinsics) and 2.5 MiB of proof_size (uncharged today : the block's
+	// proof_size limit is uncapped : but bounded here so a future switch to metered
 	// proof_size cannot be saturated through multisig dispatch).
 	pub MaxInnerCallWeight: Weight = Weight::from_parts(1_000_000_000_000, 2_621_440);
 }
@@ -1062,7 +1060,7 @@ parameter_types! {
 /// `cancel`/`recover_funds` for up to a day. Documented limitation: an
 /// exemption for live guardian interventions would be farmable (enrollment
 /// needs no guardian consent), and the recommended multisig guardian is
-/// immune — its derived address never signs an extrinsic, so the quota never
+/// immune : its derived address never signs an extrinsic, so the quota never
 /// applies to it, even when the multisig is itself high-security.
 pub struct HighSecurityConfig;
 
@@ -1247,13 +1245,16 @@ parameter_types! {
 	///
 	/// The slack is deliberately small, and the whole cap is what a settler can
 	/// use: the chain never parses these bytes, so nothing holds a submission
-	/// to a real `NoteCiphertext` shape, and `Ciphertexts` is never pruned.
+	/// to a real `NoteCiphertext` shape, and `Ciphertexts` has bounded live retention.
 	/// `ShieldedCiphertextBytesPerFeeQuantum` is what prices the payload; this
 	/// cap is what bounds one slot's worst case. A wallet reads this bound from
 	/// the pallet's metadata, where a hardcoded copy would drift: exceeding it
 	/// fails the extrinsic's SCALE decode after the proof that committed to
 	/// those exact bytes has already been built.
 	pub const ShieldedMaxCiphertextBytes: u32 = 2048;
+	pub const ShieldedCiphertextRetentionBlocks: u32 = pallet_shielded::CIPHERTEXT_RETENTION_BLOCKS;
+	pub const ShieldedMaxCiphertextsPerBlock: u32 = pallet_shielded::MAX_CIPHERTEXTS_PER_BLOCK;
+	pub const ShieldedMaxCiphertextPrunesPerBlock: u32 = pallet_shielded::MAX_CIPHERTEXT_PRUNES_PER_BLOCK;
 }
 
 impl pallet_shielded::Config for Runtime {
@@ -1272,5 +1273,8 @@ impl pallet_shielded::Config for Runtime {
 	type CiphertextBytesPerFeeQuantum = ShieldedCiphertextBytesPerFeeQuantum;
 	type FeeBurnRate = ShieldedFeeBurnRate;
 	type MaxCiphertextBytes = ShieldedMaxCiphertextBytes;
+	type CiphertextRetentionBlocks = ShieldedCiphertextRetentionBlocks;
+	type MaxCiphertextsPerBlock = ShieldedMaxCiphertextsPerBlock;
+	type MaxCiphertextPrunesPerBlock = ShieldedMaxCiphertextPrunesPerBlock;
 	type WeightInfo = pallet_shielded::weights::SubstrateWeight<Runtime>;
 }

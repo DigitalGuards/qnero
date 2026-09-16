@@ -280,8 +280,11 @@ fn a_ciphertext_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing
         .sync(&chain, &metadata)
         .expect_err("a ciphertext withheld below the count is refused");
     let message = format!("{refused:#}");
-    assert!(message.contains("no Shielded::Ciphertexts(1)"), "{message}");
-    assert!(message.contains("reports 3 leaves"), "{message}");
+    assert!(
+        message.contains("Shielded::Ciphertexts archive has no authenticated payload for leaf 1"),
+        "{message}"
+    );
+    assert!(message.contains("creation block 8"), "{message}");
 
     assert_eq!(wallet.store.next_leaf, 0);
     assert_eq!(
@@ -387,7 +390,7 @@ fn a_leaf_above_the_count_carries_no_keys_and_is_not_a_refusal() {
     let chain = Chain::new(&rpc);
 
     let rows = chain
-        .leaves(0..3, &support::block_hash(9), 1)
+        .leaves(0..3, &chain.head().expect("selected head").hash, 1)
         .expect("a range past the end of the tree is not a withheld answer");
     assert_eq!(rows.len(), 3);
     assert!(rows[1].commitment.is_none());

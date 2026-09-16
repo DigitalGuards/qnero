@@ -20,6 +20,184 @@ use std::{
 	sync::{Mutex, OnceLock},
 };
 
+#[test]
+fn protocol_profile_is_committed_at_genesis_and_refreshed_on_upgrade() {
+	use frame_support::traits::{BuildGenesisConfig, Hooks};
+	new_test_ext().execute_with(|| {
+		crate::GenesisConfig::<Test>::default().build();
+		assert_eq!(
+			crate::ActiveProtocolProfile::<Test>::get(),
+			Some(crate::circuit_config::PROTOCOL_PROFILE)
+		);
+		crate::ActiveProtocolProfile::<Test>::put([0u8; qnero_circuit::profile::PROFILE_LEN]);
+		<Shielded as Hooks<u64>>::on_runtime_upgrade();
+		assert_eq!(
+			crate::ActiveProtocolProfile::<Test>::get(),
+			Some(crate::circuit_config::PROTOCOL_PROFILE)
+		);
+	});
+}
+
+#[test]
+fn protocol_profile_metadata_contract_matches_authenticated_storage() {
+	use frame_support::traits::BuildGenesisConfig;
+	new_test_ext().execute_with(|| {
+		crate::GenesisConfig::<Test>::default().build();
+		// Inspect the generated metadata used by the runtime API. Calling the
+		// Rust getter directly would miss an incompatible exported name.
+		let constants = Shielded::pallet_constants_metadata();
+		let profiles: Vec<_> =
+			constants.iter().filter(|constant| constant.name == "ProtocolProfile").collect();
+		assert_eq!(profiles.len(), 1, "wallets require exactly one ProtocolProfile constant");
+		assert!(constants.iter().all(|constant| constant.name != "protocol_profile"));
+		let exported = &profiles[0].value;
+		assert_eq!(exported.len(), qnero_circuit::profile::PROFILE_LEN);
+		assert_eq!(exported.as_slice(), crate::circuit_config::PROTOCOL_PROFILE.as_slice());
+		let stored = crate::ActiveProtocolProfile::<Test>::get().expect("genesis profile");
+		assert_eq!(exported.as_slice(), stored.as_slice());
+		let raw = sp_io::storage::get(&crate::ActiveProtocolProfile::<Test>::hashed_key())
+			.expect("authenticated profile storage bytes");
+		assert_eq!(exported.as_slice(), &raw[..], "metadata and trie bytes must match exactly");
+	});
+}
+
+/// Small limits keep retention boundary tests independent of production load.
+/// Parameter values are restored even if a test assertion fails.
+fn with_ciphertext_limits(test: impl FnOnce()) {
+	struct Restore(u32, u32, u32);
+	impl Drop for Restore {
+		fn drop(&mut self) {
+			CiphertextRetentionBlocks::set(self.0);
+			MaxCiphertextsPerBlock::set(self.1);
+			MaxCiphertextPrunesPerBlock::set(self.2);
+		}
+	}
+	let _restore = Restore(
+		CiphertextRetentionBlocks::get(),
+		MaxCiphertextsPerBlock::get(),
+		MaxCiphertextPrunesPerBlock::get(),
+	);
+	CiphertextRetentionBlocks::set(2);
+	MaxCiphertextsPerBlock::set(2);
+	MaxCiphertextPrunesPerBlock::set(3);
+	test();
+}
+
+fn cache_test_shield() -> sp_runtime::DispatchResult {
+	Shielded::shield(RuntimeOrigin::signed(alice()), POOL_STEP, [0; 32], b"note".to_vec())
+}
+
+fn initialize_cache_block(number: u64) {
+	use frame_support::traits::Hooks;
+	System::set_block_number(number);
+	<Shielded as Hooks<u64>>::on_initialize(number);
+}
+
+#[test]
+fn ciphertext_cache_expires_at_the_retention_boundary_and_preserves_leaf_data() {
+	with_ciphertext_limits(|| {
+		new_test_ext_with_endowments(vec![(alice(), 100 * UNIT)]).execute_with(|| {
+			assert_ok!(cache_test_shield());
+			assert_ok!(cache_test_shield());
+			let commitment = ZkTree::leaf(0);
+			let original_ciphertext = Shielded::ciphertext(0).unwrap();
+			initialize_cache_block(2);
+			assert_eq!(Shielded::ciphertext(0), Some(original_ciphertext.clone()));
+			assert_ok!(cache_test_shield());
+			assert_ok!(cache_test_shield());
+			initialize_cache_block(3);
+			assert_eq!(Shielded::ciphertext(0), None);
+			assert_eq!(Shielded::ciphertext(1), None);
+			assert_eq!(Shielded::ciphertext(2), Some(original_ciphertext.clone()));
+			assert_eq!(Shielded::ciphertext(3), Some(original_ciphertext));
+			assert_eq!(ZkTree::leaf(0), commitment);
+			assert_eq!(Shielded::leaf_block(0), Some(1));
+			assert_eq!(crate::CiphertextQueueHead::<Test>::get(), 2);
+			assert_eq!(crate::CiphertextQueue::<Test>::iter().count(), 2);
+			assert_eq!(Shielded::pool_value(), 4 * POOL_STEP);
+		});
+	});
+}
+
+#[test]
+fn ciphertext_creation_cap_refuses_a_shield_before_burning_and_resets_for_next_block() {
+	with_ciphertext_limits(|| {
+		new_test_ext_with_endowments(vec![(alice(), 100 * UNIT)]).execute_with(|| {
+			assert_ok!(cache_test_shield());
+			assert_ok!(cache_test_shield());
+			assert_noop!(cache_test_shield(), Error::<Test>::TooManyCiphertextsInBlock);
+			assert_eq!(ZkTree::leaf_count(), 2);
+			// Transaction-pool validation initializes the next block's system
+			// context without executing pallet hooks. The stamped counter must
+			// admit that context as well.
+			System::set_block_number(2);
+			assert_ok!(cache_test_shield());
+			assert_eq!(crate::CiphertextsWrittenThisBlock::<Test>::get(), (2, 1));
+		});
+	});
+}
+
+#[test]
+fn ciphertext_creation_cap_applies_to_complete_settlements_before_nullifiers_change() {
+	with_ciphertext_limits(|| {
+		new_test_ext().execute_with(|| {
+			fund_pool(100);
+			let first = one_segment(10, vec![slot("cache-first", b"a", b"b", 3)]);
+			assert_ok!(Shielded::settle(first, vec![output(b"a", b"b")]));
+			let second = one_segment(10, vec![slot("cache-second", b"c", b"d", 3)]);
+			assert_noop!(
+				Shielded::settle(second, vec![output(b"c", b"d")]),
+				Error::<Test>::TooManyCiphertextsInBlock
+			);
+			assert_eq!(crate::CiphertextQueue::<Test>::iter().count(), 2);
+			assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 2);
+		});
+	});
+}
+
+#[test]
+fn ciphertext_legacy_cleanup_is_delayed_bounded_resumable_and_does_not_rewind() {
+	use frame_support::traits::{Hooks, StorageVersion};
+	with_ciphertext_limits(|| {
+		new_test_ext_with_endowments(vec![(alice(), 100 * UNIT)]).execute_with(|| {
+			System::set_block_number(10);
+			let legacy: BoundedVec<u8, MaxCiphertextBytes> = b"legacy".to_vec().try_into().unwrap();
+			for index in 0..7 {
+				crate::Ciphertexts::<Test>::insert(index, &legacy);
+				crate::LeafBlocks::<Test>::insert(index, 9);
+			}
+			pallet_zk_tree::LeafCount::<Test>::put(7);
+			StorageVersion::new(1).put::<Shielded>();
+			<Shielded as Hooks<u64>>::on_runtime_upgrade();
+			assert_eq!(crate::LegacyCiphertextCleanup::<Test>::get(), Some((0, 7, 12)));
+			assert_ok!(cache_test_shield());
+			initialize_cache_block(11);
+			assert_eq!(crate::Ciphertexts::<Test>::iter().count(), 8);
+			initialize_cache_block(12);
+			// One queued ciphertext and two legacy indices exhaust this pass.
+			assert_eq!(Shielded::ciphertext(7), None);
+			assert_eq!(crate::LegacyCiphertextCleanup::<Test>::get(), Some((2, 7, 12)));
+			assert_eq!(crate::Ciphertexts::<Test>::iter().count(), 5);
+			<Shielded as Hooks<u64>>::on_runtime_upgrade();
+			assert_eq!(crate::LegacyCiphertextCleanup::<Test>::get(), Some((2, 7, 12)));
+			initialize_cache_block(13);
+			assert_eq!(crate::LegacyCiphertextCleanup::<Test>::get(), Some((5, 7, 12)));
+			initialize_cache_block(14);
+			assert_eq!(crate::LegacyCiphertextCleanup::<Test>::get(), None);
+			assert_eq!(crate::Ciphertexts::<Test>::iter().count(), 0);
+			assert_eq!(Shielded::leaf_block(0), Some(9));
+		});
+	});
+}
+
+#[test]
+fn ciphertext_queue_overflow_refuses_an_entry_before_burning() {
+	new_test_ext_with_endowments(vec![(alice(), 100 * UNIT)]).execute_with(|| {
+		crate::CiphertextQueueTail::<Test>::put(u64::MAX);
+		assert_noop!(cache_test_shield(), Error::<Test>::CiphertextQueueOverflow);
+	});
+}
+
 use frame_support::{assert_noop, assert_ok, traits::fungible::Inspect, BoundedVec};
 use qnero_circuit::{
 	batch_layout::{
@@ -1211,7 +1389,7 @@ fn a_segment_anchored_above_the_current_height_is_skipped_not_fatal() {
 	});
 }
 
-/// `shield` writes its ciphertext into the same never-pruned `Ciphertexts` map
+/// `shield` writes its ciphertext into the same bounded live `Ciphertexts` map
 /// a settled slot writes two of, so it carries the same proof-size term. The
 /// runtime leaves `proof_size` uncapped today, so this is a declaration and
 /// nothing is metered against it yet. The day it is capped, an under-declared
@@ -1227,8 +1405,8 @@ fn the_shield_weight_carries_the_ciphertext_it_writes() {
 }
 
 /// The fee floor is linear in the payload, because the payload is what the
-/// settlement writes into permanent state. The chain never parses these bytes
-/// and `Ciphertexts` is never pruned, so a flat floor would buy as much state
+/// settlement writes into state. The chain never parses these bytes
+/// and `Ciphertexts` has bounded live retention, so a flat floor would buy as much state
 /// as the ciphertext cap allows for one step.
 ///
 /// The endpoints are what matter and they are pinned here: a pair at the

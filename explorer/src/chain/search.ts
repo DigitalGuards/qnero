@@ -6,11 +6,10 @@
  * takes a block budget, reports how far it looked, and says so in the answer
  * rather than pretending a miss is an absence.
  *
- * A walk also ends where the node stops answering. A node keeps state for a
- * bounded number of finalized blocks and this chain finalizes its reorg depth
- * behind the tip, so a default-pruned node holds only a few hundred blocks of
- * state. Reaching the bottom of that is a boundary the answer names rather
- * than an error that takes the page down.
+ * A walk also ends where the node stops answering historical state. Archive
+ * availability depends on the node's retention policy. Genesis-only finality
+ * supplies no fixed-depth pruning boundary. The answer reports unavailable
+ * history without treating a partial search as proof of absence.
  */
 
 import { blockHashAt, fetchBlockState, fetchDetail, type BlockDetail } from './blocks';

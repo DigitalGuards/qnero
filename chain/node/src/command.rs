@@ -19,7 +19,7 @@ use qp_rusty_crystals_hdwallet::{
 use rand::Rng;
 use sc_cli::SubstrateCli;
 use sc_network::config::{NodeKeyConfig, Secret};
-use sc_service::{BlocksPruning, PartialComponents, PruningMode};
+use sc_service::PartialComponents;
 use sp_core::{
 	crypto::{AccountId32, Ss58AddressFormat, Ss58Codec},
 	Pair, H256,
@@ -542,31 +542,33 @@ pub fn run() -> sc_cli::Result<()> {
 		},
 		Some(Subcommand::CheckBlock(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
-			runner.async_run(|config| {
+			runner.async_run(|mut config| {
 				let PartialComponents { client, task_manager, import_queue, .. } =
-					service::new_partial(&config)?;
+					service::new_partial(&mut config)?;
 				Ok((cmd.run(client, import_queue), task_manager))
 			})
 		},
 		Some(Subcommand::ExportBlocks(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
-			runner.async_run(|config| {
-				let PartialComponents { client, task_manager, .. } = service::new_partial(&config)?;
+			runner.async_run(|mut config| {
+				let PartialComponents { client, task_manager, .. } =
+					service::new_partial(&mut config)?;
 				Ok((cmd.run(client, config.database), task_manager))
 			})
 		},
 		Some(Subcommand::ExportState(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
-			runner.async_run(|config| {
-				let PartialComponents { client, task_manager, .. } = service::new_partial(&config)?;
+			runner.async_run(|mut config| {
+				let PartialComponents { client, task_manager, .. } =
+					service::new_partial(&mut config)?;
 				Ok((cmd.run(client, config.chain_spec), task_manager))
 			})
 		},
 		Some(Subcommand::ImportBlocks(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
-			runner.async_run(|config| {
+			runner.async_run(|mut config| {
 				let PartialComponents { client, task_manager, import_queue, .. } =
-					service::new_partial(&config)?;
+					service::new_partial(&mut config)?;
 				Ok((cmd.run(client, import_queue), task_manager))
 			})
 		},
@@ -576,9 +578,9 @@ pub fn run() -> sc_cli::Result<()> {
 		},
 		Some(Subcommand::Revert(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
-			runner.async_run(|config| {
+			runner.async_run(|mut config| {
 				let PartialComponents { client, task_manager, backend, .. } =
-					service::new_partial(&config)?;
+					service::new_partial(&mut config)?;
 				let aux_revert = Box::new(|_client, _, _blocks| {
 					unimplemented!("TODO - g*randpa was removed.");
 				});
@@ -589,7 +591,7 @@ pub fn run() -> sc_cli::Result<()> {
 		Some(Subcommand::Benchmark(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
 
-			runner.sync_run(|config| {
+			runner.sync_run(|mut config| {
 				// This switch needs to be in the client, since the client decides
 				// which sub-commands it wants to support.
 				match cmd {
@@ -598,19 +600,19 @@ pub fn run() -> sc_cli::Result<()> {
 							config.chain_spec,
 						)),
 					BenchmarkCmd::Block(cmd) => {
-						let PartialComponents { client, .. } = service::new_partial(&config)?;
+						let PartialComponents { client, .. } = service::new_partial(&mut config)?;
 						cmd.run(client)
 					},
 					BenchmarkCmd::Storage(cmd) => {
 						let PartialComponents { client, backend, .. } =
-							service::new_partial(&config)?;
+							service::new_partial(&mut config)?;
 						let db = backend.expose_db();
 						let storage = backend.expose_storage();
 
 						cmd.run(config, client, db, storage, None)
 					},
 					BenchmarkCmd::Overhead(cmd) => {
-						let PartialComponents { client, .. } = service::new_partial(&config)?;
+						let PartialComponents { client, .. } = service::new_partial(&mut config)?;
 						let ext_builder = RemarkBuilder::new(client.clone());
 
 						cmd.run(
@@ -623,7 +625,7 @@ pub fn run() -> sc_cli::Result<()> {
 						)
 					},
 					BenchmarkCmd::Extrinsic(cmd) => {
-						let PartialComponents { client, .. } = service::new_partial(&config)?;
+						let PartialComponents { client, .. } = service::new_partial(&mut config)?;
 						// Register the *Remark* and *TKA* builders.
 						let ext_factory = ExtrinsicFactory(vec![
 							Box::new(RemarkBuilder::new(client.clone())),
@@ -649,10 +651,6 @@ pub fn run() -> sc_cli::Result<()> {
 			log::info!("Run until exit ....");
 			let runner = cli.create_runner(&cli.run)?;
 			runner.run_node_until_exit(|mut config| async move {
-				//Obligatory configuration for all node holders
-				config.blocks_pruning = BlocksPruning::KeepFinalized;
-				config.state_pruning = Some(PruningMode::ArchiveCanonical);
-
 				// Note: We parse node_key_file here to make a Dilithium keypair.
 				// We then override the net config object parsed by sc_cli so we don't have to
 				// fork sc_cli.

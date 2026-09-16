@@ -50,6 +50,19 @@ use super::{Header, UncheckedExtrinsic};
 
 impl_runtime_apis! {
 
+	#[cfg(feature = "shielded-budget-bench")]
+	impl crate::shielded_budget::ShieldedBudgetApi<Block> for Runtime {
+		fn profile() -> Vec<u8> {
+			pallet_shielded::circuit_config::PROTOCOL_PROFILE.to_vec()
+		}
+
+		fn run(operation: u8, input: Vec<u8>, repetitions: u32, slots: u32)
+			-> Result<(u64, u32), Vec<u8>>
+		{
+			crate::shielded_budget::run(operation, &input, repetitions, slots)
+		}
+	}
+
 	impl sp_api::Core<Block> for Runtime {
 		fn version() -> RuntimeVersion {
 			VERSION

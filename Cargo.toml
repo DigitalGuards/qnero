@@ -10,6 +10,7 @@ members = [
     "crates/qnero-aggregator",
     "crates/qnero-circuit-builder",
     "crates/qnero-wallet",
+    "crates/qnero-state-proof",
     "crates/qnero-prover-wasm",
     "faucet",
 ]
@@ -34,6 +35,7 @@ qnero-verifier = { path = "crates/qnero-verifier" }
 qnero-aggregator = { path = "crates/qnero-aggregator" }
 qnero-circuit-builder = { path = "crates/qnero-circuit-builder" }
 qnero-wallet = { path = "crates/qnero-wallet" }
+qnero-state-proof = { path = "crates/qnero-state-proof" }
 qnero-prover-wasm = { path = "crates/qnero-prover-wasm" }
 qnero-faucet = { path = "faucet" }
 # no_std, and its `std` feature is empty, so nothing here asks for it: the

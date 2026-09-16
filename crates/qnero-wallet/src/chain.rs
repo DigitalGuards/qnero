@@ -186,6 +186,8 @@ pub enum ListSupport {
 pub struct Chain<'a> {
     pub rpc: &'a RpcClient,
     hash_lists: std::cell::Cell<ListSupport>,
+    archive_ancestry:
+        std::cell::RefCell<Option<([u8; 32], std::collections::BTreeMap<u32, [u8; 32]>)>>,
 }
 
 impl<'a> Chain<'a> {
@@ -193,6 +195,7 @@ impl<'a> Chain<'a> {
         Self {
             rpc,
             hash_lists: std::cell::Cell::new(ListSupport::Unknown),
+            archive_ancestry: Default::default(),
         }
     }
 
@@ -737,42 +740,19 @@ impl<'a> Chain<'a> {
     /// about which entries matter.
     pub fn used_nullifiers_at(&self, at: &[u8; 32]) -> Result<BTreeSet<String>> {
         let prefix = storage_prefix(SHIELDED_PALLET, "UsedNullifiers");
-        let at = hex_0x(at);
-        let prefix_hex = hex_0x(&prefix);
+        let entries = self.rpc.storage_prefix(&prefix, &hex_0x(at), KEY_PAGE)?;
         let mut out = BTreeSet::new();
-        let mut start: Option<String> = None;
-        loop {
-            let params = match &start {
-                Some(cursor) => json!([prefix_hex, KEY_PAGE, cursor, at]),
-                None => json!([prefix_hex, KEY_PAGE, Value::Null, at]),
+        for (key, value) in entries {
+            let Some(raw) = key.get(prefix.len() + 16..) else {
+                bail!("a UsedNullifiers key is too short");
             };
-            let keys: Vec<String> = self.rpc.call_as("state_getKeysPaged", params)?;
-            if keys.is_empty() {
-                break;
+            if raw.len() != 32 || !value.is_empty() {
+                bail!("a UsedNullifiers entry has an unexpected encoding");
             }
-            let last = keys[keys.len() - 1].clone();
-            for key in &keys {
-                let bytes = decode_hex(key)?;
-                // `twox_128(pallet) ++ twox_128(item) ++ blake2_128(k) ++ k`.
-                let Some(raw) = bytes.get(prefix.len() + 16..) else {
-                    bail!("a UsedNullifiers key is {} bytes, too short", bytes.len());
-                };
-                if raw.len() != 32 {
-                    bail!(
-                        "a UsedNullifiers key carries a {}-byte nullifier, expected 32",
-                        raw.len()
-                    );
-                }
-                out.insert(hex::encode(raw));
+            if blake2_128_concat_map_key(SHIELDED_PALLET, "UsedNullifiers", raw) != key {
+                bail!("a UsedNullifiers key has an invalid Blake2_128Concat prefix");
             }
-            if keys.len() < KEY_PAGE {
-                break;
-            }
-            // The guard against a node that answers the same page forever.
-            if start.as_deref() == Some(last.as_str()) {
-                bail!("state_getKeysPaged stopped advancing at {last}");
-            }
-            start = Some(last);
+            out.insert(hex::encode(raw));
         }
         Ok(out)
     }
@@ -844,20 +824,12 @@ impl<'a> Chain<'a> {
     /// from `from` and stops at the first leaf `Shielded::LeafBlocks` dates
     /// above `top_block`.
     ///
-    /// **The size of the read is a property of an honest node's dating.** On
-    /// one, a chunk holds its own blocks' leaves and a chain far ahead of the
-    /// checkpoint never holds every leaf's ciphertext at once, which is the
-    /// figure `docs/BENCH.md` carries for the chunked walk. The stop condition
-    /// is `Shielded::LeafBlocks`, which the node answers, so a node that dates
-    /// the whole range into the chunk's top block makes one chunk read the
-    /// whole range: the memory is spent first and the refusal comes after it.
-    /// What that node does not get is a wrong answer, and the refusal is by
-    /// name: `crate::typing` folds exactly these leaves and compares against
-    /// each block's own `zkTreeRoot`, so an under-reported chunk range reaches
-    /// a short fold and an over-reported one reaches a long fold, and the pass
-    /// stops with nothing written. Bounding the read itself would need a
-    /// per-block ceiling on appended leaves, which is a consensus number this
-    /// wallet does not have over RPC.
+    /// The stop condition uses `Shielded::LeafBlocks` authenticated against
+    /// the selected header's state root. The configured provider/checkpoint
+    /// policy still determines which header chain is selected. A chunk holds
+    /// the leaves dated within its own blocks; its memory use depends on that
+    /// chain's actual leaf density. `crate::typing` also folds those leaves and
+    /// checks each block's `zkTreeRoot` before scan progress is committed.
     pub fn leaves_up_to_block(
         &self,
         from: u64,
@@ -886,6 +858,46 @@ impl<'a> Chain<'a> {
         Ok(out)
     }
 
+    /// Find a creation block on this selected header chain. Every range is
+    /// linked to the already verified higher range, so a historical proof from
+    /// a competing branch cannot supply a pruned ciphertext.
+    pub fn authenticated_ancestor(&self, at: &[u8; 32], wanted: u32) -> Result<[u8; 32]> {
+        let mut cache = self.archive_ancestry.borrow_mut();
+        if cache.as_ref().is_none_or(|(tip, _)| tip != at) {
+            let raw = self.header_at(at)?;
+            if raw.to_header_inputs()?.block_hash().to_bytes() != *at {
+                bail!("archive header does not hash to the selected block");
+            }
+            let number = raw.block_number()?;
+            *cache = Some((*at, [(number, *at)].into_iter().collect()));
+        }
+        let (_, hashes) = cache.as_mut().expect("initialized above");
+        if let Some(hash) = hashes.get(&wanted) {
+            return Ok(*hash);
+        }
+        let (&number, &hash) = hashes.first_key_value().expect("selected head present");
+        if wanted > number {
+            bail!("ciphertext creation height is outside the selected header chain");
+        }
+        let mut top = ChainHead { number, hash };
+        while top.number > wanted {
+            let lower = wanted.max(top.number.saturating_sub(1024));
+            let blocks = self.header_chain(&top, lower)?;
+            for block in &blocks {
+                hashes.insert(block.number, block.hash);
+            }
+            if hashes.len() > 1_000_000 {
+                bail!("archive ancestry exceeds the supported scan size");
+            }
+            let first = blocks.first().context("archive header range is empty")?;
+            top = ChainHead {
+                number: first.number,
+                hash: first.hash,
+            };
+        }
+        Ok(top.hash)
+    }
+
     /// One read window of the four per-leaf maps.
     fn leaf_window(
         &self,
@@ -901,7 +913,40 @@ impl<'a> Chain<'a> {
             keys.push(identity_map_key(SHIELDED_PALLET, "LeafBlocks", index));
             keys.push(identity_map_key(SHIELDED_PALLET, "CoinbaseValues", index));
         }
-        let values = self.rpc.storage_batch(&keys, &at_hash)?;
+        let mut values = self.rpc.storage_batch(&keys, &at_hash)?;
+        let mut archived: std::collections::BTreeMap<u32, Vec<usize>> = Default::default();
+        for (offset, index) in range.clone().enumerate() {
+            if index < leaf_count && values[offset * 4].is_none() {
+                return Err(withheld_key(index, leaf_count, at, "ZkTree::Leaves"));
+            }
+            if index < leaf_count
+                && values[offset * 4 + 1].is_none()
+                && values[offset * 4 + 3].is_none()
+            {
+                let block = values[offset * 4 + 2]
+                    .as_ref()
+                    .ok_or_else(|| withheld_key(index, leaf_count, at, "Shielded::LeafBlocks"))?;
+                archived
+                    .entry(decode_u32_exact(block, "Shielded::LeafBlocks")?)
+                    .or_default()
+                    .push(offset);
+            }
+        }
+        for (block, offsets) in archived {
+            let created_at = self.authenticated_ancestor(at, block)?;
+            let historical_keys: Vec<_> = offsets
+                .iter()
+                .map(|offset| keys[offset * 4 + 1].clone())
+                .collect();
+            let historical = self.rpc.storage_batch(&historical_keys, &hex_0x(&created_at))
+                .with_context(|| format!("ciphertext archive unavailable at creation block {block}; scan progress is unchanged"))?;
+            for (offset, value) in offsets.into_iter().zip(historical) {
+                if value.is_none() {
+                    bail!("Shielded::Ciphertexts archive has no authenticated payload for leaf {} at creation block {block}; scan progress is unchanged", range.start + offset as u64);
+                }
+                values[offset * 4 + 1] = value;
+            }
+        }
         let mut out = Vec::with_capacity((range.end - range.start) as usize);
         for (offset, index) in range.enumerate() {
             let commitment = values[offset * 4].clone();

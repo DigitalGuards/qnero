@@ -43,29 +43,11 @@ import { formatStepsAsQnr } from '../lib/units';
 import { ENTRY_WALK_LIMIT } from '../worker/protocol';
 import { birthdayWatermarkNote, MAX_CHECKPOINTS, unscannedBirthday, type NoteOrigin, type NoteSecret, type RejectedNote, type StoreMeta, type StoredNote, type SyncCheckpoint } from './model';
 
-/**
- * What a pass that read entries and received nothing may also be, in one line.
- *
- * This is the reader's half of a bound the command-line wallet states whole.
- * `CIPHERTEXT_SUBSTITUTION_HINT` in `crates/qnero-wallet/src/wallet.rs` names
- * the two per-entry values the chain leaves unbound and works through what the
- * fold does and does not pin, because the reader at a terminal is an operator
- * and the scope of the exposure is the thing they need. The reader here is
- * somebody holding a phone who wanted to know where their payment is, and the
- * two wallets used to print one string at both of them: 150 words of tree
- * argument under a wallet balance, in the vocabulary this app reserves for the
- * explorer.
- *
- * So the sentence is short and the argument is `docs/WALLET.md`, which
- * `tests/leaf-typing.test.ts` now holds against the Rust literal in place of
- * holding this string against it. Both wallets still end at one recovery, and
- * that phrase is asserted on both sides, because a wallet that names a
- * different answer to the same reading is the failure the shared text existed
- * to stop.
- */
+/** A short explanation of provider trust for the wallet screen. The CLI and
+ * docs/WALLET.md state the header and storage-proof boundary in detail. */
 export const CIPHERTEXT_SUBSTITUTION_HINT =
-  'If a payment you expected is not here after a sync, rescan against a second node: a node can ' +
-  "serve a stranger's bytes at your entry, and a second node is the check.";
+  'The wallet checks payment data and trusts your node to follow the right chain. ' +
+  'If a payment is missing after syncing, rescan with another trusted node.';
 
 /** What a scan needs out of the chain, so a test can supply it. */
 export interface SyncChain {
@@ -1800,29 +1782,8 @@ export async function runSync(
     );
   }
   if (report.leavesScanned > 0 && report.received === 0) {
-    // The ordinary case on most passes, because almost every leaf on the chain
-    // is somebody else's, and also what either of the two unbound per-leaf
-    // values looks like.
-    //
-    // `Shielded::Ciphertexts(i)` is bound to leaf `i` by nothing: the
-    // commitment the tree authenticates carries no ciphertext, and `ct_digest`
-    // binds the bytes only inside the settlement extrinsic at inclusion, which
-    // a storage-only reader never fetches. And where a commitment sits inside
-    // its block's own leaf range is bound by nothing either: the tree sorts a
-    // node's children at every level and tags no level, so a block's root pins
-    // that block's leaf multiset and each internal node's child multiset and
-    // nothing further. Sibling swaps composed at any level reach any position
-    // the range's aligned subtrees allow, the coinbase position included,
-    // where a ciphertext is not owed, and a shorter tree of internal node
-    // values served as leaves folds to the same root, so the root pins neither
-    // the leaf count nor the height inside a block. Either way the leaf reads
-    // as somebody else's and the watermark is written above it, and the
-    // checkpoint fork walk does not recover either, because the headers agree.
-    //
-    // A hint rather than a warning: it fires on nearly every pass, and a list
-    // that always has an entry stops being read. The sentence names the one
-    // recovery and `docs/WALLET.md` carries the bound it comes from, which is
-    // what the command-line wallet prints in full and a phone does not.
+    // State integrity is checked before the scan. Chain selection retains
+    // the configured provider and checkpoint trust boundary.
     hints.push(CIPHERTEXT_SUBSTITUTION_HINT);
   }
 

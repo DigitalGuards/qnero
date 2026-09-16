@@ -7271,6 +7271,7 @@ name = "qnero-circuit-builder"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake2 0.10.6",
  "qnero-aggregator",
  "qnero-circuit",
  "qnero-verifier",
@@ -7364,6 +7365,7 @@ name = "qnero-prover"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake2 0.10.6",
  "qnero-aggregator",
  "qnero-circuit",
  "qp-plonky2",
@@ -7403,12 +7405,14 @@ dependencies = [
  "pallet-zk-tree",
  "parity-scale-codec",
  "primitive-types 0.13.1",
+ "qnero-circuit",
  "qp-dilithium-crypto",
  "qp-header",
  "qp-high-security",
  "qp-poseidon-core",
  "qp-scheduler",
  "qp-wormhole",
+ "sc-executor",
  "scale-info",
  "serde_json",
  "smallvec",

@@ -38,6 +38,7 @@
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
+use blake2::{digest::consts::U32, Blake2b, Digest as _};
 use plonky2::iop::witness::PartialWitness;
 use plonky2::plonk::circuit_data::CircuitData;
 use qnero_aggregator::private_batch::QneroPrivateBatchProver;
@@ -145,6 +146,33 @@ impl WalletProver {
     /// Leaf slots per batch.
     pub fn num_leaves(&self) -> usize {
         self.batch.num_leaves()
+    }
+
+    /// Check a fresh build against the release pins before any private witness
+    /// is proved. Callers first negotiate the profile before constructing us.
+    pub fn ensure_supported_verifiers(&self) -> Result<()> {
+        use qnero_aggregator::artifacts::serialize_verifier_data;
+        use qnero_circuit::profile::{
+            RELEASE_LEAF_DIGEST, RELEASE_NUM_LEAVES, RELEASE_PRIVATE_DIGEST,
+        };
+        if self.num_leaves() != RELEASE_NUM_LEAVES {
+            bail!("the built prover's dimensions have no supported experimental profile");
+        }
+        for (name, verifier, expected) in [
+            ("leaf", self.leaf_data.verifier_data(), RELEASE_LEAF_DIGEST),
+            (
+                "private batch",
+                self.batch.verifier_data(),
+                RELEASE_PRIVATE_DIGEST,
+            ),
+        ] {
+            let actual: [u8; 32] =
+                Blake2b::<U32>::digest(serialize_verifier_data(&verifier, name)?).into();
+            if actual != expected {
+                bail!("the built {name} verifier differs from the supported experimental profile");
+            }
+        }
+        Ok(())
     }
 
     /// Prove one transfer.
