@@ -403,8 +403,13 @@ describe('a leaf whose kind the headers decide', () => {
     // beside the rare coinbase-label warning it was the constant entry that
     // made the list stop being read. The balance screen renders it under the
     // warnings and at less weight.
+    //
+    // The browser states the recovery and `docs/WALLET.md` states the bound,
+    // so what is asserted here is that a substituted ciphertext reaches a
+    // reader at all. That it names the bytes is asserted where it still says
+    // so, in `crates/qnero-wallet/tests/leaf_typing.rs`.
     expect(hidden.report.warnings).toEqual([]);
-    expect(hidden.report.hints.some((hint) => hint.includes('Shielded::Ciphertexts'))).toBe(true);
+    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
 
     // An honest node serving the same headers recovers nothing on an ordinary
     // pass: no checkpoint moves, so the scan starts above the leaf.
@@ -582,9 +587,11 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.notes).toHaveLength(0);
     expect(hidden.report.warnings).toEqual([]);
     expect(hidden.meta.nextLeaf).toBe(3);
-    // What the operator is given instead: the hint, which states the whole
-    // bound because one rescan is the recovery for every part of it.
-    expect(hidden.report.hints.some((hint) => hint.includes('at every level'))).toBe(true);
+    // What the reader is given instead: the hint, and one rescan is the
+    // recovery for every part of the bound, so one sentence covers this
+    // reading too. That the command-line wallet spells the fold out at every
+    // level is asserted in `crates/qnero-wallet/tests/leaf_typing.rs`.
+    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
 
     // An honest node serving the same headers recovers nothing on an ordinary
     // pass: no checkpoint moves, so the scan starts above the leaf.
@@ -683,9 +690,11 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.report.received).toBe(0);
     expect(hidden.report.warnings).toEqual([]);
     expect(hidden.meta.nextLeaf).toBe(8);
-    expect(
-      hidden.report.hints.some((hint) => hint.includes("where a leaf sits inside its block's own range")),
-    ).toBe(true);
+    // A payment moved inside its own block's range reads the same way a
+    // substituted ciphertext does, and takes the same rescan, so it reaches
+    // the reader as the same sentence. The range half of the bound is
+    // asserted in `crates/qnero-wallet/tests/leaf_typing.rs`.
+    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
 
     const ordinary = await runSync(
       {
@@ -770,11 +779,11 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.report.received).toBe(0);
     expect(hidden.report.leavesScanned).toBe(2);
     expect(hidden.meta.nextLeaf).toBe(2);
-    expect(
-      hidden.report.hints.some((hint) =>
-        hint.includes('neither the leaf count nor the height'),
-      ),
-    ).toBe(true);
+    // A short tree of internal node values served as leaves folds to the same
+    // root, and that reading ends at the same rescan. The half of the bound
+    // that says the root pins neither count nor height is asserted in
+    // `crates/qnero-wallet/tests/leaf_typing.rs`.
+    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
 
     // An ordinary pass against the honest node recovers nothing, and says so
     // loudly. The watermark this pass wrote sits above leaves block 8 really
@@ -1322,7 +1331,7 @@ describe('the fold these bound tests are modelled on', () => {
 
 describe('the sentences both wallets print', () => {
   /**
-   * Every text both wallets emit, byte for byte, read out of the command-line
+   * The texts both wallets emit, byte for byte, read out of the command-line
    * wallet's own source.
    *
    * `docs/WALLET.md` says the two wallets print identical sentences, and
@@ -1330,6 +1339,13 @@ describe('the sentences both wallets print', () => {
    * clause, so two operators looking at one bound were told two different
    * things. The cap and the four per-leaf sentences beside it are the same
    * kind of duplicated text, so they are all read from the Rust source here.
+   *
+   * One text is deliberately not in this set. The ciphertext hint states a
+   * bound whose scope an operator at a terminal needs and a wallet screen may
+   * not carry, because `leaf` is this project's explorer vocabulary and the
+   * hint used to put 150 words of it under a balance. The two are held
+   * together by the test below instead: the Rust argument has to be in the
+   * document, and both wallets have to end at one recovery.
    * A sentence edited on one side alone fails this file.
    *
    * The Rust literals are `&str`s with backslash line continuations, which
@@ -1380,12 +1396,6 @@ describe('the sentences both wallets print', () => {
   const CASES: { name: string; marker: string; values: Record<string, string>; browser: string }[] =
     [
       {
-        name: 'the hint a pass that received nothing carries',
-        marker: 'pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =',
-        values: {},
-        browser: CIPHERTEXT_SUBSTITUTION_HINT,
-      },
-      {
         name: 'the warning for a leaf its own block holds elsewhere',
         marker: 'fn moved_leaf_warning(',
         values: { leaf: '7', block_number: '42', index: '3' },
@@ -1431,6 +1441,45 @@ describe('the sentences both wallets print', () => {
 
   it.each(CASES)('$name is identical in both wallets', ({ marker, values, browser }) => {
     expect(rustSentence(marker, values)).toBe(browser);
+  });
+
+  /**
+   * The one text the two wallets state at two lengths, held together at both
+   * ends.
+   *
+   * The command-line wallet works the bound through, because an operator at a
+   * terminal is asking how far the exposure reaches. The browser prints one
+   * sentence, because it renders under a balance on a phone and `leaf` is a
+   * word this project spends only in the explorer. That is a split worth
+   * having and a split worth watching: the risk is a short sentence that
+   * quietly stops matching the argument behind it, or two wallets sending one
+   * reader to two different recoveries.
+   *
+   * So the argument has to be somewhere a reader can reach, and both sentences
+   * have to end in the same place.
+   */
+  it('keeps the bound in the document and the recovery in both wallets', () => {
+    const rust = rustLiteral('pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =');
+    const doc = readFileSync(new URL('../../docs/WALLET.md', import.meta.url), 'utf8');
+
+    // What the command-line wallet names, named in the document the browser
+    // sends its reader to. A clause dropped from either side fails here.
+    for (const claim of ['Shielded::Ciphertexts', "a stranger's"]) {
+      expect(rust).toContain(claim);
+      expect(doc).toContain(claim);
+    }
+    expect(doc).toMatch(/rescan\s+against a second node/);
+
+    // And both wallets end at the one recovery.
+    expect(rust).toContain('rescan against a second node');
+    expect(CIPHERTEXT_SUBSTITUTION_HINT).toContain('rescan against a second node');
+
+    // The sentence a phone gets is a sentence, and it spends none of the
+    // explorer's vocabulary.
+    expect(CIPHERTEXT_SUBSTITUTION_HINT.length).toBeLessThan(200);
+    expect(CIPHERTEXT_SUBSTITUTION_HINT).not.toMatch(
+      /\b(leaf|leaves|nullifier|commitment|note)s?\b/i,
+    );
   });
 
   it('quotes the same measured rate in both wallets', () => {

@@ -16,6 +16,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CIPHERTEXT_SUBSTITUTION_HINT,
   NodeRefusedError,
   readNodeStance,
   runSync,
@@ -722,11 +723,11 @@ describe('a rescan', () => {
     // what the pass gave up or could not verify, and the add-only notice is
     // the whole of it here. The hint is what the pass may also be: this rescan
     // re-read a note it already held, so it received nothing new, which is the
-    // ordinary reading and also what a substituted or moved leaf looks like.
+    // ordinary reading and also what a substituted or moved entry looks like.
     // Both on `warnings` the rare entry read like the constant one.
     expect(result.report.warnings).toHaveLength(1);
     expect(result.report.hints).toHaveLength(1);
-    expect(result.report.hints.join(' ')).toMatch(/where a leaf sits inside its block's own range/);
+    expect(result.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
   });
 
   it('is never a bypass of the chain check', async () => {
