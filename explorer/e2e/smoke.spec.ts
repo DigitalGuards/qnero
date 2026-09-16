@@ -130,7 +130,11 @@ test('the shield block names the payer, the amount and the leaf together', async
 
   // Header hashes are head and tail with the whole value one press away; the
   // block hash alone is shown whole, because it is what a reader came holding.
-  await expect(field(page, 'Author label')).toContainText(/^0x[0-9a-f]{8}…[0-9a-f]{6}$/);
+  // The shortened text is the hash element's own, because the copy control
+  // sits inside the value and its label lands in the value's text.
+  await expect(page.locator('[data-field="Author label"] .mono').first()).toHaveText(
+    /^0x[0-9a-f]{8}…[0-9a-f]{6}$/,
+  );
   expect(await hashOf(page, 'Author label')).toMatch(/^0x[0-9a-f]{64}$/);
   expect(await hashOf(page, 'zk tree root')).toMatch(/^0x[0-9a-f]{64}$/);
   await expect(field(page, 'Hash')).toContainText(/0x[0-9a-f]{64}/);
@@ -205,7 +209,12 @@ test('a settlement page states what it publishes and what it does not', async ({
   // once, under the list of slots: it used to render inside every slot, so a
   // settlement with eight slots printed it eight times.
   const slots = panel(page, 'Slots');
-  await expect(slots.locator('.field__note')).toHaveCount(1);
+  expect(
+    occurrences(
+      await slots.innerText(),
+      'Each nullifier marks one of a slot’s two input positions consumed',
+    ),
+  ).toBe(1);
   await expect(slots).toContainText(
     'Each nullifier marks one of a slot’s two input positions consumed and names no note',
   );
