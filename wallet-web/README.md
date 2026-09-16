@@ -152,13 +152,13 @@ has the bug too.
 
 ## What it does
 
-- **Create a wallet.** 32 bytes from `crypto.getRandomValues`, shown once as
-  eight groups of eight hex characters, then three of the eight groups asked
-  back before the wallet is written. Somebody who wrote nothing down cannot
-  answer, which is the point: that screen is the last moment the key is
-  recoverable. Hex and no code beside it: a QR of a spend key is harvested by
-  any camera, screen share or shoulder in the room in one frame, and nothing
-  in this wallet scans one.
+- **Create a wallet.** 32 bytes from `crypto.getRandomValues`, shown as eight
+  groups of eight hex characters. An optional backup check asks for three
+  groups; the user can show the seed again or skip the check. Both paths lead
+  to passphrase setup and encrypt the seed before writing the wallet. Keep a
+  backup of the seed to recover the wallet. Hex and no code beside it: a QR of
+  a spend key is harvested by any camera, screen share or shoulder in the room
+  in one frame, and nothing in this wallet scans one.
 
   A new wallet records its **birthday**: the head the node it is connected to
   is at, rounded down to a multiple of 1024 blocks, with the leaf count that

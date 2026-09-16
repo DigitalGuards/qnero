@@ -76,11 +76,11 @@ pub trait ZkTreeApi {
 /// The requested hash must also be the *canonical* hash at its height. The backend
 /// resolves numbers for any imported block (side forks included), but settlement
 /// verifies the claimed hash against `frame_system::BlockHash`, so a proof built on
-/// fork state is unusable by construction — reject it here instead of spending
+/// fork state is unusable by construction - reject it here instead of spending
 /// state-execution resources producing it.
 ///
 /// The window is `qnero_runtime::configs::BlockHashCount` from the runtime
-/// crate linked into this node binary — a compile-time constant, not a live
+/// crate linked into this node binary - a compile-time constant, not a live
 /// chain/metadata lookup. After a forkless upgrade that changes
 /// `BlockHashCount`, already-running nodes keep the old value until rebuilt.
 /// That is acceptable for this DoS guard: a slightly stale window is still
@@ -114,7 +114,7 @@ where
 	};
 
 	// The backend resolves a number for ANY block it has imported, including
-	// side-fork blocks — resolvability is not canonicality. On-chain settlement
+	// side-fork blocks - resolvability is not canonicality. On-chain settlement
 	// compares the proof's claimed hash against `frame_system::BlockHash` (the
 	// canonical chain), so proof material derived from fork state can never
 	// settle. Reject anything that is not the canonical hash at its height;
@@ -150,7 +150,7 @@ where
 		));
 	}
 
-	// Compile-time constant from the linked runtime crate — see fn docs.
+	// Compile-time constant from the linked runtime crate - see fn docs.
 	let window = <qnero_runtime::configs::BlockHashCount as sp_core::Get<u32>>::get();
 	if info.best_number.saturating_sub(number) > window {
 		return Err(jsonrpsee::types::error::ErrorObject::owned(
@@ -286,8 +286,8 @@ where
 ///
 /// sc-rpc 50's `StateApiServer::call` has no `Extensions` parameter, so it
 /// cannot read `DenyUnsafe` and cannot apply `check_if_safe`. The service crate
-/// drops those two methods and this handler — which does receive `Extensions`
-/// — is merged in their place.
+/// drops those two methods and this handler - which does receive `Extensions`
+/// - is merged in their place.
 #[rpc(server)]
 pub trait StateCallApi {
 	/// Call a runtime API method at a block's state.
@@ -537,7 +537,7 @@ mod tests {
 	}
 
 	/// The backend resolves a number for ANY imported block, including side-fork
-	/// blocks — resolvability is not canonicality. A proof generated against fork
+	/// blocks - resolvability is not canonicality. A proof generated against fork
 	/// state can never settle (the wormhole pallet compares the claimed hash to
 	/// `frame_system::BlockHash`, the canonical chain), so the RPC must reject
 	/// noncanonical hashes instead of burning state-execution resources on them.
@@ -585,7 +585,7 @@ mod tests {
 	}
 
 	/// A genuine backend/`number()` failure must not be reported as "unknown
-	/// block hash" — operators need to tell a corrupted DB from client garbage.
+	/// block hash" - operators need to tell a corrupted DB from client garbage.
 	#[test]
 	fn surfaces_backend_errors_separately_from_unknown_hashes() {
 		let best = 10 * window();
@@ -697,7 +697,7 @@ mod tests {
 	}
 
 	/// Cheap runtime APIs (nonce, metadata, …) may still run at historical
-	/// blocks for any caller — windowing them would break public historical
+	/// blocks for any caller - windowing them would break public historical
 	/// decoding (e.g. subxt fetching metadata at an old block). Only the
 	/// merkle-proof method is the DoS surface the node RPC named.
 	#[test]

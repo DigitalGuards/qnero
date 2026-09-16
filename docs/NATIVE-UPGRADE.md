@@ -111,13 +111,23 @@ recovery, bounded migration, legacy database refusal and fork transport progress
 [WASM-BUDGET.md](WASM-BUDGET.md) provides an offline runtime-executor measurement
 harness with valid private/public proof fixtures and explicit component gates.
 
-Activation still needs an honest multi-node partition/reconnect/restart rehearsal
-with actual PoW imports, an archive recovery rehearsal on the selected database
-backend, and reference-hardware full-block and admission-capacity measurements.
-Component/unit tests do not establish those operational guarantees. The exact
-cryptographic composition remains subject to independent assessment.
+A fresh RocksDB-backed dev rehearsal passed isolated mining, follower restart,
+reconnect, actual PoW imports, work-based convergence, former-branch archive
+reads and native wallet synchronization. Its shallow fork is detailed below.
+Activation still needs long-partition and deep-reorganization qualification,
+replay/recovery on the selected deployed database, full-retention-window wallet
+recovery, and reference-hardware full-block and admission-capacity measurements.
+The exact cryptographic composition remains subject to independent assessment.
 
 ### Local fork and wallet smoke
+
+The [2026-09-16 result](bench/2026-09-16-native-upgrade-smoke.json) passed with A
+at height 1 and B at height 2, carrying configured cumulative work 129 and 257.
+Both followers selected B after reconnect and retained A's former block and
+historical profile state. Finalization remained at genesis. Wallet B verified
+the runtime profile and state proofs, reached height 2, and discovered both
+positive coinbase notes. All owned processes stopped and their ports were
+closed and bindable. The result pins both executable hashes and the dev genesis.
 
 After building fresh release binaries with the actual runtime WASM, run from
 the repository root:

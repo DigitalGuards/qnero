@@ -1229,34 +1229,47 @@ count. `docs/WALLET.md`, "Where a wallet starts reading", has it.
 ## Runtime 105 executor component check (2026-09-16)
 
 The `shielded-budget-bench` feature was compiled to runtime WASM and measured
-through the node's Wasmtime executor. The source is based on `a294ded` plus the
-native-architecture fixes; this is a component qualification build with
-benchmark-only exports. Its exact WASM hash, 192-byte protocol profile, valid
+through the node's Wasmtime executor. The measured runtime build source is in
+`5888617`: the run started from `d0c8d12` plus its portable-path and nested-lock
+build changes. Concurrent UI merges and the generated testnet candidate
+specification were separate changes. This is a component qualification build
+with benchmark-only exports. Its exact WASM hash, 192-byte protocol profile, valid
 private/public proof hashes, raw samples and declared budgets are in the
 [JSON record](bench/2026-09-16-runtime-components.json). The procedure and limits
 are in [WASM-BUDGET.md](WASM-BUDGET.md).
 
+Measured WASM Blake2-256:
+`cfef3de17bdd22888b6705ba843a1878450bd41ccc2b546c15bf21e8ad6b8513`.
+The runtime build supplies its workspace hint and remaps source locations to
+`/qnero`, `/cargo` and `/target`. Both the decompressed compact WASM and the
+uncompressed build artifact contain zero actual workstation-prefix matches.
+Dependency resolution was offline. Every nested WASM dependency's name, version,
+source and checksum matches `chain/Cargo.lock`; the generated
+`qnero-runtime-blob` wrapper is its only additional package. Earlier attempts with an unpinned nested lock or local
+compiler paths are preserved as diagnostics and excluded from this report.
+
 Host: AMD Ryzen AI 9 365, x86_64, affinity CPUs 0-7, nice 19, four Rayon threads,
 two Cargo jobs, Rust 1.93.0. Each row used one first call plus nine cached-executor
 calls. The max includes the first call; module compilation is recorded separately.
+Cold module compilation and the first `Core_version` call took 576.135 ms.
 Storage setup used in-memory externalities. Fixtures were valid release-shape
 proofs: six leaf slots and 53 private batches.
 
 | Component | Median ms | Max ms | Declared budget ms |
 | --- | ---: | ---: | ---: |
-| Private proof parse | 1.412 | 1.499 | 5.066 |
-| Private parse and verification, once | 23.981 | 25.223 | 30.066 |
-| Private parse and verification, twice | 44.969 | 46.378 | 60.131 |
-| Public proof parse | 1.812 | 2.655 | 8.473 |
-| Public parse and verification, once | 32.743 | 33.437 | 158.474 |
-| Public parse and verification, twice | 65.470 | 66.391 | 316.947 |
-| Payload binding, two checks, one maximum-size slot | 1.138 | 2.557 | 2.600 |
-| Payload binding, two checks, 318 maximum-size slots | 335.979 | 339.588 | 824.620 |
-| Full bounded ciphertext-retention hook | 10.209 | 10.445 | 927.376 |
+| Private proof parse | 1.292 | 1.446 | 5.066 |
+| Private parse and verification, once | 23.225 | 23.320 | 30.066 |
+| Private parse and verification, twice | 45.825 | 46.032 | 60.131 |
+| Public proof parse | 1.779 | 1.858 | 8.474 |
+| Public parse and verification, once | 33.466 | 33.518 | 158.474 |
+| Public parse and verification, twice | 66.152 | 66.858 | 316.947 |
+| Payload binding, two checks, one maximum-size slot | 1.098 | 1.163 | 2.600 |
+| Payload binding, two checks, 318 maximum-size slots | 337.790 | 340.211 | 824.620 |
+| Full bounded ciphertext-retention hook | 10.372 | 10.842 | 927.376 |
 
-All measured component gates passed. The narrow one-slot wall-clock margin and
-single-host sample do not justify reducing weights. This closes the absence of
-runtime-executor component measurements. Full successful settlement, block import,
+All measured component gates passed. This single-host sample does not justify
+reducing weights. This closes the absence of runtime-executor component
+measurements. Full successful settlement, block import,
 disk costs, admission under legitimate congestion and minimum-hardware capacity
 remain unqualified. Production runtimes omit the measurement exports; changes to
 the execution logic or build configuration require fresh measurements.

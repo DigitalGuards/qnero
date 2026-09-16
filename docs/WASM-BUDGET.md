@@ -18,11 +18,33 @@ supported six-leaf release profile. `--wasm` may select an independently built
 benchmark-feature runtime; otherwise the example uses its freshly built runtime.
 
 ```sh
+CARGO_NET_OFFLINE=true \
 RAYON_NUM_THREADS=4 CARGO_BUILD_JOBS=2 taskset -c 0-7 nice -n 19 \
-  cargo run --release -p qnero-runtime --example shielded-budget \
+  cargo run --locked --offline --release -p qnero-runtime --example shielded-budget \
   --features shielded-budget-bench -- \
   --private-proof /path/to/private_batch.proof --runs 9 > wasm-budget.json
 ```
+
+The runtime's build script supplies `WASM_BUILD_WORKSPACE_HINT` from its own
+manifest directory, so the nested build copies `chain/Cargo.lock` even when
+`CARGO_TARGET_DIR` is outside the checkout. The WASM builder uses a separate
+Cargo project; the outer command's `--locked` alone does not pin that project's
+resolution. `CARGO_NET_OFFLINE=true` also applies to nested Cargo commands.
+Dependencies must already be cached.
+
+The same build script remaps original and canonical checkout, Cargo-home and
+target-directory paths to `/qnero`, `/cargo` and `/target`. These build paths must
+be UTF-8 and contain no whitespace; the builder refuses unsupported paths before
+constructing compiler flags. Scan the decompressed WASM for actual workstation
+prefixes before publishing it.
+
+To force regeneration in an existing cache, change `FORCE_WASM_BUILD` to a new
+value, such as `1`, for the next command. The builder watches that variable.
+Before accepting measurements, compare every dependency's name, version, source
+and checksum in the nested `release/wbuild/qnero-runtime/Cargo.lock` under the
+target directory with `chain/Cargo.lock`. The generated `qnero-runtime-blob`
+wrapper is expected to be additional. Preserve that lockfile and the exact
+hash-matching benchmark WASM alongside the report.
 
 Add `--public-proof /path/to/public_batch.proof` to qualify the 53-inner public
 verifier. A verifier artifact is insufficient: the file must contain a valid
