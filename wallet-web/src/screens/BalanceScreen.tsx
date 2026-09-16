@@ -10,10 +10,10 @@
  *
  * - **unspent** is spendable, on chain, counted once per nullifier.
  * - **pending** is written by this wallet and not yet met in the tree.
- * - **off chain** is held, with its secrets, and its leaf is gone: a reorg took
- *   the block that carried it and no later block has re-included it.
+ * - **off chain** is held, with its secrets, and its entry in the tree is gone:
+ *   a reorg took the block that carried it and no later block re-included it.
  * - **reachable** is what one payment can actually move, which is the two
- *   largest notes, because the leaf has two input slots.
+ *   largest transfers, because one settlement has two input slots.
  */
 
 import { Check, RefreshCw } from 'lucide-react';
@@ -56,10 +56,7 @@ function Stat({
     <div className="flex justify-between gap-2">
       <dt className="min-w-0">
         <Tooltip label={explains}>
-          <button
-            type="button"
-            className="cursor-help text-left text-muted underline decoration-dotted underline-offset-2"
-          >
+          <button type="button" className="mm-term text-muted">
             {term}
           </button>
         </Tooltip>
@@ -146,7 +143,7 @@ function SyncProgress({
       <p className="mt-2 font-mono tabular-nums text-meta text-muted" data-testid="sync-elapsed">
         {formatDuration(elapsed)} elapsed
       </p>
-      <p className="mt-1 text-meta text-muted">Your viewing key never leaves this page.</p>
+      <p className="mm-note mt-1 text-muted">Your viewing key never leaves this page.</p>
     </div>
   );
 }
@@ -156,6 +153,7 @@ export function BalanceScreen({
   notes,
   rejected,
   readsFrom,
+  syncBlocked,
   report,
   syncing,
   syncStage,
@@ -174,6 +172,14 @@ export function BalanceScreen({
    * with it, is a sentence behind the Last sync disclosure.
    */
   readsFrom: number;
+  /**
+   * Why reading the chain is unavailable, or null.
+   *
+   * A disabled control with nothing beside it is a wallet that has stopped and
+   * will not say why: the prover case had no signal anywhere outside Settings,
+   * and the no-node case had a red dot in the header and nothing here.
+   */
+  syncBlocked: string | null;
   report: SyncReport | null;
   syncing: boolean;
   /** The stage a running pass is in, and what it is counting. */
@@ -241,9 +247,9 @@ export function BalanceScreen({
             {showOffChain && (
               <Stat
                 term="off chain"
-                explains="Held with its secrets, and its leaf is gone: a reorg took the block that
-                  carried it and no later block has re-included it. It counts in no balance until it
-                  comes back."
+                explains="Held with its secrets, and its entry in the tree is gone: a reorg took
+                  the block that carried it and no later block has re-included it. It counts in no
+                  balance until it comes back."
                 value={formatStepsAsQnr(balances.offChain)}
                 testId="balance-offchain"
               />
@@ -262,10 +268,12 @@ export function BalanceScreen({
         {syncing && <SyncProgress stage={syncStage} elapsed={elapsed} />}
         <div className="mt-3 flex items-center justify-between gap-2 border-t border-edge pt-3">
           <span className="text-meta text-muted" data-testid="sync-status">
-            {report === null
-              ? `reads from block ${formatCount(readsFrom)}`
-              : `synced through block ${formatCount(report.head)} · reads from block ` +
-                formatCount(readsFrom)}
+            {syncBlocked !== null
+              ? syncBlocked
+              : report === null
+                ? `reads from block ${formatCount(readsFrom)}`
+                : `synced through block ${formatCount(report.head)} · reads from block ` +
+                  formatCount(readsFrom)}
           </span>
           {/* A utility button, and the accent is not spent here. The wallet
               reads the chain by itself on open and on each new head; this is
@@ -288,10 +296,10 @@ export function BalanceScreen({
 
       {conflicted.length > 0 && (
         <Notice>
-          {conflicted.length} of these transfers would be spent by the same marker as another this
-          wallet holds. A sender picks the randomness behind that marker, so a repeated pair is two
-          transfers of which at most one can ever settle. Both are held; the larger is the one a
-          spend uses, and the pair is counted once.
+          {conflicted.length} of these transfers repeat another one this wallet holds. A sender
+          picks the randomness behind a transfer, so a repeated pair is two transfers of which at
+          most one can ever settle. Both are held; the larger is the one a spend uses, and the pair
+          is counted once.
         </Notice>
       )}
 
@@ -299,19 +307,26 @@ export function BalanceScreen({
         report.warnings.map((warning) => <Notice key={warning}>{warning}</Notice>)}
 
       {/*
-        Hints, under the warnings and at less weight. A warning is something
+        Hints, under the warnings and behind a summary. A warning is something
         this pass gave up or could not verify, and each one is rare. The
-        ciphertext hint fires on nearly every sync, because almost every leaf
+        ciphertext hint fires on nearly every sync, because almost every entry
         on the chain is somebody else's, so rendering it as a warning made the
-        rare signal beside it look like the constant one. It is a prompt for
-        an operator waiting on a payment, and it reads as one here.
+        rare signal beside it look like the constant one; it is 180 words of
+        what two unbound values buy an attacker, which is theory, and theory in
+        this wallet reads on request. It is a prompt for an operator waiting on
+        a payment, and the summary is that prompt.
       */}
       {report !== null && report.hints.length > 0 && (
-        <div className="space-y-1 px-1 text-meta text-muted" data-testid="sync-hints">
-          {report.hints.map((hint) => (
-            <p key={hint}>{hint}</p>
-          ))}
-        </div>
+        <details className="px-1">
+          <summary className="cursor-pointer text-meta text-muted">
+            Expecting a payment that is not here?
+          </summary>
+          <div className="mm-note mt-2 space-y-1 text-muted" data-testid="sync-hints">
+            {report.hints.map((hint) => (
+              <p key={hint}>{hint}</p>
+            ))}
+          </div>
+        </details>
       )}
 
       <Panel title="Incoming transfers" flush>
@@ -389,11 +404,7 @@ export function BalanceScreen({
                           chain with more shields than that, one restored from its seed reads as a
                           transfer. The label moves no value and nothing selects on it."
                       >
-                        <button
-                          type="button"
-                          className="cursor-help text-left uppercase tracking-label underline
-                            decoration-dotted underline-offset-2"
-                        >
+                        <button type="button" className="mm-term uppercase tracking-label">
                           Origin
                         </button>
                       </Tooltip>
@@ -461,9 +472,9 @@ export function BalanceScreen({
               </tbody>
             </Table>
           </TableScroll>
-          <p className="px-4 pt-2 text-meta text-muted">
-            Provisional. A reorg that orphans the settlement makes the same leaf acceptable, and the
-            next sync drops the row and keeps the funds.
+          <p className="mm-note px-4 pt-2 text-muted">
+            Provisional. A reorg that orphans the settlement makes the same entry acceptable, and
+            the next sync drops the row and keeps the funds.
           </p>
         </Panel>
       )}
@@ -516,14 +527,14 @@ export function BalanceScreen({
                 </tbody>
               </Table>
             </TableScroll>
-            <p className="px-4 pt-2 text-meta text-muted" data-testid="reads-from">
+            <p className="mm-note px-4 pt-2 text-muted" data-testid="reads-from">
               This wallet reads the chain from block {formatCount(readsFrom)}. That is this
               node&apos;s claim about where the chain held nothing of this wallet&apos;s, like
               every checkpoint: a node that disagrees at that height is rewound to there.
             </p>
           </details>
           {report.heldSpent > 0 && (
-            <p className="px-4 pt-2 text-meta text-muted">
+            <p className="mm-note px-4 pt-2 text-muted">
               {report.heldSpent} transfer{report.heldSpent === 1 ? '' : 's'} kept marked spent:
               their spend markers are absent from this node&apos;s set, and this node has not yet
               reached the block that settled them. Clearing the flag on that reading would put an
@@ -531,9 +542,9 @@ export function BalanceScreen({
             </p>
           )}
           {report.forkedAt !== null && (
-            <p className="px-4 pt-2 text-meta text-muted">
+            <p className="mm-note px-4 pt-2 text-muted">
               This node is on a different branch above block {formatCount(report.forkedAt)}. The
-              watermark was rewound to there and the leaves were walked again.
+              watermark was rewound to there and the entries were read again.
             </p>
           )}
         </Panel>

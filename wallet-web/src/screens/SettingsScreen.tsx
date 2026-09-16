@@ -94,25 +94,25 @@ export function SettingsScreen({
           </Button>
         </div>
         {spending && (
-          <p className="mt-2 text-meta text-muted" data-testid="rescan-needs-quiet">
+          <p className="mm-note mt-2 text-muted" data-testid="rescan-needs-quiet">
             A rescan is unavailable while a payment is being proved. A scan reads everything this
             wallet holds before it starts and commits at the end, so the two would write the same
             rows from two different moments. It can run once the payment has settled.
           </p>
         )}
         {!proverRunning && (
-          <p className="mt-2 text-meta text-muted" data-testid="lock-needs-prover">
+          <p className="mm-note mt-2 text-muted" data-testid="lock-needs-prover">
             Locking is unavailable while the prover is stopped. Unlocking hands the worker the
             seed, so the switch below goes back on first.
           </p>
         )}
-        <p className="mt-2 text-meta text-muted">
+        <p className="mm-note mt-2 text-muted">
           A rescan drops this wallet&apos;s watermark and its record of which blocks it has seen,
           then walks the node&apos;s whole tree again. It runs add only: spent flags and orphaned
           transfers are not reconciled, because the evidence for reconciling them is the node gate
           the rescan bypassed. Run an ordinary sync against a current node afterwards.
         </p>
-        <p className="mt-2 text-meta text-muted">
+        <p className="mm-note mt-2 text-muted">
           Storage is {persisted ? 'marked persistent' : 'not marked persistent'} in this browser.
           {persisted
             ? ' The browser has been asked not to evict it under storage pressure.'
@@ -235,7 +235,7 @@ export function SettingsScreen({
           <summary className="cursor-pointer text-meta text-muted">
             What stopping the prover does
           </summary>
-          <p className="mt-2 text-meta text-muted">
+          <p className="mm-note mt-2 text-muted">
             The circuits hold most of a gigabyte of linear memory once built, and wasm linear
             memory never shrinks. Stopping the worker is the only way to give it back. Nothing can
             sync or send while it is stopped, and starting it again loads the module afresh, so the

@@ -92,7 +92,7 @@
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 15px;
-  --space-4: 22px;
+  --space-4: 20px;
   --space-5: 32px;
 
   --radius-sm: 3px;
@@ -100,11 +100,23 @@
   --radius-md: 5px;
 
   --control-h: 32px;
+  /* The one action a screen is for. MyMonero's desktop geometry everywhere a
+     pointer is, and a thumb's target on a phone: see the phone block below. */
+  --primary-h: 32px;
   --input-h: 29px;
   --strip-height: 24px;
+  /*
+   * How much of the balance's trailing pad recedes.
+   *
+   * Dimming is subtraction against the ground, so the same opacity is a
+   * different contrast in each theme: 0.35 measures 3.16:1 over the dark panel
+   * and 2.19:1 over the light one, which is under the 3:1 a large figure owes.
+   * Light gets more of the ink.
+   */
+  --pad-opacity: 0.55;
   /* Reading measure, on the container rather than the paragraph: a `ch` cap
      tracks the child's font size, so an 11 px note would stop at half a box. */
-  --measure: 620px;
+  --measure: 560px;
   --shell-width: 760px;
   --wizard-width: 420px;
 
@@ -142,6 +154,8 @@
     --destructive-on-fill: #161416;
     --positive: #7fd4a0;
 
+    --pad-opacity: 0.35;
+
     --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
     --shadow-inset: 0 0.5px 0 0 rgba(56, 54, 56, 0.5), inset 0 0.5px 0 0 #161416;
     --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
@@ -176,10 +190,34 @@
   --destructive-on-fill: #161416;
   --positive: #7fd4a0;
 
+  --pad-opacity: 0.35;
+
   --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
   --shadow-inset: 0 0.5px 0 0 rgba(56, 54, 56, 0.5), inset 0 0.5px 0 0 #161416;
   --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
   --shadow-modal: 0 8px 32px 0 rgba(0, 0, 0, 0.55);
   --shadow-edge: rgba(255, 255, 255, 0.22);
   --shadow-edge-fade: rgba(255, 255, 255, 0);
+}
+
+/*
+ * The phone.
+ *
+ * MyMonero's 32 px button and 29 px input are a pointer's geometry, and on the
+ * screens this wallet was measured on three to eight controls per screen were
+ * under 44 px in one dimension. So a control is 40 px here, the one action a
+ * screen is for is 44, and an input is 40 with its text at 16 px, which is
+ * what stops iOS zooming the page when a field takes focus.
+ *
+ * The label size goes to 11 px with it: 10 px is a caption on a desk and a
+ * squint in a hand, and every panel title, field label and tab in this wallet
+ * is drawn at it.
+ */
+@media (max-width: 640px) {
+  :root {
+    --control-h: 40px;
+    --primary-h: 44px;
+    --input-h: 40px;
+    --fs-label: 11px;
+  }
 }

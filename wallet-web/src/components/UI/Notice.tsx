@@ -53,7 +53,9 @@ export function Notice({
       data-testid={testId}
       data-sensitive={sensitive ? 'may name an amount' : undefined}
       className={cn(
-        'flex gap-2 rounded-panel border p-2 text-meta',
+        // `mm-note`, so a sentence is 13 px in a hand: a notice is prose and
+        // 11 px prose on a phone is a squint.
+        'mm-note flex gap-2 rounded-panel border p-2',
         // `bg-notice-bg` is `transparent` in both themes. The token is kept so
         // the role still has one place to change; the fill is what was dropped.
         tone === 'error'
@@ -80,11 +82,6 @@ export function Notice({
   );
 }
 
-/** An empty list, said as an empty list rather than drawn as a blank box. */
-export function Empty({ children }: { children: ReactNode }): ReactNode {
-  return <p className="px-4 text-meta text-muted">{children}</p>;
-}
-
 /**
  * A read that did not happen, said as a read that did not happen.
  *
@@ -93,5 +90,5 @@ export function Empty({ children }: { children: ReactNode }): ReactNode {
  * whether something happened.
  */
 export function NotRead({ what }: { what: string }): ReactNode {
-  return <span className="text-meta text-muted">{what} could not be read</span>;
+  return <span className="mm-note text-muted">{what} could not be read</span>;
 }

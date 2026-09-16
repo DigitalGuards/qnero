@@ -99,7 +99,7 @@
      focus from a Radix primitive rather than from a click. */
   :focus-visible {
     outline: 2px solid var(--accent);
-    outline-offset: 1px;
+    outline-offset: 2px;
   }
 
   /* Hue alone is about 1.2:1 against this text, so a link inside prose is
@@ -125,24 +125,41 @@
     box-shadow: var(--shadow-inset);
   }
 
-  /* The sunken input: 29 px tall, 4 px radius, field ground, inset edge. */
+  /*
+   * The sunken input: the control height, 4 px radius, field ground, inset
+   * edge. 29 px where a pointer is and 40 px in a hand, from `--input-h`.
+   *
+   * The text is 16 px on a phone whatever the scale says, because Safari zooms
+   * the page when a field under 16 px takes focus, and a page zoomed by the
+   * browser is a form the reader then has to pan.
+   */
   .mm-input {
     display: block;
     width: 100%;
-    min-height: 29px;
+    min-height: var(--input-h);
     padding: 5px 7px;
     border: 1px solid var(--border);
     border-radius: var(--radius-input);
     background: var(--bg-field);
     color: var(--text-primary);
     font-family: var(--font-stack-mono);
-    font-size: var(--fs-body);
-    line-height: 17px;
+    font-size: max(16px, var(--fs-body));
+    line-height: 20px;
     box-shadow: var(--shadow-inset);
   }
 
+  @media (min-width: 641px) {
+    .mm-input {
+      font-size: var(--fs-body);
+      line-height: 17px;
+    }
+  }
+
+  /* Muted rather than dim: a placeholder is read, and the dim ink measures
+     3.14:1 dark and 3.27:1 light on the surfaces it lands on. */
   .mm-input::placeholder {
-    color: var(--text-dim);
+    color: var(--text-secondary);
+    opacity: 1;
   }
 
   .mm-input:focus-visible {
@@ -193,7 +210,7 @@
 
   /* Trailing pad zeros alone. Never a digit that carries value. */
   .mm-balance-fraction {
-    opacity: 0.35;
+    opacity: var(--pad-opacity);
   }
 
   /*
@@ -228,6 +245,45 @@
     overflow-wrap: anywhere;
     font-family: var(--font-stack-mono);
     user-select: all;
+  }
+
+  /*
+   * A sentence, at a size a sentence is read at.
+   *
+   * 11 px is this scale's label size and it carried paragraphs of fifty and
+   * seventy-nine words on a phone. A note is 13 px in a hand and 11 px from
+   * 641 px up, where the scale MyMonero's carry-over comes from is a pointer's.
+   */
+  .mm-note {
+    font-size: var(--fs-body);
+    line-height: 20px;
+  }
+
+  @media (min-width: 641px) {
+    .mm-note {
+      font-size: var(--fs-meta);
+      line-height: 16px;
+    }
+  }
+
+  /*
+   * A term with a sentence behind it, underlined only where a pointer is.
+   *
+   * A tooltip is unreachable on a touch screen, so the dotted underline there
+   * is an affordance that does nothing. What is inside one is never the only
+   * place a thing is said.
+   */
+  .mm-term {
+    text-align: left;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .mm-term {
+      cursor: help;
+      text-decoration: underline;
+      text-decoration-style: dotted;
+      text-underline-offset: 2px;
+    }
   }
 
   /* A memo is remote input. Escaping happens in `lib/memo.ts`; isolation is a

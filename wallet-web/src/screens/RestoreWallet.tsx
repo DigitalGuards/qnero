@@ -191,7 +191,7 @@ export function RestoreWallet({
           <summary className="cursor-pointer text-meta text-muted">
             What this number does
           </summary>
-          <p className="mt-2 text-meta text-muted">
+          <p className="mm-note mt-2 text-muted">
             It is recorded rounded down to the nearest {BIRTHDAY_EPOCH} blocks, so what the nodes
             this wallet syncs against are told is a coarse epoch rather than the day it was made.
             A height <strong className="text-ink">above</strong> the block a transfer arrived in is

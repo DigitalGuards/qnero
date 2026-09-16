@@ -55,6 +55,7 @@ import {
 } from './wallet/crypto';
 import { createStore, WalletStore } from './wallet/store';
 import type { Balances, NoteRow, RejectedNote, StoreMeta, StoredNote } from './wallet/model';
+import { formatCount } from './lib/units';
 import { collapseRows, reachableTotal, spendable } from './wallet/select';
 import {
   birthdayNoticeFor,
@@ -1055,48 +1056,64 @@ export function App(): ReactNode {
       >
         Skip to content
       </a>
-      <div
-        className={
-          open
-            ? 'mx-auto w-full max-w-[var(--shell-width)] px-4 pb-24 pt-4'
-            : 'mx-auto w-full max-w-[var(--wizard-width)] px-4 pb-10 pt-4'
-        }
-      >
-        <header className="mb-4 flex items-center justify-between gap-3">
+      {/*
+        The header is one row and it is a header: 44 px on the deep ground with
+        a rule under it, the wordmark at the left gutter and the one live fact
+        about this wallet at the right. Nothing else. It used to carry a theme
+        control as well, which is the only thing in this wallet that is about
+        the page rather than about the wallet; that lives in Settings.
+      */}
+      <header className="border-b border-edge bg-deep">
+        <div
+          className={
+            open
+              ? 'mx-auto flex h-11 w-full max-w-[var(--shell-width)] items-center justify-between gap-3 px-4'
+              : 'mx-auto flex h-11 w-full max-w-[var(--wizard-width)] items-center justify-between gap-3 px-4'
+          }
+        >
           {/* The wordmark, in MyMonero's header type: the name in the body
               size at semibold, the descriptor beside it at label size in
               caps. "Qloak, a Qnero wallet" is the full form, and it is set
               where a subtitle has room: the tab title, the readme and the
-              docs. Here the second span stays one word, because the chain
-              status and the theme control share this row at phone width. */}
+              docs. */}
           <div className="flex items-baseline gap-2">
             <span className="text-body font-semibold tracking-label text-ink">Qloak</span>
             <span className="text-label uppercase tracking-label text-muted">wallet</span>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="flex items-center gap-1.5 text-meta text-muted" data-testid="chain-status">
-              <span
-                aria-hidden
-                className={
-                  connection.kind === 'live'
-                    ? 'size-1.5 rounded-full bg-positive'
-                    : connection.kind === 'failed'
-                      ? 'size-1.5 rounded-full bg-destructive'
-                      : 'size-1.5 rounded-full bg-dim'
-                }
-              />
+          <span
+            className="flex min-w-0 items-center gap-2 text-meta text-muted"
+            data-testid="chain-status"
+          >
+            <span
+              aria-hidden
+              className={
+                connection.kind === 'live'
+                  ? 'size-[7px] shrink-0 rounded-full bg-positive'
+                  : connection.kind === 'failed'
+                    ? 'size-[7px] shrink-0 rounded-full bg-destructive'
+                    : 'size-[7px] shrink-0 rounded-full bg-muted'
+              }
+            />
+            <span className="truncate tabular-nums">
               {chainName}
               {connection.kind === 'live' && connection.head !== undefined
-                ? ` · block ${connection.head}`
+                ? ` · block ${formatCount(connection.head)}`
                 : connection.kind === 'connecting'
                   ? ' · connecting'
                   : connection.kind === 'failed'
                     ? ' · no node'
                     : ''}
             </span>
-          </div>
-        </header>
-
+          </span>
+        </div>
+      </header>
+      <div
+        className={
+          open
+            ? 'mx-auto w-full max-w-[var(--shell-width)] px-4 pb-24 pt-5'
+            : 'mx-auto w-full max-w-[var(--wizard-width)] px-4 pb-10 pt-5'
+        }
+      >
         <main id="main" className="space-y-3">
           {error !== null && (
             <Notice tone="error" testId="app-error" sensitive>
@@ -1216,6 +1233,17 @@ export function App(): ReactNode {
                     // payment writes `spent` on those same rows when it
                     // settles.
                     canSync={connection.kind === 'live' && proverRunning && !spendRunning}
+                    // Why it is off, in the line beside it. A control that
+                    // refuses and says nothing is the wallet having stopped.
+                    syncBlocked={
+                      connection.kind !== 'live'
+                        ? 'no node: check Settings'
+                        : !proverRunning
+                          ? 'prover stopped: check Settings'
+                          : spendRunning
+                            ? 'a payment is being proved'
+                            : null
+                    }
                     onSync={() => {
                       void sync(false);
                     }}

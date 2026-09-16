@@ -212,7 +212,7 @@ export function SendScreen({
         </Prose>
         <div className="elev-inset mt-3 h-1 w-full overflow-hidden rounded-full bg-field">
           <div
-            className="h-full bg-accent-fill transition-[width] duration-300"
+            className="h-full bg-accent-fill transition-[width] duration-300 motion-reduce:transition-none"
             style={{
               width: `${Math.min(
                 100,
@@ -225,12 +225,13 @@ export function SendScreen({
           {PHASES.map((step, index) => (
             <li
               key={step.key}
+              // No second dimming on a waiting row: the muted ink is 5.36:1
+              // on this panel and 0.7 of it measured 3.31:1, which is under
+              // what a line of text owes a reader in either theme.
               className={
-                index < current
-                  ? 'flex justify-between text-muted'
-                  : index === current
-                    ? 'flex justify-between text-ink'
-                    : 'flex justify-between text-muted opacity-70'
+                index === current
+                  ? 'flex justify-between text-ink'
+                  : 'flex justify-between text-muted'
               }
               data-state={index < current ? 'done' : index === current ? 'running' : 'waiting'}
             >
@@ -410,10 +411,9 @@ function SendResultView({
       ) : (
         !settled && (
           <Notice tone="error" className="mb-3">
-            The extrinsic is in block {result.inclusion.blockNumber} and its spend markers are not
-            in the settled set at that block. A segment whose anchor went stale or whose spend marker
-            was claimed elsewhere is skipped, and the block carries it anyway. Sync, then send again
-            against a fresh anchor.
+            The settlement is in block {result.inclusion.blockNumber} and the chain did not settle
+            it there. A payment whose anchor went stale, or whose transfer was spent elsewhere
+            first, is skipped and the block carries it anyway. Read the chain, then send again.
           </Notice>
         )
       )}
@@ -450,7 +450,7 @@ function SendResultView({
       </dl>
       {/* The sentence the fee field used to hide in a tooltip, said once,
           where a reader has just paid one. */}
-      <p className="mt-2 text-meta text-muted">
+      <p className="mm-note mt-2 text-muted">
         The fee is the floor this runtime charges for one slot, fixed at proving time.
       </p>
       <div className="mt-3 flex gap-2">
@@ -483,7 +483,7 @@ function SendResultView({
             </tbody>
           </Table>
         </TableScroll>
-        <p className="mt-2 text-meta text-muted">
+        <p className="mm-note mt-2 text-muted">
           The payment landed in slot {result.paymentSlot}, drawn for this spend. Either slot
           settles the same way, and drawing it is what stops a chain reader telling the
           recipient&apos;s slot from the change.

@@ -57,7 +57,7 @@ export function ReceiveScreen({
           </Button>
         </div>
         <Address value={address} testId="receive-address" expandable />
-        <p className="text-meta text-muted">
+        <p className="mm-note text-muted">
           Payments to this address are private; the chain shows nothing about them.
         </p>
       </Panel>
@@ -111,7 +111,7 @@ export function ReceiveScreen({
             <div className="flex gap-2">
               <CopyButton value={minerKey} label="Copy miner key" />
             </div>
-            <p className="mt-2 text-meta text-muted">
+            <p className="mm-note mt-2 text-muted">
               Prefer the node&apos;s environment variable to its command line: every process listing
               on a machine can read a command line.
             </p>

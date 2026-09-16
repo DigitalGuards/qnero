@@ -57,7 +57,7 @@ export function DialogContent({
         </DialogPrimitive.Title>
         {description !== undefined && (
           <DialogPrimitive.Description asChild>
-            <div className="mb-3 space-y-2 text-meta text-ink-2">{description}</div>
+            <div className="mm-note mb-3 space-y-2 text-ink-2">{description}</div>
           </DialogPrimitive.Description>
         )}
         <div className="flex flex-wrap gap-2 [&>*]:flex-1">
@@ -69,9 +69,8 @@ export function DialogContent({
         <DialogPrimitive.Close asChild>
           <Button
             variant="quiet"
-            size="small"
             aria-label="Close"
-            className="absolute right-2 top-2 no-underline"
+            className="absolute right-1 top-1 size-11 no-underline sm:right-2 sm:top-2 sm:size-8"
           >
             <X className="size-3.5" aria-hidden />
           </Button>

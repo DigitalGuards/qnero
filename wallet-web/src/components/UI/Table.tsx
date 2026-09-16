@@ -18,9 +18,9 @@ import { cn } from '../../utils/cn';
  * which keeps every cell above 4.5:1 in both themes instead of trading one
  * contrast problem for another.
  *
- * The cell inset is 16 px, which is `Panel`'s own and `Empty`'s. Inside a
- * flush panel the three have to agree, or the left edge of a list moves by
- * four pixels the moment the list stops being empty.
+ * The cell inset is 16 px, which is `Panel`'s own and the empty state's.
+ * Inside a flush panel the three have to agree, or the left edge of a list
+ * moves by four pixels the moment the list stops being empty.
  */
 export function TableScroll({ children }: { children: ReactNode }): ReactNode {
   return <div className="mm-scroll-x w-full">{children}</div>;
