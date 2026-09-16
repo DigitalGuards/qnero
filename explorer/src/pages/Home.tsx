@@ -103,7 +103,7 @@ const SKELETON = [
 ];
 
 export function Home(): ReactNode {
-  const { bundle, chainName, head } = useChain();
+  const { bundle, chainName, endpoint, head } = useChain();
   const headHash = head?.hash ?? null;
   const headNumber = head?.header.number ?? null;
 
@@ -209,11 +209,12 @@ export function Home(): ReactNode {
     <>
       <header className="page__head">
         <h1>{bundle.config.chainName}</h1>
+        {/* One line. It was 200 characters over four lines opening on a spec
+            version and a transaction version, which pushed the first figure of
+            the chain to 55% of the first screen. The runtime is a field in the
+            panel under it, and Reveals is a section in the nav. */}
         <p className="page__lede">
-          {bundle.context.specName} spec {bundle.context.specVersion}, transaction version{' '}
-          {bundle.context.transactionVersion}. Value is private by default: every unit minted after
-          genesis is a note, and the figures here are what any reader of the chain can total.{' '}
-          <a href={href({ name: 'reveals' })}>What this chain reveals</a>.
+          Value is private by default. What any reader of the chain can total is here.
         </p>
       </header>
 
@@ -221,6 +222,15 @@ export function Home(): ReactNode {
         <Fields>
           <Field label="Best block" value={<span className="num">{formatCount(head.header.number)}</span>} />
           <Field label="Best hash" value={<Hash value={head.hash} href={href({ name: 'block', id: head.hash })} />} />
+          <Field
+            label="Runtime"
+            value={
+              <span className="mono">
+                {bundle.context.specName} {formatCount(bundle.context.specVersion)}
+              </span>
+            }
+            note={`transaction version ${formatCount(bundle.context.transactionVersion)}`}
+          />
           <Field
             label="Finalized"
             value={
@@ -410,6 +420,15 @@ export function Home(): ReactNode {
           )
         ) : null}
       </Panel>
+
+      {/* The one place the endpoint answers a question on a working page: which
+          node these figures came from. It was the second most prominent string
+          on every screen, in the header. */}
+      {endpoint === null ? null : (
+        <p className="page__foot">
+          node <span className="mono">{endpoint}</span>
+        </p>
+      )}
     </>
   );
 }

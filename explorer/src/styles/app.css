@@ -352,6 +352,13 @@ p {
   color: var(--text-secondary);
 }
 
+/* The provenance line at the foot of the chain page: which node answered. */
+.page__foot {
+  margin-top: var(--space-4);
+  font-size: var(--fs-meta);
+  color: var(--text-muted);
+}
+
 .mono {
   font-family: var(--font-mono);
   word-break: break-word;
