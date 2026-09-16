@@ -16,8 +16,8 @@
  *   largest notes, because the leaf has two input slots.
  */
 
-import { RefreshCw } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { Check, RefreshCw } from 'lucide-react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 
 import { Button } from '../components/UI/Button';
@@ -27,7 +27,9 @@ import { Pill } from '../components/UI/Address';
 import { Tooltip } from '../components/UI/Tooltip';
 import { Num, Table, TableScroll } from '../components/UI/Table';
 import { formatCount, formatStepsAsQnr, splitAmountForDisplay } from '../lib/units';
+import { formatDuration } from '../lib/format';
 import { renderMemo } from '../lib/memo';
+import { SYNC_PHASES, syncFraction, syncPhaseIndex } from './syncPhases';
 import type { Balances, NoteRow, RejectedNote } from '../wallet/model';
 import type { SyncReport } from '../wallet/sync';
 
@@ -91,6 +93,86 @@ function Stat({
   );
 }
 
+/**
+ * A clock that runs while something does, in milliseconds.
+ *
+ * The sending screen's, kept to the same quarter-second tick: a wait with no
+ * clock on it reads as a wait with nothing happening.
+ */
+function useElapsed(running: boolean): number {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!running) {
+      return;
+    }
+    const started = performance.now();
+    const timer = setInterval(() => {
+      setElapsed(performance.now() - started);
+    }, 250);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [running]);
+  if (!running && elapsed !== 0) {
+    // Adjusted during render rather than in an effect: the reading belongs to
+    // the run that produced it, and a run that has ended has no reading.
+    setElapsed(0);
+  }
+  return elapsed;
+}
+
+/**
+ * A sync, as progress: the bar, the phases in order, and the clock.
+ *
+ * What it replaces was forty-five words of theory and a spinner inside a
+ * disabled button, with stage strings in the explorer's vocabulary. The phase
+ * names are this screen's, the counts are the pass's own, and the one sentence
+ * under it is the one a reader of a scan wants: nothing about them leaves.
+ */
+function SyncProgress({
+  stage,
+  elapsed,
+}: {
+  stage: { stage: string; detail: string | null } | null;
+  elapsed: number;
+}): ReactNode {
+  const current = syncPhaseIndex(stage?.stage ?? null);
+  const detail = current < 0 ? null : stage?.detail;
+  return (
+    <div className="mt-3 border-t border-edge pt-3" data-testid="sync-progress">
+      <div className="elev-inset h-1 w-full overflow-hidden rounded-full bg-field">
+        <div
+          className="h-full bg-accent-fill transition-[width] duration-300 motion-reduce:transition-none"
+          style={{ width: `${Math.min(100, syncFraction(stage?.stage ?? null, detail ?? null) * 100)}%` }}
+        />
+      </div>
+      <ul className="mt-3 list-none space-y-1 p-0 text-meta" data-testid="sync-phases">
+        {SYNC_PHASES.map((phase, index) => (
+          <li
+            key={phase.label}
+            className={
+              index === current
+                ? 'flex justify-between gap-2 text-ink'
+                : 'flex justify-between gap-2 text-muted'
+            }
+            data-state={index < current ? 'done' : index === current ? 'running' : 'waiting'}
+          >
+            <span>
+              {phase.label}
+              {index === current && detail !== null && detail !== undefined ? ` ${detail}` : ''}
+            </span>
+            {index < current && <Check className="mt-0.5 size-3 shrink-0" aria-hidden />}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 font-mono tabular-nums text-meta text-muted" data-testid="sync-elapsed">
+        {formatDuration(elapsed)} elapsed
+      </p>
+      <p className="mt-1 text-meta text-muted">Your viewing key never leaves this page.</p>
+    </div>
+  );
+}
+
 export function BalanceScreen({
   balances,
   notes,
@@ -116,10 +198,12 @@ export function BalanceScreen({
   readsFrom: number;
   report: SyncReport | null;
   syncing: boolean;
-  syncStage: string | null;
+  /** The stage a running pass is in, and what it is counting. */
+  syncStage: { stage: string; detail: string | null } | null;
   canSync: boolean;
   onSync: () => void;
 }): ReactNode {
+  const elapsed = useElapsed(syncing);
   const conflicted = notes.filter((row) => row.conflictMembers > 1);
   // Three of these four figures are about something having gone wrong, and a
   // figure that is only interesting when it is not zero is noise when it is.
@@ -186,6 +270,7 @@ export function BalanceScreen({
             )}
           </dl>
         )}
+        {syncing && <SyncProgress stage={syncStage} elapsed={elapsed} />}
         <div className="mt-3 flex items-center justify-between gap-2 border-t border-edge pt-3">
           <span className="text-meta text-muted" data-testid="sync-status">
             {report === null
@@ -197,20 +282,11 @@ export function BalanceScreen({
               reads the chain by itself on open and on each new head; this is
               the one for a reader who wants it now. */}
           <Button disabled={syncing || !canSync} data-testid="do-sync" onClick={onSync}>
-            <RefreshCw className={syncing ? 'size-3.5 animate-spin' : 'size-3.5'} aria-hidden />
+            <RefreshCw className="size-3.5" aria-hidden />
             {syncing ? 'Reading…' : 'Refresh'}
           </Button>
         </div>
       </Panel>
-
-      {syncing && (
-        <Notice testId="sync-progress">
-          Syncing{syncStage === null ? '' : `: ${syncStage}`}. Every ciphertext on the chain is read
-          and tried against this wallet&apos;s viewing key, and the whole set of settled spend
-          markers is paged, so the node is never told which leaves or which markers are this
-          wallet&apos;s.
-        </Notice>
-      )}
 
       {balances.reachable < balances.unspent && (
         <Notice>

@@ -153,7 +153,16 @@ export function App(): ReactNode {
   const [rejected, setRejected] = useState<RejectedNote[]>([]);
   const [syncReport, setSyncReport] = useState<SyncReport | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [syncStage, setSyncStage] = useState<string | null>(null);
+  /**
+   * The stage a running pass is in, and what it is counting.
+   *
+   * The two are held apart rather than joined into one line: the wallet screen
+   * names the phase itself and prints the count beside it, so a stage name the
+   * pass uses internally never reaches a screen.
+   */
+  const [syncStage, setSyncStage] = useState<{ stage: string; detail: string | null } | null>(
+    null,
+  );
 
   const [connection, setConnection] = useState<ConnectionState>({
     kind: 'offline',
@@ -424,7 +433,7 @@ export function App(): ReactNode {
   // The worker's progress, wherever it comes from.
   useEffect(() => {
     return session.prover.onProgress((stage, detail) => {
-      setSyncStage(detail === undefined ? stage : `${stage}: ${detail}`);
+      setSyncStage({ stage, detail: detail ?? null });
     });
   }, []);
 
@@ -726,7 +735,7 @@ export function App(): ReactNode {
           {
             rescan,
             onProgress: (stage, detail) => {
-              setSyncStage(detail === undefined ? stage : `${stage}, ${detail}`);
+              setSyncStage({ stage, detail: detail ?? null });
             },
           },
         );

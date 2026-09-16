@@ -616,7 +616,7 @@ export async function authenticateLeaves(
   const scans = leafCount > watermark;
   const commitments = scans
     ? await chain.leafHashes(leafCount, head.hash, (done) => {
-        progress('headers', `${done} of ${leafCount} leaf hashes`);
+        progress('headers', `${done} of ${leafCount} entry hashes`);
       })
     : new Uint8Array(0);
   if (scans && commitments.length !== leafCount * 32) {
@@ -1197,9 +1197,12 @@ export async function runSync(
     );
   }
 
-  progress('spend markers', 'paging the settled set');
+  // The detail a screen prints beside a phase name, so it is the wallet's
+  // vocabulary rather than the pass's: `docs/WALLET.md` keeps leaf, note,
+  // marker and slot for the explorer.
+  progress('spend markers', 'reading what the chain has spent');
   const settled = await chain.usedNullifiers(head.hash, (seen) => {
-    progress('spend markers', `${seen} settled spend markers`);
+    progress('spend markers', `${seen} read`);
   });
 
   // The working set, keyed by commitment. Every held note starts here and the
@@ -1329,7 +1332,7 @@ export async function runSync(
     for (let windowFrom = watermark; windowFrom < shape.leafCount; windowFrom += WINDOW) {
       const windowTo = Math.min(windowFrom + WINDOW, shape.leafCount);
       const records = await chain.leaves(windowFrom, windowTo, head.hash, shape.leafCount);
-      progress('scan', `${windowTo - watermark} of ${total} leaves`);
+      progress('scan', `${windowTo - watermark} of ${total} entries`);
 
       // Which rule opens each leaf, and both batches built from it. A leaf
       // below its block's last cannot be a coinbase whatever a node answers
@@ -1420,7 +1423,7 @@ export async function runSync(
           decrypted.set(record.index, answers[offset] ?? null);
         });
         ciphertextsTried += slice.length;
-        progress('scan', `${ciphertextsTried} ciphertexts tried`);
+        progress('scan', `${ciphertextsTried} entries tried`);
       }
 
       // The coinbase leaves, in the same shape and for the same reason.
@@ -1448,7 +1451,11 @@ export async function runSync(
         slice.forEach((record, offset) => {
           minted.set(record.index, answers[offset] ?? null);
         });
-        progress('scan', `${Math.min(start + BATCH, coinbases.length)} of ${coinbases.length} coinbase leaves in this window`);
+        progress(
+          'scan',
+          `${Math.min(start + BATCH, coinbases.length)} of ${coinbases.length} mining rewards in ` +
+            'this window',
+        );
       }
 
       for (const record of records) {
