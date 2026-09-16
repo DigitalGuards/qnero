@@ -33,7 +33,7 @@ means adding **deep** checks, and the shallow ones are only there to separate
 | explorer config | `GET https://explorer.<domain>/config.json` | 200 and `.rpcEndpoint == "wss://rpc.<domain>"` |
 | explorer wasm policy | `GET https://explorer.<domain>/` headers | `content-security-policy` contains `'wasm-unsafe-eval'` |
 | rpc health | `POST https://rpc.<domain>` with `system_health` | 200 and `.result.peers` present and `.result.isSyncing == false` |
-| rpc height | `POST https://rpc.<domain>` with `chain_getHeader` | 200, `.result.number` present, and greater than the value stored on the previous tick within 15 minutes |
+| rpc height | `POST https://rpc.<domain>` with `chain_getHeader` | 200, `.result.number` present, and advancing within 30 minutes; configure `QNERO_HEIGHT_STALL_SECS=1800` to match the on-box stall window |
 | faucet status | `GET https://faucet.<domain>/status` | 200, `.configured == true`, `.captchaEnabled == true`, `.dripQuanta > 0`, `.cooldownHours` positive and finite |
 | faucet health | `GET https://faucet.<domain>/health` | exactly 200 (it is 503 when drained, when the wallet is not open, or when the node has not answered in six minutes) |
 | p2p reachable | TCP connect `node.<domain>:30333` | connects |
@@ -59,8 +59,10 @@ Three notes on what these do and do not prove:
   check answers 200 throughout.
 - **The height check has to compare across ticks.** A JSON-RPC endpoint that answers is not a
   chain that is advancing, and a node stops authoring when its tip is stale, when it has no
-  peers or during an initial sync. At 120 s blocks and a 5-minute tick the height moves
-  every tick, so 15 minutes of no movement is three missed blocks and worth paging for.
+  peers or during an initial sync, unless configured for solo authoring. The 120 s
+  block target permits variable PoW arrival times. Use a 30-minute stall window,
+  fifteen target intervals, on both monitors. Keep RPC and service failures on
+  their existing short debounce.
 - **`/status` does not prove a claim would settle.** A configured server is not the page
   carrying the matching Turnstile site key, nor Cloudflare accepting the domain, nor a
   funded faucet actually paying. The only thing that proves the last one is a synthetic

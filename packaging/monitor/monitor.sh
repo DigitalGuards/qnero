@@ -220,7 +220,7 @@ done
 
 health="$(rpc_call system_health)"
 peers="$(printf '%s' "$health" | jq -r '.result.peers // empty' 2>/dev/null)"
-syncing="$(printf '%s' "$health" | jq -r '.result.isSyncing // empty' 2>/dev/null)"
+syncing="$(printf '%s' "$health" | jq -r '.result.isSyncing | if . == null then "unknown" else . end' 2>/dev/null)"
 
 if [ -z "$peers" ]; then
     check_debounced "rpc" fail "the node's RPC did not answer on loopback" ""
