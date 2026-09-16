@@ -67,14 +67,21 @@ SSL_DIR="${MONITOR_SSL_DIR:-$OPS_HOME/ssl/$DOMAIN}"
 RPC="${MONITOR_RPC:-http://127.0.0.1:9944}"
 FAUCET="${MONITOR_FAUCET:-http://127.0.0.1:8080}"
 STRATUM_PORT="${MONITOR_STRATUM_PORT:-3333}"
-# A node that lost its database and restarted from the spec answers every call
-# happily and serves both wallets an empty tree. Only a height floor catches
-# it. Raise this as the chain grows; it is a floor to fail against.
+# An optional extra floor, and no longer the check that catches a node which
+# lost its database: this script remembers the best height it has seen and
+# alerts on a fall from it, which needs no hand-editing as the chain grows.
+# Leave this at 1, or set it to a height this deployment is known to be past if
+# an absolute floor is wanted as well.
 MIN_HEIGHT="${MONITOR_MIN_HEIGHT:-1}"
+# How far the head may fall below the best height this monitor has seen before
+# it is a fall rather than a reorg. A node that resynced from the spec goes to
+# zero; a reorg on this chain is a block or two.
+HEIGHT_DROP="${MONITOR_HEIGHT_DROP:-100}"
 # At 120 s blocks and a 60 s tick the height moves on roughly every other tick,
-# so staleness is wall clock rather than a per-tick comparison. Ten minutes is
-# five block intervals.
-STALE_SECS="${MONITOR_STALE_SECS:-600}"
+# so staleness is wall clock rather than a per-tick comparison. Thirty minutes
+# is fifteen block intervals: long enough that a slow stretch of difficulty
+# retarget is not an alert, short enough to catch a node that stopped.
+STALE_SECS="${MONITOR_STALE_SECS:-1800}"
 DISK_MIN_PCT="${MONITOR_DISK_MIN_PCT:-10}"
 CERT_WARN_DAYS="${MONITOR_CERT_WARN_DAYS:-30}"
 
@@ -153,6 +160,19 @@ set_fail_count() {
     mv "$FAIL_COUNTS.new" "$FAIL_COUNTS"
 }
 
+# A state field read back as a number. A file written by a different version of
+# this script, or a write that was cut short by a reboot, holds something that
+# is not one, and `$(( ))` reads an unparseable value as a variable name and
+# calls it zero. A zero best height is no memory at all, and a zero timestamp
+# would read as thirty minutes of stall on the next tick, so an unreadable
+# field starts again from this tick instead.
+number_or_zero() {
+    case "$1" in
+        '' | *[!0-9]*) printf '0' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 # check_debounced <key> <ok|fail> <alert message> <resolve message>
 check_debounced() {
     local key="$1" verdict="$2" bad="$3" good="$4"
@@ -210,37 +230,84 @@ fi
 
 header="$(rpc_call chain_getHeader)"
 height_hex="$(printf '%s' "$header" | jq -r '.result.number // empty' 2>/dev/null)"
+# Anything that is not hex is treated as no header at all, for the same reason
+# as number_or_zero: $(( )) would call it zero, and a zero here is exactly what
+# a node that lost its database looks like.
+if ! printf '%s' "$height_hex" | grep -qE '^0x[0-9a-fA-F]+$'; then
+    height_hex=''
+fi
 if [ -n "$height_hex" ]; then
     height=$((height_hex))
 
+    # An absolute floor, kept because it is free and it catches the one case
+    # the memory below cannot: a monitor whose state directory is as new as the
+    # resynced node it is watching. It is optional and it no longer has to be
+    # raised by hand.
     if [ "$height" -lt "$MIN_HEIGHT" ]; then
         check_debounced "height-floor" fail \
-            "the node is at block $height, below the floor of $MIN_HEIGHT. A node that lost its database and restarted from the spec looks exactly like this: it answers every call and serves an empty tree" ""
+            "the node is at block $height, below the floor of $MIN_HEIGHT" ""
     else
         check_debounced "height-floor" ok "" "the node is back above the height floor"
     fi
 
+    # What the monitor remembers about the chain: the best height it has ever
+    # seen, the height it saw last, and when that last changed.
+    #
+    # The best height is the check that used to be MONITOR_MIN_HEIGHT's job and
+    # was only ever as good as the last time somebody edited it. A node that
+    # lost its database and restarted from the spec answers every call happily
+    # and serves both wallets an empty tree; against a remembered high-water
+    # mark it is unmistakable, and nothing has to be maintained for that to
+    # stay true as the chain grows.
+    #
+    # Three fields. A state file written by an older copy of this script holds
+    # two, height and the time it was seen, and is read as that.
+    previous_best=0
     previous_height=0
     previous_at=0
     if [ -f "$HEIGHT_FILE" ]; then
-        read -r previous_height previous_at < "$HEIGHT_FILE" || true
-    fi
-    if [ "$height" -gt "${previous_height:-0}" ] || [ "${previous_at:-0}" = "0" ]; then
-        printf '%s %s\n' "$height" "$now" > "$HEIGHT_FILE"
-        check_debounced "height-stall" ok "" "the node is authoring again, at block $height"
-    else
-        stalled=$((now - previous_at))
-        if [ "$stalled" -gt "$STALE_SECS" ]; then
-            # Peers and syncing are reported with it rather than alerted on
-            # separately, because authoring pauses on a stale tip, on no peers
-            # or during an initial sync, and a stalled height with zero peers
-            # is a different problem from a stalled height with peers.
-            check_debounced "height-stall" fail \
-                "the node has been at block $height for ${stalled}s (peers $peers, syncing $syncing)" ""
+        read -r previous_best previous_height previous_at < "$HEIGHT_FILE" || true
+        if [ -z "${previous_at:-}" ]; then
+            previous_at="${previous_height:-0}"
+            previous_height="${previous_best:-0}"
         fi
     fi
+    previous_best="$(number_or_zero "${previous_best:-0}")"
+    previous_height="$(number_or_zero "${previous_height:-0}")"
+    previous_at="$(number_or_zero "${previous_at:-0}")"
+
+    best="$previous_best"
+    [ "$height" -gt "$best" ] && best="$height"
+    # The tip moving at all is the node working, in either direction: a reorg
+    # is not a stall.
+    if [ "$height" != "$previous_height" ] || [ "$previous_at" = "0" ]; then
+        changed_at="$now"
+    else
+        changed_at="$previous_at"
+    fi
+    printf '%s %s %s\n' "$best" "$height" "$changed_at" > "$HEIGHT_FILE"
+
+    dropped=$((best - height))
+    if [ "$dropped" -gt "$HEIGHT_DROP" ]; then
+        check_debounced "height-drop" fail \
+            "the node is at block $height, $dropped blocks below the $best this monitor has seen. A node that lost its database and resynced from the spec looks exactly like this: it answers every call and serves an empty tree. If this chain was replaced on purpose, delete $HEIGHT_FILE and update MONITOR_EXPECT_GENESIS" ""
+    else
+        check_debounced "height-drop" ok "" "the node is back up at block $height"
+    fi
+
+    stalled=$((now - changed_at))
+    if [ "$stalled" -gt "$STALE_SECS" ]; then
+        # Peers and syncing are reported with it rather than alerted on
+        # separately, because authoring pauses on a stale tip, on no peers or
+        # during an initial sync, and a stalled height with peers is a
+        # different problem from a stalled height with zero peers.
+        check_debounced "height-stall" fail \
+            "the node has been at block $height for ${stalled}s (peers $peers, syncing $syncing)" ""
+    else
+        check_debounced "height-stall" ok "" "the node is authoring again, at block $height"
+    fi
 else
-    check_debounced "height-stall" fail "chain_getHeader returned no header" ""
+    check_debounced "height-stall" fail "chain_getHeader returned no usable height" ""
 fi
 
 genesis="$(rpc_call chain_getBlockHash '[0]' | jq -r '.result // empty' 2>/dev/null)"

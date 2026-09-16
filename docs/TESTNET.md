@@ -697,7 +697,22 @@ loopback**, the origin certificate's expiry, and disk. Alerts are edge-triggered
 and debounced at two ticks, and the state lives outside `/tmp`, because a reboot
 wipes `/tmp` and every active alert then re-fires as new.
 
-Two things it does on purpose, both of which are the difference between a
+**The height it remembers.** A node that lost its database and resynced from
+the spec answers every call happily and serves both wallets an empty tree, and
+the height is the one reading that gives it away. The monitor keeps the best
+height it has seen in `$MONITOR_STATE_DIR/height` and alerts when the head
+falls more than `MONITOR_HEIGHT_DROP` (100 blocks) below it, so a floor no
+longer has to be raised by hand as the chain grows. It alerts as well when the
+head has not moved for `MONITOR_STALE_SECS` (1800 s, fifteen block intervals),
+with the peer count and `isSyncing` in the message, because a stall with peers
+is a different problem from a stall without them. `MONITOR_MIN_HEIGHT` is still
+there as an optional absolute floor, 1 by default, and it covers the one case
+the memory cannot: a monitor whose state directory is as new as the resynced
+node it is watching. **After replacing the chain on purpose, delete that state
+file and set the new `MONITOR_EXPECT_GENESIS`**, or the monitor alerts on the
+new chain until it passes the old one's height.
+
+Three things it does on purpose, all of which are the difference between a
 monitor and the appearance of one:
 
 - **It exits 2 while `MONITOR_DOMAIN` is still `<domain>`.** The env file is sourced before
