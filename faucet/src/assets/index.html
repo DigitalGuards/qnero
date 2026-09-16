@@ -46,26 +46,47 @@
       </p>
 
       <form id="form" class="panel" autocomplete="off">
-        <label class="label" for="address">Your address</label>
-        <textarea
-          id="address"
-          name="address"
-          class="input"
-          rows="3"
-          spellcheck="false"
-          autocapitalize="none"
-          autocorrect="off"
-          autocomplete="off"
-          enterkeyhint="send"
-          placeholder="qn1..."
-          required
-        ></textarea>
-        <p id="check" class="check" hidden></p>
-        <!--TURNSTILE_WIDGET-->
-        <button id="submit" class="button" type="submit">Request funds</button>
-      </form>
+        <span id="bar" class="panel__bar" hidden></span>
 
-      <p id="result" class="result" role="status" aria-live="polite"></p>
+        <div id="body">
+          <label class="label" for="address">Your address</label>
+          <textarea
+            id="address"
+            name="address"
+            class="input"
+            rows="3"
+            spellcheck="false"
+            autocapitalize="none"
+            autocorrect="off"
+            autocomplete="off"
+            enterkeyhint="send"
+            placeholder="qn1..."
+            required
+          ></textarea>
+          <p id="check" class="check" hidden></p>
+          <!--TURNSTILE_WIDGET-->
+          <button id="submit" class="button" type="submit">Request funds</button>
+
+          <div id="progress" class="progress" hidden>
+            <ol class="steps">
+              <li data-phase="queued">Queued</li>
+              <li data-phase="proving">Proving, about 10 s</li>
+              <li data-phase="waiting">Waiting for a block, up to 2 min</li>
+              <li data-phase="sent">Sent</li>
+            </ol>
+            <p class="progress__clock"><span id="elapsed">0:00</span> elapsed</p>
+            <p id="expect" class="progress__note"></p>
+          </div>
+        </div>
+
+        <div id="receipt" class="receipt" hidden>
+          <p id="receipt-line" class="receipt__line"></p>
+          <a class="button" href="https://wallet.qnero.io/" data-host="wallet">Open Qloak</a>
+          <button id="again" class="quiet" type="button">Claim for another address</button>
+        </div>
+
+        <p id="result" class="result" role="status" hidden></p>
+      </form>
 
       <section class="panel panel--quiet">
         <h2>What it does not do</h2>

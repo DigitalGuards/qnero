@@ -304,6 +304,7 @@ code {
 }
 
 .panel {
+  position: relative;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -407,10 +408,138 @@ code {
   margin-top: var(--space-3);
 }
 
+/* The line that changes, inside the box it is about. It sat outside the panel
+   with a reserved 1.55em and two 20 px margins, which left a 60 px hole in the
+   empty state where every other gap on the page is 20 px, and read as an
+   element that had failed to render. It is hidden until it has something to
+   say. */
 .result {
-  min-height: 1.55em;
+  margin: var(--space-3) 0 0;
   font-size: 13px;
+}
+
+/* The wait, where the wait is. A claim is roughly ten seconds of proving and
+   then up to one 120 s block, and the page used to repeat one sentence at it
+   every three seconds with no step, no elapsed time and nothing moving, which
+   is how a wait reads as a hang. */
+.progress {
+  margin-top: var(--space-3);
+}
+
+.steps {
+  list-style: none;
   margin: 0;
+  padding: 0;
+  font-size: 13px;
+  /* A step that has not happened is muted at full opacity rather than faded:
+     the same rule the wallet's phase list follows. */
+  color: var(--text-muted);
+}
+
+.steps li {
+  position: relative;
+  padding-left: 18px;
+}
+
+.steps li + li {
+  margin-top: var(--space-1);
+}
+
+.steps li[data-state='done']::before {
+  content: '\2713';
+  position: absolute;
+  left: 0;
+  color: var(--text-secondary);
+}
+
+.steps li[data-state='now'] {
+  color: var(--text-primary);
+}
+
+.steps li[data-state='now']::before {
+  content: '\203A';
+  position: absolute;
+  left: 2px;
+  color: var(--accent);
+}
+
+.progress__clock {
+  margin: var(--space-2) 0 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* The one sentence that says what is happening, and the only place on this
+   page where the zero-knowledge explanation appears: inside the wait it
+   explains, once, while the reader is in it. */
+.progress__note {
+  margin: var(--space-1) 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* One rule of amber across the top edge of the panel, covering the border. It
+   is the whole of the motion on this page, and under reduced motion it stops
+   and stays lit. */
+.panel__bar {
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  right: -1px;
+  height: 1px;
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+.panel__bar::after {
+  content: '';
+  display: block;
+  width: 40%;
+  height: 100%;
+  background: var(--accent-fill);
+  animation: sweep 1.6s linear infinite;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel__bar::after {
+    width: 100%;
+    animation: none;
+  }
+}
+
+/* What is left of the form once a claim has settled: one line, one primary,
+   and one quiet way back to the form. The button does not re-arm itself with
+   the address still in the field, which invited a second press the server was
+   always going to refuse. */
+.receipt__line {
+  margin: 0;
+  font-size: 13px;
+}
+
+.quiet {
+  display: block;
+  margin-top: var(--space-2);
+  /* 44 px tall, like everything else a finger has to find on this page. */
+  padding: 12px 0;
+  line-height: 20px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
 }
 
 .result--ok {
