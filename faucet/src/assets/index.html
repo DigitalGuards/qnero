@@ -6,20 +6,36 @@
     <title>Qnero testnet faucet</title>
     <meta
       name="description"
-      content="<!--DRIP_QNR--> QNR of Qnero testnet funds, sent to one qn1 address, once per address per <!--COOLDOWN-->."
+      content="<!--DRIP_QNR--> QNR of Qnero testnet funds, sent to one qn1 address, once per address per <!--COOLDOWN-->. Public testnet, pre-alpha and unaudited."
     />
     <meta name="referrer" content="no-referrer" />
+    <meta name="theme-color" content="#161416" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f4f2f0" media="(prefers-color-scheme: light)" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <aside class="status-strip" aria-label="Project status">
+      <div class="wrap">
+        <span class="dot" aria-hidden="true"></span>
+        <p><strong>Pre-alpha.</strong> Public testnet, may be reset. Unaudited.</p>
+      </div>
+    </aside>
+
     <header class="head">
       <div class="wrap">
-        <span class="wordmark"><span class="mark">Q</span>nero</span>
-        <span class="head__name">testnet faucet</span>
+        <a class="wordmark" href="https://qnero.io/" data-host=""><span class="mark">Q</span>nero</a>
+        <span class="head__name">faucet</span>
+        <nav class="head__links" aria-label="The other Qnero sites">
+          <a href="https://wallet.qnero.io/" data-host="wallet">Qloak</a>
+          <a href="https://explorer.qnero.io/" data-host="explorer">silQ Road</a>
+        </nav>
       </div>
     </header>
 
-    <main class="wrap main">
+    <main id="main" class="wrap main">
       <h1>Testnet funds</h1>
       <p class="lede">
         This sends <strong><!--DRIP_QNR--> QNR</strong> to one <code>qn1</code> address, once per

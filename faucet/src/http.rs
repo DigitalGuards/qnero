@@ -1,4 +1,4 @@
-//! The five routes, and the order a claim is refused in.
+//! The routes, and the order a claim is refused in.
 //!
 //! Nothing here touches the wallet. The worker thread owns it, and the only
 //! way to reach it is the bounded channel below, which is also the rate limit
@@ -42,6 +42,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/app.css", get(app_css))
         .route("/app.js", get(app_js))
+        .route("/favicon.svg", get(favicon))
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/drip", post(drip))
@@ -96,6 +97,18 @@ async fn app_js() -> Response {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         page::APP_JS,
+    )
+        .into_response()
+}
+
+/// No `Cache-Control`, exactly as `/app.css` and `/app.js` carry none: the
+/// three static files are served by one process that is restarted by every
+/// deploy, and a page that is a form has nothing to gain from a cache it would
+/// then have to bust.
+async fn favicon() -> Response {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
+        page::FAVICON,
     )
         .into_response()
 }

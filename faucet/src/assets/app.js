@@ -23,6 +23,24 @@ function say(text, kind) {
   result.className = kind ? `result result--${kind}` : 'result';
 }
 
+/*
+ * The links out of this page, pointed at the deployment serving it.
+ *
+ * The markup carries the project's own hosts, so a reader with no script still
+ * has somewhere to go, and this rewrites them when the page is served from
+ * some other `faucet.<domain>`. Reading the hostname off `location` is what
+ * keeps a second deployment from linking to the first one's wallet.
+ */
+function retargetLinks() {
+  const match = /^faucet\.(.+)$/.exec(location.hostname);
+  if (!match) return;
+  const domain = match[1];
+  for (const link of document.querySelectorAll('[data-host]')) {
+    const sub = link.dataset.host;
+    link.href = `https://${sub ? `${sub}.` : ''}${domain}/`;
+  }
+}
+
 function turnstileToken() {
   const field = document.querySelector('input[name="cf-turnstile-response"]');
   return field ? field.value : '';
@@ -109,4 +127,5 @@ form.addEventListener('submit', async (event) => {
   }
 });
 
+retargetLinks();
 refreshStatus();

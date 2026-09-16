@@ -27,6 +27,9 @@
   --mark: #e6a145;
   --ok: #7fc08a;
   --bad: #e88b7d;
+  /* The status strip's ground. The site tunes it against --bg-deep, and the
+     strip is the one band on this page that is not the page's own black. */
+  --band-accent-bg: #1f1a14;
 
   --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
 
@@ -62,9 +65,14 @@
     --text-muted: #6a6460;
 
     --accent: #8a4b06;
-    --mark: #9c5c05;
+    /* The Q is the identity and a logotype is exempt from the 4.5:1 text
+       rule, so the mark is the one amber in both themes. --accent is a link
+       colour and goes dark brown here, which is the correct value for text
+       and for a focus ring and the wrong one for the wordmark. */
+    --mark: #e6a145;
     --ok: #1f6b33;
     --bad: #9d3320;
+    --band-accent-bg: #f8f1e4;
 
     --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
 
@@ -94,40 +102,148 @@ body {
   padding: 0 var(--gutter);
 }
 
-.head {
-  background: var(--bg-body);
+/* One rule for the whole page, on every interactive element. The page used to
+   have two: a 2 px accent ring on the input and the browser's own 1 px default
+   on the button, which is rgb(16, 16, 16) on a dark panel and therefore no
+   ring at all. Nothing below re-states or removes this. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 10;
+  background: var(--accent-fill);
+  color: var(--accent-on-fill);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+.skip:focus {
+  left: var(--space-2);
+  top: var(--space-2);
+}
+
+/* The site's strip, at the site's measurements, saying the site's one fact.
+   It is the first thing on the page and a second line would push the form down
+   by a whole nav row, so the sentence is written to 50 characters and the rule
+   below holds it to one line: at 375 px the text box is 320 px after the dot
+   and the gap, and this sentence measures 270 px at 11 px. */
+.status-strip {
+  background: var(--band-accent-bg);
   border-bottom: 1px solid var(--border);
-  padding: var(--space-3) 0;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+}
+
+.status-strip .wrap {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-height: 24px;
+  padding-block: 3px;
+}
+
+.status-strip p {
+  margin: 0;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The 0.5 px tracking is 25 px across this sentence, which is the difference
+   between fitting and being cut to "Unaudite" on a 320 px screen. */
+@media (max-width: 360px) {
+  .status-strip {
+    letter-spacing: normal;
+  }
+}
+
+.status-strip .dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  /* A 7 px dot carries no text and owes no text contrast, so it takes the fill
+     token and stays the one identity amber in both themes. */
+  background: var(--accent-fill);
+  transform: translateY(-1px);
+}
+
+.status-strip strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* One 44 px row on --bg-deep, as on the site. It was a 57 px band on
+   --bg-body, lighter than the page it sat on and the only header in the family
+   that was, carrying a name and a section label and nothing a reader could
+   press. The row now reads left to right: whose site this is, which part of it,
+   and the two other parts. */
+.head {
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border);
 }
 
 .head .wrap {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--space-2);
 }
 
 /* The site header's wordmark, copied from site/css/site.css so the faucet
-   wears the same name: one word, Qnero, with the Q amber. --accent is a link
-   colour and goes dark brown in light, so the mark carries --mark instead and
-   stays amber in both themes. On the site the mark is an anchor home; here the
-   root of this host is this page, so it is a span and carries no link
-   affordance and no outbound target. */
+   wears the same name: one word, Qnero, with the Q amber. It is an anchor to
+   the project site, which is the answer to "what is this" and was not on the
+   page at all. */
 .wordmark {
   font-size: 1.05rem;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--text-bright);
+  text-decoration: none;
+  padding-block: 12px;
+  line-height: 20px;
 }
 
 .wordmark .mark {
   color: var(--mark);
 }
 
+/* The section, once. The word testnet lives in the h1 and nowhere in this
+   row, so the page's name is not set twice 68 px apart. */
 .head__name {
   font-size: 12px;
   letter-spacing: 0.5px;
   text-transform: uppercase;
   color: var(--text-secondary);
+  margin-right: auto;
+}
+
+/* The way out. A faucet's last question is where the money lands, and this
+   page answered it with no link of any kind. 13 px, quiet, and 44 px tall:
+   the padding is what makes the header row 44 and the links a target at the
+   same time. */
+.head__links {
+  display: flex;
+  gap: var(--space-3);
+  font-size: 13px;
+}
+
+.head__links a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  padding-block: 12px;
+  line-height: 20px;
+}
+
+.head__links a:hover {
+  color: var(--text-primary);
 }
 
 .main {
@@ -209,11 +325,6 @@ code {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
-}
-
-.input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 .button {

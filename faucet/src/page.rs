@@ -1,6 +1,6 @@
 //! The one page this server serves, in the project site's type.
 //!
-//! Three files, none of them inline, so the content policy the runbook writes
+//! Four files, none of them inline, so the content policy the runbook writes
 //! for `faucet.<domain>` can say `script-src 'self'` and mean it. The tokens
 //! are `site/css/site.css`'s, copied rather than linked because the faucet is
 //! its own origin and a cross-origin stylesheet would be one more request and
@@ -14,6 +14,11 @@ use crate::config::Config;
 
 pub const APP_CSS: &str = include_str!("assets/app.css");
 pub const APP_JS: &str = include_str!("assets/app.js");
+/// The project site's own icon, byte for byte (`site/img/favicon.svg`). The
+/// faucet is its own origin, so a browser asks this origin for `/favicon.svg`
+/// and got a 404: the amber Q beside every other tab in the family, and a
+/// default globe beside this one.
+pub const FAVICON: &str = include_str!("assets/favicon.svg");
 const INDEX: &str = include_str!("assets/index.html");
 
 /// The page, with the parts that depend on configuration filled in.

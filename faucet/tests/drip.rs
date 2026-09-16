@@ -594,13 +594,15 @@ async fn a_full_queue_is_a_503_and_not_a_wait() {
     assert_eq!(queued.len(), 2);
 }
 
-/// The page is served, and it is the page rather than a framework default.
+/// The page is served, with the three files beside it. The icon is one of
+/// them: a browser asks this origin for `/favicon.svg`, and a 404 there is the
+/// default globe beside a tab whose whole family shows an amber Q.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_page_and_its_two_files_are_served() {
     let dir = tempdir::TempDir::new("cfg");
     let harness = start(config_in(dir.path())).await;
 
-    for path in ["/", "/app.css", "/app.js"] {
+    for path in ["/", "/app.css", "/app.js", "/favicon.svg"] {
         let (status, _, _) = request("GET", format!("{}{path}", harness.base), None, None).await;
         assert_eq!(status, 200, "{path} was not served");
     }

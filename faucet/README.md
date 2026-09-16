@@ -100,7 +100,7 @@ pair. Both sides agreeing is the confirmation `docs/TESTNET.md` asks for.
 
 | Route | What it is |
 |---|---|
-| `GET /` | the page, with `/app.css` and `/app.js` beside it |
+| `GET /` | the page, with `/app.css`, `/app.js` and `/favicon.svg` beside it |
 | `GET /health` | 200 when the worker is up, the node answered inside six minutes and the balance is above the floor; 503 otherwise, with `ready`, `nodeFresh`, `funded`, `balanceQuanta`, `balanceQnr` and `chainHead` saying which. The worker's minute tick is what keeps that freshness true with no traffic |
 | `GET /status` | the deep check: `configured`, `captchaEnabled`, `dripQuanta`, `dripQnr`, `cooldownHours`, `balanceQuanta`, `balanceQnr`, `notes`, `queued`, `queueCapacity`, `paidQuanta`, `paidQnr`, `chainHead`, `address`, `genesis` |
 | `POST /drip` | `{"address": "qn1...", "turnstileToken": "..."}` → 202 `{"status":"queued","id":N}` |
