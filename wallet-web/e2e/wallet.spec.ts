@@ -218,14 +218,25 @@ async function createWallet(page: Page): Promise<string> {
   return address.trim();
 }
 
-async function syncUntil(page: Page, want: (unspent: bigint) => boolean): Promise<bigint> {
+/**
+ * Read the chain until the headline says what this test is waiting for.
+ *
+ * The wallet syncs itself on open and on each new head, so the press here is
+ * the one a reader would make rather than the only way a balance moves: the
+ * button is disabled while a pass runs, and Playwright waits for it the way a
+ * hand would.
+ *
+ * The headline is what this wallet holds, which is unspent plus the change of
+ * its own payment while that is still pending.
+ */
+async function syncUntil(page: Page, want: (held: bigint) => boolean): Promise<bigint> {
   for (let attempt = 0; attempt < 12; attempt += 1) {
     await page.getByTestId('tab-balance').click();
     await page.getByTestId('do-sync').click();
     await expect(page.getByTestId('do-sync')).toBeEnabled({ timeout: 120_000 });
-    const unspent = stepsFrom(await page.getByTestId('balance-unspent').innerText());
-    if (want(unspent)) {
-      return unspent;
+    const held = stepsFrom(await page.getByTestId('balance-held').innerText());
+    if (want(held)) {
+      return held;
     }
     // The funding settlement may not be in a block yet.
     await page.waitForTimeout(3000);
@@ -300,13 +311,13 @@ test.describe('the browser wallet against a dev chain', () => {
       'funding the browser wallet',
     ]);
 
-    const funded = await syncUntil(page, (unspent) => unspent >= FUNDING);
+    const funded = await syncUntil(page, (held) => held >= FUNDING);
     expect(funded).toBe(FUNDING);
     // The headline balance reads as one amount to anything that takes its
     // text rather than looks at it: a screen reader, a copy-paste, this
     // probe. Its symbol sits in a span of its own, so the space before it has
     // to be in the markup and cannot be the margin that spaces it on screen.
-    await expect(page.getByTestId('balance-unspent')).toHaveText(/^10\.00 QNR$/);
+    await expect(page.getByTestId('balance-held')).toHaveText(/^10\.00 QNR$/);
     await expect(page.getByTestId('notes-table')).toContainText('10.00 QNR');
 
     // And the amount column never wraps. The memo column takes every pixel of
@@ -379,7 +390,7 @@ test.describe('the browser wallet against a dev chain', () => {
 
     // And the browser sees its own change, with the input it spent gone.
     const change = FUNDING - PAYMENT - fee;
-    const after = await syncUntil(page, (unspent) => unspent === change);
+    const after = await syncUntil(page, (held) => held === change);
     expect(after).toBe(change);
     await expect(page.getByTestId('notes-table')).toContainText('spent');
 

@@ -49,7 +49,7 @@ function Amount({ steps, testId }: { steps: bigint; testId?: string }): ReactNod
       {pad !== '' && <span className="mm-balance-fraction">{pad}</span>}
       {/* A real space, because the margin is only an optical gap. Without it
           the element's text is "10.00QNR" to anything that reads it rather
-          than looks at it: a screen reader, a copy-paste, the `balance-unspent`
+          than looks at it: a screen reader, a copy-paste, the `balance-held`
           probe in the end-to-end suite. */}{' '}
       <span className="text-ui font-normal text-muted">QNR</span>
     </div>
@@ -218,8 +218,17 @@ export function BalanceScreen({
   return (
     <div className="space-y-3">
       <Panel>
-        <Amount steps={balances.unspent} testId="balance-unspent" />
-        <p className="mt-1 text-meta text-muted">unspent</p>
+        {/* What this wallet holds: unspent plus the change of its own
+            payment, which is written and waiting for the tree. The headline
+            read 0.00 QNR the moment after a payment while 6.92 was on its way
+            back, a 32 px zero over an 11 px correction, and "what do I have"
+            is the question this number answers. */}
+        <Amount steps={balances.unspent + balances.pending} testId="balance-held" />
+        <p className="mt-1 text-meta text-muted" data-testid="balance-line">
+          {balances.pending > 0n
+            ? `${formatStepsAsQnr(balances.pending)} pending`
+            : 'unspent'}
+        </p>
         {/* The track count follows the content. Fixed at two columns, the
             common case of one visible figure rendered a half-width row and put
             the number in the middle of the panel with the right half empty,
