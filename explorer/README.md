@@ -12,8 +12,10 @@ space, capital `R`.
 
 It is built for a chain where value is private by default, so it is as careful
 about what it declines to show as about what it shows. The "What this chain
-reveals" page states both halves in plain words, and the presentation rules
-behind it are in [What it will not do](#what-it-will-not-do).
+reveals" page states both halves in plain words, and it is where the reasoning
+lives: every other page links to it in one sentence and carries none of it. The
+presentation rules behind that are in
+[What it will not do](#what-it-will-not-do).
 
 ## Pages
 
@@ -21,8 +23,8 @@ behind it are in [What it will not do](#what-it-will-not-do).
 |---|---|
 | `#/` | Head and finalized height, rolling block time, difficulty and an estimated hash rate, the RandomX seed height and its next rotation, tree leaves and depth, the settled nullifier count, pool value, the newest block's coinbase, and a live list of recent blocks |
 | `#/blocks` | A paged list, newest first |
-| `#/block/<height or hash>` | Header fields, the coinbase note, every settlement in full, every shield entry, refused calls, and every extrinsic summarised |
-| `#/settlement/<extrinsic hash>` | One settlement: its slots, the anchor window, and what it publishes and does not |
+| `#/block/<height or hash>` | A summary of when, how many and how much, then the header fields, the coinbase note, every settlement in full, every shield entry, refused calls, and every extrinsic summarised |
+| `#/settlement/<extrinsic hash>` | One settlement: its slots and the anchor window |
 | `#/search?q=` | A height, a block hash, an extrinsic hash, a nullifier or a commitment |
 | `#/reveals` | What an observer learns per block, and what stays hidden |
 
@@ -213,6 +215,10 @@ Each of these is a decision.
   the runtime's filter refuses still enters a block and its arguments stay in
   the body forever. The block page names the call, says why the arguments are
   public, and leaves them where the chain put them.
+- **It keeps the warning colour for state.** `--notice` means "attend to this":
+  a read that failed, a state the node no longer keeps, a request that carries
+  the reader's own value to a node. Reasoning goes in prose, behind a
+  disclosure, or on the reveals page.
 - **It does not sort by ciphertext size or by anchor gap.** Both are documented
   open leaks. The size is shown per leaf, and a size other than 1792 bytes is
   marked, because that is worth knowing; neither is a sortable column.
@@ -339,8 +345,9 @@ used to render as an extrinsic which settled nothing; it opens genesis, an unkno
 settlement at a block this chain does not have, which are the pages a
 dereference used to take down and the one that used to fail into a bare error
 box with nothing to click;
-and at 400 px it checks that a wide table scrolls inside its wrapper
-and that the skip link lands in the page with the route intact. It stops the
+and at 400 px it checks that one wordmark and one chain name are on the screen,
+that the block tables keep the columns carrying the answer, and that the skip
+link lands in the page with the route intact. It stops the
 node by its pidfile and does not finish until the RPC port is free again.
 
 It needs release builds of both binaries and it needs port 9944 to itself:
@@ -363,10 +370,14 @@ src/chain/      the connection and the reads: metadata, blocks, state, leaves,
                 bounded searches
 src/app/        the hash router, the connection context, one async hook
 src/pages/      one file per route
-src/components/ the shared shell and the field, panel and notice primitives
+src/components/ the shared shell and the field, panel, disclosure and notice
+                primitives
 src/styles/     tokens.css is the family resemblance, app.css is this app
 tests/          vitest over src/lib and src/chain/config, with captured fixtures
-e2e/            the dev-node lifecycle and the Playwright smoke
+e2e/            the dev-node lifecycle, the Playwright smoke, and the script
+                that points a build at that node
+public/         config.json, and theme.js, which applies a stored theme before
+                the first paint
 scripts/        the fixture capture
 ```
 
