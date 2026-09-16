@@ -1,0 +1,6 @@
+User-agent: *
+Disallow: /health
+Disallow: /status
+Disallow: /drip
+
+Sitemap: https://faucet.qnero.io/sitemap.xml
