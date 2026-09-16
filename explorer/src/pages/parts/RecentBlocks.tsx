@@ -1,22 +1,46 @@
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 
 import { href } from '../../app/router';
 import type { BlockSummary } from '../../chain/blocks';
-import { formatCount, formatQnr } from '../../lib/units';
+import { formatAgo, formatCount, formatQnr } from '../../lib/units';
 import { Hash } from '../../components/ui';
 
-function age(timestampMs: number | null): ReactNode {
+/**
+ * The clock the ages are read against.
+ *
+ * The ages used to be computed at render and re-rendered only when the head
+ * changed, so on the blocks page for an older range, which never re-renders,
+ * "6 s ago" stayed "6 s ago" for as long as the tab was open. At a 12 s target
+ * block time a list of ages that does not move reads as a stalled chain.
+ *
+ * One interval for the whole list, and none at all for a reader who asked for
+ * less movement: for them the ages are the times they were when the page was
+ * read, which is a static state and still true of the blocks.
+ */
+function useSecond(): number {
+  const [reduced] = useState(
+    () => window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  );
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (reduced) {
+      return;
+    }
+    const id = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => {
+      clearInterval(id);
+    };
+  }, [reduced]);
+  return now;
+}
+
+function age(timestampMs: number | null, now: number): ReactNode {
   if (timestampMs === null || timestampMs === 0) {
     return <span className="dim">unread</span>;
   }
-  const seconds = Math.max(0, Math.round((Date.now() - timestampMs) / 1000));
-  if (seconds < 60) {
-    return `${seconds}s ago`;
-  }
-  if (seconds < 3600) {
-    return `${Math.round(seconds / 60)}m ago`;
-  }
-  return `${Math.round(seconds / 3600)}h ago`;
+  return formatAgo(timestampMs, now);
 }
 
 /**
@@ -42,6 +66,7 @@ function age(timestampMs: number | null): ReactNode {
  * trading a number for a label.
  */
 export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): ReactNode {
+  const now = useSecond();
   return (
     <div className="table-wrap">
       <table>
@@ -77,7 +102,7 @@ export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): R
                   {formatCount(block.header.number)}
                 </a>
               </td>
-              <td className="num">{age(block.timestampMs)}</td>
+              <td className="num">{age(block.timestampMs, now)}</td>
               <td className="col--wide">
                 {block.header.authorLabel === null ? (
                   <span className="dim">none</span>

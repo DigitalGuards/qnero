@@ -106,6 +106,15 @@ test('the home page reads the head, the work and the pool off the node', async (
   const rows = panel(page, 'Recent blocks').locator('tbody tr');
   await expect(rows.first()).toBeVisible();
   expect(await rows.count()).toBeGreaterThan(1);
+
+  // The row is the link, and the ages move. They used to be computed at render
+  // and re-rendered only when the head changed, so on a page for an older
+  // range they never moved at all, which reads as a stalled chain.
+  const age = rows.last().locator('td').nth(1);
+  const first = await age.innerText();
+  await expect.poll(async () => age.innerText(), { timeout: 15_000, intervals: [1000] }).not.toBe(
+    first,
+  );
 });
 
 test('the shield block names the payer, the amount and the leaf together', async ({ page }) => {
