@@ -50,7 +50,8 @@ export function ThemeToggle(): ReactNode {
   const Icon = theme === 'system' ? Monitor : theme === 'dark' ? Moon : Sun;
   return (
     <Button
-      size="small"
+      // The control height rather than the small one: this lives on the
+      // settings screen now, where every other control is a thumb's target.
       aria-label={`Theme: ${theme}. Switch to ${next}.`}
       onClick={() => {
         setTheme(next);

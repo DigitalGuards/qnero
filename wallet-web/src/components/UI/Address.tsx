@@ -75,7 +75,8 @@ export function Address({
       {expandable && (
         <Button
           variant="quiet"
-          className="mt-1"
+          // The label is 11 px and the target around it is a thumb's.
+          className="mt-1 min-h-11 sm:min-h-0"
           data-testid="show-whole-address"
           onClick={() => {
             setWhole(!whole);
