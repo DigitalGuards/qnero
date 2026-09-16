@@ -231,10 +231,10 @@
               <h3>One runtime JSON</h3>
               <p>
                 <code>config.json</code> sits beside the built assets and is read at startup, so one
-                build serves a devnet and a testnet. Nothing about a chain is compiled in. The
-                endpoint must be <code>ws://</code> or <code>wss://</code>, because the live head is
-                a subscription. A page served over HTTPS cannot open a plain WebSocket, so put the
-                node behind the same TLS the site uses.
+                build serves the testnet and a local chain. Nothing about a chain is compiled in.
+                The endpoint must be <code>ws://</code> or <code>wss://</code>, because the live
+                head is a subscription. A page served over HTTPS cannot open a plain WebSocket, so
+                put the node behind the same TLS the site uses.
               </p>
               <p>
                 The defaults: 12 recent blocks in the home list and in the rolling block-time

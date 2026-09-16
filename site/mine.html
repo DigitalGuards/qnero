@@ -105,7 +105,7 @@
               <h3>The node's own miner</h3>
               <p>
                 Every authoring node runs an in-process RandomX miner in light mode, one thread by
-                default, so a devnet produces blocks with no rig attached.
+                default, so a local chain produces blocks with no rig attached.
               </p>
               <p>
                 <code>--mining-threads&nbsp;N</code> sets the thread count and <code>0</code> turns
@@ -286,7 +286,7 @@ export QNERO_MINER_KEY=$(
       <section class="band band--raised" id="measured">
         <div class="wrap">
           <span class="band__label">05 / Measured</span>
-          <h2>The devnet figures, and what they are not</h2>
+          <h2>The figures, and what they are not</h2>
           <p class="band__intro">
             One workstation, 20 cores, WSL2, on a <code>--dev --tmp</code> chain at the 12-second
             dev preset. None of these is a network hash rate, because no network exists.
@@ -326,7 +326,7 @@ export QNERO_MINER_KEY=$(
           <div class="panel status-panel">
             <span class="panel__label">The runs themselves</span>
             <p>
-              <strong>A stock xmrig mined a local devnet.</strong> That is the whole of the
+              <strong>A stock xmrig mined a local chain.</strong> That is the whole of the
               evidence, six rig sessions on one workstation on the 12-second dev preset. The
               strongest: a rig mined 190 of the 199 blocks in its own two-minute window, one login,
               no reconnects, 478 shares accepted and none rejected, the chain reaching block 211.
@@ -340,8 +340,8 @@ export QNERO_MINER_KEY=$(
           <p class="table-note">
             The node is more than an order of magnitude slower per thread than the rig, 32.9 H/s
             against about 450, and that is the intended shape: the in-process miner exists so a
-            devnet produces blocks with no rig attached. Read the 32.9 H/s figure as one thread of
-            light-mode RandomX on one box. Read the 900 H/s figure as one rig on one box, derived
+            local chain produces blocks with no rig attached. Read the 32.9 H/s figure as one
+            thread of light-mode RandomX on one box. Read the 900 H/s figure as one rig on one box, derived
             from that one session's accepted shares and cross-checked against the rig's own speed
             line. Neither says anything about a network.
           </p>
