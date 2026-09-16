@@ -75,19 +75,11 @@
             software for.
           </p>
           <div class="panel status-panel">
-            <span class="panel__label">What has actually happened</span>
+            <span class="panel__label">Read this first</span>
             <p>
-              <strong>A stock xmrig mined a local devnet.</strong> That is the whole of the
-              evidence, six rig sessions on one workstation on the 12-second dev preset. The
-              strongest: a rig mined 190 of the 199 blocks in its own two-minute window, one login,
-              no reconnects, 478 shares accepted and none rejected, the chain reaching block 211.
-              Three later sessions sealed 128, 215 and 189 blocks from 334, 508 and 455 accepted
-              shares. The first session reached 84 blocks in 4 minutes 2 seconds with only 10 of
-              them mined by the rig, which is a number to read with its cause: the node dropped 17
-              of the rig's 65 block-worthy shares as superseded seals, a defect fixed since, and at
-              that difficulty almost any nonce was a block for the in-process miner too. There is a
-              public testnet now, at <code>node.qnero.io:3333</code>, and there is still no pool and
-              nothing to earn: testnet QNR is worth nothing, and the chain may be reset.
+              <strong>Mining is solo and there is no pool.</strong> Testnet QNR is worth nothing,
+              the chain may be reset without notice, and the reward goes to the key the node was
+              started with. <a href="#measured">What a rig has actually done</a>, in figures.
             </p>
           </div>
         </div>
@@ -278,7 +270,7 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
         </div>
       </section>
 
-      <section class="band band--raised">
+      <section class="band band--raised" id="measured">
         <div class="wrap">
           <span class="band__label">05 / Measured</span>
           <h2>The devnet figures, and what they are not</h2>
@@ -317,6 +309,20 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
               <span class="figure__value">84 blocks</span>
               <span class="figure__note">4 minutes 2 seconds: 74 mined in process, 10 by xmrig. Difficulty 128 at block 1, 189 at block 66</span>
             </div>
+          </div>
+          <div class="panel status-panel">
+            <span class="panel__label">The runs themselves</span>
+            <p>
+              <strong>A stock xmrig mined a local devnet.</strong> That is the whole of the
+              evidence, six rig sessions on one workstation on the 12-second dev preset. The
+              strongest: a rig mined 190 of the 199 blocks in its own two-minute window, one login,
+              no reconnects, 478 shares accepted and none rejected, the chain reaching block 211.
+              Three later sessions sealed 128, 215 and 189 blocks from 334, 508 and 455 accepted
+              shares. The first session reached 84 blocks in 4 minutes 2 seconds with only 10 of
+              them mined by the rig, which is a number to read with its cause: the node dropped 17
+              of the rig's 65 block-worthy shares as superseded seals, a defect fixed since, and at
+              that difficulty almost any nonce was a block for the in-process miner too.
+            </p>
           </div>
           <p class="table-note">
             The node is more than an order of magnitude slower per thread than the rig, 32.9 H/s

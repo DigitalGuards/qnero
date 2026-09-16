@@ -708,6 +708,17 @@ h1 .mark {
   color: var(--text-primary);
 }
 
+/* Eight rows are 488 px of the index hero and they pushed the first band to
+   y 1509 at 375 px. Four of them answer the question a first-time reader
+   actually has; the other four are repeated further down the same page, in
+   band 03's prose, in the comparison table and in the footer's licence line,
+   so a phone loses nothing by not carrying them twice. */
+@media (max-width: 640px) {
+  .hero-facts dl > div:nth-child(n + 5) {
+    display: none;
+  }
+}
+
 /* Balanced for the reason the lede under it is: the h1 is a proposition in a
    sentence, and an unbalanced one leaves a single word on its last line. */
 .hero h1 {
@@ -1123,6 +1134,10 @@ tbody tr:hover td.col-self {
   .figures--3 {
     grid-template-columns: repeat(3, 1fr);
   }
+}
+
+.figures + .panel {
+  margin-top: var(--space-4);
 }
 
 .figure__label {
