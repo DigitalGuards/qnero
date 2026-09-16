@@ -111,6 +111,34 @@ before running.
 
 Run a single stage with an argument: `deploy-testnet.sh wallet`.
 
+**Deploying the faucet on its own.** `node` builds, copies and restarts both
+binaries, so a change to the faucet page used to arrive by restarting the
+chain. There is a stage for the faucet alone, and it is the one to use for
+anything that is only the faucet:
+
+```bash
+QNERO_HOST=<user>@<host> QNERO_DOMAIN=<domain> ./scripts/deploy-testnet.sh faucet
+```
+
+It builds `qnero-faucet` here, keeps the binary it is about to replace as
+`/usr/local/bin/qnero-faucet.previous`, installs the new one and restarts
+`qnero-faucet`. Nothing else is touched: the chain does not miss a block and no
+peer is dropped.
+
+`faucet.<domain>` answers **502 for about 20 seconds** across that restart.
+The worker opens the wallet, asks the node for runtime metadata and builds the
+proving circuits before the listener binds, which is deliberate: a faucet that
+cannot pay fails at startup instead of serving a page and refusing every claim.
+Wait for `/health` rather than watching the page:
+
+```bash
+until curl -sf -m 4 https://faucet.<domain>/health > /dev/null; do sleep 2; done
+curl -sS https://faucet.<domain>/status | jq '{chainHead, balanceQnr, queued}'
+```
+
+The stage is not in the default run, because `node` already installs the same
+binary and running both would build and restart it twice.
+
 ## 4. The chain spec
 
 The committed raw spec is `chain/node/chain-specs/qnero-testnet.json`. It is
@@ -703,16 +731,17 @@ files, so the node and the faucet can both be dead while every root returns 200.
 
 ## 12. Rollback
 
-**A bad binary.** The previous one is already kept. The `node` stage copies
-whatever it is about to replace to `<name>.previous` before it installs, for
-both binaries, and prints where it put them, so a rollback is one install and a
-restart with nothing to have remembered beforehand:
+**A bad binary.** The previous one is already kept. The `node` and `faucet`
+stages copy whatever they are about to replace to `<name>.previous` before they
+install, and print where they put it, so a rollback is one install and a restart
+with nothing to have remembered beforehand:
 
 ```bash
 sudo install -m 0755 /usr/local/bin/qnero-node.previous /usr/local/bin/qnero-node
 sudo systemctl restart qnero-node
 
-# The faucet is replaced by the same stage and rolls back the same way.
+# The faucet keeps its own .previous, written by whichever stage installed it,
+# the `node` stage or the `faucet` stage, and rolls back the same way.
 sudo install -m 0755 /usr/local/bin/qnero-faucet.previous /usr/local/bin/qnero-faucet
 sudo systemctl restart qnero-faucet
 ```

@@ -13,6 +13,18 @@
 #   explorer  build silQ Road, rsync explorer/dist/
 #   config    write the two runtime config.json files
 #
+# And one stage that is never run unless it is named:
+#
+#   faucet    build qnero-faucet, copy it, restart qnero-faucet and nothing else
+#
+# The faucet page is the surface that changes most often and the chain is the
+# thing least worth restarting, so a faucet edit had the worst deploy in this
+# repository: the node stage was the only path to the binary and it restarts
+# the chain mid-block to deliver it. `faucet` is that path without the chain.
+# It stays
+# out of the default run because `node` already builds and installs the same
+# binary, and running both would build it twice and restart it twice.
+#
 # **Nothing is built on the host.** The build wants cmake and a C++17 compiler
 # for randomx-rs, libclang for the rocksdb bindings, and a pallet build script
 # that generates the circuit artifact set before the pallet compiles; on a
@@ -39,6 +51,16 @@ rpc_endpoint="wss://rpc.$domain"
 stages=("$@")
 if [ ${#stages[@]} -eq 0 ]; then
   stages=(node spec site wallet explorer config)
+fi
+
+# Release builds run niced, and on at most eight of this workstation's cores,
+# so a deploy never takes the machine away from whoever is using it. taskset is
+# Linux only and the mask is clamped to the cores that actually exist, because
+# asking for 0-7 on a four-core machine fails the whole build.
+build_nice=(nice -n 19)
+if command -v taskset > /dev/null 2>&1; then
+  cores="$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 1)"
+  build_nice=(taskset -c "0-$((cores > 8 ? 7 : cores - 1))" nice -n 19)
 fi
 
 has_stage() {
@@ -106,13 +128,13 @@ if has_stage node; then
     # is a stub, and every genesis it exports and every block it executes is
     # that stub's.
     LIBCLANG_PATH="${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}" \
-      nice -n 19 cargo build -j "$jobs" --release -p qnero-node
+      "${build_nice[@]}" cargo build -j "$jobs" --release -p qnero-node
   )
 
   step "building qnero-faucet"
   (
     cd "$here"
-    nice -n 19 cargo build -j 2 --release -p qnero-faucet
+    "${build_nice[@]}" cargo build -j 2 --release -p qnero-faucet
   )
 
   step "copying the binaries"
@@ -141,6 +163,37 @@ if has_stage node; then
     && sleep 5 \
     && sudo systemctl restart qnero-faucet \
     && systemctl is-active qnero-node qnero-faucet'
+fi
+
+# The faucet alone. Same build, same keep-the-previous-binary rule, and one
+# unit restarted: the chain is not touched, no block is missed and no peer is
+# dropped for a change to a page.
+if has_stage faucet; then
+  step "building qnero-faucet"
+  (
+    cd "$here"
+    "${build_nice[@]}" cargo build -j 2 --release -p qnero-faucet
+  )
+
+  step "copying the faucet binary"
+  scp "$here/target/release/qnero-faucet" "$host:/tmp/qnero-faucet"
+  ssh "$host" 'if sudo test -x /usr/local/bin/qnero-faucet; then \
+      sudo cp -a /usr/local/bin/qnero-faucet /usr/local/bin/qnero-faucet.previous; \
+      echo "kept /usr/local/bin/qnero-faucet.previous"; \
+    fi \
+    && sudo install -m 0755 /tmp/qnero-faucet /usr/local/bin/qnero-faucet \
+    && rm -f /tmp/qnero-faucet \
+    && sudo systemctl restart qnero-faucet \
+    && systemctl is-active qnero-faucet'
+
+  cat <<'MSG'
+
+The faucet answers 502 for about 20 s after this restart. Its worker opens the
+wallet, asks the node for runtime metadata and builds the proving circuits
+before the listener binds, on purpose: a faucet that cannot pay should fail at
+startup rather than serve a page and refuse every claim. Nothing else was
+restarted, and the chain did not miss a block.
+MSG
 fi
 
 if has_stage spec; then
