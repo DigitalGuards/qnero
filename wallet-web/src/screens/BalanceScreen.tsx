@@ -205,6 +205,8 @@ export function BalanceScreen({
 }): ReactNode {
   const elapsed = useElapsed(syncing);
   const conflicted = notes.filter((row) => row.conflictMembers > 1);
+  // Newest first, once: the rows and the table are two renderings of one list.
+  const ordered = [...notes].sort((a, b) => b.note.leafIndex - a.note.leafIndex);
   // Three of these four figures are about something having gone wrong, and a
   // figure that is only interesting when it is not zero is noise when it is.
   // A new wallet showed four dotted-underlined terms over four zeros on a
@@ -353,68 +355,109 @@ export function BalanceScreen({
             </div>
           </div>
         ) : (
-          <TableScroll>
-            <Table testId="notes-table">
-              <thead>
-                <tr>
-                  <th>Entry</th>
-                  <th>Block</th>
-                  <th className="text-right">Amount</th>
-                  <th>
-                    <Tooltip
-                      label="A shield this wallet made is labelled by matching the chain's own
-                        entry counter, and the match is looked for over the newest 64 entries. On a
-                        chain with more shields than that, one restored from its seed reads as a
-                        transfer. The label moves no value and nothing selects on it."
-                    >
-                      <button
-                        type="button"
-                        className="cursor-help text-left uppercase tracking-label underline
-                          decoration-dotted underline-offset-2"
-                      >
-                        Origin
-                      </button>
-                    </Tooltip>
-                  </th>
-                  <th>State</th>
-                  <th className="w-full">Memo</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[...notes]
-                  .sort((a, b) => b.note.leafIndex - a.note.leafIndex)
-                  .map((row) => (
-                    <tr key={row.note.commitment}>
-                      <Num>{row.note.leafIndex}</Num>
-                      <Num>{row.note.blockNumber ?? '-'}</Num>
-                      <Num>{formatStepsAsQnr(BigInt(row.note.value))}</Num>
-                      <td>
-                        {row.note.origin}
-                        {row.conflictMembers > 1 && (
-                          <span className="text-muted"> conflict, {row.conflictMembers} members</span>
-                        )}
-                      </td>
-                      <td>
+          <>
+            {/* A transfer on a phone is an amount, a state and a memo. The
+                six-column table put two chain counters in front of the amount
+                and pushed the memo, the only human-readable thing on a
+                payment, 115 px off the right edge of a 341 px scroller. */}
+            <ul className="list-none p-0 md:hidden" data-testid="notes-rows">
+              {ordered.map((row) => (
+                  <li
+                    key={row.note.commitment}
+                    className="border-t border-edge px-4 py-2 first:border-t-0"
+                  >
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="mm-memo min-w-0 text-body text-ink">
+                        {row.secret === null
+                          ? 'locked'
+                          : row.secret.memo === ''
+                            ? ''
+                            : renderMemo(row.secret.memo)}
+                      </span>
+                      <span className="shrink-0 whitespace-nowrap font-mono text-body tabular-nums text-ink">
+                        {formatStepsAsQnr(BigInt(row.note.value))}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex items-baseline justify-between gap-2 text-meta text-muted">
+                      <span className="flex items-baseline gap-2">
                         <Pill
                           state={
                             !row.note.onChain ? 'off chain' : row.note.spent ? 'spent' : 'unspent'
                           }
                         />
-                      </td>
-                      <td>
-                        {row.secret === null ? (
-                          <span className="text-muted">locked</span>
-                        ) : row.secret.memo === '' ? (
-                          <span className="text-muted">-</span>
-                        ) : (
-                          <span className="mm-memo">{renderMemo(row.secret.memo)}</span>
-                        )}
-                      </td>
-                    </tr>
+                        {row.note.origin}
+                        {row.conflictMembers > 1 && ` conflict, ${row.conflictMembers} members`}
+                      </span>
+                      <span className="whitespace-nowrap">
+                        {row.note.blockNumber === null
+                          ? 'no block'
+                          : `block ${formatCount(row.note.blockNumber)}`}
+                      </span>
+                    </div>
+                  </li>
+              ))}
+            </ul>
+            <div className="hidden md:block">
+            <TableScroll>
+              <Table testId="notes-table">
+                <thead>
+                  <tr>
+                    <th>Block</th>
+                    <th className="text-right">Amount</th>
+                    <th>
+                      <Tooltip
+                        label="A shield this wallet made is labelled by matching the chain's own
+                          entry counter, and the match is looked for over the newest 64 entries. On a
+                          chain with more shields than that, one restored from its seed reads as a
+                          transfer. The label moves no value and nothing selects on it."
+                      >
+                        <button
+                          type="button"
+                          className="cursor-help text-left uppercase tracking-label underline
+                            decoration-dotted underline-offset-2"
+                        >
+                          Origin
+                        </button>
+                      </Tooltip>
+                    </th>
+                    <th>State</th>
+                    <th className="w-full">Memo</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ordered.map((row) => (
+                      <tr key={row.note.commitment}>
+                        <Num>{row.note.blockNumber ?? '-'}</Num>
+                        <Num>{formatStepsAsQnr(BigInt(row.note.value))}</Num>
+                        <td>
+                          {row.note.origin}
+                          {row.conflictMembers > 1 && (
+                            <span className="text-muted"> conflict, {row.conflictMembers} members</span>
+                          )}
+                        </td>
+                        <td>
+                          <Pill
+                            state={
+                              !row.note.onChain ? 'off chain' : row.note.spent ? 'spent' : 'unspent'
+                            }
+                          />
+                        </td>
+                        <td>
+                          {row.secret === null ? (
+                            <span className="text-muted">locked</span>
+                          ) : row.secret.memo === '' ? (
+                            <span className="text-muted">-</span>
+                          ) : (
+                            <span className="mm-memo">{renderMemo(row.secret.memo)}</span>
+                          )}
+                        </td>
+                      </tr>
                   ))}
-              </tbody>
-            </Table>
-          </TableScroll>
+                </tbody>
+              </Table>
+            </TableScroll>
+            </div>
+          </>
         )}
       </Panel>
 
@@ -465,17 +508,17 @@ export function BalanceScreen({
                   <tr>
                     <td>head</td>
                     <Num>{formatCount(report.head)}</Num>
-                    <td>leaves read</td>
+                    <td>entries read</td>
                     <Num>{formatCount(report.leavesScanned)}</Num>
                   </tr>
                   <tr>
                     <td>transfers received</td>
                     <Num>{formatCount(report.received)}</Num>
-                    <td>settled spend markers</td>
+                    <td>spends the chain settled</td>
                     <Num>{formatCount(report.nullifierSetSize)}</Num>
                   </tr>
                   <tr>
-                    <td>coinbase leaves</td>
+                    <td>mining rewards</td>
                     <Num>{formatCount(report.coinbaseLeaves)}</Num>
                     <td>of them this wallet&apos;s</td>
                     <Num>{formatCount(report.coinbaseReceived)}</Num>
