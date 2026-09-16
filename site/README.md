@@ -93,6 +93,18 @@ nav, and the footer. A change to any of the three is a change to all eight
 files. That is the price of having no build step, and it is deliberate: what is
 in the repository is exactly what is served.
 
+The shell has a fixed shape below 641 px: a 24 px status strip, a 44 px row
+holding the wordmark and a 32 px theme control, and a 44 px row holding six
+links. The nav carries roles, `Wallet` and `Explorer`, because the reader meets
+the names Qloak and silQ Road on those pages; `GitHub` is hidden at that width
+and reached through the footer. The six labels measure 312 px in the 335 px
+column at 375 px and 277 px in the 280 px column at 320 px, where the gap
+tightens to 8 px, so a seventh link or a longer label wraps the row and has to
+be paid for somewhere else.
+
+The wordmark renders once per page. No h1 repeats it: the index h1 is the
+proposition, and every other h1 names its page.
+
 `css/site.css` starts with the token block. The values match
 `explorer/src/styles/tokens.css` and `wallet-web/src/styles/tokens.css`, so the
 site, silQ Road and Qloak read as one project. Dark is the default. The light
@@ -142,14 +154,24 @@ exist, and resolves every absolute `qnero.io` URL in a meta tag against disk.
 `check-layout.mjs` measures the rendered pages in a headless browser at 320,
 400 and 1280 px and fails on two things a stylesheet comment cannot enforce: a
 page that scrolls sideways, and an inline `code` chip wider than the box holding
-it. It needs the site served on port 8931, which is what the line above it does,
+it. What it does not measure, and what a change to the shell has to be checked
+against by hand, is the phone header: one wordmark, one nav row, 116 px of
+chrome above the first content edge, and the page's primary button inside the
+first screen. It needs the site served on port 8931, which is what the line above it does,
 and it resolves Playwright from `explorer/node_modules` the way
 `tools/make-images.mjs` does.
 
 **The testnet hosts are linked.** `wallet.qnero.io`, `explorer.qnero.io` and
-`faucet.qnero.io` are anchors, and `wss://rpc.qnero.io` is a `code` chip,
-because a WebSocket endpoint is an address a reader copies rather than a
-control a browser can follow. Each carries "testnet, live" beside it.
+`faucet.qnero.io` are anchors, and `wss://rpc.qnero.io` and
+`node.qnero.io:3333` are `code` chips, because an endpoint a rig or a wallet is
+configured with is an address a reader copies rather than a control a browser
+can follow. Each carries its state beside it in a `.tag`.
+
+Every page that has a live thing to open leads with one amber primary that
+opens it, and one ghost `Source` after it: index "Open the wallet", wallet
+"Open wallet.qnero.io", explorer "Open explorer.qnero.io", mine "Get testnet
+QNR". `.hostline` is the mono caption under that button and is reserved for
+hosts; nothing else takes it.
 
 They were plain unlinked hostnames until the testnet was deployed, marked with
 `data-m11-host` so that the checker could fail any `*.qnero.io` occurrence

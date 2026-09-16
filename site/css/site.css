@@ -413,6 +413,15 @@ svg {
   text-overflow: ellipsis;
 }
 
+/* The 0.5 px tracking is 25 px across this sentence, which is the difference
+   between fitting and being cut to "Unaudite" on a 320 px screen. A status
+   disclosure that truncates is worse than one set a little tighter. */
+@media (max-width: 360px) {
+  .status-strip {
+    letter-spacing: normal;
+  }
+}
+
 .status-strip .dot {
   flex: none;
   width: 7px;
