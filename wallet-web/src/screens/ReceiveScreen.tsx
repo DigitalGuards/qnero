@@ -1,12 +1,22 @@
 /**
- * Receive Qnero: the address, its code, and the miner key behind a control.
+ * Receive Qnero: the address, then its code behind a control, then the miner
+ * key behind another.
  *
  * The address is long. It carries an ML-KEM-1024 encapsulation key, which is
- * 1568 bytes of the roughly 2600 characters, so it does not shorten and there
- * is no second short form: an integrated address or a subaddress would be
- * another thing to get wrong. The code is what a payment is made from, so the
- * code is first and the address is collapsed to three lines under it, whole on
- * request and selectable in one gesture either way.
+ * 1568 bytes of its 2571 characters, so it does not shorten and there is no
+ * second short form: an integrated address or a subaddress would be another
+ * thing to get wrong. That length is also what the code is made of. 1568
+ * uniformly random bytes do not compress, so the symbol is version 35 whatever
+ * encoding or correction level is chosen, and on a laptop it is a wall of
+ * modules too fine for a phone held at arm's length. Nothing in this wallet
+ * scans one either.
+ *
+ * So the screen leads with the text and the ways of handing it over: copy, and
+ * the system share sheet where the device has one. The code is behind a
+ * disclosure, remembered for as long as this tab is open, for the reader who
+ * wants to try it anyway. The shorter address that would make the code small
+ * is a key registry on chain and a protocol change, and it is planned
+ * separately.
  *
  * How transparent value gets into the pool is a command-line step and it lives
  * in `docs/WALLET.md`. What a reader of this screen needs on the public
@@ -18,8 +28,8 @@
  * runs is configured with. An address is meant to be handed out; this is not.
  */
 
-import { Eye } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { Eye, QrCode, Share2 } from 'lucide-react';
+import { useState, type ReactNode } from 'react';
 
 import { Address } from '../components/UI/Address';
 import { Button } from '../components/UI/Button';
@@ -28,6 +38,38 @@ import { Dialog, DialogContent, DialogTrigger } from '../components/UI/Dialog';
 import { Notice } from '../components/UI/Notice';
 import { Panel } from '../components/UI/Panel';
 import { Qr } from '../components/UI/Qr';
+
+/**
+ * Whether the code was open, for this tab and no longer.
+ *
+ * `sessionStorage` rather than `localStorage`: a reader who opened the code
+ * once to try a scanner should not meet it on every visit from now on, and a
+ * reader who is mid-task should not lose it by switching tabs and back. Both
+ * accessors throw in a private window with site data blocked, which is not a
+ * failure: the code is then closed on each open, which is the default anyway.
+ */
+const QR_KEY = 'qnero-wallet-receive-qr';
+
+function readQrOpen(): boolean {
+  try {
+    return sessionStorage.getItem(QR_KEY) === 'open';
+  } catch {
+    return false;
+  }
+}
+
+function writeQrOpen(open: boolean): void {
+  try {
+    sessionStorage.setItem(QR_KEY, open ? 'open' : 'closed');
+  } catch {
+    // A private window, or site data blocked.
+  }
+}
+
+/** Whether this device has a share sheet to hand the address to. */
+function hasShareSheet(): boolean {
+  return typeof navigator.share === 'function';
+}
 
 export function ReceiveScreen({
   address,
@@ -40,26 +82,72 @@ export function ReceiveScreen({
   onRevealMinerKey: () => void;
   locked: boolean;
 }): ReactNode {
+  const [qrOpen, setQrOpen] = useState(readQrOpen);
+  // Read once per mount. A share sheet does not appear part way through a
+  // visit, and a control that comes and goes between renders is worse than one
+  // that is decided when the screen opens.
+  const [canShare] = useState(hasShareSheet);
+
   return (
     <div className="space-y-3">
       <Panel title="Receive Qnero">
-        {/* The code first. A receive screen owes a phone the thing a payment
-            is made from, and this one opened with a forty-four word paragraph
-            and ten lines of an address, which put the code at y 517 of a
-            667 px screen. */}
-        <Qr value={address} uppercase caption="the same address, uppercase inside the code" />
+        {/* The text first, whole and selectable in one gesture. It is what a
+            payment is actually made from here: the code is 2571 characters of
+            incompressible key and nothing in this wallet reads one. */}
+        <Address value={address} testId="receive-address" />
         <div className="mt-3 flex flex-wrap gap-2">
           <CopyButton value={address} label="Copy address" testId="copy-address" />
+          {canShare && (
+            <Button
+              data-testid="share-address"
+              onClick={() => {
+                // The sheet rejects when it is dismissed, which is a reader
+                // changing their mind rather than an error to report.
+                navigator.share({ text: address }).then(
+                  () => undefined,
+                  () => undefined,
+                );
+              }}
+            >
+              <Share2 className="size-3.5" aria-hidden />
+              Share address
+            </Button>
+          )}
           <Button asChild data-testid="receive-faucet">
             <a href="https://faucet.qnero.io" target="_blank" rel="noreferrer">
               Get test QNR from the faucet
             </a>
           </Button>
         </div>
-        <Address value={address} testId="receive-address" expandable />
         <p className="mm-note text-muted">
           Payments to this address are private; the chain shows nothing about them.
         </p>
+
+        <div className="mt-3">
+          <Button
+            data-testid="toggle-qr"
+            aria-expanded={qrOpen}
+            aria-controls="receive-qr"
+            onClick={() => {
+              const next = !qrOpen;
+              setQrOpen(next);
+              writeQrOpen(next);
+            }}
+          >
+            <QrCode className="size-3.5" aria-hidden />
+            {qrOpen ? 'Hide QR code' : 'Show QR code'}
+          </Button>
+          {qrOpen && (
+            <div id="receive-qr" className="mt-3">
+              <Qr
+                value={address}
+                uppercase
+                alt="this wallet's address as a QR code, uppercase inside the code"
+                caption="A Qnero address is 2571 characters, so its code is large; copying the text is the reliable way to hand it over."
+              />
+            </div>
+          )}
+        </div>
       </Panel>
 
       <Panel title="Miner key">

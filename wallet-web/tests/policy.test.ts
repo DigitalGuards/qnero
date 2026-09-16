@@ -609,3 +609,46 @@ describe('the words a wallet screen spends', () => {
     expect(offences).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The receive screen, which leads with the address rather than with its code.
+// ---------------------------------------------------------------------------
+
+/**
+ * A Qnero address is 2571 characters, and 1568 of its bytes are an ML-KEM-1024
+ * encapsulation key: uniformly random, so nothing compresses it. The symbol is
+ * version 35 at any correction level, too fine for a phone held up to a
+ * laptop, and nothing in this wallet scans one. So the screen leads with the
+ * text and the ways of handing it over, and the code waits behind a control.
+ *
+ * Nothing here renders a browser. What is asserted is that the code is written
+ * inside the disclosure rather than beside it, that the level is the one with
+ * the fewest modules this payload has, and that the share control is asked for
+ * before it is drawn. The e2e is what presses the control.
+ */
+describe('the receive screen', () => {
+  const screen = readFileSync(
+    new URL('../src/screens/ReceiveScreen.tsx', import.meta.url),
+    'utf8',
+  );
+  const code = readFileSync(new URL('../src/components/UI/Qr.tsx', import.meta.url), 'utf8');
+
+  it('draws the code at the level with the fewest modules', () => {
+    expect(code).toContain('level="L"');
+  });
+
+  it('renders the code only while the disclosure is open', () => {
+    expect(screen).toContain('aria-expanded={qrOpen}');
+    expect(screen).toMatch(/\{qrOpen && \(/);
+  });
+
+  it('leads with the address text and the controls that hand it over', () => {
+    expect(screen).toContain('copy-address');
+    expect(screen.indexOf('receive-address')).toBeLessThan(screen.indexOf('<Qr'));
+  });
+
+  it('draws the share control only where there is a share sheet', () => {
+    expect(screen).toContain("typeof navigator.share === 'function'");
+    expect(screen).toMatch(/\{canShare && \(/);
+  });
+});

@@ -212,9 +212,27 @@ async function createWallet(page: Page): Promise<string> {
   await page.getByTestId('passphrase-repeat').fill(PASSPHRASE);
   await page.getByTestId('finish-create').click();
 
-  // Creating lands on the receive screen, which is where the address is.
+  // Creating lands on the receive screen, which is where the address is. The
+  // screen leads with the text, so this is the value a reader copies and it is
+  // the value this suite funds.
   const address = await page.getByTestId('receive-address').innerText();
   expect(address.startsWith('qn1')).toBe(true);
+  expect(address.trim().length).toBeGreaterThan(2000);
+
+  // The code waits behind a control. 1568 bytes of encapsulation key do not
+  // compress, so the symbol is version 35 whatever is done to it, and nothing
+  // in this wallet scans one. The disclosure is asserted both ways here, and
+  // left closed, which is how the screen opens.
+  const code = page.getByTestId('qr');
+  const control = page.getByTestId('toggle-qr');
+  await expect(code).toHaveCount(0);
+  await expect(control).toHaveAttribute('aria-expanded', 'false');
+  await control.click();
+  await expect(code).toBeVisible();
+  await expect(control).toHaveAttribute('aria-expanded', 'true');
+  await control.click();
+  await expect(code).toHaveCount(0);
+
   return address.trim();
 }
 

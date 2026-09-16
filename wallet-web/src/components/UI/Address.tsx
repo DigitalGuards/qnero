@@ -1,7 +1,6 @@
-import { useState, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 
 import { cn } from '../../utils/cn';
-import { Button } from './Button';
 
 /**
  * A long value shown whole: an address, a miner key, a seed.
@@ -26,7 +25,6 @@ export function Address({
   testId,
   tone = 'default',
   lines = 10,
-  expandable = false,
 }: {
   value: string;
   className?: string;
@@ -34,21 +32,10 @@ export function Address({
   tone?: 'default' | 'secret';
   /** How many 16 px line boxes the value is given before it scrolls. */
   lines?: number;
-  /**
-   * Whether the box opens to the whole value on request.
-   *
-   * The receive screen collapses the address to three lines, because the code
-   * above it is what a payment is made from and sixty-five lines of hex between
-   * the code and the rest of the screen is a scroller inside the page scroll.
-   * Nothing is hidden from a copy: `user-select: all` still takes all of it.
-   */
-  expandable?: boolean;
 }): ReactNode {
-  const [whole, setWhole] = useState(false);
-  const shown = expandable && !whole ? 3 : lines;
   return (
     // Two boxes, and the split is the fix. Capped and scrollable rather than
-    // 2600 characters tall, but a scroll container's bottom padding is
+    // 2571 characters tall, but a scroll container's bottom padding is
     // scrollable area that content paints into rather than a band that clips
     // it, so budgeting both paddings in one `max-height` cut the last visible
     // line horizontally through the middle of its glyphs and read as a
@@ -68,23 +55,10 @@ export function Address({
       <p
         data-testid={testId}
         className="mm-secret m-0 overflow-y-auto text-meta leading-4 text-ink"
-        style={{ maxHeight: `${shown * 16}px` }}
+        style={{ maxHeight: `${lines * 16}px` }}
       >
         {value}
       </p>
-      {expandable && (
-        <Button
-          variant="quiet"
-          // The label is 11 px and the target around it is a thumb's.
-          className="mt-1 min-h-11 sm:min-h-0"
-          data-testid="show-whole-address"
-          onClick={() => {
-            setWhole(!whole);
-          }}
-        >
-          {whole ? 'Show less' : 'Show whole'}
-        </Button>
-      )}
     </div>
   );
 }

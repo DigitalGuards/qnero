@@ -216,7 +216,7 @@ export function SendScreen({
                     ', then one block interval before it settles.'
                   ) : (
                     <>
-                      , then up to one block interval of {blockSeconds} seconds before it settles.
+                      , then the next block before it settles: the target is {blockSeconds} seconds and a quiet network can take several times that.
                     </>
                   )}
                   {/* The first payment of a session pays for the circuit build
