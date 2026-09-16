@@ -47,16 +47,20 @@
 
       <form id="form" class="panel" autocomplete="off">
         <label class="label" for="address">Your address</label>
-        <input
+        <textarea
           id="address"
           name="address"
           class="input"
-          type="text"
-          inputmode="text"
+          rows="3"
           spellcheck="false"
+          autocapitalize="none"
+          autocorrect="off"
+          autocomplete="off"
+          enterkeyhint="send"
           placeholder="qn1..."
           required
-        />
+        ></textarea>
+        <p id="check" class="check" hidden></p>
         <!--TURNSTILE_WIDGET-->
         <button id="submit" class="button" type="submit">Request funds</button>
       </form>

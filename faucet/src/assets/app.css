@@ -35,6 +35,7 @@
 
   --radius-sm: 3px;
   --radius-md: 5px;
+  --space-1: 4px;
   --space-2: 8px;
   --space-3: 15px;
   --space-4: 20px;
@@ -321,19 +322,38 @@ code {
   letter-spacing: 0.5px;
   text-transform: uppercase;
   color: var(--text-muted);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
 }
 
+/* A Qnero address is 2571 characters. In the one-line input this was, that is
+   20 146 px of value in a 291 px box: 1.4% of it on screen, the head only, and
+   no way to see the tail, which is the half that differs between two of a
+   reader's own addresses. A wrong paste costs a 24 hour cooldown on an address
+   the reader does not hold. Three rows show the head, some middle and the
+   tail, and the check line under them says what arrived. */
 .input {
   display: block;
   width: 100%;
   font-family: var(--font-mono);
   font-size: 13px;
+  line-height: 1.5;
   color: var(--text-primary);
   background: var(--bg-raised);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
+  overflow-wrap: anywhere;
+  resize: none;
+}
+
+/* The confirmation of a paste, in the family's body size. This page carries no
+   11 px reading matter. */
+.check {
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .button {

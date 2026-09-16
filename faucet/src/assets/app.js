@@ -10,6 +10,7 @@
 
 const form = document.getElementById('form');
 const address = document.getElementById('address');
+const check = document.getElementById('check');
 const submit = document.getElementById('submit');
 const result = document.getElementById('result');
 const status = document.getElementById('status');
@@ -140,6 +141,38 @@ async function poll(id, startedAt) {
     });
   }, POLL_MS);
 }
+
+/** `qn1q84a…lcge2v, 2571 characters`: what the field is actually holding. */
+function describeAddress(value) {
+  if (!value) return '';
+  const short = value.length > 20 ? `${value.slice(0, 7)}\u2026${value.slice(-6)}` : value;
+  return `${short}, ${value.length} characters`;
+}
+
+/*
+ * An address carries no whitespace, so any that arrives came from a copy that
+ * wrapped, and dropping it here is what makes a paste out of a terminal work.
+ * The value is rewritten only when it actually changed, so typing keeps its
+ * caret.
+ */
+address.addEventListener('input', () => {
+  const clean = address.value.replace(/\s+/g, '');
+  if (clean !== address.value) address.value = clean;
+  check.textContent = describeAddress(clean);
+  check.hidden = clean === '';
+});
+
+/*
+ * Enter sends. A textarea takes the key as a newline and the form is never
+ * submitted, which is the cost of the three rows; `enterkeyhint="send"` says
+ * send on a phone keyboard and this is what makes it true.
+ */
+address.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    form.requestSubmit();
+  }
+});
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
