@@ -35,7 +35,6 @@ import { readMeasuredSendSeconds, writeMeasuredSendSeconds } from './app/proverM
 import { Session, type ConnectionState } from './app/session';
 import { Notice } from './components/UI/Notice';
 import { Panel } from './components/UI/Panel';
-import { ThemeToggle } from './components/UI/ThemeToggle';
 import { TabBar } from './components/TabBar';
 import { Landing } from './screens/Landing';
 import { CreateWallet } from './screens/CreateWallet';
@@ -1095,7 +1094,6 @@ export function App(): ReactNode {
                     ? ' · no node'
                     : ''}
             </span>
-            <ThemeToggle />
           </div>
         </header>
 

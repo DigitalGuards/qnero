@@ -57,7 +57,10 @@ export function ThemeToggle(): ReactNode {
       }}
     >
       <Icon className="size-3.5" aria-hidden />
-      <span className="sr-only sm:not-sr-only">{theme}</span>
+      {/* The label is always shown: this control lives on the settings screen
+          now, where a row is a label and a control, and an icon on its own
+          reads as a state rather than as a switch. */}
+      <span>{theme}</span>
     </Button>
   );
 }
