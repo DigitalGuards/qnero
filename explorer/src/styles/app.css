@@ -66,32 +66,69 @@ li a,
   top: var(--space-2);
 }
 
-/* Status strip -------------------------------------------------------- */
+/* Masthead, nav and the loading bar ----------------------------------- */
 
-.strip {
+/*
+ * One 44 px row, at every width.
+ *
+ * What it replaces at 375 px: a status strip that wrapped to 54 px because it
+ * carried a dot, a word, a WebSocket URL, a height and a bordered theme box,
+ * over a rail whose wordmark was three stacked lines. 155 px of chrome, 23% of
+ * the first screen, with the chain's name in it twice.
+ */
+.masthead {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
   align-items: center;
-  min-height: var(--strip-height);
-  padding: var(--space-1) var(--space-2);
-  font-size: var(--fs-meta);
-  color: var(--text-secondary);
+  gap: var(--space-2);
+  min-height: var(--masthead-h);
+  padding: 0 var(--space-4);
   background: var(--bg-deep);
   border-bottom: 1px solid var(--border);
 }
 
-.strip--warn {
+.masthead__brand {
+  margin-right: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-ui);
+  font-weight: 600;
+  color: var(--text-primary);
+  /* The name carries a space and a browser with a minimum font size set read
+     it as "silQ" over "Road". The name cannot break. */
+  white-space: nowrap;
+}
+
+.masthead__brand:hover {
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+/* The live fact, in one line that never wraps: a chain name is somebody else's
+   string, so it is the part that gives way. */
+.masthead__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--fs-meta);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.masthead__chain {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.masthead__status--warn {
   color: var(--notice);
-  background: var(--notice-bg);
-  border-bottom-color: var(--notice-border);
 }
 
-.strip__spacer {
-  flex: 1 1 auto;
+.masthead__status--down {
+  color: var(--destructive);
 }
 
-.strip__dot {
+.dot {
   width: 7px;
   height: 7px;
   border-radius: 100px;
@@ -99,99 +136,159 @@ li a,
   flex: 0 0 auto;
 }
 
-.strip__dot--live {
+.dot--live {
   background: var(--accent);
 }
 
-.strip__dot--down {
+.dot--warn {
+  background: var(--notice);
+}
+
+.dot--down {
   background: var(--destructive);
+}
+
+/* One row of 40 px: four sections and the theme control, 279 px of the 335 px
+   column at 375 px. */
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav__link {
+  display: flex;
+  align-items: center;
+  min-height: var(--nav-h);
+  padding: 0 var(--space-2);
+  font-size: var(--fs-ui);
+  color: var(--text-secondary);
+  border-bottom: 2px solid transparent;
+}
+
+.nav__link:hover {
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.nav__link[aria-current='page'] {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+/* An icon, 32 x 32, once per surface, at the end of the nav row. It was a
+   20 px bordered box reading "theme: system" inside the status strip. */
+.theme-toggle {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  padding: 0;
+  color: var(--text-secondary);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.theme-toggle:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.theme-toggle svg {
+  display: block;
+}
+
+.theme-toggle .t-sun circle,
+.theme-toggle .t-sun path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+.theme-toggle .t-moon path {
+  fill: currentColor;
+}
+
+/* Dark shows the sun, because the sun is where the press goes. The three
+   blocks mirror the palette's own: bare :root, the media query guarded against
+   the attribute, and the attribute. */
+.theme-toggle .t-sun {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .theme-toggle .t-sun {
+    display: block;
+  }
+
+  :root:not([data-theme='light']) .theme-toggle .t-moon {
+    display: none;
+  }
+}
+
+:root[data-theme='dark'] .theme-toggle .t-sun {
+  display: block;
+}
+
+:root[data-theme='dark'] .theme-toggle .t-moon {
+  display: none;
+}
+
+/*
+ * The bar under the header while the socket is opening.
+ *
+ * Two pixels, indeterminate, and the one piece of motion a page with no
+ * figures on it yet is allowed. Under reduced motion it is a static rule,
+ * which says the same thing without moving.
+ */
+.indeterminate {
+  position: relative;
+  height: 2px;
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+.indeterminate::after {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  width: 40%;
+  background: var(--accent-fill);
+  animation: slide 1.2s linear infinite;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .indeterminate::after {
+    width: 100%;
+    animation: none;
+    opacity: 0.5;
+  }
 }
 
 /* Frame --------------------------------------------------------------- */
 
-.frame {
-  display: flex;
-  align-items: stretch;
-  min-height: calc(100vh - var(--strip-height));
-}
-
-.rail {
-  flex: 0 0 var(--rail-width);
-  width: var(--rail-width);
-  padding: var(--space-3) 0;
-  background: var(--bg-deep);
-  border-right: 1px solid var(--border);
-}
-
-.rail__brand {
-  display: block;
-  padding: 0 var(--space-2) var(--space-3);
-  font-family: var(--font-mono);
-  font-size: var(--fs-ui);
-  font-weight: 600;
-  color: var(--text-primary);
-  /* The name carries a space and the rail is a fixed width, so a reader whose
-     browser sets a minimum font size read it as "silQ" over "Road": four
-     stacked tokens with the chain's own two under them, and no way to tell
-     which two were the name. The name cannot break; the lines under it may. */
-  white-space: nowrap;
-}
-
-.rail__kind {
-  display: block;
-  font-family: var(--font-mono);
-  font-size: var(--fs-label);
-  font-weight: 400;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-
-.rail__brand:hover {
-  text-decoration: none;
-}
-
-.rail__chain {
-  display: block;
-  font-family: var(--font-mono);
-  font-size: var(--fs-label);
-  font-weight: 400;
-  color: var(--text-muted);
-  /* A chain name is somebody else's string and it wraps, under a wordmark that
-     does not. */
-  white-space: normal;
-  word-break: break-word;
-}
-
-.rail__nav {
-  display: flex;
-  flex-direction: column;
-}
-
-.rail__link {
-  display: block;
-  padding: var(--space-2);
-  font-size: var(--fs-ui);
-  color: var(--text-secondary);
-  border-left: 2px solid transparent;
-  transition: background-color 0.1s ease-out;
-}
-
-.rail__link:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-  text-decoration: none;
-}
-
-.rail__link[aria-current='page'] {
-  color: var(--text-primary);
-  border-left-color: var(--accent);
-  background: var(--bg-raised);
-}
-
 .main {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: var(--space-4) var(--space-3) var(--space-5);
+  padding: var(--space-4) var(--space-4) var(--space-5);
 }
 
 .main__inner {
@@ -199,44 +296,8 @@ li a,
 }
 
 @media (max-width: 640px) {
-  .frame {
-    display: block;
-  }
-
-  .rail {
-    width: auto;
-    padding: var(--space-2);
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .rail__brand {
-    padding-bottom: var(--space-2);
-  }
-
-  .rail__nav {
-    flex-direction: row;
-    flex-wrap: wrap;
-    gap: var(--space-1);
-  }
-
-  .rail__link {
-    border-left: 0;
-    border-bottom: 2px solid transparent;
-    padding: var(--space-1) var(--space-2);
-  }
-
-  .rail__link[aria-current='page'] {
-    border-left-color: transparent;
-    border-bottom-color: var(--accent);
-  }
-
-  .main {
-    padding: var(--space-3) var(--space-2) var(--space-4);
-  }
-
-  /* A phone gets the columns that carry the block's answer. The two counts
-     that fall out of the others are 160 px of a 340 px table. */
+  /* A phone gets the columns that carry the answer. The ones that fall out are
+     the widest cells in the row and the ones a reader did not come for. */
   .col--wide {
     display: none;
   }

@@ -69,5 +69,15 @@ export default tseslint.config(
       'no-restricted-syntax': ['error', ...merkleProofFence],
     },
   },
-  { files: ['**/*.js'], ...tseslint.configs.disableTypeChecked },
+  // `public/theme.js` is a plain browser script, served as it is written and
+  // outside the TypeScript project: it runs in the head before the bundle, so
+  // it cannot be a module the build owns.
+  {
+    files: ['**/*.js'],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      ...tseslint.configs.disableTypeChecked.languageOptions,
+      globals: { document: 'readonly', localStorage: 'readonly', window: 'readonly' },
+    },
+  },
 );

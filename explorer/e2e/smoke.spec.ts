@@ -18,15 +18,33 @@ function panel(page: Page, title: string) {
   return page.locator(`[data-panel="${title}"]`).first();
 }
 
+/**
+ * Open a route and wait for the masthead to carry a height.
+ *
+ * The header's status slot holds the one live fact this surface has, so a
+ * connected page is one that is showing a block number. It used to read the
+ * word "connected" beside an endpoint URL and a height, in a strip that
+ * wrapped to two rows on a phone.
+ */
 async function open(page: Page, route: string): Promise<void> {
   await page.goto(`/${route}`);
-  await expect(page.getByRole('status').first()).toContainText('connected');
+  await expect(page.getByRole('status').first()).toContainText(/block [\d,]+/);
 }
 
 /** The head height the status strip is showing, which is how a new block is noticed. */
 async function stripHeight(page: Page): Promise<number> {
   const text = await page.getByRole('status').first().innerText();
   return Number((/block ([\d,]+)/.exec(text)?.[1] ?? '0').replace(/,/g, ''));
+}
+
+/** Everything a reader can read on the screen, as one line. */
+async function screenText(page: Page): Promise<string> {
+  return (await page.locator('body').innerText()).replace(/\n/g, ' ');
+}
+
+/** How many times a string is on the screen. One is the bar for an identity. */
+function occurrences(text: string, needle: string): number {
+  return text.split(needle).length - 1;
 }
 
 test('the home page reads the head, the work and the pool off the node', async ({ page }) => {
@@ -468,7 +486,7 @@ test('a settlement whose block state is gone is never written up as one that set
   // never touch the socket.
   await page.goto(`/${String(link)}`);
   await page.reload();
-  await expect(page.getByRole('status').first()).toContainText('connected');
+  await expect(page.getByRole('status').first()).toContainText(/block [\d,]+/);
   // The body is archived, so the submission is all still here.
   await expect(field(page, 'Call')).toHaveText('Shielded.submit_private_batch');
   await expect(field(page, 'Included in')).toContainText(`block ${facts().settlementHeight}`);
@@ -509,18 +527,32 @@ test('every page is reachable from the keyboard and readable at 400 px', async (
   );
   expect(overflow).toBe(0);
 
-  // The first tab stop is the skip link, then the status strip's one control,
-  // then the rail in the order it is read.
+  // One wordmark and one chain name per screen. The chain page's heading is
+  // the chain, so the header's slot beside it holds the height alone; on every
+  // other page the header holds the name and the heading says what the page
+  // is. The pair used to be printed 75 px apart on every route.
+  const chain = await screenText(page);
+  expect(occurrences(chain, 'silQ Road')).toBe(1);
+  expect(occurrences(chain, 'Qnero devnet')).toBe(1);
+  await open(page, '#/blocks');
+  const blocks = await screenText(page);
+  expect(occurrences(blocks, 'silQ Road')).toBe(1);
+  expect(occurrences(blocks, 'Qnero devnet')).toBe(1);
+  await open(page, '#/');
+
+  // The first tab stop is the skip link, then the header in the order it is
+  // read: the wordmark, the four sections, and the theme control last.
   await page.keyboard.press('Tab');
   await expect(page.locator(':focus')).toHaveText('Skip to content');
-  await page.keyboard.press('Tab');
-  await expect(page.locator(':focus')).toContainText('theme:');
   await page.keyboard.press('Tab');
   await expect(page.locator(':focus')).toContainText('silQ Road');
   for (const name of ['Chain', 'Blocks', 'Search', 'Reveals']) {
     await page.keyboard.press('Tab');
     await expect(page.locator(':focus')).toHaveText(name);
   }
+  await page.keyboard.press('Tab');
+  await expect(page.locator(':focus')).toHaveAttribute('aria-label', /^Theme/);
+  await page.keyboard.press('Shift+Tab');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'What this chain reveals' })).toBeVisible();
 
@@ -531,7 +563,7 @@ test('every page is reachable from the keyboard and readable at 400 px', async (
   // hash navigation keeps the document, and with it whatever holds focus.
   await open(page, '#/');
   await page.reload();
-  await expect(page.getByRole('status').first()).toContainText('connected');
+  await expect(page.getByRole('status').first()).toContainText(/block [\d,]+/);
   await page.keyboard.press('Tab');
   await expect(page.locator(':focus')).toHaveText('Skip to content');
   await page.keyboard.press('Enter');

@@ -12,36 +12,60 @@ const NAV: { label: string; route: Route; match: Route['name'][] }[] = [
   { label: 'Reveals', route: { name: 'reveals' }, match: ['reveals'] },
 ];
 
-function StatusStrip(): ReactNode {
-  const { status, endpoint, head, error } = useChain();
-  const warn = status === 'offline' || status === 'failed';
+/**
+ * The masthead: the wordmark, and the one live fact this surface has.
+ *
+ * It replaces a 155 px stack of a wrapping status strip over a three-line
+ * wordmark. The strip carried five things at once, among them a raw WebSocket
+ * URL as the second most prominent string on every page, and it printed the
+ * chain's name 75 px above the heading that printed it again.
+ *
+ * So the name is printed once per screen. The chain page's `h1` is the chain,
+ * and on every other page the chain is here beside the height. The endpoint
+ * left the header for the No connection page and the foot of the chain page,
+ * which are the two places it answers a question.
+ */
+function Masthead({ current }: { current: Route['name'] }): ReactNode {
+  const { status, chainName, head } = useChain();
+  const live = status === 'live' || status === 'offline';
+  const modifier =
+    status === 'failed'
+      ? ' masthead__status--down'
+      : status === 'offline'
+        ? ' masthead__status--warn'
+        : '';
   const dot =
-    status === 'live' ? 'strip__dot strip__dot--live' : warn ? 'strip__dot strip__dot--down' : 'strip__dot';
+    status === 'live'
+      ? 'dot dot--live'
+      : status === 'connecting'
+        ? 'dot'
+        : status === 'offline'
+          ? 'dot dot--warn'
+          : 'dot dot--down';
+  // The chain page's heading is the chain's name, so the slot beside it holds
+  // the height alone.
+  const named = current !== 'home' && chainName !== null;
   return (
-    <div className={warn ? 'strip strip--warn' : 'strip'} role="status">
-      <span className={dot} aria-hidden="true" />
-      <span>
-        {status === 'live'
-          ? 'connected'
-          : status === 'connecting'
-            ? 'connecting'
-            : status === 'offline'
-              ? 'node unreachable, retrying'
-              : 'connection failed'}
+    <header className="masthead">
+      <a className="masthead__brand" href={href({ name: 'home' })}>
+        silQ Road
+      </a>
+      <span className={`masthead__status${modifier}`} role="status">
+        <span className={dot} aria-hidden="true" />
+        {status === 'connecting' ? <span>Reading the chain head</span> : null}
+        {status === 'failed' ? <span>connection failed</span> : null}
+        {live && status === 'offline' ? <span>no node</span> : null}
+        {live && named ? <span className="masthead__chain">{chainName}</span> : null}
+        {live && head !== null ? (
+          <span className="num">block {formatCount(head.header.number)}</span>
+        ) : null}
       </span>
-      {/* The endpoint is held from the moment config.json is read, so the
-          address that is failing to answer is on screen while it fails. */}
-      {endpoint === null ? null : <span className="mono">{endpoint}</span>}
-      {head === null ? null : <span>block {formatCount(head.header.number)}</span>}
-      {error === null ? null : <span>{error}</span>}
-      <span className="strip__spacer" />
-      <ThemeToggle />
-    </div>
+    </header>
   );
 }
 
 export function Layout({ current, children }: { current: Route['name']; children: ReactNode }): ReactNode {
-  const { bundle } = useChain();
+  const { status } = useChain();
   return (
     <>
       {/* The fragment belongs to the router, so following this as a link would
@@ -57,42 +81,27 @@ export function Layout({ current, children }: { current: Route['name']; children
       >
         Skip to content
       </a>
-      <StatusStrip />
-      <div className="frame">
-        <nav className="rail" aria-label="Sections">
-          {/* The wordmark, in the rail's own type: the name at the UI size
-              in the mono face, what this site is under it, and the chain it is
-              pointed at under that, both at label size. "silQ Road, the Qnero
-              explorer" is the full form and it is set where a subtitle has
-              room: the tab title, the readme and the docs. The descriptor
-              stays on the page because the name on its own says nothing about
-              what a first-time reader is looking at, and a tab title is
-              truncated to about a dozen characters. Under it is the chain,
-              which is the thing a reader of a page needs to know first, and it
-              is a live value: while no chain is connected it says that, so the
-              slot never reads as a second half of the name. */}
-          <a className="rail__brand" href={href({ name: 'home' })}>
-            silQ Road
-            <span className="rail__kind">explorer</span>
-            <span className="rail__chain">{bundle?.config.chainName ?? 'no chain'}</span>
+      <Masthead current={current} />
+      <nav className="nav" aria-label="Sections">
+        {NAV.map((item) => (
+          <a
+            key={item.label}
+            className="nav__link"
+            href={href(item.route)}
+            aria-current={item.match.includes(current) ? 'page' : undefined}
+          >
+            {item.label}
           </a>
-          <div className="rail__nav">
-            {NAV.map((item) => (
-              <a
-                key={item.label}
-                className="rail__link"
-                href={href(item.route)}
-                aria-current={item.match.includes(current) ? 'page' : undefined}
-              >
-                {item.label}
-              </a>
-            ))}
-          </div>
-        </nav>
-        <main className="main" id="main" tabIndex={-1}>
-          <div className="main__inner">{children}</div>
-        </main>
-      </div>
+        ))}
+        <ThemeToggle />
+      </nav>
+      {/* Two pixels of movement while the socket is opening, and nothing once
+          it has. It is the one thing on a screen with no figures on it yet that
+          says the page is working; under reduced motion it is a static rule. */}
+      {status === 'connecting' ? <div className="indeterminate" aria-hidden="true" /> : null}
+      <main className="main" id="main" tabIndex={-1}>
+        <div className="main__inner">{children}</div>
+      </main>
     </>
   );
 }

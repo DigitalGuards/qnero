@@ -54,6 +54,12 @@ interface ChainState {
   bundle: ChainBundle | null;
   /** Held from the moment config.json is read, so a failing address can be shown while it fails. */
   endpoint: string | null;
+  /**
+   * Held from the same moment, so the header names the chain this page is
+   * pointed at from the first paint. The slot used to read "no chain" for the
+   * whole connect, which is the first thing a visitor read about the chain.
+   */
+  chainName: string | null;
   head: Head | null;
   error: string | null;
 }
@@ -62,6 +68,7 @@ const Context = createContext<ChainState>({
   status: 'connecting',
   bundle: null,
   endpoint: null,
+  chainName: null,
   head: null,
   error: null,
 });
@@ -103,6 +110,7 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
     status: 'connecting',
     bundle: null,
     endpoint: null,
+    chainName: null,
     head: null,
     error: null,
   });
@@ -116,7 +124,11 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
     const start = async (): Promise<void> => {
       const config = await loadConfig();
       if (stillLive()) {
-        setState((previous) => ({ ...previous, endpoint: config.rpcEndpoint }));
+        setState((previous) => ({
+          ...previous,
+          endpoint: config.rpcEndpoint,
+          chainName: config.chainName,
+        }));
       }
       const context = await connectWithin(config.rpcEndpoint, CONNECT_DEADLINE_MS);
       if (!stillLive()) {
@@ -204,6 +216,7 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
           status: 'failed',
           bundle: null,
           endpoint: previous.endpoint,
+          chainName: previous.chainName,
           head: null,
           error: messageOf(error),
         }));

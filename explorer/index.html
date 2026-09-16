@@ -22,6 +22,10 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23161416'/%3E%3Ccircle cx='16' cy='13' r='7' fill='none' stroke='%23fcfbfc' stroke-width='3'/%3E%3Cpath d='M17.5 18 L22 22.5' fill='none' stroke='%23fcfbfc' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M4 28 h5 m3 0 h5 m3 0 h5' fill='none' stroke='%23e6a145' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E"
     />
+    <!-- The stored theme, applied before anything paints. It is a file and not
+         an inline script because this site ships under `script-src 'self'
+         'wasm-unsafe-eval'`, with no `'unsafe-inline'`. -->
+    <script src="./theme.js"></script>
   </head>
   <body>
     <div id="root"></div>
