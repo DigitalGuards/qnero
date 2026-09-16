@@ -246,6 +246,26 @@ function hsl(hex: string): { hue: number; saturation: number } {
   return { hue: (hue + 360) % 360, saturation };
 }
 
+/** Relative luminance, per WCAG 2. */
+function luminance(hex: string): number {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (match === null) {
+    throw new Error(`${hex} is not a six-digit hex colour`);
+  }
+  const body = match[1] ?? '';
+  const channels = [0, 2, 4].map((at) => {
+    const value = Number.parseInt(body.slice(at, at + 2), 16) / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  }) as [number, number, number];
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+/** The contrast ratio between two opaque colours. */
+function contrast(a: string, b: string): number {
+  const [high, low] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+  return (high + 0.05) / (low + 0.05);
+}
+
 function hueDistance(a: number, b: number): number {
   const raw = Math.abs(a - b) % 360;
   return raw > 180 ? 360 - raw : raw;
@@ -278,6 +298,21 @@ describe.each([
 
   it('keeps the accent saturated, because it is the one thing carrying identity', () => {
     expect(hsl(resolve(theme, '--accent-fill')).saturation).toBeGreaterThan(0.3);
+  });
+
+  it('fills the one action a screen is for with the same amber in both themes', () => {
+    // The link ink and the filled ground are two roles. In light the ink is
+    // the dark amber, because it is text on a near-white ground; the fill is a
+    // ground of its own and owes contrast only to its own label, so it stays
+    // the amber this project is recognised by. `site/css/site.css` carries the
+    // identical pair, and a wallet whose primary button went brown in daylight
+    // is a wallet that reads as another project.
+    expect(resolve(theme, '--accent-fill')).toBe('#e6a145');
+    expect(contrast(resolve(theme, '--accent-on-fill'), resolve(theme, '--accent-fill')))
+      .toBeGreaterThanOrEqual(4.5);
+    // And hovering it stays a fill, rather than taking the link ink's hover.
+    expect(contrast(resolve(theme, '--accent-on-fill'), resolve(theme, '--accent-fill-hover')))
+      .toBeGreaterThanOrEqual(4.5);
   });
 });
 

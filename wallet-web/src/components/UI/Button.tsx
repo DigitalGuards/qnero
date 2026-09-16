@@ -35,7 +35,7 @@ const buttonVariants = cva(
           'disabled:bg-raised disabled:text-muted',
         action:
           'min-h-[var(--primary-h)] bg-accent-fill text-on-accent text-body font-semibold ' +
-          'hover:bg-accent-hover shadow-[inset_0_0.5px_0_0_rgba(255,255,255,0.2)] ' +
+          'hover:bg-accent-fill-hover shadow-[inset_0_0.5px_0_0_rgba(255,255,255,0.2)] ' +
           'disabled:bg-raised disabled:text-muted disabled:shadow-none',
         destructive:
           'min-h-[var(--primary-h)] bg-destructive-fill text-on-destructive text-body ' +

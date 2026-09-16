@@ -44,10 +44,21 @@
   --text-muted: #6a6460;
   --text-dim: #948d88;
 
+  /*
+   * The link ink and the filled ground are two roles, and in light they are
+   * two values. `--accent` carries link text and labels on a near-white
+   * ground, so it is the dark amber at 6.80:1. `--accent-fill` is a ground of
+   * its own and owes contrast only to the label on it: it is the same
+   * `#e6a145` the dark theme uses, with `#161416` over it at 8.33:1, so the
+   * one action a screen is for is the same amber in both themes and the
+   * wallet, the site and the explorer read as one project. `site/css/site.css`
+   * carries the identical pair.
+   */
   --accent: #8a4b06;
   --accent-hover: #6f3c05;
-  --accent-fill: #8a4b06;
-  --accent-on-fill: #ffffff;
+  --accent-fill: #e6a145;
+  --accent-fill-hover: #f2b968;
+  --accent-on-fill: #161416;
   --destructive: #a32020;
   --destructive-fill: #a32020;
   --destructive-on-fill: #ffffff;
@@ -148,6 +159,7 @@
     --accent: #e6a145;
     --accent-hover: #f2b968;
     --accent-fill: #e6a145;
+    --accent-fill-hover: #f2b968;
     --accent-on-fill: #161416;
     --destructive: #f97777;
     --destructive-fill: #f97777;
@@ -184,6 +196,7 @@
   --accent: #e6a145;
   --accent-hover: #f2b968;
   --accent-fill: #e6a145;
+  --accent-fill-hover: #f2b968;
   --accent-on-fill: #161416;
   --destructive: #f97777;
   --destructive-fill: #f97777;
