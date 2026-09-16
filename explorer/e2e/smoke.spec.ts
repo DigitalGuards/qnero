@@ -248,7 +248,10 @@ test('search answers a height, a block hash and a settled nullifier', async ({ p
   // block page opened by hash has to send the hash it was asked for.
   const askedHash = naming(blockHash);
   await open(page, `#/search?q=${blockHash}`);
-  await expect(page.locator('.notice').first()).toContainText('Opening it sends the node nothing');
+  await expect(page.locator('.notice').first()).toContainText(
+    'Nothing is sent until you press a button',
+  );
+  await expect(page.locator('[data-query]')).toContainText(blockHash);
   // The count first: it is the claim. The missing field below it is only how
   // the page shows that the read has not run.
   expect(naming(blockHash)).toBe(askedHash);
@@ -265,12 +268,25 @@ test('search answers a height, a block hash and a settled nullifier', async ({ p
   // named it, because it arrived in a frame the node sent.
   await open(page, `#/search?q=${nullifier}`);
   // The value being asked about is on screen inside the same keyed subtree as
-  // the consent notice, so the copy's "those 32 bytes" cannot name one value
+  // the consent notice, so the copy's "these 32 bytes" cannot name one value
   // while the lookup sends another.
-  await expect(page.locator('.notice').first()).toContainText(nullifier);
+  await expect(page.locator('[data-query]')).toContainText(nullifier);
   await expect(page.locator('.notice')).toContainText(
-    'tells whoever runs the node that someone asked about this value',
+    'The two lookups send these 32 bytes to the node; the two scans read ranges and name nothing',
   );
+  // What each panel costs is a tag beside its one sentence: the two lookups
+  // carry the value to the node, the two scans read ranges.
+  await expect(panel(page, 'As a block hash').locator('.tag')).toHaveText('sends the value');
+  await expect(panel(page, 'The settled nullifier set').locator('.tag')).toHaveText(
+    'sends the value',
+  );
+  await expect(panel(page, 'As a commitment in the tree').locator('.tag')).toHaveText(
+    'sends no value',
+  );
+  await expect(panel(page, 'As an extrinsic hash').locator('.tag')).toHaveText('sends no value');
+  // The reasoning is behind a disclosure, closed, so the answer is what the
+  // page opens on.
+  await expect(panel(page, 'As a block hash').locator('details')).not.toHaveAttribute('open', '');
   expect(naming(nullifier)).toBe(0);
   await expect(page.locator('[data-field="A block on this chain"]')).toHaveCount(0);
   await expect(page.locator('[data-field="In the settled nullifier set"]')).toHaveCount(0);

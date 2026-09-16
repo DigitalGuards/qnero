@@ -72,8 +72,41 @@ export function Field({
   );
 }
 
+/**
+ * State a reader has to act on: a read that failed, a stale head, a claim
+ * refused. It is the one colour on this site that means "attend to this", and
+ * it was spent on essays: five pages carried a yellow box of reading matter,
+ * one of them 408 px tall on a 667 px screen. Reading matter goes in prose or
+ * behind a disclosure; this stays for state.
+ */
 export function Notice({ children }: { children: ReactNode }): ReactNode {
   return <div className="notice">{children}</div>;
+}
+
+/**
+ * What a panel costs, in one line a reader can act on.
+ *
+ * `leaks` is the difference between a request that carries the reader's value
+ * to the node and one that reads a range and names nothing. It is the fact the
+ * consent gate exists for, so it is a tag beside the sentence rather than the
+ * fourth paragraph of one.
+ */
+export function Leak({ leaks }: { leaks: boolean }): ReactNode {
+  return (
+    <span className={leaks ? 'tag tag--leak' : 'tag'}>
+      {leaks ? 'sends the value' : 'sends no value'}
+    </span>
+  );
+}
+
+/** The reasoning behind a sentence, for the reader who wants it. */
+export function Why({ summary, children }: { summary: string; children: ReactNode }): ReactNode {
+  return (
+    <details className="why">
+      <summary>{summary}</summary>
+      {children}
+    </details>
+  );
 }
 
 export function ErrorBox({ children }: { children: ReactNode }): ReactNode {

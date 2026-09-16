@@ -12,10 +12,12 @@ import {
   ErrorBox,
   Field,
   Fields,
+  Leak,
   Loading,
   Notice,
   PageSkeleton,
   Panel,
+  Why,
 } from '../components/ui';
 
 export function Search({ query }: { query: string }): ReactNode {
@@ -139,16 +141,16 @@ function HashResult({ hash }: { hash: string }): ReactNode {
 
   return (
     <>
+      {/* The value, in the same keyed subtree as the notice, so "these 32
+          bytes" can never name one value while a lookup sends another. */}
+      <p className="query" data-query>
+        Answering for <span className="mono">{hash}</span>
+      </p>
       <Notice>
+        <p>Nothing is sent until you press a button.</p>
         <p>
-          This page is answering for <span className="mono">{hash}</span>.
-        </p>
-        <p>
-          Opening it sends the node nothing. Every answer below is a request that carries those 32
-          bytes: the block check asks for the header at them, and the nullifier lookup builds a map
-          key out of them, so either one tells whoever runs the node that someone asked about this
-          value. Each runs when you press its button and not before. The two scans read leaves and
-          events in ranges and name no single one of them.
+          The two lookups send these 32 bytes to the node; the two scans read ranges and name
+          nothing.
         </p>
       </Notice>
 
@@ -191,13 +193,17 @@ function BlockCheck({ hash }: { hash: string }): ReactNode {
     <Panel title="As a block hash">
       {!asked ? (
         <>
-          <p>
-            This asks the node for the header at these 32 bytes. The request carries the value
-            itself, so whoever runs the node learns that someone asked about it. What comes back
-            names nothing the chain does not already publish.
+          <p className="ask">
+            Asks the node for the header at these 32 bytes. <Leak leaks />
           </p>
+          <Why summary="Why this is behind a button">
+            <p>
+              The request carries the value itself, so whoever runs the node learns that someone
+              asked about it. What comes back names nothing the chain does not already publish.
+            </p>
+          </Why>
           <button
-            className="button"
+            className="button button--action"
             type="button"
             onClick={() => {
               setAsked(true);
@@ -210,6 +216,7 @@ function BlockCheck({ hash }: { hash: string }): ReactNode {
         <Fields>
           <Field
             label="A block on this chain"
+            display
             value={
               result.status === 'loading' ? (
                 'reading'
@@ -276,13 +283,17 @@ function NullifierLookup({ hash }: { hash: string }): ReactNode {
           </ErrorBox>
         ) : askedAt === null ? (
           <>
-            <p>
-              This asks the node for one key built from these 32 bytes, which names the value to
-              whoever runs it. It runs once, against the block the chain is at when you ask.
-              Membership marks one input position of one settlement consumed, and a position
-              holding a dummy input publishes a nullifier over no note, so it says nothing about
-              which note and nothing about whether one was spent there.
+            <p className="ask">
+              Asks the node for one key built from these 32 bytes, once, against the block the
+              chain is at when you ask. <Leak leaks />
             </p>
+            <Why summary="What membership means">
+              <p>
+                Membership marks one input position of one settlement consumed, and a position
+                holding a dummy input publishes a nullifier over no note, so it says nothing about
+                which note and nothing about whether one was spent there.
+              </p>
+            </Why>
             <button
               className="button"
               type="button"
@@ -303,6 +314,7 @@ function NullifierLookup({ hash }: { hash: string }): ReactNode {
             <Fields>
               <Field
                 label="In the settled nullifier set"
+                display
                 value={
                   result.status === 'error' ? 'not answered' : answered === true ? 'seen' : 'not seen'
                 }
@@ -346,10 +358,13 @@ function NullifierBlock({ hash }: { hash: string }): ReactNode {
     <Panel title="Which settlement published it">
       {!run ? (
         <>
-          <p>
-            The settled set holds presence only. Finding the block means reading the settlement
-            events of the last {formatCount(bundle.config.searchWindowBlocks)} blocks.
+          <p className="ask">
+            Reads the settlement events of the last {formatCount(bundle.config.searchWindowBlocks)}{' '}
+            blocks. <Leak leaks={false} />
           </p>
+          <Why summary="Why a walk and not a lookup">
+            <p>The settled set holds presence only, so nothing in it says which block published it.</p>
+          </Why>
           <button
             className="button"
             type="button"
@@ -430,11 +445,16 @@ function CommitmentScan({ hash }: { hash: string }): ReactNode {
     <Panel title="As a commitment in the tree">
       {!run ? (
         <>
-          <p>
-            The tree is keyed by leaf index, so finding a commitment means reading leaves newest
-            first. Every request here asks for a range of leaves, so none of them names the one
-            that matters.
+          <p className="ask">
+            Reads leaves in ranges, newest first. <Leak leaks={false} />
           </p>
+          <Why summary="Why ranges">
+            <p>
+              The tree is keyed by leaf index, so finding a commitment means reading leaves newest
+              first. Every request here asks for a range, so none of them names the one that
+              matters.
+            </p>
+          </Why>
           <button
             className="button"
             type="button"
@@ -498,10 +518,13 @@ function ExtrinsicScan({ hash }: { hash: string }): ReactNode {
     <Panel title="As an extrinsic hash">
       {!run ? (
         <>
-          <p>
-            Bodies are not indexed here, so this reads the last{' '}
-            {formatCount(bundle.config.searchWindowBlocks)} blocks and hashes what it finds.
+          <p className="ask">
+            Reads the last {formatCount(bundle.config.searchWindowBlocks)} blocks and hashes what it
+            finds. <Leak leaks={false} />
           </p>
+          <Why summary="Why a walk and not a lookup">
+            <p>Bodies are not indexed here, and no node keeps a map from an extrinsic hash to a block.</p>
+          </Why>
           <button
             className="button"
             type="button"

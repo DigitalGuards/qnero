@@ -56,6 +56,11 @@ function Masthead({ current }: { current: Route['name'] }): ReactNode {
         {status === 'failed' ? <span>connection failed</span> : null}
         {live && status === 'offline' ? <span>no node</span> : null}
         {live && named ? <span className="masthead__chain">{chainName}</span> : null}
+        {live && named && head !== null ? (
+          <span className="masthead__sep" aria-hidden="true">
+            &middot;
+          </span>
+        ) : null}
         {live && head !== null ? (
           <span className="num">block {formatCount(head.header.number)}</span>
         ) : null}
