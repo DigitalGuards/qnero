@@ -1265,11 +1265,34 @@ tbody tr:hover td.col-self {
    400px viewport paints its 12px labels at 7.9px and its 10px captions at
    6.6px, under the smallest type on the site. At 1:1 the scroller does the
    work, which is what its edge shadows were drawn for. */
-.diagram svg {
+.diagram__wide {
   display: block;
   width: 944px;
   min-width: 944px;
   max-width: none;
+}
+
+/* The same five steps built downward, for the width where the wide one showed
+   two boxes at a time and clipped the bracket caption to "PROVED IN YOUR". Its
+   viewBox is 336 units so it renders at about 1:1 in a 335 px column and the
+   12 px labels stay 12 px; the cap keeps it from scaling up on a 600 px
+   screen. No scroller, so no focusable wrapper either: the wide one's
+   .diagram__scroll is display:none here and leaves the tab order with it. */
+.diagram__tall {
+  display: none;
+  width: 100%;
+  max-width: 336px;
+  height: auto;
+}
+
+@media (max-width: 640px) {
+  .diagram__scroll {
+    display: none;
+  }
+
+  .diagram__tall {
+    display: block;
+  }
 }
 
 .diagram figcaption {

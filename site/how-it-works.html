@@ -113,7 +113,7 @@
           <h2>Up to 2 inputs, exactly 2 outputs, a public fee</h2>
           <figure class="diagram">
             <div class="diagram__scroll" tabindex="0" role="group" aria-labelledby="flow-title">
-              <svg viewBox="0 0 944 232" role="img" aria-labelledby="flow-title flow-desc">
+              <svg class="diagram__wide" viewBox="0 0 944 232" role="img" aria-labelledby="flow-title flow-desc">
                 <title id="flow-title">From a note to a settled block</title>
                 <desc id="flow-desc">
                   Five steps left to right: your notes, a leaf proof, a private batch of six leaf
@@ -155,6 +155,47 @@
                 <text class="d-meta" x="856" y="186" text-anchor="middle">IN THE BLOCK</text>
               </svg>
             </div>
+            <svg class="diagram__tall" viewBox="0 0 336 606" role="img" aria-labelledby="flow-title-v flow-desc-v">
+                <title id="flow-title-v">From a note to a settled block</title>
+                <desc id="flow-desc-v">
+                  Five steps top to bottom: your notes, a leaf proof, a private batch of six
+                  leaf proofs, an optional public batch of fifty-three private batches, and
+                  settlement on chain. The first four steps are proved locally. Only the last
+                  is in the block.
+                </desc>
+                <text class="d-meta" x="8" y="12">PROVED IN YOUR WALLET, OR BY AN AGGREGATOR</text>
+                <path class="d-line" d="M8 20 H 328" stroke-dasharray="3 3" />
+                <rect class="d-surface" x="8" y="32" width="320" height="92" rx="5" />
+                <text class="d-label" x="168" y="66" text-anchor="middle">Your notes</text>
+                <text class="d-meta" x="168" y="90" text-anchor="middle">up to 2 inputs</text>
+                <text class="d-meta" x="168" y="110" text-anchor="middle">2 outputs, 1 fee</text>
+                <path class="d-line" d="M168 124 V 136" />
+                <path class="d-arrow" d="M164 136 l 4 6 l 4 -6 z" />
+                <rect class="d-surface" x="8" y="142" width="320" height="92" rx="5" />
+                <text class="d-label" x="168" y="176" text-anchor="middle">Leaf proof</text>
+                <text class="d-meta" x="168" y="200" text-anchor="middle">320 gates</text>
+                <text class="d-meta" x="168" y="220" text-anchor="middle">105500 bytes</text>
+                <path class="d-line" d="M168 234 V 246" />
+                <path class="d-arrow" d="M164 246 l 4 6 l 4 -6 z" />
+                <rect class="d-surface" x="8" y="252" width="320" height="92" rx="5" />
+                <text class="d-label" x="168" y="286" text-anchor="middle">Private batch</text>
+                <text class="d-meta" x="168" y="310" text-anchor="middle">N = 6, ZK</text>
+                <text class="d-meta" x="168" y="330" text-anchor="middle">150908 bytes</text>
+                <path class="d-line" d="M168 344 V 356" />
+                <path class="d-arrow" d="M164 356 l 4 6 l 4 -6 z" />
+                <rect class="d-surface" x="8" y="362" width="320" height="92" rx="5" />
+                <text class="d-label" x="168" y="396" text-anchor="middle">Public batch</text>
+                <text class="d-meta" x="168" y="420" text-anchor="middle">n = 53, optional</text>
+                <text class="d-meta" x="168" y="440" text-anchor="middle">237544 bytes</text>
+                <path class="d-line" d="M168 454 V 466" />
+                <path class="d-arrow" d="M164 466 l 4 6 l 4 -6 z" />
+                <path class="d-line" d="M8 480 H 328" />
+                <text class="d-meta" x="8" y="496">IN THE BLOCK</text>
+                <rect class="d-accent" x="8" y="506" width="320" height="92" rx="5" />
+                <text class="d-label" x="168" y="540" text-anchor="middle">Settlement</text>
+                <text class="d-meta" x="168" y="564" text-anchor="middle">pallet-shielded</text>
+                <text class="d-meta" x="168" y="584" text-anchor="middle">nullifiers + leaves</text>
+              </svg>
             <figcaption>
               The public batch is an aggregator's non-ZK bundle and is optional. A wallet submits a
               private batch on its own today.
