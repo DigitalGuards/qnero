@@ -36,12 +36,13 @@
     return root.getAttribute('data-theme') || stored() || systemTheme();
   }
 
+  /* The button holds two inline SVGs and CSS decides which one shows, so this
+     writes the accessible name and never the content: setting textContent
+     would delete the icons. */
   function label(button, theme) {
-    button.textContent = theme === 'light' ? 'Theme: light' : 'Theme: dark';
-    button.setAttribute(
-      'aria-label',
-      theme === 'light' ? 'Theme: light. Switch to dark.' : 'Theme: dark. Switch to light.'
-    );
+    var name = theme === 'light' ? 'Theme: light. Switch to dark.' : 'Theme: dark. Switch to light.';
+    button.setAttribute('aria-label', name);
+    button.setAttribute('title', name);
   }
 
   function apply(theme, button) {

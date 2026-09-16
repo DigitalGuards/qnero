@@ -416,6 +416,9 @@ svg {
   background: var(--bg-deep);
 }
 
+/* One row from 641 px up: wordmark, links, theme control. Below that the nav
+   drops to a second row of its own and the header is two 44 px rows, which is
+   what the phone breakpoint at the end of this block sets up. */
 .site-header .wrap {
   display: flex;
   flex-wrap: wrap;
@@ -431,6 +434,13 @@ svg {
   color: var(--text-bright);
   text-decoration: none;
   margin-right: auto;
+}
+
+/* The nav's order is the reading order the header row shows. The theme
+   control sits last on a wide screen and at the end of the wordmark row on a
+   phone, where the nav is a row of its own. */
+.site-header .theme-toggle {
+  order: 3;
 }
 
 .wordmark:hover {
@@ -460,6 +470,10 @@ h1 .mark {
   border-bottom: 1px solid transparent;
 }
 
+.nav {
+  order: 2;
+}
+
 .nav a:hover {
   color: var(--text-primary);
   border-bottom-color: var(--border-strong);
@@ -470,25 +484,116 @@ h1 .mark {
   border-bottom-color: var(--accent);
 }
 
+/* An icon, 32 x 32. It was an 86 px bordered box reading THEME: DARK at the
+   end of the nav, where it counted as an eighth destination and was the only
+   interactive thing on the site set at 10 px. */
 .theme-toggle {
-  font: inherit;
-  font-size: var(--fs-label);
-  letter-spacing: var(--ls-wide);
-  text-transform: uppercase;
-  /* --text-muted on --bg-raised is 3.75:1 in dark, which 10 px text may not
-     have. The panel ground takes the same ink to 6.3:1. */
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   color: var(--text-secondary);
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 4px var(--space-2);
-  min-height: 24px;
   cursor: pointer;
+}
+
+.theme-toggle[hidden] {
+  display: none;
 }
 
 .theme-toggle:hover {
   color: var(--text-primary);
   border-color: var(--border-strong);
+}
+
+.theme-toggle svg {
+  display: block;
+}
+
+.theme-toggle .t-sun circle,
+.theme-toggle .t-sun path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+.theme-toggle .t-moon path {
+  fill: currentColor;
+}
+
+/* Dark shows the sun, because the sun is where the press goes. The three
+   blocks mirror the palette's own: bare :root, the media query guarded
+   against the attribute, and the attribute. */
+.theme-toggle .t-moon {
+  display: none;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) .theme-toggle .t-sun {
+    display: none;
+  }
+
+  :root:not([data-theme='dark']) .theme-toggle .t-moon {
+    display: block;
+  }
+}
+
+:root[data-theme='light'] .theme-toggle .t-sun {
+  display: none;
+}
+
+:root[data-theme='light'] .theme-toggle .t-moon {
+  display: block;
+}
+
+/* ---------- the phone header: two 44 px rows ---------- */
+
+/* Seven links and a bordered control wrapped into two ragged rows here, 176 px
+   of chrome before the h1, with 26 px tap targets as narrow as 26 px. Row one
+   is the wordmark and the theme control; row two is six role-named links on
+   one line, 312 px of the 335 px column. GitHub leaves this row: the footer
+   carries it on every page and the index hero carries it as a button. */
+@media (max-width: 640px) {
+  .site-header .wrap {
+    gap: 0;
+    padding-block: 0;
+  }
+
+  .wordmark {
+    padding-block: 9px;
+  }
+
+  .nav {
+    flex-basis: 100%;
+    order: 4;
+    gap: 0 var(--space-3);
+    border-top: 1px solid var(--border);
+  }
+
+  .nav a {
+    padding: 12px 0;
+    line-height: 20px;
+  }
+
+  .nav__aside {
+    display: none;
+  }
+}
+
+/* The six labels measure 237 px of text. At 375 px the 15 px gaps put the row
+   at 312 px in a 335 px column; at 320 px, a Galaxy Fold cover screen, the
+   column is 280 px and the same gaps wrap the row in two. 8 px is the floor
+   R11 sets between adjacent targets and it brings the row to 277 px. */
+@media (max-width: 360px) {
+  .nav {
+    gap: 0 var(--space-2);
+  }
 }
 
 /* ---------- bands ---------- */
