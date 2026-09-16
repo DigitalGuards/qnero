@@ -366,12 +366,44 @@ async fn drip(
         .into_response()
 }
 
+/// Where a claim has got to, in the words the page shows a person.
+///
+/// `status` is the ledger's three values and stays exactly what it was. This
+/// is the finer reading the page's progress line needs, and every part of it
+/// comes from rows the ledger already keeps:
+///
+///  - `queued`: somebody else's claim is in front of this one. One prover, one job at a
+///    time, so a claim with anything ahead of it is waiting for a prover rather than being
+///    proved.
+///  - `proving`: nothing ahead of it and nothing submitted yet, which is the roughly ten
+///    seconds a private payment's proof takes.
+///  - `waiting`: `submitted_at` is written just before the payment goes to the node, so a
+///    claim carrying one is in the node's pool waiting for a block, up to 120 s.
+///
+/// Without this the page can only guess from a stopwatch, and a guess that
+/// says "proving" while a claim is fourth in a queue is worse than no step at
+/// all.
+fn phase_of(claim: &crate::store::Claim, ahead: usize) -> &'static str {
+    match claim.status {
+        ClaimStatus::Sent => "sent",
+        ClaimStatus::Failed => "failed",
+        ClaimStatus::Queued if claim.submitted_at.is_some() => "waiting",
+        ClaimStatus::Queued if ahead > 0 => "queued",
+        ClaimStatus::Queued => "proving",
+    }
+}
+
 async fn claim_status(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    let claim = {
+    let (claim, ahead) = {
         let Ok(store) = state.store.lock() else {
             return internal("the claims ledger is poisoned");
         };
-        store.claim(id).unwrap_or(None)
+        let claim = store.claim(id).unwrap_or(None);
+        let ahead = store
+            .queued_claims()
+            .map(|claims| claims.iter().filter(|other| other.id < id).count())
+            .unwrap_or(0);
+        (claim, ahead)
     };
     let Some(claim) = claim else {
         return (
@@ -382,6 +414,8 @@ async fn claim_status(State(state): State<AppState>, Path(id): Path<i64>) -> Res
     };
     Json(json!({
         "status": claim.status.as_str(),
+        "phase": phase_of(&claim, ahead),
+        "ahead": ahead,
         "id": claim.id,
         "address": claim.address,
         "amountQuanta": claim.amount_quanta,

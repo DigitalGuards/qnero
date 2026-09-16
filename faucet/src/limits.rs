@@ -76,28 +76,33 @@ impl Refusal {
         }
     }
 
-    /// What the requester is told. Plain, and carrying no hint about anything
-    /// the faucet holds.
+    /// What the requester is told. Plain, carrying no hint about anything the
+    /// faucet holds, and written as sentences.
+    ///
+    /// The page prints these where they are read, under the button, so each
+    /// one starts with a capital, ends with a full stop, and says what to do
+    /// next where there is anything to do. They used to start lower case mid
+    /// sentence, which reads as a template with a piece missing.
     pub fn message(&self) -> String {
         match self {
-            Self::BadAddress(why) => format!("that is not a Qnero address: {why}"),
+            Self::BadAddress(why) => {
+                format!("Not a valid Qnero address: {why}. Paste it again, whole.")
+            }
             Self::AddressCooldown { retry_after } => format!(
-                "this address has already been paid. It can claim again in {}",
+                "This address has already been paid. It can claim again in {}.",
                 human(*retry_after)
             ),
             Self::ClientLimit { limit, retry_after } => format!(
-                "this connection has had its {limit} claims. It can claim again in {}",
+                "This connection has had its {limit} claims. It can claim again in {}.",
                 human(*retry_after)
             ),
             Self::Drained => {
-                "the faucet is out of funds. The operator has to refill it".to_string()
+                "The faucet is empty. The operator has to refill it.".to_string()
             }
-            Self::CaptchaMissing => "the challenge was not completed".to_string(),
-            Self::CaptchaRefused => "the challenge was refused".to_string(),
+            Self::CaptchaMissing => "The challenge was not completed.".to_string(),
+            Self::CaptchaRefused => "The challenge was refused.".to_string(),
             Self::Busy { .. } => {
-                "every proving slot is busy. A drip takes about ten seconds to prove and the \
-                 faucet proves one at a time"
-                    .to_string()
+                "Every proving slot is busy. Try again in a minute.".to_string()
             }
         }
     }
@@ -225,6 +230,44 @@ mod tests {
                     refusal.code()
                 );
             }
+        }
+    }
+
+    /// The page prints these under the button exactly as they arrive, so each
+    /// one has to be a sentence: a capital at the front and a full stop at the
+    /// end. A message that starts lower case reads as a template with a piece
+    /// missing, which is how this page rendered every refusal it had.
+    #[test]
+    fn every_refusal_is_a_sentence() {
+        let refusals = [
+            Refusal::BadAddress("the checksum does not match".into()),
+            Refusal::AddressCooldown {
+                retry_after: Duration::from_secs(86_400),
+            },
+            Refusal::ClientLimit {
+                limit: 3,
+                retry_after: Duration::from_secs(86_400),
+            },
+            Refusal::Drained,
+            Refusal::CaptchaMissing,
+            Refusal::CaptchaRefused,
+            Refusal::Busy {
+                retry_after: Duration::from_secs(30),
+            },
+        ];
+        for refusal in refusals {
+            let message = refusal.message();
+            let first = message.chars().next().expect("a message");
+            assert!(
+                first.is_uppercase(),
+                "{:?} starts lower case: {message}",
+                refusal.code()
+            );
+            assert!(
+                message.ends_with('.'),
+                "{:?} has no full stop: {message}",
+                refusal.code()
+            );
         }
     }
 

@@ -104,7 +104,15 @@ pair. Both sides agreeing is the confirmation `docs/TESTNET.md` asks for.
 | `GET /health` | 200 when the worker is up, the node answered inside six minutes and the balance is above the floor; 503 otherwise, with `ready`, `nodeFresh`, `funded`, `balanceQuanta`, `balanceQnr` and `chainHead` saying which. The worker's minute tick is what keeps that freshness true with no traffic |
 | `GET /status` | the deep check: `configured`, `captchaEnabled`, `dripQuanta`, `dripQnr`, `cooldownHours`, `balanceQuanta`, `balanceQnr`, `notes`, `queued`, `queueCapacity`, `paidQuanta`, `paidQnr`, `chainHead`, `address`, `genesis` |
 | `POST /drip` | `{"address": "qn1...", "turnstileToken": "..."}` → 202 `{"status":"queued","id":N}` |
-| `GET /drip/{id}` | `queued`, `sent` with `includedAt`, or `failed` with a reason code |
+| `GET /drip/{id}` | `queued`, `sent` with `includedAt`, or `failed` with a reason code, plus `phase` and `ahead` |
+
+`phase` is the finer reading of a queued claim that the page's progress line
+shows: `queued` while somebody else's claim is in front of it, `proving` when
+nothing is ahead and nothing has been submitted, `waiting` once `submitted_at`
+is written and the payment is in the node's pool. `ahead` is how many queued
+claims are in front of this one. Both are derived from rows the ledger already
+keeps, and both exist because a page with only a stopwatch tells somebody who
+is fourth in line that their proof is being computed.
 
 `/status` is GET only so a probe can never submit a claim. `/health` is 503 when
 the faucet is drained, on purpose: a faucet that is up and cannot pay is an

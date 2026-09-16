@@ -598,7 +598,7 @@ async fn a_full_queue_is_a_503_and_not_a_wait() {
 /// them: a browser asks this origin for `/favicon.svg`, and a 404 there is the
 /// default globe beside a tab whose whole family shows an amber Q.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_page_and_its_two_files_are_served() {
+async fn the_page_and_its_three_files_are_served() {
     let dir = tempdir::TempDir::new("cfg");
     let harness = start(config_in(dir.path())).await;
 
@@ -606,6 +606,56 @@ async fn the_page_and_its_two_files_are_served() {
         let (status, _, _) = request("GET", format!("{}{path}", harness.base), None, None).await;
         assert_eq!(status, 200, "{path} was not served");
     }
+}
+
+/// What the page's progress line reads its steps from.
+///
+/// One prover, one job at a time, so the claim at the head of the queue is
+/// the one being proved and everything behind it is waiting for a prover. A
+/// page with only a stopwatch says "proving, about 10 s" to somebody who is
+/// fourth in line, which is a progress line that lies; `phase` and `ahead`
+/// are what make the steps true, and they come from rows the ledger already
+/// keeps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_knows_which_step_it_is_on() {
+    let dir = tempdir::TempDir::new("cfg");
+    let harness = start(config_in(dir.path())).await;
+
+    let mut ids = Vec::new();
+    for attempt in 0..2 {
+        let (status, body, _) = request(
+            "POST",
+            format!("{}/drip", harness.base),
+            Some(serde_json::json!({ "address": an_address(&format!("phase-{attempt}")) }).to_string()),
+            Some("203.0.113.21"),
+        )
+        .await;
+        assert_eq!(status, 202);
+        ids.push(body["id"].as_i64().expect("a claim id"));
+    }
+
+    let (_, first, _) = request("GET", format!("{}/drip/{}", harness.base, ids[0]), None, None).await;
+    assert_eq!(first["status"], serde_json::json!("queued"));
+    assert_eq!(first["phase"], serde_json::json!("proving"));
+    assert_eq!(first["ahead"], serde_json::json!(0));
+
+    let (_, second, _) =
+        request("GET", format!("{}/drip/{}", harness.base, ids[1]), None, None).await;
+    assert_eq!(second["status"], serde_json::json!("queued"));
+    assert_eq!(second["phase"], serde_json::json!("queued"));
+    assert_eq!(second["ahead"], serde_json::json!(1));
+
+    // `submitted_at` is written just before the payment goes to the node, so a
+    // claim carrying one is in the pool waiting for a block rather than being
+    // proved.
+    harness
+        .store
+        .lock()
+        .expect("the ledger")
+        .mark_submitted(ids[0], now_secs())
+        .expect("submitted");
+    let (_, first, _) = request("GET", format!("{}/drip/{}", harness.base, ids[0]), None, None).await;
+    assert_eq!(first["phase"], serde_json::json!("waiting"));
 }
 
 /// The per-client limit counts an IPv6 requester by its /64, through the whole
