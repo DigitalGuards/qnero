@@ -80,11 +80,20 @@ export function Input({
   return <input className={cn('mm-input', className)} {...props} />;
 }
 
+/**
+ * The multi-line field: an address, a spend key.
+ *
+ * No resize handle. Both of the values that land in one are pasted whole and
+ * wrap inside three rows, so the handle offered a reader a way to make the
+ * form taller and nothing else; on a phone it is a 16 px target in the corner
+ * of a 40 px control. Nothing is hidden: the box scrolls and a paste is
+ * selectable in one gesture.
+ */
 export function Textarea({
   className,
   ...props
 }: TextareaHTMLAttributes<HTMLTextAreaElement>): ReactNode {
-  return <textarea className={cn('mm-input resize-y', className)} {...props} />;
+  return <textarea className={cn('mm-input resize-none', className)} {...props} />;
 }
 
 /** A field id that is stable across renders, for the label to point at. */

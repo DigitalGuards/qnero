@@ -277,6 +277,8 @@ export function SendScreen({
             data-testid="send-to"
             rows={3}
             autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
             spellCheck={false}
             {...form.register('to', {
               // The checksum as it is typed, from the module that will decode

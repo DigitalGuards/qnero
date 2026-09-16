@@ -155,6 +155,8 @@ export function RestoreWallet({
             id="restore-seed"
             data-testid="restore-seed"
             autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
             spellCheck={false}
             rows={3}
             {...form.register('seed', {
