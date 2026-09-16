@@ -295,14 +295,17 @@ and the signature is ML-DSA-87 under the FIPS 204 context. The wasm module
 exports no signing at all, and `qnero-wallet`'s extrinsic, fee and selection
 modules are not wasm-clean (they reach for `libc`, `ureq`, `clap` and
 `twox-hash`). So a browser wallet can predict and recognise a shield, and it
-cannot make one. Fund it from `qnero-wallet shield` followed by a `send`, or
-from a node configured with its miner key. Closing this properly means a
+cannot make one. Fund it from the faucet at https://faucet.qnero.io, from
+`qnero-wallet shield` followed by a `send`, or from a node configured with its
+miner key. Closing this properly means a
 wasm-clean crate split and an ML-DSA-87 signer in the module, and that is not
 M10.
 
 ## Threat model, in plain words
 
-**This is dev grade and browser hosted. Use it on a dev chain.**
+**This is pre-alpha and browser hosted. None of Qnero's own code has been
+audited, the public testnet has been live since 2026-09-15 and the network may
+be reset.**
 
 - **The page host can do anything the page can.** Whoever serves these files
   can serve different ones tomorrow, and the different ones can send the seed
