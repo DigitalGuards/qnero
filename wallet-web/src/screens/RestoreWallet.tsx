@@ -28,7 +28,7 @@ import { useForm, useWatch } from 'react-hook-form';
 
 import { Button } from '../components/UI/Button';
 import { Field, Textarea, Input } from '../components/UI/Field';
-import { Panel, Prose } from '../components/UI/Panel';
+import { Panel } from '../components/UI/Panel';
 import { MIN_PASSPHRASE, seedHexIsWellFormed } from '../wallet/crypto';
 import { BIRTHDAY_EPOCH, birthdayEpochOf } from '../wallet/model';
 import { fullScanEstimate } from '../wallet/sync';
@@ -117,26 +117,22 @@ export function RestoreWallet({
   const typed = useWatch({ control: form.control, name: 'seed' }).replace(/\s+/g, '');
   const typedHeight = useWatch({ control: form.control, name: 'restoreHeight' });
   const field = readRestoreField(typedHeight, head, targetBlockTimeMs);
+  // One line. What the field is for is the label, what an empty one does is
+  // this, and the epoch and the estimate read on request under the form.
   const heightHint =
     field.kind === 'empty'
-      ? head === null
-        ? 'empty scans the whole chain from block zero'
-        : `empty scans the whole chain: ${fullScanEstimate(head)}`
+      ? 'Leave empty to read the whole chain'
       : field.kind === 'height'
-        ? `recorded as block ${birthdayEpochOf(field.value)}, the epoch below it`
+        ? `Recorded as block ${birthdayEpochOf(field.value)}, the epoch below it`
         : field.kind === 'no-head'
-          ? 'that reads as a date, and a date becomes a height by counting back from a node' +
-            ' head. Connect to a node, or give a block number.'
-          : 'that is neither a block number nor a date this wallet can read';
+          ? 'A date needs a node to count back from. Give a block number instead.'
+          : 'Neither a block number nor a date this wallet can read';
 
   return (
     <Panel title="Use an existing wallet">
-      <Prose>
-        <p>
-          Paste the 32-byte spend key, as 64 hex characters. Spaces and line breaks are ignored, so
-          the grouped form this wallet shows can go straight back in.
-        </p>
-      </Prose>
+      <p className="text-body text-ink-2">
+        Paste the 32-byte spend key, as 64 hex characters. Spaces and line breaks are ignored.
+      </p>
       <form
         className="mt-3"
         onSubmit={(event) => {
@@ -163,12 +159,13 @@ export function RestoreWallet({
             rows={3}
             {...form.register('seed', {
               validate: (value) =>
-                seedHexIsWellFormed(value.replace(/\s+/g, '')) || 'a spend key is 64 hex characters',
+                seedHexIsWellFormed(value.replace(/\s+/g, '')) ||
+                'A spend key is 64 hex characters.',
             })}
           />
         </Field>
         <Field
-          label="Restore height (optional)"
+          label="Start from (optional)"
           htmlFor="restore-height"
           hint={heightHint}
           error={form.formState.errors.restoreHeight?.message}
@@ -178,7 +175,7 @@ export function RestoreWallet({
             data-testid="restore-height"
             autoComplete="off"
             spellCheck={false}
-            placeholder="the chain height when this wallet was created, leave empty to scan everything"
+            placeholder="block number or date"
             {...form.register('restoreHeight', {
               // Refused rather than taken as "scan everything". A typo in this
               // field used to submit as an empty one, and the difference
@@ -186,20 +183,23 @@ export function RestoreWallet({
               // somebody meant to name a block.
               validate: (value) =>
                 readRestoreField(value, head, targetBlockTimeMs).kind !== 'neither' ||
-                'give a block number, a date such as 2026-03-14, or nothing at all',
+                'Give a block number, a date such as 2026-03-14, or nothing at all.',
             })}
           />
         </Field>
-        <Prose>
-          <p className="text-meta text-muted">
-            A block number, or a date such as 2026-03-14. It is recorded rounded down to the
-            nearest {BIRTHDAY_EPOCH} blocks, so what the nodes this wallet syncs against are told
-            is a coarse epoch rather than the day it was made. A height{' '}
-            <strong className="text-ink">above</strong> the block a transfer arrived in is a
-            transfer this wallet never reads and a balance quietly short, so if you are not sure,
+        <details className="mb-3">
+          <summary className="cursor-pointer text-meta text-muted">
+            What this number does
+          </summary>
+          <p className="mt-2 text-meta text-muted">
+            It is recorded rounded down to the nearest {BIRTHDAY_EPOCH} blocks, so what the nodes
+            this wallet syncs against are told is a coarse epoch rather than the day it was made.
+            A height <strong className="text-ink">above</strong> the block a transfer arrived in is
+            a transfer this wallet never reads and a balance quietly short, so if you are not sure,
             leave it empty or give a height you are sure is early.
+            {head !== null && ` Empty reads the whole chain: ${fullScanEstimate(head)}.`}
           </p>
-        </Prose>
+        </details>
         <Field
           label="Passphrase"
           htmlFor="passphrase"
@@ -215,7 +215,7 @@ export function RestoreWallet({
               // on an empty field. See `CreateWallet` and `wallet/crypto.ts`.
               validate: (value) =>
                 value.length >= MIN_PASSPHRASE ||
-                `use at least ${MIN_PASSPHRASE} characters for the passphrase`,
+                `Use at least ${MIN_PASSPHRASE} characters for the passphrase.`,
             })}
           />
         </Field>
@@ -231,7 +231,7 @@ export function RestoreWallet({
             autoComplete="new-password"
             {...form.register('repeat', {
               validate: (value, values) =>
-                value === values.passphrase || 'those two passphrases do not match',
+                value === values.passphrase || 'Those two passphrases do not match.',
             })}
           />
         </Field>

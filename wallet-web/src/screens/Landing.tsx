@@ -6,16 +6,22 @@
  * changes is the sentence under it, because this wallet's answer to "where do
  * my keys live" is different from a light wallet's, and that is the thing to
  * say before somebody creates one.
+ *
+ * The storage warning is not here. `navigator.storage.persist()` answers false
+ * in Safari on a phone, so it was the common case on the device this screen is
+ * mostly read on: thirty-four words about losing a wallet that does not exist
+ * yet, between the question and its two answers, taking a quarter of the
+ * panel. It is on the step that shows the spend key, which is the step it is
+ * actionable on, and in Settings, where it is a standing fact.
  */
 
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 
 import { Button } from '../components/UI/Button';
-import { Notice } from '../components/UI/Notice';
 import { Panel, Prose } from '../components/UI/Panel';
 
-export function Landing({ storageWarning }: { storageWarning: string | null }): ReactNode {
+export function Landing(): ReactNode {
   return (
     <Panel>
       {/* MyMonero sets this sentence at 13 px, weight 300, in the secondary
@@ -35,7 +41,6 @@ export function Landing({ storageWarning }: { storageWarning: string | null }): 
           encrypted here with a passphrase you choose, and used here.
         </p>
       </Prose>
-      {storageWarning !== null && <Notice className="mt-3">{storageWarning}</Notice>}
       <div className="mt-4 space-y-2">
         <Button asChild size="block" data-testid="use-existing">
           <Link to="/restore">Use existing wallet</Link>

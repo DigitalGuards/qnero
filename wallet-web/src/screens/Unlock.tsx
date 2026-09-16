@@ -13,7 +13,7 @@ import { Hash } from '../components/UI/Address';
 import { Button } from '../components/UI/Button';
 import { Dialog, DialogContent, DialogTrigger } from '../components/UI/Dialog';
 import { Field, Input } from '../components/UI/Field';
-import { Panel, Prose } from '../components/UI/Panel';
+import { Panel } from '../components/UI/Panel';
 
 export function Unlock({
   address,
@@ -32,20 +32,15 @@ export function Unlock({
 
   return (
     <Panel title="Unlock">
-      <Prose>
-        <p>
-          This browser holds a wallet. Its balance, its list of transfers and the position
-          each one sits at are readable without the passphrase, which is what lets a locked
-          wallet still show a balance; the spend key, every transfer&apos;s randomness and every
-          memo are encrypted with it, and spending needs it.
-        </p>
-      </Prose>
-      {/* Shortened here, where the address identifies which wallet this
-          browser holds. `Address` shows one whole on the receive screen and
-          the send result, where the value is being used rather than
-          recognised; 176 px of 2,600 characters above the field this screen
-          exists to collect is 38% of the panel for something nobody reads. */}
-      <p className="my-2 text-meta text-muted" data-testid="locked-address">
+      {/* Shortened, where the address identifies which wallet this browser
+          holds. `Address` shows one whole on the receive screen and the send
+          result, where the value is being used rather than recognised; 176 px
+          of 2,600 characters above the field this screen exists to collect is
+          38% of the panel for something nobody reads.
+
+          The fifty-one word paragraph that used to open this screen said a
+          locked wallet still shows a balance, on a screen that shows none. */}
+      <p className="mb-3 text-meta text-muted" data-testid="locked-address">
         <Hash value={address} head={12} tail={8} />
       </p>
       <form
@@ -107,6 +102,9 @@ export function Unlock({
             {busy ? 'Deriving the key…' : 'Unlock'}
           </Button>
         </div>
+        <p className="mt-3 text-meta text-muted">
+          Spending needs the passphrase; viewing does not.
+        </p>
       </form>
     </Panel>
   );

@@ -1135,18 +1135,7 @@ export function App(): ReactNode {
             <Routes>
               <Route
                 path="/"
-                element={guard(
-                  'public',
-                  <Landing
-                    storageWarning={
-                      !persisted
-                        ? 'This browser has not marked its storage persistent. Under storage ' +
-                          'pressure it may drop this wallet, and the seed written down is then ' +
-                          'the only way back to it. Write the spend key down.'
-                        : null
-                    }
-                  />,
-                )}
+                element={guard('public', <Landing />)}
               />
               <Route
                 path="/create"
@@ -1154,6 +1143,15 @@ export function App(): ReactNode {
                   'public',
                   <CreateWallet
                     busy={busy}
+                    // Said where it is actionable: the step that shows the
+                    // spend key, rather than over the landing's two buttons.
+                    storageWarning={
+                      persisted
+                        ? null
+                        : 'This browser has not marked its storage persistent. Under storage ' +
+                          'pressure it may drop this wallet, and what you write down now is then ' +
+                          'the only way back to it.'
+                    }
                     onCancel={() => {
                       void navigate('/');
                     }}

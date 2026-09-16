@@ -62,10 +62,19 @@ export function CreateWallet({
   onCancel,
   onCreated,
   busy,
+  storageWarning,
 }: {
   onCancel: () => void;
   onCreated: (seedHex: string, passphrase: string) => void;
   busy: boolean;
+  /**
+   * What this browser said about keeping the wallet, when the answer was no.
+   *
+   * On this step and nowhere earlier: it is a sentence about the seed being
+   * the only way back, and this is the one screen where the seed is on the
+   * page and writing it down is the thing being asked for.
+   */
+  storageWarning: string | null;
 }): ReactNode {
   const seedHex = useMemo(() => {
     const bytes = newSeed();
@@ -92,6 +101,7 @@ export function CreateWallet({
             once. It is the only thing that recovers this wallet, and nobody else has a copy: not a
             server, not this page after you leave it, not the node you connect to.
           </p>
+          {storageWarning !== null && <p>{storageWarning}</p>}
           <p>
             Proving a payment happens in this browser too, in a background worker, and it takes
             tens of seconds. Nothing is contacted except the node you configure.
