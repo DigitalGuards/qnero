@@ -253,7 +253,7 @@ body {
 h1 {
   font-size: clamp(1.6rem, 1.3rem + 1.4vw, 2.1rem);
   line-height: 1.2;
-  margin: 0 0 var(--space-3);
+  margin: 0 0 var(--space-2);
 }
 
 h2 {
@@ -271,10 +271,17 @@ p {
   margin: 0 0 var(--space-3);
 }
 
-.meta {
-  color: var(--text-muted);
-  font-size: 11px;
-  margin-top: var(--space-4);
+/* The only live figures on the page. They sat at 11 px in --text-muted at the
+   very bottom, 168 px below the fold and under the warnings, where the one
+   line that says the faucet is alive and funded did no work at all. The height
+   is reserved, because a line that arrives with /status and was not there
+   before shifts everything under it. */
+.status {
+  min-height: 20px;
+  margin: 0 0 var(--space-3);
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--text-secondary);
 }
 
 /* A chip in running text with a raised ground and a border is 22.6 px tall in
