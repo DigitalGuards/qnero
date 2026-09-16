@@ -1114,7 +1114,8 @@ export async function runSync(
     throw new NodeRefusedError(
       `this wallet is bound to the chain whose genesis is ${input.meta.genesisHash} and this ` +
         `node serves ${genesis}. Nothing has been changed. Point the wallet at a node on its ` +
-        'own chain, or start a new wallet for this one.',
+        'own chain. If the testnet was reset, forget this wallet and import the same ' +
+        'recovery phrase again: the balance belongs to the old chain and does not carry over.',
     );
   }
 
