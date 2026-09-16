@@ -689,6 +689,7 @@ tbody tr:hover .dim {
 
 .input {
   width: 100%;
+  min-height: 32px;
   padding: 7px 10px;
   font-family: var(--font-mono);
   font-size: var(--fs-body);
@@ -698,20 +699,43 @@ tbody tr:hover .dim {
   border-radius: var(--radius-sm);
 }
 
+.input::placeholder {
+  color: var(--text-secondary);
+  opacity: 1;
+}
+
+/* Label above the control, the control full width, the button under it. */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: stretch;
+}
+
+.form .button {
+  align-self: stretch;
+}
+
+@media (min-width: 641px) {
+  .form .button {
+    align-self: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  /* 16 px in a hand: Safari zooms the page on focus of anything smaller and
+     leaves the reader zoomed in after every search. */
+  .input {
+    min-height: 44px;
+    font-size: max(16px, var(--fs-body));
+  }
+}
+
 .row {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
-}
-
-.row--search {
-  align-items: stretch;
-}
-
-.row--search .input {
-  flex: 1 1 260px;
-  min-width: 0;
 }
 
 .pager {

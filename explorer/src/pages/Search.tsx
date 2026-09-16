@@ -34,7 +34,11 @@ export function Search({ query }: { query: string }): ReactNode {
       {/* Keyed by the route's query, so the box follows the route. A box that
           kept the previous value across a back button would leave the consent
           notice below naming 32 bytes that are not the ones the lookup sends. */}
-      <SearchBox key={query} initial={query} />
+      {/* The form is the page's primary until the reader has an answer to act
+          on. On a 32-byte query the first panel's button becomes the primary,
+          because pressing it is the next thing the reader does. One amber per
+          screen, and it is the action they came for. */}
+      <SearchBox key={query} initial={query} primary={kind !== 'hash'} />
 
       {query === '' ? null : kind === 'unknown' ? (
         <Empty>
@@ -52,7 +56,18 @@ export function Search({ query }: { query: string }): ReactNode {
   );
 }
 
-function SearchBox({ initial }: { initial: string }): ReactNode {
+/**
+ * The one form on the site, on the page whose whole job is that form.
+ *
+ * It was a three-piece row that did not fit the phone it was on: a top-aligned
+ * label left of a 276 px input, with the button dropped to a second line under
+ * the label. The placeholder measured 337 px in a 274 px box, so it truncated
+ * mid-sentence, and the input was 13 px, which makes iOS Safari zoom the page
+ * on focus and leave the reader zoomed in after every search.
+ *
+ * Label above, input full width at 16 px in a hand, button full width under it.
+ */
+function SearchBox({ initial, primary }: { initial: string; primary: boolean }): ReactNode {
   const [text, setText] = useState(initial);
   const onSubmit = (event: SyntheticEvent): void => {
     event.preventDefault();
@@ -60,22 +75,27 @@ function SearchBox({ initial }: { initial: string }): ReactNode {
   };
   return (
     <Panel>
-      <form className="row row--search" onSubmit={onSubmit} role="search">
-        <label className="field__label" htmlFor="search-input">
-          Query
-        </label>
-        <input
-          id="search-input"
-          className="input"
-          value={text}
-          onChange={(event) => {
-            setText(event.target.value);
-          }}
-          placeholder="height, or 0x followed by 64 hex characters"
-          spellCheck={false}
-          autoComplete="off"
-        />
-        <button className="button button--action" type="submit">
+      <form className="form" onSubmit={onSubmit} role="search">
+        <div className="form__field">
+          <label className="field__label" htmlFor="search-input">
+            Query
+          </label>
+          <input
+            id="search-input"
+            className="input"
+            value={text}
+            onChange={(event) => {
+              setText(event.target.value);
+            }}
+            placeholder="height or 0x hash"
+            spellCheck={false}
+            autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
+            enterKeyHint="search"
+          />
+        </div>
+        <button className={primary ? 'button button--action' : 'button'} type="submit">
           Look up
         </button>
       </form>
