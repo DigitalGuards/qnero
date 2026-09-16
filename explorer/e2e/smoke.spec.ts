@@ -678,6 +678,26 @@ test('every page is reachable from the keyboard and readable at 400 px', async (
   // the hash it went with the columns that drop.
   await expect(extrinsics.getByRole('link', { name: /submit_private_batch/ })).toBeVisible();
 
+  // And the row that leads somewhere is the target across its width: the link
+  // itself is 14 px of text in a 45 px row. The press lands at the right edge
+  // of what the scroller is showing, which is the Outcome column, where
+  // nothing is a link.
+  const settlementRow = extrinsics
+    .locator('tbody tr')
+    .filter({ hasText: 'submit_private_batch' })
+    .first();
+  await settlementRow.scrollIntoViewIfNeeded();
+  const rowBox = await settlementRow.boundingBox();
+  const wrapBox = await wrap.boundingBox();
+  if (rowBox === null || wrapBox === null) {
+    throw new Error('the settlement row or its scroller has no box to press');
+  }
+  await page.mouse.click(
+    Math.min(rowBox.x + rowBox.width, wrapBox.x + wrapBox.width) - 12,
+    rowBox.y + rowBox.height / 2,
+  );
+  await expect(page.getByRole('heading', { name: 'Settlement' })).toBeVisible();
+
   // A shield reader's three columns: the value, the leaf and the entry. The
   // 40-character signer was pushing the value off the screen.
   await open(page, `#/block/${facts().shieldHeight}`);

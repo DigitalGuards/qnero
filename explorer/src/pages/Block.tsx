@@ -565,8 +565,10 @@ function OtherExtrinsics({
                 <td className="num">{extrinsic.index}</td>
                 {/* The link is on the call, which is the column a phone keeps.
                     On the hash it disappeared with the three columns that drop
-                    at phone width, and the row's identity is what it called. */}
-                <td className="mono">
+                    at phone width, and the row's identity is what it called. A
+                    row that leads somewhere is the whole target: the link was
+                    14 px tall in a 44 px row. */}
+                <td className={isSettlement(extrinsic.index) ? 'mono row-link' : 'mono'}>
                   {isSettlement(extrinsic.index) ? (
                     <SettlementLink txHash={extrinsic.hash} blockHash={block.hash}>
                       {extrinsic.name}
