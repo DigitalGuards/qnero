@@ -12,6 +12,7 @@ import {
   ErrorBox,
   Field,
   Fields,
+  Hash,
   Leak,
   Loading,
   Notice,
@@ -35,12 +36,20 @@ export function Search({ query }: { query: string }): ReactNode {
 
       {/* Keyed by the route's query, so the box follows the route. A box that
           kept the previous value across a back button would leave the consent
-          notice below naming 32 bytes that are not the ones the lookup sends. */}
+          notice below naming 32 bytes that are not the ones the lookup sends.
+
+          The key carries a prefix because the answer below is keyed by the
+          same query. Two siblings under one parent with the same key is a
+          duplicate key: React kept the old SearchBox mounted when the query
+          changed, and the orphaned form then sat above the h1 of every page
+          the reader opened afterwards, for the life of the tab. A lowercase
+          hash made the two keys identical; an uppercase one did not, which is
+          why it only happened to readers who pasted lowercase hex. */}
       {/* The form is the page's primary until the reader has an answer to act
           on. On a 32-byte query the first panel's button becomes the primary,
           because pressing it is the next thing the reader does. One amber per
           screen, and it is the action they came for. */}
-      <SearchBox key={query} initial={query} primary={kind !== 'hash'} />
+      <SearchBox key={`box:${query}`} initial={query} primary={kind !== 'hash'} />
 
       {query === '' ? null : kind === 'unknown' ? (
         <Empty>
@@ -52,7 +61,7 @@ export function Search({ query }: { query: string }): ReactNode {
         // Keyed by the query, so asking about a second value starts from the
         // warning again. Consent to name one nullifier to the node is not
         // consent to name the next one.
-        <HashResult key={query.toLowerCase()} hash={query.toLowerCase()} />
+        <HashResult key={`result:${query.toLowerCase()}`} hash={query.toLowerCase()} />
       )}
     </>
   );
@@ -142,9 +151,14 @@ function HashResult({ hash }: { hash: string }): ReactNode {
   return (
     <>
       {/* The value, in the same keyed subtree as the notice, so "these 32
-          bytes" can never name one value while a lookup sends another. */}
+          bytes" can never name one value while a lookup sends another.
+
+          Head and tail, because the whole 66 characters ran to three lines of
+          11 px text at 375 px: the smallest type on the page and the line that
+          names the value the notice is about. The full value is in the input
+          directly above it and in this element's title. */}
       <p className="query" data-query>
-        Answering for <span className="mono">{hash}</span>
+        Answering for <Hash value={hash} />
       </p>
       <Notice>
         <p>Nothing is sent until you press a button.</p>

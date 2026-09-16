@@ -480,6 +480,19 @@ p {
   margin-top: 2px;
 }
 
+/* A link inside a field value carried no padding of its own, so it was 14 to
+   25 px tall: under the 24 px WCAG target floor and well under the 44 px a
+   thumb wants. These are the only route from a settlement to its block and
+   from the head to the block page, and a thumb lands beside them. The padding
+   is pulled straight back out as negative margin, so the hit area grows and
+   nothing on the page moves. */
+.field__value a,
+.hashline a {
+  display: inline-block;
+  padding-block: 8px;
+  margin-block: -8px;
+}
+
 /* A value and its copy control on one line. */
 .hashline {
   display: inline-flex;
@@ -572,11 +585,20 @@ p {
 }
 
 /* The value a result page is answering for, above the consent notice and in
-   the same keyed subtree as it. */
+   the same keyed subtree as it. It joins the notes and notices at body size
+   on a phone: it was the smallest type on the page and it names the value the
+   notice is about. The rule is here rather than in the block above, because
+   this declaration comes after that block and would outrank it. */
 .query {
   font-size: var(--fs-meta);
   color: var(--text-secondary);
   word-break: break-all;
+}
+
+@media (max-width: 640px) {
+  .query {
+    font-size: var(--fs-body);
+  }
 }
 
 /* What a panel costs, in one line with its tag at the end. */

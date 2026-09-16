@@ -85,15 +85,15 @@ export function SettlementView({
           </div>
         </div>
       ))}
-      {/* Once, under the list. It was rendered inside every slot: a settlement
-          with eight slots printed this same 345-character paragraph eight
-          times, 2,760 characters of it. */}
+      {/* Once, under the list, and one sentence long. It was rendered inside
+          every slot first: a settlement with eight slots printed the same
+          345-character paragraph eight times, 2,760 characters of it. Then it
+          was that paragraph once, eight lines of it at 375 px on a page whose
+          job is the data above it. The reasoning lives in Reveals, under
+          "What a settled nullifier stands for", which the settlement page
+          links under this panel and the masthead links from every page. */}
       <p className="field__note">
-        Each nullifier marks one of a slot&rsquo;s two input positions consumed and names no note.
-        A real input spends one note and a dummy input publishes a nullifier over no note, so a
-        slot spent one note or two, and nothing on chain joins a nullifier to the leaf it spent.
-        The two leaves beside them are the outputs that spend created, and the chain publishes that
-        link.
+        A nullifier marks one input position consumed and names no note.
       </p>
     </>
   );

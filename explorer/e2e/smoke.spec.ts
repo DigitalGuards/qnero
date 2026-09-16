@@ -110,7 +110,16 @@ test('the home page reads the head, the work and the pool off the node', async (
   // The row is the link, and the ages move. They used to be computed at render
   // and re-rendered only when the head changed, so on a page for an older
   // range they never moved at all, which reads as a stalled chain.
-  const age = rows.last().locator('td').nth(1);
+  //
+  // The row is picked by having an age at all. On a chain under twelve blocks
+  // the last row is genesis, whose age cell reads `none` because genesis
+  // carries no timestamp, so the last row never moves and this test failed on
+  // exactly the chain global setup produces.
+  const age = rows
+    .filter({ hasText: /ago/ })
+    .last()
+    .locator('td')
+    .nth(1);
   const first = await age.innerText();
   await expect.poll(async () => age.innerText(), { timeout: 15_000, intervals: [1000] }).not.toBe(
     first,
@@ -201,32 +210,26 @@ test('a settlement page states what it publishes and what it does not', async ({
 
   await expect(panel(page, 'Slots').locator('.slot')).toHaveCount(1);
 
-  // What a settled nullifier stands for. A slot has two input positions and its
-  // two nullifiers mark both consumed; a position holding a dummy input
-  // publishes a nullifier over no note (docs/CIRCUIT.md section 5, the NF_DUMMY
-  // tag, and section 9.5 on settling both nullifiers of every real slot). So
-  // the page bounds what the slot spent and counts positions. It is stated
-  // once, under the list of slots: it used to render inside every slot, so a
-  // settlement with eight slots printed it eight times.
+  // What a settled nullifier stands for, in one sentence, once. A slot has two
+  // input positions and its two nullifiers mark both consumed; a position
+  // holding a dummy input publishes a nullifier over no note (docs/CIRCUIT.md
+  // section 5, the NF_DUMMY tag, and section 9.5 on settling both nullifiers of
+  // every real slot). This is a data page, so it states the bound and leaves
+  // the argument to Reveals: the four-sentence version was eight lines at
+  // 375 px between the slot and the next panel.
   const slots = panel(page, 'Slots');
-  expect(
-    occurrences(
-      await slots.innerText(),
-      'Each nullifier marks one of a slot’s two input positions consumed',
-    ),
-  ).toBe(1);
+  const slotsText = await slots.innerText();
+  expect(occurrences(slotsText, 'A nullifier marks one input position consumed')).toBe(1);
   await expect(slots).toContainText(
-    'Each nullifier marks one of a slot’s two input positions consumed and names no note',
+    'A nullifier marks one input position consumed and names no note',
   );
-  await expect(slots).toContainText(
-    'A real input spends one note and a dummy input publishes a nullifier over no note',
-  );
-  await expect(slots).toContainText('nothing on chain joins a nullifier to the leaf it spent');
-  await expect(slots).toContainText('The two leaves beside them are the outputs');
+  expect(slotsText).not.toContain('A real input spends one note');
+  expect(slotsText).not.toContain('The two leaves beside them are the outputs');
 
   // The four-paragraph statement of what a spend publishes lived here in the
   // one colour this site has for state a reader must act on, 408 px of it
-  // after the data. It is on Reveals and this page links to it.
+  // after the data. It is on Reveals and this page links to it, which is now
+  // also where the rest of the nullifier argument is.
   await expect(page.locator('.notice')).toHaveCount(0);
   await expect(
     page.getByRole('link', { name: 'What this chain reveals' }).first(),
@@ -238,6 +241,15 @@ test('a settlement page states what it publishes and what it does not', async ({
   expect(settlementText).not.toContain('proves some note was spent');
   expect(settlementText).not.toContain('Nullifiers spent');
   expect(settlementText).not.toContain('that some notes were spent');
+
+  // The argument the slot list no longer carries is on Reveals, whole.
+  await open(page, '#/reveals');
+  await expect(page.locator('#main')).toContainText(
+    'a dummy input publishes a nullifier over no note',
+  );
+  await expect(page.locator('#main')).toContainText(
+    'nothing on chain joins a nullifier to the leaf it spent',
+  );
 });
 
 test('a settlement that cannot be answered is a page with a way out', async ({ page }) => {
@@ -290,7 +302,9 @@ test('search answers a height, a block hash and a settled nullifier', async ({ p
   await expect(page.locator('.notice').first()).toContainText(
     'Nothing is sent until you press a button',
   );
-  await expect(page.locator('[data-query]')).toContainText(blockHash);
+  // Head and tail on screen, the whole value in the title: the line is one
+  // row at 375 px and the value it names is still exact.
+  await expect(page.locator('[data-query] .mono')).toHaveAttribute('title', blockHash);
   // The count first: it is the claim. The missing field below it is only how
   // the page shows that the read has not run.
   expect(naming(blockHash)).toBe(askedHash);
@@ -309,7 +323,7 @@ test('search answers a height, a block hash and a settled nullifier', async ({ p
   // The value being asked about is on screen inside the same keyed subtree as
   // the consent notice, so the copy's "these 32 bytes" cannot name one value
   // while the lookup sends another.
-  await expect(page.locator('[data-query]')).toContainText(nullifier);
+  await expect(page.locator('[data-query] .mono')).toHaveAttribute('title', nullifier);
   await expect(page.locator('.notice')).toContainText(
     'The two lookups send these 32 bytes to the node; the two scans read ranges and name nothing',
   );
@@ -365,6 +379,26 @@ test('search answers a height, a block hash and a settled nullifier', async ({ p
   await expect(panel(page, 'Which settlement published it')).toContainText(
     `block ${facts().settlementHeight}`,
   );
+
+  // One form, whatever was searched before it. The box and the answer were
+  // siblings keyed by the same string, which for any lowercase hash is one
+  // duplicate key: React then kept the previous box mounted and the orphan sat
+  // above the h1 of every page opened afterwards, for the life of the tab.
+  await open(page, `#/search?q=${facts().settlementHeight}`);
+  await expect(page.locator('form')).toHaveCount(1);
+  await expect(page.locator('.main__inner > *').first()).toHaveClass(/page__head/);
+
+  // The same through the form rather than the address bar, which is how a
+  // reader gets here.
+  await page.locator('#search-input').fill(String(facts().shieldHeight));
+  await page.locator('#search-input').press('Enter');
+  await expect(panel(page, 'Height')).toContainText(`Block ${facts().shieldHeight}`);
+  await expect(page.locator('form')).toHaveCount(1);
+
+  // And on a page the reader walks to next, which is where the orphan showed.
+  await open(page, '#/reveals');
+  await expect(page.locator('form')).toHaveCount(0);
+  await expect(page.locator('.main__inner > *').first()).toHaveClass(/page__head/);
 });
 
 test('genesis and an unknown hash each render as a page with a way out', async ({ page }) => {
@@ -377,6 +411,15 @@ test('genesis and an unknown hash each render as a page with a way out', async (
     'genesis has no parent',
   );
   await expect(panel(page, 'Extrinsics (0)')).toContainText('This block carries no extrinsics');
+
+  // Genesis in a list: it carries no timestamp, and a block the node did read
+  // is not a block whose state the node no longer keeps. `unread` is the word
+  // for the second, and the row said it for the first while printing `none`
+  // for the same block's coinbase and linking a block page that says `none`.
+  await open(page, '#/blocks?before=11');
+  const genesis = page.locator('table tbody tr').last();
+  await expect(genesis.locator('td').first()).toHaveText('0');
+  await expect(genesis.locator('td').nth(1)).toHaveText('none');
 
   const unknown = `0x${'00'.repeat(31)}01`;
   await open(page, `#/block/${unknown}`);

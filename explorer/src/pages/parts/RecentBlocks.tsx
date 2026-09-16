@@ -36,9 +36,21 @@ function useSecond(): number {
   return now;
 }
 
+/**
+ * The two empty cases are different and the word for each is different.
+ *
+ * `null` is state the node no longer keeps, which is what `unread` means
+ * everywhere on this site. A timestamp of 0 is genesis, which the node did
+ * read and which simply carries no time: the block page says `none` for it,
+ * and a row that said `unread` for the block whose coinbase it prints as
+ * `none` contradicted the page it links to.
+ */
 function age(timestampMs: number | null, now: number): ReactNode {
-  if (timestampMs === null || timestampMs === 0) {
+  if (timestampMs === null) {
     return <span className="dim">unread</span>;
+  }
+  if (timestampMs === 0) {
+    return <span className="dim">none</span>;
   }
   return formatAgo(timestampMs, now);
 }
