@@ -119,12 +119,18 @@
             <div class="command">
               <span class="command__label">Make a miner key</span>
               <pre><code>./target/release/qnero-wallet keygen
-export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pre>
+export QNERO_MINER_KEY=$(
+  ./target/release/qnero-wallet \
+    miner-address)</code></pre>
             </div>
             <div class="command">
               <span class="command__label">Start an authoring node</span>
-              <pre><code>nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
-  --rewards-miner-key "$QNERO_MINER_KEY" --rewards-inner-hash &lt;hash&gt;</code></pre>
+              <pre><code>nice -n 19 \
+  ./chain/target/release/qnero-node \
+  --dev --tmp \
+  --rewards-miner-key \
+    "$QNERO_MINER_KEY" \
+  --rewards-inner-hash &lt;hash&gt;</code></pre>
             </div>
           </div>
         </div>
@@ -162,14 +168,21 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
           <div class="commands">
             <div class="command">
               <span class="command__label">On the node</span>
-              <pre><code>nice -n 19 ./chain/target/release/qnero-node --dev --tmp \
-  --rewards-miner-key "$QNERO_MINER_KEY" --rewards-inner-hash &lt;hash&gt; \
-  --stratum-port 3333 --mining-threads 0</code></pre>
+              <pre><code>nice -n 19 \
+  ./chain/target/release/qnero-node \
+  --dev --tmp \
+  --rewards-miner-key \
+    "$QNERO_MINER_KEY" \
+  --rewards-inner-hash &lt;hash&gt; \
+  --stratum-port 3333 \
+  --mining-threads 0</code></pre>
             </div>
             <div class="command">
               <span class="command__label">On the rig</span>
-              <pre><code>nice -n 19 xmrig --threads=2 --algo rx/0 \
-  -o 127.0.0.1:3333 -u qnero-rig -p x --no-color</code></pre>
+              <pre><code>nice -n 19 xmrig \
+  --threads=2 --algo rx/0 \
+  -o 127.0.0.1:3333 \
+  -u qnero-rig -p x --no-color</code></pre>
             </div>
           </div>
         </div>
