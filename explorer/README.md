@@ -139,7 +139,7 @@ server {
     }
 
     location / {
-        try_files $uri $uri/ /index.html;
+        try_files $uri $uri/ =404;
     }
 
     # The page talks to the node and to nothing else.
