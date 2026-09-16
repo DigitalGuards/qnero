@@ -761,6 +761,35 @@ h1 .mark {
   text-wrap: balance;
 }
 
+/* The first screen on a phone is 667 px with 116 px of chrome already spent on
+   the status strip and the header, and the page's primary button has to land
+   inside it. The display clamp gives 29.9 px at 375, which wraps the home
+   sentence to three lines and puts the button at y 348. 27 px wraps it to two
+   and 28 px does not, so 27 is the ceiling for that sentence, and the hero's
+   own top padding comes down from 32 to 20 at the same breakpoint: button at
+   y 294.
+
+   Below 375 px the measure is too narrow for 27 px to hold two lines, so the
+   size steps to 24 px there: that fits two lines at 360 and keeps the third
+   line a 320 px screen cannot avoid down to 86 px. Buttons land at y 314, 286,
+   294 and 294 at 320, 360, 375 and 414 px, where before they landed at 344,
+   347, 348 and 352. Every figure here is read off the served page. */
+@media (max-width: 640px) {
+  .band--hero {
+    padding-top: 20px;
+  }
+
+  .hero h1 {
+    font-size: 1.6875rem;
+  }
+}
+
+@media (max-width: 374px) {
+  .hero h1 {
+    font-size: 1.5rem;
+  }
+}
+
 /* Balanced for the same reason .band h2 is: a lede sits directly under a 52px
    h1, so a one-word second line is the most conspicuous line on the page. */
 .hero .lede {
@@ -1143,6 +1172,67 @@ tbody tr:hover td.col-self {
     left: 0;
     z-index: 1;
     background: var(--bg-panel);
+  }
+}
+
+/* Three columns whose row label is a `code` chip: the sticky treatment above
+   cannot carry it. A chip does not wrap, so `--stratum-max-connections-per-ip
+   N` sets a 272 px column of a 333 px viewport and then pins it over the 61 px
+   left for the two columns the reader came for; the Default cell showed `off`
+   and the description nine characters of its last line. Below 640 px each row
+   becomes the flag on its own line with the two values labelled under it,
+   which is the pairs treatment with one field more. The sticky and min-width
+   rules are undone by name, because the table keeps .table--mid for the widths
+   where three columns do fit. */
+@media (max-width: 640px) {
+  .table--rows {
+    min-width: 0;
+  }
+
+  .table--rows thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .table--rows tbody tr {
+    display: block;
+    border-top: 1px solid var(--border);
+    padding: var(--space-3);
+  }
+
+  .table--rows tbody tr:first-child {
+    border-top: 0;
+  }
+
+  .table--rows tbody th,
+  .table--rows tbody td {
+    display: block;
+    position: static;
+    border: 0;
+    min-width: 0;
+    padding: 0;
+  }
+
+  .table--rows tbody th {
+    margin-bottom: var(--space-2);
+  }
+
+  .table--rows tbody td + td {
+    margin-top: var(--space-2);
+  }
+
+  .table--rows tbody td::before {
+    content: attr(data-label);
+    display: block;
+    font-size: var(--fs-label);
+    letter-spacing: var(--ls-wide);
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: var(--space-1);
   }
 }
 

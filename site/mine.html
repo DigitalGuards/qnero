@@ -26,7 +26,7 @@
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <aside class="status-strip" aria-label="Project status">
+    <aside class="status-strip" role="status" aria-label="Project status">
       <div class="wrap">
         <span class="dot" aria-hidden="true"></span>
         <p>
@@ -92,8 +92,9 @@
           <div class="split split--even">
             <div class="prose">
               <p>
-                A built node and a wallet. Release builds are mandatory: a leaf takes about 0.2 s in
-                release and minutes in debug. The repository README carries the build preconditions.
+                A built node and a wallet. Release builds are mandatory: a proof takes about 0.2 s
+                in release and minutes in debug. The repository README carries the build
+                preconditions.
               </p>
               <p>
                 The miner key is secret-bearing and cannot spend. Its holder can pick that miner's
@@ -193,7 +194,7 @@ export QNERO_MINER_KEY=$(
           <span class="band__label">03 / The endpoint</span>
           <h2>Stratum flags</h2>
           <section class="table-wrap" tabindex="0" aria-label="Stratum flags, scrollable table">
-            <table class="table--mid">
+            <table class="table--mid table--rows">
               <caption>Each flag, and what it takes when unset</caption>
               <thead>
                 <tr>
@@ -205,28 +206,28 @@ export QNERO_MINER_KEY=$(
               <tbody>
                 <tr>
                   <th scope="row"><code>--stratum-port&nbsp;PORT</code></th>
-                  <td>off</td>
-                  <td>Opens the endpoint xmrig connects to. Requires an authoring node</td>
+                  <td data-label="Default">off</td>
+                  <td data-label="What it does">Opens the endpoint xmrig connects to. Requires an authoring node</td>
                 </tr>
                 <tr>
                   <th scope="row"><code>--stratum-host&nbsp;ADDR</code></th>
-                  <td>127.0.0.1</td>
-                  <td>Bind address. A rig on another machine needs <code>0.0.0.0</code> and a firewall rule you chose</td>
+                  <td data-label="Default">127.0.0.1</td>
+                  <td data-label="What it does">Bind address. A rig on another machine needs <code>0.0.0.0</code> and a firewall rule you chose</td>
                 </tr>
                 <tr>
                   <th scope="row"><code>--stratum-share-difficulty&nbsp;D</code></th>
-                  <td>5000</td>
-                  <td>Per-connection share difficulty, clamped per job to the block difficulty</td>
+                  <td data-label="Default">5000</td>
+                  <td data-label="What it does">Per-connection share difficulty, clamped per job to the block difficulty</td>
                 </tr>
                 <tr>
                   <th scope="row"><code>--stratum-max-connections-per-ip&nbsp;N</code></th>
-                  <td>16</td>
-                  <td>Connections one address may hold. Several rigs behind one NAT gateway arrive from a single address</td>
+                  <td data-label="Default">16</td>
+                  <td data-label="What it does">Connections one address may hold. Several rigs behind one NAT gateway arrive from a single address</td>
                 </tr>
                 <tr>
                   <th scope="row"><code>--stratum-share-timeout&nbsp;S</code></th>
-                  <td>600, rising with the share difficulty</td>
-                  <td>How long a logged-in session has to produce an accepted share before it is closed. The ceiling is 7200 s</td>
+                  <td data-label="Default">600, rising with the share difficulty</td>
+                  <td data-label="What it does">How long a logged-in session has to produce an accepted share before it is closed. The ceiling is 7200 s</td>
                 </tr>
               </tbody>
             </table>
