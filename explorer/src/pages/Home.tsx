@@ -220,7 +220,11 @@ export function Home(): ReactNode {
 
       <Panel title="Head">
         <Fields>
-          <Field label="Best block" value={<span className="num">{formatCount(head.header.number)}</span>} />
+          <Field
+            label="Best block"
+            value={<span className="num">{formatCount(head.header.number)}</span>}
+            display
+          />
           <Field label="Best hash" value={<Hash value={head.hash} href={href({ name: 'block', id: head.hash })} />} />
           <Field
             label="Runtime"
@@ -250,6 +254,7 @@ export function Home(): ReactNode {
           />
           <Field
             label="Block time"
+            display
             value={<span className="num">{observedMs === null ? '-' : formatSeconds(observedMs)}</span>}
             note={
               // The target comes from the chain, never from a constant in this
@@ -362,6 +367,7 @@ export function Home(): ReactNode {
           />
           <Field
             label="Nullifiers settled"
+            display
             value={
               <span className="num">
                 {settled.kind === 'not-counted'
@@ -375,6 +381,7 @@ export function Home(): ReactNode {
           />
           <Field
             label="Pool value"
+            display
             value={
               <span className="num">
                 {snapshot.status === 'ready' ? formatQnr(snapshot.value.pool.poolValuePlanck) : '-'}
@@ -390,6 +397,7 @@ export function Home(): ReactNode {
           />
           <Field
             label="Latest coinbase"
+            display
             value={
               <span className="num">
                 {coinbase.kind === 'minted' ? formatQnr(coinbase.note.valuePlanck) : '-'}

@@ -32,23 +32,41 @@ export function Fields({ children }: { children: ReactNode }): ReactNode {
   return <div className="fields">{children}</div>;
 }
 
+/**
+ * One labelled value.
+ *
+ * `display` is the balance treatment Qloak has and this site did not: every
+ * value on the chain page, Best block and Pool value included, was 13 px,
+ * identical to the prose beside it, so nothing on the page said "this is the
+ * number". It belongs on the four or five figures a page is opened for and
+ * nowhere else.
+ */
 export function Field({
   label,
   value,
   note,
   wide = false,
   mono = false,
+  display = false,
 }: {
   label: string;
   value: ReactNode;
   note?: ReactNode;
   wide?: boolean;
   mono?: boolean;
+  display?: boolean;
 }): ReactNode {
+  const classes = ['field__value'];
+  if (mono) {
+    classes.push('mono');
+  }
+  if (display) {
+    classes.push('field__value--display');
+  }
   return (
     <div className={wide ? 'field field--wide' : 'field'} data-field={label}>
       <span className="field__label">{label}</span>
-      <div className={mono ? 'field__value mono' : 'field__value'}>{value}</div>
+      <div className={classes.join(' ')}>{value}</div>
       {note === undefined ? null : <span className="field__note">{note}</span>}
     </div>
   );

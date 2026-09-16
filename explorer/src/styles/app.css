@@ -313,8 +313,16 @@ h3 {
   margin: 0;
 }
 
+/* A page title outranks the body it heads. It was 17 px against a 13 px body,
+   a ratio of 1.31. */
 h1 {
-  font-size: 17px;
+  font-size: 20px;
+}
+
+@media (min-width: 641px) {
+  h1 {
+    font-size: 24px;
+  }
 }
 
 h2 {
@@ -384,9 +392,11 @@ p {
   max-width: var(--measure);
 }
 
+/* One step above the labels it heads. At 10 px it was smaller than the notes
+   under the values inside it. */
 .panel__title {
   font-family: var(--font-mono);
-  font-size: var(--fs-label);
+  font-size: var(--fs-meta);
   font-weight: 400;
   letter-spacing: var(--ls-wide);
   text-transform: uppercase;
@@ -394,14 +404,23 @@ p {
   margin-bottom: var(--space-3);
 }
 
+/* Two columns where there is room, and one where there is not. An auto-fit
+   track at 220 px gave a four-field panel three columns at 1280 px and left
+   the fourth field alone beside two empty cells. */
 .fields {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 0 var(--space-4);
 }
 
+@media (min-width: 641px) {
+  .fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .field {
-  padding: 0 0 18px;
+  padding: 0 0 12px;
   min-width: 0;
 }
 
@@ -424,6 +443,16 @@ p {
   font-size: var(--fs-body);
   color: var(--text-primary);
   word-break: break-word;
+}
+
+/* The figure a page is opened for: the explorer's half of Qloak's balance
+   treatment, in the same tabular mono every amount on this site is set in. */
+.field__value--display {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: 0;
 }
 
 /* Two hashes under one label, such as a slot's pair of nullifiers. Flush
