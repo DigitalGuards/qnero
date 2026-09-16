@@ -18,9 +18,10 @@
 
 import { RefreshCw } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { Link } from 'react-router';
 
 import { Button } from '../components/UI/Button';
-import { Empty, Notice } from '../components/UI/Notice';
+import { Notice } from '../components/UI/Notice';
 import { Panel } from '../components/UI/Panel';
 import { Pill } from '../components/UI/Address';
 import { Tooltip } from '../components/UI/Tooltip';
@@ -192,9 +193,12 @@ export function BalanceScreen({
               : `synced through block ${formatCount(report.head)} · reads from block ` +
                 formatCount(readsFrom)}
           </span>
-          <Button variant="action" disabled={syncing || !canSync} data-testid="do-sync" onClick={onSync}>
+          {/* A utility button, and the accent is not spent here. The wallet
+              reads the chain by itself on open and on each new head; this is
+              the one for a reader who wants it now. */}
+          <Button disabled={syncing || !canSync} data-testid="do-sync" onClick={onSync}>
             <RefreshCw className={syncing ? 'size-3.5 animate-spin' : 'size-3.5'} aria-hidden />
-            {syncing ? 'Syncing…' : 'Sync'}
+            {syncing ? 'Reading…' : 'Refresh'}
           </Button>
         </div>
       </Panel>
@@ -247,11 +251,22 @@ export function BalanceScreen({
 
       <Panel title="Incoming transfers" flush>
         {notes.length === 0 ? (
-          <Empty>
-            Nothing received yet. A wallet receives value when somebody pays its address, when a
-            node configured with its miner key wins a block, or when a transparent account shields
-            into it from the command-line wallet.
-          </Empty>
+          /* One sentence and the two things to do about it. The sentence used
+             to be thirty-five words ending at the command-line wallet, which
+             was the only way in before the public testnet had a faucet. */
+          <div className="px-4" data-testid="notes-empty">
+            <p className="text-body text-muted">Nothing received yet.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button asChild data-testid="empty-receive">
+                <Link to="/receive">Show my address</Link>
+              </Button>
+              <Button asChild data-testid="empty-faucet">
+                <a href="https://faucet.qnero.io" target="_blank" rel="noreferrer">
+                  Get test QNR from the faucet
+                </a>
+              </Button>
+            </div>
+          </div>
         ) : (
           <TableScroll>
             <Table testId="notes-table">

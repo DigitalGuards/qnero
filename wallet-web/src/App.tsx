@@ -639,20 +639,35 @@ export function App(): ReactNode {
     [config, phase, refresh],
   );
 
+  /**
+   * Read the chain.
+   *
+   * `automatic` is a pass nobody pressed: the one that runs when the wallet
+   * opens and on each new head. Every refusal below is a sentence about a
+   * button, so an automatic pass takes them silently and waits for the next
+   * head. A wallet that put "this wallet is not connected to a node" on the
+   * screen by itself, once a block, would be shouting about a state its own
+   * header already shows with a red dot.
+   */
   const sync = useCallback(
-    async (rescan: boolean): Promise<void> => {
+    async (rescan: boolean, automatic = false): Promise<void> => {
       const current = session;
       const store = current.store;
       const context = current.context;
+      const refuse = (message: string): void => {
+        if (!automatic) {
+          setError(message);
+        }
+      };
       if (store === null) {
         return;
       }
       if (context === null) {
-        setError('this wallet is not connected to a node');
+        refuse('this wallet is not connected to a node');
         return;
       }
       if (context.storageDrift.length > 0) {
-        setError(
+        refuse(
           'this runtime declares storage differently from what this build assumes, so syncing ' +
             'against it is refused. An absent key and an empty map are indistinguishable, and an ' +
             'empty map here is a zero balance, or an amount already spent reported as unspent.',
@@ -660,16 +675,16 @@ export function App(): ReactNode {
         return;
       }
       if (!store.isUnlocked) {
-        setError('unlock this wallet before syncing: a scan needs its viewing key');
+        refuse('unlock this wallet before syncing: a scan needs its viewing key');
         return;
       }
       const limits = current.limits;
       if (limits === null) {
-        setError('this wallet has not finished loading its prover, which a scan reads its bounds from');
+        refuse('this wallet has not finished loading its prover, which a scan reads its bounds from');
         return;
       }
       if (running.current !== null) {
-        setError(
+        refuse(
           running.current === 'spend'
             ? 'a payment is being proved and submitted. A scan reads everything this wallet ' +
               'holds before it starts and commits at the end, so the two would write the same ' +
@@ -739,6 +754,9 @@ export function App(): ReactNode {
         setSyncReport(result.report);
         await refresh();
       } catch (syncError) {
+        // A pass that got as far as reading the chain and failed is said out
+        // loud whoever started it: this one is about the node rather than
+        // about a button.
         setError((syncError as Error).message);
       } finally {
         running.current = null;
@@ -748,6 +766,39 @@ export function App(): ReactNode {
     },
     [refresh],
   );
+
+  /**
+   * The head this wallet has already read for, so a head is read once.
+   *
+   * A ref, because it is a latch rather than a thing a screen renders, and the
+   * effect below both reads and writes it inside one run.
+   */
+  const autoSyncedAt = useRef<number | null>(null);
+
+  /**
+   * Sync when the wallet opens, and again on each new head.
+   *
+   * MyMonero syncs on open and on each new block and never says the word; this
+   * wallet made a reader press an amber button for it, so the one accent on
+   * the wallet screen was spent on housekeeping and a first-time visitor who
+   * had just been paid saw 0.00 and a line about a session. The header already
+   * subscribes to heads, so this costs one subscription and no polling.
+   *
+   * Refusals are silent here: see `sync`.
+   */
+  useEffect(() => {
+    if (phase.kind !== 'open' || !storeUnlocked || !proverRunning) {
+      return;
+    }
+    if (connection.kind !== 'live' || connection.head === undefined) {
+      return;
+    }
+    if (autoSyncedAt.current === connection.head || running.current !== null) {
+      return;
+    }
+    autoSyncedAt.current = connection.head;
+    void sync(false, true);
+  }, [phase.kind, storeUnlocked, proverRunning, connection, sync]);
 
   const send = useCallback(
     async (to: string, amount: bigint, memo: string): Promise<void> => {
@@ -917,6 +968,7 @@ export function App(): ReactNode {
     setBalances(EMPTY_BALANCES);
     setSyncReport(null);
     setPendingBirthday(null);
+    autoSyncedAt.current = null;
     clearWalletView();
     setPhase({ kind: 'landing' });
   }, [clearWalletView]);
@@ -925,6 +977,7 @@ export function App(): ReactNode {
     const current = session;
     const meta = await current.store?.meta();
     await current.lock();
+    autoSyncedAt.current = null;
     setStoreUnlocked(false);
     setMinerKey(null);
     // The same reset a wipe does. A locked wallet that unlocks onto the last
