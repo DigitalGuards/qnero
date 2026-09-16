@@ -733,9 +733,10 @@ td {
  * The link still is the link, and its box is stretched over the row, so there
  * is one target per row and the keyboard order is unchanged.
  */
+/* No transition on the hover: motion on this site is the loading bar and the
+   ages in a live list, and a row that fades under a pointer is neither. */
 tbody tr {
   position: relative;
-  transition: background-color 0.1s ease-out;
 }
 
 .row-link a::after {
