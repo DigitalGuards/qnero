@@ -79,15 +79,16 @@
        #e6a145 under #161416 measures 8.33:1, and --accent-fill-hover is the
        lighter amber at 10.40:1. --accent-hover is the wrong token for a filled
        ground here: #161416 on #6f3c05 measures 2.03:1.
-       --mark is the identity Q, which the favicon and the card paint amber. It
-       is the lightest amber that still clears 4.5:1 on --bg-deep, the ground
-       the header and the hero both give it: 4.77:1. */
+       --mark is the identity Q. A logotype is exempt from the 4.5:1 text rule
+       (WCAG 1.4.3, logotypes), so it keeps #e6a145 in both themes: at #9c5c05
+       it read as brown beside a black wordmark while the amber primary button
+       sat next to it, which split the identity colour from the accent. */
     --accent: #8a4b06;
     --accent-hover: #6f3c05;
     --accent-fill: #e6a145;
     --accent-fill-hover: #f2b968;
     --accent-on-fill: #161416;
-    --mark: #9c5c05;
+    --mark: #e6a145;
     --band-accent-bg: #f8f1e4;
     --col-self-bg: #f8f1e4;
     --col-self-hover: #f0e4cd;
@@ -121,7 +122,7 @@
   --accent-fill: #e6a145;
   --accent-fill-hover: #f2b968;
   --accent-on-fill: #161416;
-  --mark: #9c5c05;
+  --mark: #e6a145;
   --band-accent-bg: #f8f1e4;
   --col-self-bg: #f8f1e4;
   --col-self-hover: #f0e4cd;
@@ -177,6 +178,16 @@
   }
 }
 
+/* 10 px is MyMonero's label size and it is right on a desktop panel. On a
+   phone it is under the 11 px floor, and it carried every dt, panel label,
+   tag, table header, figure label and band label on the site. Wide screens
+   keep the 10. */
+@media (max-width: 640px) {
+  :root {
+    --fs-label: 11px;
+  }
+}
+
 /* ---------- base ---------- */
 
 *,
@@ -228,7 +239,15 @@ a:hover {
   color: var(--accent-hover);
 }
 
-:focus-visible {
+/* One rule for the whole site, on every interactive element: links, buttons,
+   the theme control and the table and diagram scrollers, which are focusable
+   because they hold no focusable child. Nothing below re-states or removes it,
+   so no browser default ring renders anywhere. */
+:focus-visible,
+.btn:focus-visible,
+.theme-toggle:focus-visible,
+.table-wrap:focus-visible,
+.diagram__scroll:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -818,6 +837,14 @@ h1 .mark {
 .card .hostline {
   margin-bottom: 0;
   margin-top: var(--space-2);
+}
+
+/* An address is read character by character and copied by hand, so on a phone
+   it takes the 13 px the rest of the site's mono takes. */
+@media (max-width: 640px) {
+  .hostline {
+    font-size: var(--fs-body);
+  }
 }
 
 /* ---------- panels ---------- */
@@ -1428,6 +1455,24 @@ tbody tr:hover td.col-self {
   max-width: var(--measure);
   font-size: var(--fs-meta);
   line-height: 1.7;
+}
+
+/* The footer's three lines are running prose, and 11 px is for labels and
+   one-line hints. The strip keeps 11 because it is one line of 50 characters
+   and the whole point of it is that it does not grow. */
+@media (max-width: 640px) {
+  .site-footer p {
+    font-size: var(--fs-body);
+  }
+
+  .footer-nav {
+    gap: 0 var(--space-4);
+  }
+
+  .footer-nav a {
+    padding: 12px 0;
+    line-height: 20px;
+  }
 }
 
 .site-footer a {
