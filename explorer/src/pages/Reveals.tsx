@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 
 import { useChain } from '../app/chainContext';
 import { formatCount, REFERENCE_CIPHERTEXT_BYTES } from '../lib/units';
-import { Notice, Panel } from '../components/ui';
+import { Panel } from '../components/ui';
 
 /**
  * What an observer learns, and what stays hidden.
@@ -78,6 +78,14 @@ export function Reveals(): ReactNode {
           payment&rsquo;s output slot at random per spend, so this site renders the pair unordered
           and never labels one of them.
         </p>
+        <p>
+          So a settlement page publishes this and no more: how many slots settled, which nullifiers
+          entered the settled set, which commitments were appended and at which leaf indices, the
+          size of each ciphertext, and the fee. What it does not publish is who sent anything, who
+          received anything, how much moved, and which of a slot&rsquo;s two nullifiers stands for
+          a note. Nothing on chain joins a nullifier to the leaf it spent, and a commitment is a
+          hash over a note nothing on chain opens.
+        </p>
 
         <h3>Entries</h3>
         <p>
@@ -141,9 +149,9 @@ export function Reveals(): ReactNode {
         </p>
       </Panel>
 
-      <Notice>
+      <Panel title="Two leaks an explorer does not fix" prose>
         <p>
-          Two known leaks are real and are not fixed by an explorer. The gap between a spend&rsquo;s
+          Both are real and neither is this site&rsquo;s to close. The gap between a spend&rsquo;s
           anchor block and the block it settles in is a per-wallet marker that tracks the
           prover&rsquo;s speed, and both numbers are public. A note ciphertext of any size other
           than {formatCount(REFERENCE_CIPHERTEXT_BYTES)} bytes was written by something other than
@@ -154,7 +162,7 @@ export function Reveals(): ReactNode {
           makes neither of them a sortable column. Surfacing either as one would turn a documented
           open issue into a deanonymisation tool.
         </p>
-      </Notice>
+      </Panel>
 
       <Panel title="What this site does not ask the node" prose>
         <p>

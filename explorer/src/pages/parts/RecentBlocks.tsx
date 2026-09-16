@@ -49,8 +49,15 @@ export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): R
           <tr>
             <th scope="col">Height</th>
             <th scope="col">Age</th>
+            {/* What the label is worth, under the column it is about. It was
+                a yellow box of its own between two panels, and at 375 px it
+                explained a column the phone does not show. */}
             <th className="col--wide" scope="col">
               Author label
+              <span className="th__note">
+                H(cvk, parent_hash), which changes every block, so no table here groups a
+                miner&rsquo;s income
+              </span>
             </th>
             <th className="col--wide" scope="col">
               Leaves

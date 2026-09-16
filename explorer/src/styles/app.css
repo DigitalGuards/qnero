@@ -666,6 +666,19 @@ th {
   white-space: nowrap;
 }
 
+/* A column that needs a sentence carries it under its own header, where it
+   hides with the column at phone width. */
+.th__note {
+  display: block;
+  max-width: 220px;
+  margin-top: 2px;
+  font-size: var(--fs-label);
+  font-weight: 400;
+  text-transform: none;
+  white-space: normal;
+  color: var(--text-muted);
+}
+
 td {
   padding: 6px var(--space-2);
   border-bottom: 1px solid var(--border);

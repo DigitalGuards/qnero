@@ -30,6 +30,7 @@ import {
   Notice,
   PageSkeleton,
   Panel,
+  Why,
 } from '../components/ui';
 import { Problem } from './parts/Problem';
 import { SettlementLink, SettlementView } from './parts/SettlementView';
@@ -379,14 +380,16 @@ export function Block({ id }: { id: string }): ReactNode {
           )
         ) : (
           <>
-            <Notice>
+            {/* Reading matter, so it reads as reading matter. It was a yellow
+                box, which is the one colour this site has for state. */}
+            <p>A shield is the one linkable event in the system, and it is so by construction.</p>
+            <Why summary="Why a shield is linkable">
               <p>
-                A shield is a signed extrinsic, so the payer&rsquo;s account, the exact amount and
-                the leaf index are on chain together. This is the one linkable event in the system,
-                and it is linkable by construction: the value it moves is transparent until the
+                It is a signed extrinsic, so the payer&rsquo;s account, the exact amount and the
+                leaf index are on chain together: the value it moves is transparent until the
                 moment it is burned.
               </p>
-            </Notice>
+            </Why>
             <div className="table-wrap">
               <table>
                 <thead>
@@ -458,18 +461,20 @@ function RefusedCalls({ block }: { block: BlockDetail }): ReactNode {
         <NotRead what="the refused and failed calls" error={block.stateError} />
       )}
       {filtered.length === 0 ? null : (
-        <Notice>
+        <>
           <p>
-            A call the runtime&rsquo;s filter refuses is still a valid extrinsic: it entered this
-            block, paid its fee, and then failed. Its full arguments are in the block body forever,
-            so a mistaken transparent transfer publishes exactly the sender, recipient and amount
-            the chain&rsquo;s policy exists to deny.
+            A refused call is still a valid extrinsic, and its arguments stay in the block body.
           </p>
-          <p>
-            This page names the call and leaves the arguments where the chain put them. Reprinting
-            them here would publish them a second time in a form built for reading.
-          </p>
-        </Notice>
+          <Why summary="Why this page names the call and not the arguments">
+            <p>
+              The filter is checked at dispatch, so the call entered this block, paid its fee, and
+              then failed. Its full arguments are in the body forever, and a mistaken transparent
+              transfer publishes exactly the sender, recipient and amount the chain&rsquo;s policy
+              exists to deny. Reprinting them here would publish them a second time in a form built
+              for reading.
+            </p>
+          </Why>
+        </>
       )}
       {block.failures.length === 0 ? null : (
         <div className="table-wrap">

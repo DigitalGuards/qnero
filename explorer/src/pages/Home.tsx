@@ -23,7 +23,6 @@ import {
   Fields,
   Hash,
   Loading,
-  Notice,
   PageSkeleton,
   Panel,
 } from '../components/ui';
@@ -407,15 +406,6 @@ export function Home(): ReactNode {
           />
         </Fields>
       </Panel>
-
-      <Notice>
-        <p>
-          The block author shown on every page is the 32-byte pre-runtime label{' '}
-          <span className="mono">H(cvk, parent_hash)</span>. It changes every block, so two blocks
-          from one miner carry unrelated labels and no table on this site can group a miner&rsquo;s
-          income.
-        </p>
-      </Notice>
 
       <Panel title="Recent blocks">
         {recent.status === 'error' ? <ErrorBox>{recent.error}</ErrorBox> : null}

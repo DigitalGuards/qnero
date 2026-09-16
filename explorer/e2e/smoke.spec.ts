@@ -187,35 +187,32 @@ test('a settlement page states what it publishes and what it does not', async ({
   );
 
   await expect(panel(page, 'Slots').locator('.slot')).toHaveCount(1);
-  await expect(page.locator('.notice')).toContainText('What this publishes');
-  await expect(page.locator('.notice')).toContainText('the pair is rendered here with no order');
-  // The join a slot does publish is stated beside the join it does not.
-  await expect(page.locator('.notice')).toContainText(
-    'Nothing on chain joins a nullifier to the leaf it spent',
-  );
-  await expect(panel(page, 'Slots')).toContainText('The two leaves beside them are the outputs');
 
   // What a settled nullifier stands for. A slot has two input positions and its
   // two nullifiers mark both consumed; a position holding a dummy input
   // publishes a nullifier over no note (docs/CIRCUIT.md section 5, the NF_DUMMY
   // tag, and section 9.5 on settling both nullifiers of every real slot). So
-  // the page bounds what the slot spent and counts positions.
-  await expect(page.locator('.notice')).toContainText(
-    'A slot has two input positions and its two nullifiers mark both consumed',
+  // the page bounds what the slot spent and counts positions. It is stated
+  // once, under the list of slots: it used to render inside every slot, so a
+  // settlement with eight slots printed it eight times.
+  const slots = panel(page, 'Slots');
+  await expect(slots.locator('.field__note')).toHaveCount(1);
+  await expect(slots).toContainText(
+    'Each nullifier marks one of a slot’s two input positions consumed and names no note',
   );
-  await expect(page.locator('.notice')).toContainText(
-    'a position holding a dummy input publishes a nullifier over no note',
-  );
-  await expect(page.locator('.notice')).toContainText('a slot spends one note or two');
-  await expect(page.locator('.notice')).toContainText(
-    'the nullifiers below count positions',
-  );
-  await expect(panel(page, 'Slots')).toContainText(
-    'Each of these marks one of the slot’s two input positions consumed',
-  );
-  await expect(panel(page, 'Slots')).toContainText(
+  await expect(slots).toContainText(
     'A real input spends one note and a dummy input publishes a nullifier over no note',
   );
+  await expect(slots).toContainText('nothing on chain joins a nullifier to the leaf it spent');
+  await expect(slots).toContainText('The two leaves beside them are the outputs');
+
+  // The four-paragraph statement of what a spend publishes lived here in the
+  // one colour this site has for state a reader must act on, 408 px of it
+  // after the data. It is on Reveals and this page links to it.
+  await expect(page.locator('.notice')).toHaveCount(0);
+  await expect(
+    page.getByRole('link', { name: 'What this chain reveals' }).first(),
+  ).toBeVisible();
 
   // And the claim it replaced is gone from the page, label included: a settled
   // nullifier is not evidence that the note behind it was spent.
@@ -402,7 +399,18 @@ test('the reveals page states both halves in plain words', async ({ page }) => {
   await expect(panel(page, 'What this site does not ask the node')).toContainText(
     'nothing there is sent until a button is pressed',
   );
-  await expect(page.locator('.notice')).toContainText('1,792');
+  // What a settlement publishes and what it does not, which the settlement
+  // page used to carry as four paragraphs in a yellow box.
+  await expect(panel(page, 'What an observer learns from one block')).toContainText(
+    'which nullifiers entered the settled set',
+  );
+  await expect(panel(page, 'What an observer learns from one block')).toContainText(
+    'Nothing on chain joins a nullifier to the leaf it spent',
+  );
+  await expect(panel(page, 'Two leaks an explorer does not fix')).toContainText('1,792');
+  // The reasoning has one home and none of it is state, so the page carries no
+  // notice at all.
+  await expect(page.locator('.notice')).toHaveCount(0);
 });
 
 /**

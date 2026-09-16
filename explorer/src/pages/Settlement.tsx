@@ -236,34 +236,15 @@ export function Settlement({ hash, at }: { hash: string; at: string | null }): R
         )}
       </Panel>
 
+      {/* The four-paragraph statement of what a spend publishes and what it
+          does not was a 1,234-character yellow box after the data, 408 px tall
+          at 375 px, on the one colour this site has for state a reader must
+          act on. It lives on Reveals, which is where the reasoning lives. */}
       {settlement === null ? null : (
-        <Notice>
-          <p>
-            What this publishes: how many slots settled, which nullifiers entered the settled set,
-            which commitments were appended and at which leaf indices, the size of each ciphertext,
-            and the fee.
-          </p>
-          <p>
-            A slot has two input positions and its two nullifiers mark both consumed. A position
-            holding a real input spends one note; a position holding a dummy input publishes a
-            nullifier over no note. At least one position of a settled slot is real, so a slot
-            spends one note or two, and the nullifiers below count positions.
-          </p>
-          <p>
-            What it does not: who sent anything, who received anything, how much moved, and which
-            of a slot&rsquo;s two nullifiers stands for a note. Nothing on chain joins a nullifier
-            to the leaf it spent, and a commitment is a hash over a note nothing on chain opens.
-            What a slot does join is its own two outputs to its own two nullifiers, so a payment
-            and its change are publicly a pair. Which of the two is the change is hidden only
-            because the wallet draws the payment&rsquo;s output slot per spend, so the pair is
-            rendered here with no order.
-          </p>
-          <p>
-            The anchor this proof was built against is a public input too, and the gap between it
-            and this block tracks the prover&rsquo;s speed. Neither that gap nor a ciphertext size
-            is sortable anywhere on this site.
-          </p>
-        </Notice>
+        <p>
+          What a settlement publishes and what it does not:{' '}
+          <a href={href({ name: 'reveals' })}>What this chain reveals</a>.
+        </p>
       )}
     </>
   );

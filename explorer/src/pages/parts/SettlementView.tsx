@@ -23,10 +23,10 @@ function ciphertextNote(bytes: number): ReactNode {
  * by presentation exactly what the protocol pays to hide.
  *
  * The two nullifiers and the two commitments of one slot are published
- * together and the page says so. A nullifier marks one of the slot's two input
- * positions consumed, and a position holding a dummy input publishes a
- * nullifier over no note, so the note under them claims a bound on what the
- * slot spent and nothing about which note each value stands for.
+ * together and the page says so, once, under the list of slots. A nullifier
+ * marks one of the slot's two input positions consumed, and a position holding
+ * a dummy input publishes a nullifier over no note, so the note claims a bound
+ * on what a slot spent and nothing about which note each value stands for.
  */
 export function SettlementView({
   settlement,
@@ -67,13 +67,6 @@ export function SettlementView({
                   </li>
                 ))}
               </ol>
-              <span className="field__note">
-                Each of these marks one of the slot&rsquo;s two input positions consumed. A real
-                input spends one note and a dummy input publishes a nullifier over no note, so this
-                slot spent one note or two, and nothing on chain joins a nullifier to the leaf it
-                spent. The two leaves beside them are the outputs this spend created, and the chain
-                publishes that link.
-              </span>
             </div>
             <div>
               <span className="field__label">Commitments appended, unordered</span>
@@ -92,6 +85,16 @@ export function SettlementView({
           </div>
         </div>
       ))}
+      {/* Once, under the list. It was rendered inside every slot: a settlement
+          with eight slots printed this same 345-character paragraph eight
+          times, 2,760 characters of it. */}
+      <p className="field__note">
+        Each nullifier marks one of a slot&rsquo;s two input positions consumed and names no note.
+        A real input spends one note and a dummy input publishes a nullifier over no note, so a
+        slot spent one note or two, and nothing on chain joins a nullifier to the leaf it spent.
+        The two leaves beside them are the outputs that spend created, and the chain publishes that
+        link.
+      </p>
     </>
   );
 }
