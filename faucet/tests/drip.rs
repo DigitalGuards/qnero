@@ -175,6 +175,19 @@ async fn request(
     .expect("the request thread")
 }
 
+/// One GET, returned as text. `request` parses JSON and the page is HTML.
+async fn fetch_text(url: String) -> String {
+    tokio::task::spawn_blocking(move || {
+        ureq::get(&url)
+            .call()
+            .expect("the page")
+            .into_string()
+            .expect("the page body")
+    })
+    .await
+    .expect("the request thread")
+}
+
 /// A real `qn1` address, made the way a wallet makes one.
 fn an_address(tag: &str) -> String {
     let dir = tempdir::TempDir::new(tag);
@@ -606,6 +619,35 @@ async fn the_page_and_its_three_files_are_served() {
         let (status, _, _) = request("GET", format!("{}{path}", harness.base), None, None).await;
         assert_eq!(status, 200, "{path} was not served");
     }
+}
+
+/// What the reader is actually handed: a page with the configured figures in
+/// it and no marker left behind.
+///
+/// The page carries its amount and its cooldown as HTML comments that
+/// `page::index` fills in, in four places now, one of them the description a
+/// search result shows. A marker that nothing replaces is invisible in a
+/// browser, so the sentence reads "once per address per ." and every test that
+/// only checks for a 200 passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_page_carries_the_figures_and_no_placeholder() {
+    let dir = tempdir::TempDir::new("cfg");
+    let harness = start(config_in(dir.path())).await;
+    let page = fetch_text(format!("{}/", harness.base)).await;
+
+    assert!(
+        !page.contains("<!--"),
+        "a placeholder reached the browser: {:?}",
+        page.split("<!--").nth(1).unwrap_or("").split("-->").next()
+    );
+    // 1000 steps of 0.01 QNR, and a 86 400 s cooldown, as a person says them.
+    assert!(page.contains("10 QNR"), "the drip is not on the page");
+    assert!(page.contains("24 hours"), "the cooldown is not on the page");
+    // No key is configured here, so the page makes no outbound request at all.
+    assert!(
+        !page.contains("challenges.cloudflare.com"),
+        "an unconfigured Turnstile still reached the page"
+    );
 }
 
 /// What the page's progress line reads its steps from.
