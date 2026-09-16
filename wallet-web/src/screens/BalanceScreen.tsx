@@ -94,6 +94,7 @@ export function BalanceScreen({
   balances,
   notes,
   rejected,
+  readsFrom,
   report,
   syncing,
   syncStage,
@@ -103,6 +104,15 @@ export function BalanceScreen({
   balances: Balances;
   notes: readonly NoteRow[];
   rejected: readonly RejectedNote[];
+  /**
+   * The block this wallet starts reading the chain at: its birthday, or zero.
+   *
+   * On the status line rather than in a banner. A wallet that quietly started
+   * above a transfer is a balance quietly short, so the number is on the
+   * screen; whose claim it is, and what an honest node that disagrees does
+   * with it, is a sentence behind the Last sync disclosure.
+   */
+  readsFrom: number;
   report: SyncReport | null;
   syncing: boolean;
   syncStage: string | null;
@@ -176,10 +186,11 @@ export function BalanceScreen({
           </dl>
         )}
         <div className="mt-3 flex items-center justify-between gap-2 border-t border-edge pt-3">
-          <span className="text-meta text-muted">
+          <span className="text-meta text-muted" data-testid="sync-status">
             {report === null
-              ? 'not synced this session'
-              : `synced through block ${formatCount(report.head)}`}
+              ? `reads from block ${formatCount(readsFrom)}`
+              : `synced through block ${formatCount(report.head)} · reads from block ` +
+                formatCount(readsFrom)}
           </span>
           <Button variant="action" disabled={syncing || !canSync} data-testid="do-sync" onClick={onSync}>
             <RefreshCw className={syncing ? 'size-3.5 animate-spin' : 'size-3.5'} aria-hidden />
@@ -384,6 +395,11 @@ export function BalanceScreen({
                 </tbody>
               </Table>
             </TableScroll>
+            <p className="px-4 pt-2 text-meta text-muted" data-testid="reads-from">
+              This wallet reads the chain from block {formatCount(readsFrom)}. That is this
+              node&apos;s claim about where the chain held nothing of this wallet&apos;s, like
+              every checkpoint: a node that disagrees at that height is rewound to there.
+            </p>
           </details>
           {report.heldSpent > 0 && (
             <p className="px-4 pt-2 text-meta text-muted">

@@ -143,6 +143,8 @@ export function App(): ReactNode {
    * the moment a node answers.
    */
   const [pendingBirthday, setPendingBirthday] = useState<number | null>(null);
+  /** The block this wallet reads the chain from: its birthday, or zero. */
+  const [readsFrom, setReadsFrom] = useState(0);
 
   const [address, setAddress] = useState('');
   const [minerKey, setMinerKey] = useState<string | null>(null);
@@ -211,11 +213,16 @@ export function App(): ReactNode {
     if (store === null) {
       return;
     }
-    const [stored, pending, rejectedNotes] = await Promise.all([
+    const [stored, pending, rejectedNotes, meta] = await Promise.all([
       store.notes(),
       store.pending(),
       store.rejected(),
+      store.meta(),
     ]);
+    // Where this wallet starts reading, for the one line on the wallet screen
+    // that says so. It used to be a thirty-word banner over the balance on
+    // every open screen: 22% of the first screen, spent on sync theory.
+    setReadsFrom(meta.birthday?.blockNumber ?? 0);
 
     const rows: NoteRow[] = [];
     const byNullifier = new Map<string, StoredNote[]>();
@@ -1037,12 +1044,19 @@ export function App(): ReactNode {
             </Notice>
           )}
 
-          {/* Where this wallet starts reading the chain, said once, on the
-              screens the wallet it belongs to can reach. A wallet that quietly
-              started above a note would be a balance quietly short, so the
-              claim and whose claim it is are both on the page. */}
+          {/* Said once, and put down. Where this wallet starts reading the
+              chain lives in the wallet screen's status line and behind its
+              Last sync disclosure; this is the one case that is not routine,
+              which is a restore height, or a node that never answered. */}
           {birthdayNotice !== null && open && (
-            <Notice testId="birthday-notice">{birthdayNotice}</Notice>
+            <Notice
+              testId="birthday-notice"
+              onDismiss={() => {
+                setBirthdayNotice(null);
+              }}
+            >
+              {birthdayNotice}
+            </Notice>
           )}
 
           {phase.kind === 'booting' && (
@@ -1131,6 +1145,7 @@ export function App(): ReactNode {
                     balances={balances}
                     notes={notes}
                     rejected={rejected}
+                    readsFrom={readsFrom}
                     report={syncReport}
                     syncing={syncing}
                     syncStage={syncStage}

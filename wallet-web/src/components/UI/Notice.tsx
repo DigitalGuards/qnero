@@ -1,4 +1,4 @@
-import { AlertTriangle, Info } from 'lucide-react';
+import { AlertTriangle, Info, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 import { cn } from '../../utils/cn';
@@ -29,12 +29,22 @@ export function Notice({
   className,
   testId,
   sensitive = false,
+  onDismiss,
 }: {
   children: ReactNode;
   tone?: 'notice' | 'error';
   className?: string;
   testId?: string;
   sensitive?: boolean;
+  /**
+   * Given for a notice that has been read once and need not stay.
+   *
+   * A notice a reader cannot put down is a banner, and a banner over the
+   * balance is the screen's strongest element spent on something that is true
+   * once: see `docs/WALLET.md` on where this wallet says where it starts
+   * reading the chain.
+   */
+  onDismiss?: () => void;
 }): ReactNode {
   const Icon = tone === 'error' ? AlertTriangle : Info;
   return (
@@ -53,7 +63,19 @@ export function Notice({
       )}
     >
       <Icon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-      <div className="min-w-0 space-y-1">{children}</div>
+      <div className="min-w-0 flex-1 space-y-1">{children}</div>
+      {onDismiss !== undefined && (
+        <button
+          type="button"
+          aria-label="Dismiss"
+          data-testid={testId === undefined ? undefined : `${testId}-dismiss`}
+          className="-m-2 grid size-8 shrink-0 place-items-center self-start rounded-control
+            text-muted hover:text-ink"
+          onClick={onDismiss}
+        >
+          <X className="size-3.5" aria-hidden />
+        </button>
+      )}
     </div>
   );
 }
