@@ -422,7 +422,7 @@ function SendResultView({
           with a five-row table of 11 px cells and put Done at y 678 of a
           667 px screen, under the whole recipient address. */}
       <Amount steps={result.amount} note="sent" testId="send-amount-paid" />
-      <dl className="mt-3 space-y-1 border-t border-edge pt-3 text-meta">
+      <dl className="mt-3 space-y-1 border-t border-edge pt-3 text-meta" data-testid="send-result">
         <div className="flex justify-between gap-2">
           <dt className="text-muted">
             {settled ? 'settled in block' : included ? 'included in block' : 'not included'}

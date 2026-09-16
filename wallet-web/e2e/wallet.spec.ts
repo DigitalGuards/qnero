@@ -323,10 +323,12 @@ test.describe('the browser wallet against a dev chain', () => {
     // And the amount column never wraps. The memo column takes every pixel of
     // slack, so an amount cell is as narrow as its own header, and an amount
     // that carries a symbol broke at the space and rendered "QNR" on a second
-    // line under the digits.
+    // line under the digits. It is the second column: block, amount, origin,
+    // state, memo, since the tree position left this table for the Last sync
+    // disclosure.
     const amountWrap = await page
       .getByTestId('notes-table')
-      .locator('tbody tr td:nth-child(3)')
+      .locator('tbody tr td:nth-child(2)')
       .first()
       .evaluate((cell) => getComputedStyle(cell).whiteSpace);
     expect(amountWrap).toBe('nowrap');

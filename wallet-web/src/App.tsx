@@ -1106,6 +1106,9 @@ export function App(): ReactNode {
             </span>
           </span>
         </div>
+        {/* Two pixels of motion while the page loads itself, and none once it
+            has. See `.mm-indeterminate`. */}
+        {phase.kind === 'booting' && <div className="mm-indeterminate" role="presentation" />}
       </header>
       <div
         className={

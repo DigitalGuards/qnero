@@ -252,6 +252,47 @@
   }
 
   /*
+   * The bar under the header while the page is loading itself.
+   *
+   * Two pixels, indeterminate, and the one piece of motion a screen with
+   * nothing on it yet is allowed: a page that is fetching a 900 kB prover owes
+   * a reader the fact that it is doing something. Under reduced motion it is a
+   * static rule, which says the same thing without moving.
+   */
+  .mm-indeterminate {
+    position: relative;
+    height: 2px;
+    overflow: hidden;
+    background: var(--bg-raised);
+  }
+
+  .mm-indeterminate::after {
+    content: '';
+    position: absolute;
+    inset-block: 0;
+    width: 40%;
+    background: var(--accent-fill);
+    animation: mm-slide 1.2s linear infinite;
+  }
+
+  @keyframes mm-slide {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(250%);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mm-indeterminate::after {
+      width: 100%;
+      animation: none;
+      opacity: 0.5;
+    }
+  }
+
+  /*
    * A sentence, at a size a sentence is read at.
    *
    * 11 px is this scale's label size and it carried paragraphs of fifty and

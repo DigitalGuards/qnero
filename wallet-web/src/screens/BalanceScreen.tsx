@@ -258,7 +258,7 @@ export function BalanceScreen({
               <Stat
                 term="transfers held"
                 explains="Every incoming transfer this wallet holds, spent and unspent, on chain and
-                  off. The table below collapses a repeated pair to the one a spend could use, so it
+                  off. The list below collapses a repeated pair to the one a spend could use, so it
                   can be shorter than this."
                 value={formatCount(balances.noteCount)}
               />
