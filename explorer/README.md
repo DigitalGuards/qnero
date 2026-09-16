@@ -48,8 +48,11 @@ nice -n 19 npm ci
 nice -n 19 npm run dev
 ```
 
-`npm run dev` serves on `http://127.0.0.1:5173` and reads `public/config.json`,
-which points at `ws://127.0.0.1:9944` out of the box.
+`npm run dev` serves on `http://127.0.0.1:5173` and reads `public/config.json`
+as it is. That file names the public testnet, because it is the copy a built
+directory carries, so point it at `ws://127.0.0.1:9944` and name the chain
+`Qnero devnet` while a local node is what you are reading. See
+[Configure it](#configure-it).
 
 ## Build it
 
@@ -346,8 +349,10 @@ settlement at a block this chain does not have, which are the pages a
 dereference used to take down and the one that used to fail into a bare error
 box with nothing to click;
 and at 400 px it checks that one wordmark and one chain name are on the screen,
-that the block tables keep the columns carrying the answer, and that the skip
-link lands in the page with the route intact. It stops the
+that the block tables keep the columns carrying the answer, that the one
+primary and the wordmark are each a press a thumb lands on, that a settlement
+row is a target across its width and not only over the call name, and that the
+skip link lands in the page with the route intact. It stops the
 node by its pidfile and does not finish until the RPC port is free again.
 
 It needs release builds of both binaries and it needs port 9944 to itself:
