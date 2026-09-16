@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 
 import { href, type Route } from '../app/router';
-import { useChain } from '../app/chainContext';
+import { isReading, useChain } from '../app/chainContext';
 import { formatCount } from '../lib/units';
 import { ThemeToggle } from './ThemeToggle';
 
@@ -28,20 +28,20 @@ const NAV: { label: string; route: Route; match: Route['name'][] }[] = [
 function Masthead({ current }: { current: Route['name'] }): ReactNode {
   const { status, chainName, head, retryInSeconds } = useChain();
   const live = status === 'live' || status === 'offline';
+  const reading = isReading({ status, head });
   const modifier =
     status === 'failed'
       ? ' masthead__status--down'
       : status === 'offline'
         ? ' masthead__status--warn'
         : '';
-  const dot =
-    status === 'live'
+  const dot = reading
+    ? 'dot'
+    : status === 'live'
       ? 'dot dot--live'
-      : status === 'connecting'
-        ? 'dot'
-        : status === 'offline'
-          ? 'dot dot--warn'
-          : 'dot dot--down';
+      : status === 'offline'
+        ? 'dot dot--warn'
+        : 'dot dot--down';
   // The chain page's heading is the chain's name, so the slot beside it holds
   // the height alone.
   const named = current !== 'home' && chainName !== null;
@@ -52,14 +52,16 @@ function Masthead({ current }: { current: Route['name'] }): ReactNode {
       </a>
       <span className={`masthead__status${modifier}`} role="status">
         <span className={dot} aria-hidden="true" />
-        {status === 'connecting' ? <span>Reading the chain head</span> : null}
+        {reading ? <span>Reading the chain head</span> : null}
         {status === 'failed' ? (
           <span>
             {retryInSeconds === null ? 'connection failed' : `retrying in ${retryInSeconds} s`}
           </span>
         ) : null}
         {live && status === 'offline' ? <span>no node</span> : null}
-        {live && named ? <span className="masthead__chain">{chainName}</span> : null}
+        {!reading && live && named ? (
+          <span className="masthead__chain">{chainName}</span>
+        ) : null}
         {live && named && head !== null ? (
           <span className="masthead__sep" aria-hidden="true">
             &middot;
@@ -74,7 +76,8 @@ function Masthead({ current }: { current: Route['name'] }): ReactNode {
 }
 
 export function Layout({ current, children }: { current: Route['name']; children: ReactNode }): ReactNode {
-  const { status } = useChain();
+  const { status, head } = useChain();
+  const reading = isReading({ status, head });
   return (
     <>
       {/* The fragment belongs to the router, so following this as a link would
@@ -104,10 +107,11 @@ export function Layout({ current, children }: { current: Route['name']; children
         ))}
         <ThemeToggle />
       </nav>
-      {/* Two pixels of movement while the socket is opening, and nothing once
-          it has. It is the one thing on a screen with no figures on it yet that
-          says the page is working; under reduced motion it is a static rule. */}
-      {status === 'connecting' ? <div className="indeterminate" aria-hidden="true" /> : null}
+      {/* Two pixels of movement for as long as the page is a skeleton, and
+          nothing once it holds a figure. It is the one thing on a screen with
+          no figures on it yet that says the page is working; under reduced
+          motion it is a static rule. */}
+      {reading ? <div className="indeterminate" aria-hidden="true" /> : null}
       <main className="main" id="main" tabIndex={-1}>
         <div className="main__inner">{children}</div>
       </main>

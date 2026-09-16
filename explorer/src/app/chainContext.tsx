@@ -136,6 +136,19 @@ export function useChain(): ChainState {
   return useContext(Context);
 }
 
+/**
+ * Whether the page is still reading what it needs before it can show anything.
+ *
+ * The socket opening and the first head arriving are one wait to a reader:
+ * the page is a skeleton through both. The status flipped to live the moment
+ * the socket answered, which took the progress bar and the sentence off a
+ * screen that still had no figure on it and left the header's slot empty for
+ * as long as the head seed took, which on a public node is a round trip.
+ */
+export function isReading(state: Pick<ChainState, 'status' | 'head'>): boolean {
+  return state.status === 'connecting' || (state.status === 'live' && state.head === null);
+}
+
 export function ChainProvider({ children }: { children: ReactNode }): ReactNode {
   const [state, setState] = useState<Connection>({
     status: 'connecting',
