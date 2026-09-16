@@ -105,8 +105,12 @@ no inline block of either, which is what keeps the content policy above true.
 Every claim and every number on these pages comes from `README.md`,
 `docs/DESIGN.md`, `docs/BENCH.md`, `docs/CIRCUIT.md` or `chain/MINING.md`. A
 figure with no source in those files does not belong on the site. The status
-disclosure sits above the fold on every page and says the same three things:
-pre-alpha, devnet only, and no part of Qnero's own code has been audited.
+strip is the first line on every page, one line at 375 px and at most 60
+characters, and says the same three things: pre-alpha, a public testnet that
+may be reset, and no part of Qnero's own code audited. It reads
+"Pre-alpha. Public testnet, may be reset. Unaudited." Change the sentence and
+the strip has to stay one line; `.status-strip p` holds it to one with
+`white-space: nowrap`.
 
 ## Images
 

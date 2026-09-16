@@ -4,12 +4,12 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Mine Qnero with a stock xmrig</title>
-    <meta name="description" content="RandomX, stock rx/0, the same algorithm and constants Monero uses. A rig that mines Monero mines Qnero with a config change. Devnet only: the node, the stratum flags and the measured figures.">
+    <meta name="description" content="RandomX, stock rx/0, the same algorithm and constants Monero uses. A rig that mines Monero mines Qnero with a config change. Public testnet since 2026-09-15: the stratum address, the flags and the measured figures.">
     <link rel="canonical" href="https://qnero.io/mine.html">
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="Qnero">
     <meta property="og:title" content="Mine Qnero with a stock xmrig">
-    <meta property="og:description" content="RandomX, stock rx/0, the same algorithm and constants Monero uses. A rig that mines Monero mines Qnero with a config change. Devnet only: the node, the stratum flags and the measured figures.">
+    <meta property="og:description" content="RandomX, stock rx/0, the same algorithm and constants Monero uses. A rig that mines Monero mines Qnero with a config change. Public testnet since 2026-09-15: the stratum address, the flags and the measured figures.">
     <meta property="og:url" content="https://qnero.io/mine.html">
     <meta property="og:image" content="https://qnero.io/img/og.png">
     <meta property="og:image:width" content="1200">
@@ -30,8 +30,7 @@
       <div class="wrap">
         <span class="dot" aria-hidden="true"></span>
         <p>
-          <strong>Pre-alpha.</strong> Devnet only. No public testnet. No part of Qnero's own code
-          has been audited.
+          <strong>Pre-alpha.</strong> Public testnet, may be reset. Unaudited.
         </p>
       </div>
     </aside>
@@ -78,9 +77,9 @@
               shares. The first session reached 84 blocks in 4 minutes 2 seconds with only 10 of
               them mined by the rig, which is a number to read with its cause: the node dropped 17
               of the rig's 65 block-worthy shares as superseded seals, a defect fixed since, and at
-              that difficulty almost any nonce was a block for the in-process miner too. There is no
-              public chain to point a rig at, there is nothing to earn, and there is no pool. Every
-              command on this page starts a chain of your own.
+              that difficulty almost any nonce was a block for the in-process miner too. There is a
+              public testnet now, at <code>node.qnero.io:3333</code>, and there is still no pool and
+              nothing to earn: testnet QNR is worth nothing, and the chain may be reset.
             </p>
           </div>
         </div>
@@ -325,15 +324,14 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
       <section class="band band--accent">
         <div class="wrap">
           <span class="band__label">06 / Testnet</span>
-          <h2>When there is something to point a rig at</h2>
+          <h2>Where to point a rig</h2>
           <div class="prose">
             <p>
-              A public testnet is the next milestone: a chain spec and a genesis both wallets can
-              bind to, seed nodes and a bootnode list, released node builds, a public RPC endpoint,
-              a faucet, and Qloak and silQ Road pointed at it through the one runtime JSON each
-              already reads. The design draft estimates 10 to 12 weeks to a private testnet.
+              The public testnet came up on 2026-09-15: a chain spec and a genesis both wallets
+              bind to, a seed node, a public RPC endpoint, a faucet, a stratum port, and Qloak and
+              silQ Road pointed at it through the one runtime JSON each already reads. The software
+              behind it is pre-alpha and the chain may be reset without notice.
             </p>
-            <p>These are the addresses it will use. None of them answers yet.</p>
           </div>
           <div class="cards">
             <div class="card">
@@ -361,9 +359,13 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
             <div class="card">
               <h3>Stratum</h3>
               <p>
-                Mining stays solo. The endpoint a rig connects to is the one your own node opens
-                with <code>--stratum-port</code>, and the reward is paid to the key that node was
-                started with.
+                Mining stays solo. This is the testnet node's own stratum port, and its reward is
+                paid to the key that node was started with. Point a rig at your own node instead
+                and the reward is yours.
+              </p>
+              <p class="card__foot hostline">
+                <code>node.qnero.io:3333</code>
+                <span class="tag">testnet, live</span>
               </p>
             </div>
           </div>
@@ -383,8 +385,9 @@ export QNERO_MINER_KEY=$(./target/release/qnero-wallet miner-address)</code></pr
           <a href="https://github.com/DigitalGuards/qnero">Source</a>
         </nav>
         <p>
-          Qnero is MIT licensed and maintained by DigitalGuards. Pre-alpha, devnet only, and no
-          part of Qnero's own code has been audited. Read the code before you trust any of it.
+          Qnero is MIT licensed and maintained by DigitalGuards. Pre-alpha software on a public
+          testnet that may be reset, and no part of Qnero's own code has been audited. Read the
+          code before you trust any of it.
         </p>
         <p>This site sets no cookies, runs no analytics and loads nothing from a third party.</p>
         <p><a href="/about.html#notice">Design provenance</a></p>

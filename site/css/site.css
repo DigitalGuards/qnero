@@ -374,7 +374,21 @@ svg {
   align-items: baseline;
   gap: var(--space-2);
   min-height: 24px;
-  padding-block: 5px;
+  padding-block: 3px;
+}
+
+/* The strip is one line, always. It is the first thing on every page and a
+   two-line strip pushes the h1 down by the height of a nav row, so the
+   sentence is written to 50 characters and the rule holds it to one line:
+   at 375 px the text box is 320 px after the dot and the gap, and this
+   sentence measures 270 px at 11 px. A longer one would be caught here
+   rather than silently doubling the chrome. */
+.status-strip p {
+  margin: 0;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-strip .dot {
