@@ -81,6 +81,8 @@ export interface ProverLimits {
   tree_arity: number;
   siblings_per_level: number;
   chain_num_leaves: number;
+  /** The release profile compiled into the WASM module, hex encoded. */
+  protocol_profile: string;
 }
 
 /**
@@ -228,6 +230,7 @@ export interface InitAnswer {
 export type WorkerRequest =
   | { kind: 'init'; wasmBase: string; numLeaves: number; maxThreads: number }
   | { kind: 'limits' }
+  | { kind: 'readStateProof'; root: string; nodes: string[]; keys: string[]; prefix?: string }
   | { kind: 'minerKey' }
   | { kind: 'unlock'; seed: Uint8Array }
   | { kind: 'lock' }

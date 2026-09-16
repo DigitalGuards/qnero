@@ -235,7 +235,7 @@ export function Home(): ReactNode {
             note={`transaction version ${formatCount(bundle.context.transactionVersion)}`}
           />
           <Field
-            label="Finalized"
+            label="Checkpoint"
             value={
               snapshot.status === 'ready' ? (
                 <span className="num">{formatCount(snapshot.value.finalizedNumber)}</span>
@@ -243,13 +243,7 @@ export function Home(): ReactNode {
                 '-'
               )
             }
-            note={
-              constants === null
-                ? 'proof of work with no finality gadget: the blocks near the tip are provisional'
-                : `proof of work with no finality gadget: the last ${formatCount(
-                    constants.maxReorgDepth,
-                  )} blocks are provisional`
-            }
+            note="Proof of work confirmations are probabilistic; the current protocol keeps genesis as its irreversible checkpoint."
           />
           <Field
             label="Block time"

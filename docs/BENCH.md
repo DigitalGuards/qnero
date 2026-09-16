@@ -1224,3 +1224,39 @@ count. `docs/WALLET.md`, "Where a wallet starts reading", has it.
   tab left open for hours over many syncs, where the terms that could grow are
   the store and the paged nullifier set rather than the circuits.
 
+
+
+## Runtime 105 executor component check (2026-09-16)
+
+The `shielded-budget-bench` feature was compiled to runtime WASM and measured
+through the node's Wasmtime executor. The source is based on `a294ded` plus the
+native-architecture fixes; this is a component qualification build with
+benchmark-only exports. Its exact WASM hash, 192-byte protocol profile, valid
+private/public proof hashes, raw samples and declared budgets are in the
+[JSON record](bench/2026-09-16-runtime-components.json). The procedure and limits
+are in [WASM-BUDGET.md](WASM-BUDGET.md).
+
+Host: AMD Ryzen AI 9 365, x86_64, affinity CPUs 0-7, nice 19, four Rayon threads,
+two Cargo jobs, Rust 1.93.0. Each row used one first call plus nine cached-executor
+calls. The max includes the first call; module compilation is recorded separately.
+Storage setup used in-memory externalities. Fixtures were valid release-shape
+proofs: six leaf slots and 53 private batches.
+
+| Component | Median ms | Max ms | Declared budget ms |
+| --- | ---: | ---: | ---: |
+| Private proof parse | 1.412 | 1.499 | 5.066 |
+| Private parse and verification, once | 23.981 | 25.223 | 30.066 |
+| Private parse and verification, twice | 44.969 | 46.378 | 60.131 |
+| Public proof parse | 1.812 | 2.655 | 8.473 |
+| Public parse and verification, once | 32.743 | 33.437 | 158.474 |
+| Public parse and verification, twice | 65.470 | 66.391 | 316.947 |
+| Payload binding, two checks, one maximum-size slot | 1.138 | 2.557 | 2.600 |
+| Payload binding, two checks, 318 maximum-size slots | 335.979 | 339.588 | 824.620 |
+| Full bounded ciphertext-retention hook | 10.209 | 10.445 | 927.376 |
+
+All measured component gates passed. The narrow one-slot wall-clock margin and
+single-host sample do not justify reducing weights. This closes the absence of
+runtime-executor component measurements. Full successful settlement, block import,
+disk costs, admission under legitimate congestion and minimum-hardware capacity
+remain unqualified. Production runtimes omit the measurement exports; changes to
+the execution logic or build configuration require fresh measurements.

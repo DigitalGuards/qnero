@@ -1,0 +1,262 @@
+//! The public Executive rejects unsupported calls before pool admission or
+//! block inclusion. These tests use the production extrinsic wrapper and keep
+//! the admission policy separate from lower-layer fee and quota coverage.
+
+#[allow(dead_code)]
+mod common;
+
+use common::TestCommons;
+use frame_support::traits::Currency;
+use qnero_runtime::{
+	extrinsic::UpstreamUncheckedExtrinsic, AccountId, Balances, Executive, Runtime, RuntimeCall,
+	System, UncheckedExtrinsic, UNIT,
+};
+use qp_dilithium_crypto::Dilithium87Pair;
+use sp_core::{Pair, H256};
+use sp_runtime::{
+	generic::{DigestItem, Preamble},
+	traits::{Checkable, IdentifyAccount},
+	transaction_validity::{InvalidTransaction, TransactionSource, TransactionValidityError},
+	BuildStorage, MultiAddress,
+};
+
+const INVALID_CALL: TransactionValidityError =
+	TransactionValidityError::Invalid(InvalidTransaction::Call);
+
+fn pair() -> Dilithium87Pair {
+	Dilithium87Pair::from_seed_slice(&[43; 32]).expect("valid test seed")
+}
+
+fn sender() -> AccountId {
+	pair().public().into_account()
+}
+
+fn recipient() -> AccountId {
+	AccountId::new([9; 32])
+}
+
+fn test_ext() -> sp_io::TestExternalities {
+	let storage = frame_system::GenesisConfig::<Runtime>::default()
+		.build_storage()
+		.expect("valid system genesis");
+	let mut ext = sp_io::TestExternalities::new(storage);
+	ext.execute_with(|| {
+		System::set_block_number(1);
+		Balances::make_free_balance_be(&sender(), 1000 * UNIT);
+	});
+	ext
+}
+
+fn signed(call: RuntimeCall) -> UncheckedExtrinsic {
+	TestCommons::signed_extrinsic(&pair(), sender(), call, 0, 0)
+}
+
+fn transfer() -> RuntimeCall {
+	RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {
+		dest: MultiAddress::Id(recipient()),
+		value: UNIT,
+	})
+}
+
+/// Both bare encodings, the signed encoding, and the general preamble all
+/// reach the same call policy before their own authorization checks.
+fn formats(call: RuntimeCall) -> [UncheckedExtrinsic; 4] {
+	let signed = signed(call.clone());
+	let Preamble::Signed(_, _, tx_ext) = &signed.0.preamble else {
+		panic!("test helper must produce a signed extrinsic");
+	};
+	let general = UncheckedExtrinsic(UpstreamUncheckedExtrinsic::new_transaction(
+		call.clone(),
+		tx_ext.clone(),
+	));
+	[
+		signed,
+		UncheckedExtrinsic::new_bare(call.clone()),
+		UncheckedExtrinsic(UpstreamUncheckedExtrinsic::new_bare_legacy(call)),
+		general,
+	]
+}
+
+fn forbidden_calls() -> Vec<RuntimeCall> {
+	vec![
+		transfer(),
+		RuntimeCall::Balances(pallet_balances::Call::transfer_allow_death {
+			dest: MultiAddress::Id(recipient()),
+			value: UNIT,
+		}),
+		RuntimeCall::Balances(pallet_balances::Call::transfer_all {
+			dest: MultiAddress::Id(recipient()),
+			keep_alive: true,
+		}),
+		RuntimeCall::Utility(pallet_utility::Call::batch_all {
+			calls: vec![RuntimeCall::Multisig(pallet_multisig::Call::execute {
+				multisig_address: AccountId::new([8; 32]),
+				proposal_id: 0,
+				call: Box::new(transfer()),
+			})],
+		}),
+		RuntimeCall::ReversibleTransfers(pallet_reversible_transfers::Call::schedule_transfer {
+			dest: MultiAddress::Id(recipient()),
+			amount: UNIT,
+		}),
+		RuntimeCall::ReversibleTransfers(pallet_reversible_transfers::Call::set_high_security {
+			delay: qp_scheduler::BlockNumberOrTimestamp::BlockNumber(10),
+			guardian: recipient(),
+		}),
+		RuntimeCall::Vesting(pallet_vesting::Call::create_schedule {
+			beneficiary: recipient(),
+			start: 0,
+			cliff: 0,
+			end: 10,
+			total: UNIT,
+		}),
+	]
+}
+
+#[test]
+fn forbidden_calls_are_invalid_for_pool_admission_in_every_format() {
+	for call in forbidden_calls() {
+		test_ext().execute_with(|| {
+			for xt in formats(call.clone()) {
+				assert_eq!(
+					Executive::validate_transaction(
+						TransactionSource::External,
+						xt,
+						H256::default(),
+					),
+					Err(INVALID_CALL),
+					"unsupported call must be rejected before admission: {call:?}"
+				);
+			}
+		});
+	}
+}
+
+#[test]
+fn forbidden_calls_are_invalid_before_block_recording_fees_or_nonce_changes() {
+	for call in forbidden_calls() {
+		test_ext().execute_with(|| {
+			let account_before = System::account(sender());
+			let recipient_before = System::account(recipient());
+			let events_before = System::events();
+			let index_before = System::extrinsic_index();
+			for xt in formats(call.clone()) {
+				assert_eq!(Executive::apply_extrinsic(xt), Err(INVALID_CALL));
+				assert_eq!(System::account(sender()), account_before);
+				assert_eq!(System::account(recipient()), recipient_before);
+				assert_eq!(System::events(), events_before);
+				assert_eq!(System::extrinsic_index(), index_before);
+				assert!(System::extrinsic_data(0).is_empty());
+			}
+		});
+	}
+}
+
+#[test]
+fn call_policy_precedes_signature_verification() {
+	test_ext().execute_with(|| {
+		let mut xt = signed(transfer());
+		let Preamble::Signed(address, _, _) = &mut xt.0.preamble else {
+			panic!("test helper must produce a signed extrinsic");
+		};
+		*address = MultiAddress::Id(recipient());
+		assert_eq!(Executive::apply_extrinsic(xt), Err(INVALID_CALL));
+	});
+}
+
+#[test]
+fn an_allowed_signed_batch_and_pool_entry_still_validate_and_dispatch() {
+	let shield = RuntimeCall::Shielded(pallet_shielded::Call::shield {
+		value: UNIT,
+		inner: [0; 32],
+		ciphertext: Vec::new(),
+	});
+	for call in [
+		shield,
+		RuntimeCall::Utility(pallet_utility::Call::batch_all {
+			calls: vec![RuntimeCall::System(frame_system::Call::remark {
+				remark: b"allowed batch".to_vec(),
+			})],
+		}),
+	] {
+		test_ext().execute_with(|| {
+			assert!(Executive::validate_transaction(
+				TransactionSource::External,
+				signed(call.clone()),
+				H256::default(),
+			)
+			.is_ok());
+		});
+		test_ext().execute_with(|| {
+			Executive::apply_extrinsic(signed(call.clone()))
+				.expect("supported signed call is valid")
+				.expect("supported signed call dispatches");
+			assert_eq!(System::account_nonce(sender()), 1);
+			if matches!(call, RuntimeCall::Shielded(..)) {
+				assert_eq!(pallet_shielded::PoolValue::<Runtime>::get(), UNIT);
+				assert_eq!(pallet_zk_tree::LeafCount::<Runtime>::get(), 1);
+			}
+		});
+	}
+}
+
+#[test]
+fn unsigned_settlements_continue_to_their_own_validity_checks() {
+	for call in [
+		RuntimeCall::Shielded(pallet_shielded::Call::submit_private_batch {
+			proof: Vec::new(),
+			outputs: Vec::new(),
+		}),
+		RuntimeCall::Shielded(pallet_shielded::Call::submit_public_batch {
+			proof: Vec::new(),
+			outputs: Vec::new(),
+		}),
+	] {
+		test_ext().execute_with(|| {
+			let xt = UncheckedExtrinsic::new_bare(call);
+			assert!(xt.clone().check(&frame_system::ChainContext::<Runtime>::default()).is_ok());
+			let result =
+				Executive::validate_transaction(TransactionSource::External, xt, H256::default());
+			assert!(result.is_err(), "an empty proof must still fail settlement validation");
+		});
+	}
+}
+
+#[test]
+fn timestamp_and_coinbase_inherents_still_apply() {
+	for call in [
+		RuntimeCall::Timestamp(pallet_timestamp::Call::set { now: 120_000 }),
+		RuntimeCall::Shielded(pallet_shielded::Call::coinbase {
+			inner: [0; 32],
+			ciphertext: Vec::new(),
+		}),
+	] {
+		test_ext().execute_with(|| {
+			let mut author = [0; 32];
+			author[..8].copy_from_slice(&1u64.to_le_bytes());
+			System::deposit_log(DigestItem::PreRuntime(
+				qp_wormhole::POW_ENGINE_ID,
+				author.to_vec(),
+			));
+			Executive::apply_extrinsic(UncheckedExtrinsic::new_bare(call))
+				.expect("supported inherent is valid")
+				.expect("supported inherent dispatches");
+		});
+	}
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn replay_keeps_the_call_policy_for_every_format() {
+	test_ext().execute_with(|| {
+		for xt in formats(transfer()) {
+			assert_eq!(
+				xt.unchecked_into_checked_i_know_what_i_am_doing(&frame_system::ChainContext::<
+					Runtime,
+				>::default(),)
+					.map(|_| ()),
+				Err(INVALID_CALL)
+			);
+		}
+	});
+}

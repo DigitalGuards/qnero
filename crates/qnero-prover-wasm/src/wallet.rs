@@ -415,6 +415,7 @@ pub fn wallet_limits_json() -> String {
         "tree_arity": ARITY,
         "siblings_per_level": SIBLINGS_PER_LEVEL,
         "chain_num_leaves": crate::prove::CHAIN_NUM_LEAVES,
+        "protocol_profile": hex::encode(qnero_circuit::profile::SUPPORTED_PROFILE),
     })
     .to_string()
 }

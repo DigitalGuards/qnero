@@ -1,0 +1,159 @@
+# Native architecture changes: runtime 105
+
+This change set requires coordinated node and wallet releases. Preparing a build
+or a new chain specification does not activate a network upgrade. Preserve the
+existing chain and database until an activation plan has been chosen and tested.
+
+## Consensus and database policy
+
+The native client selects the chain with the most accumulated work. Genesis is
+the sole irreversible checkpoint. Confirmation counts describe reversible
+history; `chain_getFinalizedHead` remains at genesis. Applications should follow
+best-chain changes and handle reorganizations. The legacy `MaxReorgDepth` runtime
+API returns `u32::MAX`, which prevents depth finalization by older consumers over
+the entire u32 block-height range. It cannot reverse checkpoints already stored
+by those clients.
+
+The node and offline import/check commands retain all block bodies and all branch
+states (`KeepAll`, `ArchiveAll`). They require full synchronization. State and
+warp synchronization depend on finality assumptions this protocol does not make.
+Fork requests use bounded reverse chunks and pinned hashes; the synchronizer
+fetches a known ancestor before queuing the branch for execution. Accumulated
+work is retained for every imported block.
+
+A database carrying a non-genesis finalized checkpoint is rejected. Changing a
+runtime constant or copying that database does not erase its finality boundary.
+The database backend can also reject an incompatible stored pruning mode before
+the explicit finality check is reached.
+
+### Keeping an existing chain
+
+1. Preserve a consistent backup of its database, original chain specification,
+   binary, and runtime artifacts. Use the previous binary to export canonical
+   blocks from the preserved database: the new client's startup policy rejects
+   a legacy finalized database, including for export commands.
+2. With the original genesis, replay complete block bodies into a separate new
+   archive database using the new client. Replay executes the historical runtime
+   stored in chain state. Check block hashes, state roots, accumulated work,
+   balances and recoverable wallet history against the preserved chain.
+3. Coordinate adoption of the native client, then qualify and activate runtime
+   105 through the chain's authorized upgrade mechanism. The deployed testnet's
+   empty governance configuration must be accounted for before choosing this
+   route. A fresh genesis may be required if it has no authorized upgrade path.
+4. Publish the exact protocol manifest and matching wallets. New wallets require
+   the authenticated profile and therefore refuse the previous runtime until
+   its profile has been installed by the upgrade.
+
+### Starting a new testnet
+
+Build the node with real runtime WASM, generate and review a new raw chain spec,
+record its genesis hash and profile, and distribute matching wallets and nodes.
+Use a separate database and explicit network identity. Existing balances and
+wallet scan checkpoints belong to the previous genesis. Generating that candidate
+specification in a development branch does not reset the active testnet.
+
+The raw `chain/node/chain-specs/qnero-testnet.json` in this branch is regenerated
+from runtime 105 and has an empty bootnode list. It is a candidate for a new
+genesis. Keep the deployed network's original specification for an upgrade or
+replay of its existing history; choose a separate network identity before
+activating this candidate.
+
+## Transaction and artifact compatibility
+
+Runtime `spec_version` is 105; `transaction_version` remains 7. The signed SCALE
+encoding and extension tuple are unchanged. Unsupported transparent calls become
+invalid at extrinsic checking, before inclusion, fees, nonce updates or body
+recording. The dispatch filter remains in place. Historical blocks use their
+historical runtime; importing them under a replacement genesis is a different
+chain and is unsupported.
+
+The runtime publishes a 192-byte profile both in metadata and authenticated
+state. Native and browser wallets compare it with their supported profile before
+building circuits or producing proofs, and pin generated verifier artifact
+digests. See [PROTOCOL-PROFILE.md](PROTOCOL-PROFILE.md). Mainnet presets also require
+independent cryptographic qualification, described in
+[CRYPTOGRAPHY.md](CRYPTOGRAPHY.md).
+
+## Ciphertext retention and wallet recovery
+
+Current state keeps ordinary ciphertexts for 64 blocks, with at most 2048 new
+ciphertexts per block and at most 4096 cleanup steps per block. A FIFO queue
+tracks only stored ciphertexts, so unrelated commitment-tree leaves cannot make
+that queue grow. At the 2048-byte runtime payload cap, the steady-state payload
+bound is 256 MiB, plus queue, map and database overhead. Real ordinary outputs
+currently use 1792 bytes. This bound concerns the live ciphertext map.
+
+The storage-version-2 migration records a finite legacy leaf-index range and
+delays cleanup by 64 blocks. It removes at most the unused portion of the cleanup
+budget per block. That old backlog can temporarily exceed the steady-state
+bound. Migration restarts preserve progress. Commitments, nullifiers, creation
+heights and coinbase values retain their existing lifetime state behavior.
+
+Once a ciphertext expires from current state, a wallet authenticates its creation
+height and follows parent-linked headers to read a trie proof at the exact
+creation block. The node must retain and serve that historical state. Missing or
+invalid archive data aborts scanning before advancing the affected watermark.
+Coinbase discovery uses its authenticated public value and the wallet's miner
+viewing key. [AUTHENTICATED_READS.md](AUTHENTICATED_READS.md) defines the read bounds
+and the separate provider/checkpoint trust assumption.
+
+Every node built with this policy retains archive state and block bodies. Total
+disk use still grows with history, including fork history. The body-only M14
+layout remains a future storage optimization requiring authenticated body
+extraction, index interpretation, migration and recovery qualification. The live
+cache does not claim constant disk size or constant scan time.
+
+## Qualification and remaining limits
+
+The regression suites cover call-policy admission, state-proof membership and
+absence, prefix completeness, profile mismatch, ciphertext expiry and archive
+recovery, bounded migration, legacy database refusal and fork transport progress.
+[WASM-BUDGET.md](WASM-BUDGET.md) provides an offline runtime-executor measurement
+harness with valid private/public proof fixtures and explicit component gates.
+
+Activation still needs an honest multi-node partition/reconnect/restart rehearsal
+with actual PoW imports, an archive recovery rehearsal on the selected database
+backend, and reference-hardware full-block and admission-capacity measurements.
+Component/unit tests do not establish those operational guarantees. The exact
+cryptographic composition remains subject to independent assessment.
+
+### Local fork and wallet smoke
+
+After building fresh release binaries with the actual runtime WASM, run from
+the repository root:
+
+```sh
+python3 scripts/check-native-upgrade.py \
+  --node-bin chain/target/release/qnero-node \
+  --wallet-bin target/release/qnero-wallet
+```
+
+The script requires explicit executable paths and refuses binaries older than
+their Rust/workspace source inputs. It does not build them. It uses fresh dev
+databases under ignored `target/native-upgrade-smoke/`, dynamic loopback ports,
+CPUs 0-7, nice 19, Rayon 4, and one mining thread at a time. A file lock prevents
+two copies of this smoke from running together. Each phase has a 180-second
+deadline and each owned child has a 30-second shutdown bound.
+
+It mines distinct ordinary forks, restarts both nodes as followers, connects
+their reserved peers, and requires convergence to B's strictly greater
+configured chain work. It checks genesis-only finalization, retrieval of the
+former A block body and historical profile proof on A after its reorganization,
+runtime 105, the 192-byte profile, and native wallet discovery of B's positive
+coinbase notes.
+The result also records whether B learned the losing A branch during reconnect;
+that depends on ordinary peer timing and is optional.
+Native wallet synchronization performs the local profile and state-proof checks.
+
+The printed `facts.json` path is the public result. Node logs omit miner-viewing
+key lines. Wallet output is suppressed; a failed sync records only its bounded,
+sanitized error chain in `facts.json`. Generated wallet seeds, stores, and
+interrupted store-save temporary files are removed during cleanup. Scratch
+databases can contain node identity keys, so
+share `facts.json` rather than the whole scratch directory. All spawned children
+are stopped in cleanup, and their ports must be closed and bindable.
+
+This smoke covers a shallow fork, normal PoW imports, restart, archive reads,
+and native wallet synchronization. Deep forks and shorter heavier candidates
+have separate transport unit tests. It does not qualify long partitions,
+ciphertext expiry over the full retention window, or reference-hardware capacity.

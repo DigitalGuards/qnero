@@ -1,3 +1,4 @@
+import { TEST_PROTOCOL_PROFILE } from './fixtures/protocol-profile';
 /**
  * The two rules the worker enforces that nothing outside it can see.
  *
@@ -36,6 +37,7 @@ const LIMITS = {
   tree_arity: 4,
   siblings_per_level: 3,
   chain_num_leaves: 6,
+  protocol_profile: TEST_PROTOCOL_PROFILE,
 };
 
 const ADDRESS = 'qn1stub';
@@ -71,6 +73,7 @@ function stubModule(counts: Counts): WasmModule {
     default: () => Promise.resolve({ memory: { buffer: new ArrayBuffer(8) } as WebAssembly.Memory }),
     entropySelfCheck: () => undefined,
     walletLimits: () => JSON.stringify(LIMITS),
+    readStateProof: () => '[]',
     deriveAccount: () =>
       JSON.stringify({ address: ADDRESS, pk: 'PK', ak: 'AK', cvk: 'CVK-SECRET' }),
     minerKey: () => 'qnm1stub',

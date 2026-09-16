@@ -6,6 +6,7 @@ license.workspace = true
 description = "Prover for the Qnero v0 shielded spend leaf circuit"
 
 [dependencies]
+blake2 = { workspace = true }
 qnero-circuit = { workspace = true }
 qnero-aggregator = { workspace = true }
 qp-plonky2 = { workspace = true }

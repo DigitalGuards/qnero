@@ -62,6 +62,7 @@
  */
 
 import type { ChainContext } from '../chain/api';
+import { ensureActiveProfile, ensureCompatibleProfile } from '../chain/profile';
 import { anchorFromHeader, parseRawHeader, type Anchor } from '../chain/anchor';
 import { blockHashAt, fetchHead, fetchLeafHashes, fetchTreeShape, headerAt } from '../chain/reads';
 import { encodeSettlement, submitSettlement, waitForInclusion } from '../chain/submit';
@@ -216,6 +217,8 @@ export async function spend(
     throw new Error(mismatch);
   }
 
+  ensureCompatibleProfile(context.protocolProfile, limits);
+
   report({ stage: 'fee' });
   // The memo against the pad, before anything is measured. The send screen
   // refuses the same bound where it is typed, from the same function.
@@ -238,6 +241,9 @@ export async function spend(
         'truncated or edited paste looks like. Nothing has been built.',
     );
   }
+  const profileHead = await fetchHead(context);
+  await ensureActiveProfile(context, limits, profileHead.hash);
+
   // The pad against both of the runtime's bounds. The cap is a refusal, the
   // divisor is a warning: see `fee.ts`.
   ensureMemoPadFits(
@@ -297,6 +303,7 @@ export async function spend(
   report({ stage: 'anchor' });
   const head = await fetchHead(context);
   const raw = await headerAt(context, head.hash);
+  await ensureActiveProfile(context, limits, head.hash);
   const anchor: Anchor = anchorFromHeader(parseRawHeader(raw));
   // The rebuild the wallet did of the header preimage, hashed by the circuit's
   // own function and compared against what the chain says. The digest

@@ -18,6 +18,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ChainContext } from '../src/chain/api';
+import { storagePrefix } from './fixtures/storage-key';
+import { bindFixtureProofs, fixtureProof, fixtureHeader } from './fixtures/state-proof';
 import { blockHashAt, fetchBirthday } from '../src/chain/reads';
 import { readRestoreField, restoreHeightOf } from '../src/screens/RestoreWallet';
 import {
@@ -41,7 +43,7 @@ function entry(prefix: string): unknown {
   };
 }
 
-const KEYS = { leafCount: '0xleafcount', depth: '0xdepth', entryCount: '0xentrycount' } as const;
+const KEYS = { leafCount: storagePrefix('ZkTree', 'LeafCount'), depth: storagePrefix('ZkTree', 'Depth'), entryCount: storagePrefix('Shielded', 'EntryCount') } as const;
 
 /**
  * A node with a head and a leaf count per height.
@@ -63,9 +65,9 @@ function nodeWith(head: number, countAt: (height: number) => number): {
       return Promise.resolve(hashAt(asked ?? head) as T);
     }
     if (method === 'chain_getHeader') {
-      return Promise.resolve({ number: `0x${head.toString(16)}` } as T);
+      return Promise.resolve(fixtureHeader(params[0] === undefined ? head : Number((typeof params[0] === 'string' ? params[0] : '0').replace(/^0x0*/, '') || '0')) as T);
     }
-    if (method === 'state_queryStorageAt') {
+    if (method === 'state_getReadProof') {
       const at = String(params[1]);
       const height = Number(at.replace(/^0x0*/, '') || '0');
       const keys = params[0] as string[];
@@ -76,17 +78,12 @@ function nodeWith(head: number, countAt: (height: number) => number): {
         [KEYS.depth, '0x03'],
         [KEYS.entryCount, `0x${'00'.repeat(8)}`],
       ]);
-      return Promise.resolve([
-        {
-          block: at,
-          changes: keys.map((key) => [key, values.get(key) ?? null] as [string, string | null]),
-        },
-      ] as T);
+      return Promise.resolve(fixtureProof(at, keys.map((key) => [key, values.get(key) ?? null])) as T);
     }
     throw new Error(`this fixture answers no ${method}`);
   };
   return {
-    context: {
+    context: bindFixtureProofs({
       send,
       api: {
         query: {
@@ -94,7 +91,7 @@ function nodeWith(head: number, countAt: (height: number) => number): {
           shielded: { entryCount: entry(KEYS.entryCount) },
         },
       },
-    } as unknown as ChainContext,
+    } as unknown as ChainContext, (anchor) => hashAt(anchor.block_number)),
     calls,
   };
 }

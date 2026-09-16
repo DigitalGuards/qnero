@@ -226,6 +226,10 @@ impl WasmWalletProver {
     #[wasm_bindgen(js_name = fromSource)]
     pub fn from_source(num_leaves: usize) -> Result<WasmWalletProver, JsError> {
         let built = prove::build_from_source(num_leaves).map_err(js_error)?;
+        built
+            .prover
+            .ensure_supported_verifiers()
+            .map_err(js_error)?;
         Ok(Self {
             inner: built.prover,
             build_report: serde_json::to_string(&built.build).unwrap_or_else(|_| "{}".to_string()),
@@ -244,6 +248,10 @@ impl WasmWalletProver {
         num_leaves: usize,
     ) -> Result<WasmWalletProver, JsError> {
         let built = prove::build_from_artifacts(leaf_verifier, padding_leaf_proof, num_leaves)
+            .map_err(js_error)?;
+        built
+            .prover
+            .ensure_supported_verifiers()
             .map_err(js_error)?;
         Ok(Self {
             inner: built.prover,
@@ -452,4 +460,61 @@ pub fn prove_zk_leaf(request_json: &str) -> Result<String, JsError> {
         .map_err(|error| JsError::new(&format!("the transfer request does not parse: {error}")))?;
     let report = prove::prove_zk_leaf(&request).map_err(js_error)?;
     serde_json::to_string(&report).map_err(|error| JsError::new(&error.to_string()))
+}
+
+/// Read authenticated values or an entire complete map prefix from raw RPC
+/// proof nodes. Header trust and selection are the caller's responsibility.
+#[wasm_bindgen(js_name = readStateProof)]
+pub fn read_state_proof(request_json: &str) -> Result<String, JsError> {
+    #[derive(serde::Deserialize)]
+    struct Request {
+        root: String,
+        nodes: Vec<String>,
+        keys: Vec<String>,
+        prefix: Option<String>,
+    }
+    fn bytes(value: &str) -> Result<Vec<u8>, JsError> {
+        hex::decode(value.strip_prefix("0x").unwrap_or(value))
+            .map_err(|error| JsError::new(&error.to_string()))
+    }
+    let request: Request =
+        serde_json::from_str(request_json).map_err(|error| JsError::new(&error.to_string()))?;
+    let root: [u8; 32] = bytes(&request.root)?
+        .try_into()
+        .map_err(|_| JsError::new("state root is not 32 bytes"))?;
+    let nodes = request
+        .nodes
+        .iter()
+        .map(|node| bytes(node))
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = if let Some(prefix) = request.prefix {
+        let entries = qnero_state_proof::read_prefix(root, nodes, &bytes(&prefix)?)
+            .map_err(|error| JsError::new(&error))?;
+        serde_json::to_string(
+            &entries
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        format!("0x{}", hex::encode(key)),
+                        format!("0x{}", hex::encode(value)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        let keys = request
+            .keys
+            .iter()
+            .map(|key| bytes(key))
+            .collect::<Result<Vec<_>, _>>()?;
+        let values = qnero_state_proof::read_values(root, nodes, &keys)
+            .map_err(|error| JsError::new(&error))?;
+        serde_json::to_string(
+            &values
+                .into_iter()
+                .map(|value| value.map(|value| format!("0x{}", hex::encode(value))))
+                .collect::<Vec<_>>(),
+        )
+    };
+    result.map_err(|error| JsError::new(&error.to_string()))
 }

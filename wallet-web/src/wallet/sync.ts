@@ -43,33 +43,10 @@ import { formatStepsAsQnr } from '../lib/units';
 import { ENTRY_WALK_LIMIT } from '../worker/protocol';
 import { birthdayWatermarkNote, MAX_CHECKPOINTS, unscannedBirthday, type NoteOrigin, type NoteSecret, type RejectedNote, type StoreMeta, type StoredNote, type SyncCheckpoint } from './model';
 
-/**
- * What a pass that read leaves and received nothing may also be, in one line.
- *
- * The same sentence the command-line wallet prints on its `hint` line, byte
- * for byte: `CIPHERTEXT_SUBSTITUTION_HINT` in
- * `crates/qnero-wallet/src/wallet.rs`, and `tests/leaf-typing.test.ts` reads
- * that literal out of the Rust source and compares it against this one, so
- * neither can drift on its own.
- *
- * It names both values the chain leaves unbound and states the second one
- * whole, because one rescan is the recovery for either: a substituted
- * ciphertext and a leaf moved anywhere inside its block's range produce the
- * same reading, a leaf that opens for nobody.
- */
+/** The remaining chain-selection trust boundary, shared with the CLI. */
 export const CIPHERTEXT_SUBSTITUTION_HINT =
-  'a pass that reads leaves and receives nothing is the ordinary case, and it is also what a ' +
-  'substituted or moved leaf looks like. Two per-leaf values are bound to a leaf by nothing on ' +
-  "chain: the bytes at Shielded::Ciphertexts, and where a leaf sits inside its block's own " +
-  "range. The tree sorts a node's children at every level and tags no level, so a " +
-  "block's root pins that block's leaf multiset and each internal node's child multiset and " +
-  'nothing further: sibling swaps composed at any level reach any position the range\'s aligned ' +
-  'subtrees allow, the coinbase position included, and a shorter tree of internal node values ' +
-  'served as leaves folds to the same root, so the root pins neither the leaf count nor the ' +
-  'height inside a block. So a node with honest headers can answer a stranger\'s bytes at an ' +
-  'incoming payment, or move that payment onto its block\'s coinbase position where no ' +
-  "ciphertext is owed, and either way the leaf reads as somebody else's. If a payment was " +
-  'expected and is not here, rescan against a second node, which is the recovery for both.';
+  'Storage reads are authenticated to the selected headers. This wallet trusts the configured ' +
+  'node for chain selection and does not verify proof of work.';
 
 /** What a scan needs out of the chain, so a test can supply it. */
 export interface SyncChain {
@@ -1804,30 +1781,8 @@ export async function runSync(
     );
   }
   if (report.leavesScanned > 0 && report.received === 0) {
-    // The ordinary case on most passes, because almost every leaf on the chain
-    // is somebody else's, and also what either of the two unbound per-leaf
-    // values looks like.
-    //
-    // `Shielded::Ciphertexts(i)` is bound to leaf `i` by nothing: the
-    // commitment the tree authenticates carries no ciphertext, and `ct_digest`
-    // binds the bytes only inside the settlement extrinsic at inclusion, which
-    // a storage-only reader never fetches. And where a commitment sits inside
-    // its block's own leaf range is bound by nothing either: the tree sorts a
-    // node's children at every level and tags no level, so a block's root pins
-    // that block's leaf multiset and each internal node's child multiset and
-    // nothing further. Sibling swaps composed at any level reach any position
-    // the range's aligned subtrees allow, the coinbase position included,
-    // where a ciphertext is not owed, and a shorter tree of internal node
-    // values served as leaves folds to the same root, so the root pins neither
-    // the leaf count nor the height inside a block. Either way the leaf reads
-    // as somebody else's and the watermark is written above it, and the
-    // checkpoint fork walk does not recover either, because the headers agree.
-    //
-    // A hint rather than a warning: it fires on nearly every pass, and a list
-    // that always has an entry stops being read. The sentence is the
-    // command-line wallet's `CIPHERTEXT_SUBSTITUTION_HINT`, held identical to
-    // it by `tests/leaf-typing.test.ts`, and `docs/WALLET.md` carries the
-    // bound.
+    // State integrity is checked before the scan. Chain selection retains
+    // the configured provider and checkpoint trust boundary.
     hints.push(CIPHERTEXT_SUBSTITUTION_HINT);
   }
 

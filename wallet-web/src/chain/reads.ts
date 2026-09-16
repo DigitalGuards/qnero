@@ -4,7 +4,7 @@
  * Two rules shape every function here, and they are rules about the requests
  * rather than about the answers:
  *
- * 1. **A sync never names a nullifier.** `UsedNullifiers` is
+ * 1. **A sync never selects an unpublished nullifier from private notes for a request.** `UsedNullifiers` is
  *    `Blake2_128Concat`, so a point lookup carries the raw 32 bytes in the
  *    clear. A node that logged those would hold, per client, the set of values
  *    that wallet will publish when it spends, before it has spent anything.
@@ -25,6 +25,7 @@ import { hexByteLength, hexToBytes, leBytesToBigInt, normaliseHash, readCompact 
 import { birthdayEpochOf } from '../wallet/model';
 import { parseRawHeader, type RawChainHeader } from './anchor';
 import { storage, type ChainContext } from './api';
+import { authenticatedValues, authenticatedPrefix, authenticatedHeaderHash } from './authenticated';
 
 /** Leaves per `state_queryStorageAt` when four items are read per leaf. */
 export const LEAF_BATCH = 64;
@@ -40,28 +41,19 @@ export interface Head {
   hash: string;
 }
 
-interface StorageChangeSet {
-  block: string;
-  changes: [string, string | null][];
-}
-
 async function queryAt(
   context: ChainContext,
   keys: string[],
   at: string,
 ): Promise<Map<string, string>> {
-  if (keys.length === 0) {
-    return new Map();
-  }
-  const sets = await context.send<StorageChangeSet[]>('state_queryStorageAt', [keys, at]);
+  const values = await authenticatedValues(context, keys, at);
+  if (values.length !== keys.length) throw new Error('state verifier returned an unexpected value count');
   const out = new Map<string, string>();
-  for (const set of sets) {
-    for (const [key, value] of set.changes) {
-      if (value !== null) {
-        out.set(key, value);
-      }
-    }
-  }
+  values.forEach((value, index) => {
+    const key = keys[index];
+    if (key === undefined) throw new Error('state verifier returned an unexpected value count');
+    if (value !== null) out.set(key, value);
+  });
   return out;
 }
 
@@ -847,6 +839,55 @@ function withheld(key: string, index: number, leafCount: number, at: string): Er
  * `Chain::leaves` and `Wallet::sync_with` in the command-line wallet refuse
  * the identical set.
  */
+const archiveAncestors = new WeakMap<ChainContext, { tip: string; oldest: number; hashes: Map<number, string> }>();
+
+/** Link a historical ciphertext proof to this selected scan head. */
+export async function authenticatedAncestor(context: ChainContext, at: string, wanted: number): Promise<string> {
+  let cache = archiveAncestors.get(context);
+  if (cache === undefined || normaliseHash(cache.tip) !== normaliseHash(at)) {
+    const head = parseRawHeader(await headerAt(context, at));
+    if (normaliseHash(await authenticatedHeaderHash(context, head)) !== normaliseHash(at)) {
+      throw new Error('archive header does not hash to the selected block');
+    }
+    cache = { tip: at, oldest: Number(BigInt(head.number)), hashes: new Map([[Number(BigInt(head.number)), at]]) };
+    archiveAncestors.set(context, cache);
+  }
+  const known = cache.hashes.get(wanted);
+  if (known !== undefined) return known;
+  let number = cache.oldest;
+  let hash = cache.hashes.get(number);
+  if (hash === undefined) throw new Error('archive ancestry cache has no selected head');
+  if (wanted > number) throw new Error('ciphertext creation height is outside the selected header chain');
+  while (number > wanted) {
+    const lower = Math.max(wanted, number - HEADER_SPAN_LIMIT);
+    const headers: RawChainHeader[] = [];
+    await fetchHeaderRange(context, lower, { number, hash }, (header) => headers.push(header));
+    const hashes = await Promise.all(headers.map((header) => authenticatedHeaderHash(context, header)));
+    const topHash = hashes.at(-1);
+    if (topHash === undefined || normaliseHash(topHash) !== normaliseHash(hash)) {
+      throw new Error('archive header range does not reach the selected chain');
+    }
+    for (let index = 1; index < headers.length; index += 1) {
+      const header = headers[index];
+      const parent = hashes[index - 1];
+      if (header === undefined || parent === undefined || normaliseHash(header.parentHash) !== normaliseHash(parent)) {
+        throw new Error('archive header range contains an unauthenticated ancestor');
+      }
+    }
+    for (let index = 0; index < hashes.length; index += 1) {
+      const value = hashes[index];
+      if (value === undefined) throw new Error('archive header range is incomplete');
+      cache.hashes.set(lower + index, value.startsWith('0x') ? value : `0x${value}`);
+    }
+    if (cache.hashes.size > 1_000_000) throw new Error('archive ancestry exceeds the supported scan size');
+    number = lower;
+    cache.oldest = lower;
+    hash = cache.hashes.get(number);
+    if (hash === undefined) throw new Error('archive header range has no ancestor');
+  }
+  return hash;
+}
+
 export async function fetchLeaves(
   context: ChainContext,
   from: number,
@@ -879,6 +920,33 @@ export async function fetchLeaves(
       rows.flatMap((row) => row.keys),
       at,
     );
+    const archived = new Map<number, typeof rows>();
+    for (const row of rows) {
+      if (row.index < leafCount && !values.has(row.keys[0])) throw withheld('ZkTree::Leaves', row.index, leafCount, at);
+      if (row.index < leafCount && !values.has(row.keys[1]) && !values.has(row.keys[3])) {
+        const block = decodeInteger(values.get(row.keys[2]), `Shielded::LeafBlocks(${row.index})`, 4);
+        if (block === null) throw withheld('Shielded::LeafBlocks', row.index, leafCount, at);
+        const group = archived.get(Number(block)) ?? [];
+        group.push(row);
+        archived.set(Number(block), group);
+      }
+    }
+    for (const [block, group] of [...archived].sort(([a], [b]) => a - b)) {
+      const createdAt = await authenticatedAncestor(context, at, block);
+      const keys = group.map((row) => row.keys[1]);
+      let historical: (string | null)[];
+      try {
+        historical = await authenticatedValues(context, keys, createdAt);
+      } catch (error) {
+        throw new Error(`ciphertext archive unavailable at creation block ${block}; scan progress is unchanged: ${(error as Error).message}`);
+      }
+      historical.forEach((value, index) => {
+        if (value === null) throw new Error(`Shielded::Ciphertexts archive has no authenticated payload at creation block ${block}; scan progress is unchanged`);
+        const key = keys[index];
+        if (key === undefined) throw new Error('archive proof returned an unexpected value count');
+        values.set(key, value);
+      });
+    }
     for (const row of rows) {
       const rawCommitment = values.get(row.keys[0]);
       const rawCiphertext = values.get(row.keys[1]);
@@ -915,15 +983,12 @@ export async function fetchLeaves(
  * The whole settled nullifier set at one block.
  *
  * Paged over the map's keys. `UsedNullifiers` is `Blake2_128Concat`, so the
- * raw 32-byte nullifier is the tail of every key the node returns and no value
- * fetch is needed.
+ * raw 32-byte nullifier is the tail of every proven key. The local trie walk
+ * also authenticates the unit value and proves the set is complete.
  *
- * **Not capped.** The explorer caps its own walk and reports a floor, because
- * a floor on a count is honest. A wallet cannot: a short set is a settled note
- * reported unspent, which puts a consumed note back into selection and pays
- * for a proof the chain skips. So this pages to the end, and the only thing
- * that stops it early is `stillWanted`, which is the caller abandoning the
- * whole pass.
+ * A partial set would report settled notes as unspent. Reaching a proof or
+ * entry limit, or cancellation through `stillWanted`, therefore refuses the
+ * complete pass without returning a partial result.
  */
 export async function fetchUsedNullifiers(
   context: ChainContext,
@@ -933,44 +998,16 @@ export async function fetchUsedNullifiers(
 ): Promise<Set<string>> {
   const entry = storage(context, 'shielded', 'usedNullifiers');
   const prefix = entry.keyPrefix();
-  // `twox_128(pallet) ++ twox_128(item) ++ blake2_128(k) ++ k`, in hex
-  // characters: the prefix, then 16 bytes of hash, then the raw key.
-  const rawOffset = prefix.length + 32;
+  const entries = await authenticatedPrefix(context, prefix, at, KEY_PAGE, stillWanted, onProgress);
   const out = new Set<string>();
-  let cursor: string | null = null;
-  for (;;) {
-    if (stillWanted?.() === false) {
-      throw new Error('the sync was abandoned while paging the settled spend markers');
+  for (const [key, value] of entries) {
+    const raw = key.slice(prefix.length + 32);
+    if (raw.length !== 64 || value !== '0x' || entry.key(`0x${raw}`) !== key) {
+      throw new Error('a proven UsedNullifiers entry has an unexpected encoding');
     }
-    const keys: string[] = await context.send<string[]>('state_getKeysPaged', [
-      prefix,
-      KEY_PAGE,
-      cursor,
-      at,
-    ]);
-    if (keys.length === 0) {
-      return out;
-    }
-    for (const key of keys) {
-      const raw = key.slice(rawOffset);
-      if (raw.length !== 64) {
-        throw new Error(`a UsedNullifiers key carries a ${raw.length / 2}-byte spend marker`);
-      }
-      out.add(raw.toLowerCase());
-    }
-    onProgress?.(out.size);
-    if (keys.length < KEY_PAGE) {
-      return out;
-    }
-    const last = keys.at(-1);
-    if (last === undefined || cursor === last) {
-      // The guard against a node whose cursor stops advancing. A capped answer
-      // is exactly the failure this whole function exists to avoid, so it is
-      // an error rather than a short set.
-      throw new Error('state_getKeysPaged stopped advancing, so the settled set is incomplete');
-    }
-    cursor = last;
+    out.add(raw.toLowerCase());
   }
+  return out;
 }
 
 /**

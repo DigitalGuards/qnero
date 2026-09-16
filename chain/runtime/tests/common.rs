@@ -25,6 +25,27 @@ pub fn dispatch_unfiltered(
 	call.dispatch_bypass_filter(origin)
 }
 
+/// Exercise the inherited fee and quota layers after signature verification.
+///
+/// Production admission refuses the reversible calls those layers were built
+/// for. Their tests still need to check the extension behavior independently,
+/// using the upstream checked extrinsic's apply path. The production wrapper
+/// is covered separately by `transaction_policy.rs`; this helper is test-only
+/// and keeps dispatch filtering active.
+pub fn apply_through_transaction_extensions(
+	xt: UncheckedExtrinsic,
+) -> sp_runtime::ApplyExtrinsicResult {
+	use frame_support::dispatch::GetDispatchInfo;
+	use sp_runtime::traits::{Applyable, Checkable};
+
+	let len = xt.encoded_size();
+	let checked = xt.0.check(&frame_system::ChainContext::<Runtime>::default())?;
+	let info = checked.get_dispatch_info();
+	checked
+		.apply::<Runtime>(&info, len)
+		.map(|result| result.map(|_| ()).map_err(|e| e.error))
+}
+
 pub struct TestCommons;
 
 impl TestCommons {
@@ -74,7 +95,7 @@ impl TestCommons {
 	/// Create a test externality. Governance track timing is selected at
 	/// compile time via the `quantus-runtime/fast-governance` feature:
 	/// - feature ON:  all referenda windows collapse to 2 blocks (fast tests)
-	/// - feature OFF: production timing (hours/days) — slow but mainnet-accurate
+	/// - feature OFF: production timing (hours/days): slow but mainnet-accurate
 	pub fn new_fast_governance_test_ext() -> sp_io::TestExternalities {
 		#[cfg(feature = "fast-governance")]
 		println!("Fast governance: all referenda windows = 2 blocks (compile-time).");

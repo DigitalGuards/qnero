@@ -32,9 +32,10 @@ pub const RANDOMX_HASH_LEN: usize = 32;
 
 /// Default number of seed caches held at once.
 ///
-/// Two, so the epoch boundary and a reorg across it verify without re-running
-/// Argon2d: the seed a block asks for is either the current one or the one
-/// before it. Each cache is 256 MiB.
+/// Two lookup entries retain the usual current and previous epoch seeds.
+/// Historical forks can request older seeds and rebuild their caches. Each
+/// cache is 256 MiB; idle and leased VMs can retain additional cache references,
+/// so this is a lookup bound rather than a total resident-memory bound.
 pub const DEFAULT_MAX_CACHES: usize = 2;
 
 /// A RandomX cache, shareable across threads.
@@ -93,6 +94,7 @@ struct PooledVm {
 pub struct RandomxEngine {
 	flags: RandomXFlag,
 	caches: Mutex<VecDeque<([u8; 32], Arc<SharedCache>)>>,
+	cache_build: Mutex<()>,
 	idle: Mutex<Vec<PooledVm>>,
 	max_caches: usize,
 	max_idle_vms: AtomicUsize,
@@ -115,6 +117,7 @@ impl RandomxEngine {
 		Arc::new(Self {
 			flags,
 			caches: Mutex::new(VecDeque::new()),
+			cache_build: Mutex::new(()),
 			idle: Mutex::new(Vec::new()),
 			max_caches: max_caches.max(1),
 			max_idle_vms: AtomicUsize::new(max_idle_vms.max(1)),
@@ -167,10 +170,17 @@ impl RandomxEngine {
 			}
 		}
 
-		// Build outside the lock: this is an Argon2d fill over 256 MiB and
-		// takes hundreds of milliseconds. Two threads racing on a new seed
-		// build it twice and one of the two is dropped, which costs a fill and
-		// never a wrong answer.
+		// Serialize cold-cache construction and check again after waiting. A
+		// historical branch may use an older seed, and concurrent requests for
+		// it must share one 256 MiB fill. Cached seeds remain available while
+		// this lock is held because the cache lookup uses its own short lock.
+		let _build = self.cache_build.lock();
+		{
+			let caches = self.caches.lock();
+			if let Some((_, cache)) = caches.iter().find(|(key, _)| key == seed) {
+				return Ok(cache.clone());
+			}
+		}
 		log::info!(
 			target: crate::LOG_TARGET,
 			"⛏️ RandomX: initialising the seed cache for {} (light mode, 256 MiB)",
@@ -180,9 +190,6 @@ impl RandomxEngine {
 		self.cache_initialisations.fetch_add(1, Ordering::Relaxed);
 
 		let mut caches = self.caches.lock();
-		if let Some(index) = caches.iter().position(|(key, _)| key == seed) {
-			return Ok(caches[index].1.clone());
-		}
 		caches.push_back((*seed, cache.clone()));
 		while caches.len() > self.max_caches {
 			caches.pop_front();
@@ -403,5 +410,25 @@ mod tests {
 		// verifies without paying for Argon2d again.
 		engine.hash(old, b"blob").expect("old again");
 		assert_eq!(engine.cache_initialisations(), 2);
+	}
+
+	#[test]
+	fn concurrent_requests_share_one_cold_cache() {
+		let engine = RandomxEngine::with_settings(4, 2);
+		let ready = std::sync::Arc::new(std::sync::Barrier::new(4));
+		let seed = seed_from(b"shared cold seed");
+		let threads: Vec<_> = (0..4)
+			.map(|_| {
+				let engine = engine.clone();
+				let ready = ready.clone();
+				std::thread::spawn(move || {
+					ready.wait();
+					engine.hash(seed, b"same block").expect("valid hash")
+				})
+			})
+			.collect();
+		let hashes: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
+		assert!(hashes.iter().all(|hash| hash == &hashes[0]));
+		assert_eq!(engine.cache_initialisations(), 1);
 	}
 }

@@ -1,0 +1,55 @@
+import { describe, expect, it } from 'vitest';
+import { canonicalStorage, storage } from '../src/chain/api';
+import type { ChainContext } from '../src/chain/api';
+
+const CIPHERTEXTS = '0xcad93014ca4e3d270e8f2677345d6f092a4e237a5f910ca9a954cf9ba5668400';
+const NULLIFIERS = '0xcad93014ca4e3d270e8f2677345d6f0901239bbc95787a4c6519eafa1fe501c9';
+const LEAF_COUNT = '0xa40fcc202f608fe42e097dbf79522f643bddea35263a128d602ae2b1451398a9';
+
+describe('canonical Qnero storage keys', () => {
+  it('encodes fixed namespaces, Identity u64 indexes, and Blake2_128Concat nullifiers', () => {
+    const ciphertexts = canonicalStorage('shielded', 'ciphertexts');
+    expect(ciphertexts.keyPrefix()).toBe(CIPHERTEXTS);
+    expect(ciphertexts.key(257)).toBe(`${CIPHERTEXTS}0101000000000000`);
+    expect(ciphertexts.key(0xffffffffffffffffn)).toBe(`${CIPHERTEXTS}ffffffffffffffff`);
+    expect(canonicalStorage('zkTree', 'leafCount').key()).toBe(LEAF_COUNT);
+    const nullifiers = canonicalStorage('shielded', 'usedNullifiers');
+    expect(nullifiers.keyPrefix()).toBe(NULLIFIERS);
+    expect(nullifiers.key(`0x${'00'.repeat(32)}`)).toBe(
+      `${NULLIFIERS}ff0f22492f44bac4c4b30ae58d0e8daa${'00'.repeat(32)}`,
+    );
+  });
+
+  it('preserves the authenticated namespace after ApiPromise metadata refresh', () => {
+    const api = {
+      query: {
+        shielded: {
+          ciphertexts: { key: () => '0xobsolete', keyPrefix: () => '0xobsolete' },
+          usedNullifiers: { key: () => '0xobsolete', keyPrefix: () => '0xobsolete' },
+        },
+      },
+    };
+    const context = { api } as unknown as ChainContext;
+    const original = storage(context, 'shielded', 'ciphertexts');
+    api.query.shielded = {
+      ciphertexts: { key: () => '0xother', keyPrefix: () => '0xother' },
+      usedNullifiers: { key: () => '0xother', keyPrefix: () => '0xother' },
+    };
+    expect(original.key(1)).toBe(`${CIPHERTEXTS}0100000000000000`);
+    expect(storage(context, 'shielded', 'ciphertexts').key(1)).toBe(original.key(1));
+    expect(storage(context, 'shielded', 'usedNullifiers').keyPrefix()).toBe(NULLIFIERS);
+  });
+
+  it('refuses unknown namespaces and malformed key arguments', () => {
+    expect(() => canonicalStorage('other', 'leafCount')).toThrow('unsupported Qnero storage');
+    expect(() => canonicalStorage('zkTree', 'leafCount').key(1)).toThrow('takes no storage key');
+    const ciphertexts = canonicalStorage('shielded', 'ciphertexts');
+    for (const index of [undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '-1', '0x1', 1n << 64n]) {
+      expect(() => ciphertexts.key(index)).toThrow('requires a u64 leaf index');
+    }
+    const nullifiers = canonicalStorage('shielded', 'usedNullifiers');
+    for (const invalid of [undefined, 1, '00', 'gg'.repeat(32), '00'.repeat(33)]) {
+      expect(() => nullifiers.key(invalid)).toThrow('requires a 32-byte nullifier');
+    }
+  });
+});

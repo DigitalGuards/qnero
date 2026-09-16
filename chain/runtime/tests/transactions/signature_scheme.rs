@@ -181,19 +181,19 @@ fn an_identical_ml_dsa_87_extrinsic_is_admitted_and_dispatches() {
 	});
 }
 
-/// The signed transfer that v1 refuses at dispatch is still admitted when it
-/// carries an ML-DSA-87 signature, which is what separates this rule from the
-/// call filter: one decides who may sign, the other decides what may run.
+/// The supported signature scheme still meets the independent call policy:
+/// transparent transfers are invalid before admission or fee processing.
 #[test]
-fn an_ml_dsa_87_signed_transfer_is_admitted_and_refused_by_the_call_filter() {
+fn an_ml_dsa_87_signed_transfer_is_invalid_under_the_call_policy() {
 	test_ext().execute_with(|| {
 		let dest = AccountId32::new([9u8; 32]);
-		let outcome = Executive::apply_extrinsic(ml_dsa_87_signed(transfer(&dest), 0))
-			.expect("ML-DSA-87 passes the entry");
+		let invalid_call = TransactionValidityError::Invalid(InvalidTransaction::Call);
+		assert_eq!(validate(ml_dsa_87_signed(transfer(&dest), 0)), Err(invalid_call));
 		assert_eq!(
-			outcome.expect_err("v1 refuses a transparent transfer"),
-			sp_runtime::DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
+			Executive::apply_extrinsic(ml_dsa_87_signed(transfer(&dest), 0)),
+			Err(invalid_call)
 		);
 		assert_eq!(Balances::free_balance(&dest), 0, "no value moved");
+		assert_eq!(Balances::free_balance(ml_dsa_87_account()), 1000 * UNIT);
 	});
 }

@@ -436,8 +436,13 @@ fn the_runtime_identity_is_pinned() {
 	assert_eq!(version.spec_name, "qnero", "the chain's own name, set at M6");
 	assert_eq!(version.impl_name, "qnero-node");
 	assert_eq!(
+		pallet_qpow::Pallet::<Runtime>::get_max_reorg_depth(),
+		u32::MAX,
+		"legacy depth consumers must preserve reversible PoW throughout the u32 height range"
+	);
+	assert_eq!(
 		(version.spec_version, version.transaction_version),
-		(104, 7),
+		(105, 7),
 		"runtime metadata or the signed extrinsic encoding moved; see the rule above \
 		 `VERSION` in runtime/src/lib.rs and bump the half that changed"
 	);

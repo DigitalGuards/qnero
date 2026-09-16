@@ -15,6 +15,7 @@ qnero-circuit = { workspace = true }
 qnero-prover = { workspace = true }
 qnero-circuit-builder = { workspace = true }
 qnero-pqcrypto = { workspace = true }
+qnero-state-proof = { workspace = true }
 qp-poseidon-core = { workspace = true }
 qp-rusty-crystals-dilithium = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
@@ -36,6 +37,7 @@ zeroize = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+qnero-state-proof = { workspace = true, features = ["fixtures"] }
 # The public-batch measurement builds an aggregator's circuit over the wallet's
 # own private-batch proof. Nothing in the wallet itself aggregates.
 qnero-aggregator = { workspace = true }

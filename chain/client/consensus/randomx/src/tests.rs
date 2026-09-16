@@ -265,9 +265,10 @@ impl HeaderBackend<TestBlock> for FakeBackend {
 	}
 
 	fn info(&self) -> sp_blockchain::Info<TestBlock> {
+		let best = self.headers.values().max_by_key(|header| *header.number());
 		sp_blockchain::Info {
-			best_hash: H256::zero(),
-			best_number: 0,
+			best_hash: best.map_or(H256::zero(), |header| header.hash()),
+			best_number: best.map_or(0, |header| *header.number()),
 			genesis_hash: H256::zero(),
 			finalized_hash: H256::zero(),
 			finalized_number: self.finalized_number,
@@ -335,14 +336,9 @@ fn an_unknown_parent_is_refused_before_anything_is_walked() {
 /// A header at or below the finalized height is refused before the seed walk
 /// and before any hash.
 ///
-/// This is what bounds the seed epochs an unauthenticated peer can name. A
-/// fork response carries up to `MaxReorgDepth` headers of which only the last
-/// is pinned to the hash that was requested; the rest are free-form, and on an
-/// archive node every old parent they name still resolves. Left unbounded,
-/// each one is a seed epoch of the peer's choosing, so each one misses the two
-/// caches the engine holds and buys a 256 MiB Argon2d fill before the target is
-/// ever compared, on the import queue's single verification task, for a header
-/// with no proof of work in it.
+/// This is a backend consistency rule. Startup refuses legacy databases with
+/// non-genesis finality; the block import seam still honors any finalized
+/// boundary a backend reports. Reversible PoW keeps that boundary at genesis.
 #[test]
 fn a_header_at_or_below_the_finalized_height_is_refused() {
 	// Finality at #1000, and a parent that is the finalized block itself.
@@ -392,3 +388,28 @@ fn a_block_the_node_already_has_is_exempt() {
 
 /// A hash no header in the fake chain has, so neither exemption applies to it.
 const UNKNOWN_BLOCK: H256 = H256([0xcdu8; 32]);
+
+#[test]
+fn reversible_pow_accepts_a_genesis_only_checkpoint() {
+	let (backend, _) = FakeBackend::with_block(10_000);
+	crate::ensure_pow_database::<TestBlock, _>(&backend).unwrap();
+}
+
+#[test]
+fn reversible_pow_requires_replay_of_a_legacy_finalized_database() {
+	let (backend, _) = FakeBackend::with_block_finalized_at(10_000, 9_900);
+	let error = crate::ensure_pow_database::<TestBlock, _>(&backend).unwrap_err();
+	assert!(error.to_string().contains("separate archive database"));
+}
+
+#[test]
+fn a_valid_old_parent_remains_eligible_with_genesis_finality() {
+	// The parent height is independent of the best height and confirmation
+	// count. A fresh PoW database leaves its finalized checkpoint at genesis.
+	let (mut backend, parent) = FakeBackend::with_block(1);
+	let tip = sealed_header_at(10_000, canonical_digest());
+	backend.headers.insert(tip.hash(), tip);
+	assert_eq!(backend.info().best_number, 10_000);
+	crate::ensure_pow_database::<TestBlock, _>(&backend).unwrap();
+	check_header_position::<TestBlock, _>(&backend, parent, 2, UNKNOWN_BLOCK).unwrap();
+}

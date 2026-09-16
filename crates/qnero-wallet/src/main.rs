@@ -816,11 +816,13 @@ fn main() -> Result<()> {
             );
 
             let build_started = std::time::Instant::now();
+            metadata.ensure_active_profile(&rpc, None)?;
             // One build per process. Building both circuits is seconds and
             // proving is tens of seconds; constructing a prover per
             // transaction is the mistake the API exists to prevent.
             let prover = WalletProver::new(NUM_LEAF_PROOFS)
                 .context("failed to build the wallet's circuits")?;
+            prover.ensure_supported_verifiers()?;
             println!(
                 "circuits    built in {:.2?} ({NUM_LEAF_PROOFS} leaf slots per batch)",
                 build_started.elapsed()

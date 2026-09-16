@@ -47,6 +47,7 @@ qp-header = { workspace = true, features = ["serde"] }
 qp-high-security.workspace = true
 qp-scheduler.workspace = true
 qp-wormhole.workspace = true
+qnero-circuit = { workspace = true, optional = true }
 scale-info = { features = ["derive", "serde"], workspace = true }
 serde_json = { workspace = true, default-features = false, features = [
 	"alloc",
@@ -69,6 +70,7 @@ sp-version = { features = ["serde"], workspace = true }
 substrate-wasm-builder = { optional = true, workspace = true, default-features = true }
 
 [dev-dependencies]
+sc-executor = { workspace = true, default-features = true }
 env_logger.workspace = true
 qp-dilithium-crypto.workspace = true
 qp-poseidon-core.workspace = true
@@ -187,3 +189,12 @@ fast-governance = []
 # A convenience feature for enabling things when doing a build
 # for an on-chain release.
 on-chain-release-build = ["metadata-hash", "sp-api/disable-logging"]
+
+# Local executor measurements only. No RPC is registered for these exports.
+# Runtime releases must leave this feature disabled.
+shielded-budget-bench = ["dep:qnero-circuit"]
+
+[[example]]
+name = "shielded-budget"
+path = "examples/shielded_budget.rs"
+required-features = ["shielded-budget-bench"]

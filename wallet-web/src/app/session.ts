@@ -8,6 +8,7 @@
 
 import { connect, watchConnection, type ChainContext } from '../chain/api';
 import { watchHead } from '../chain/reads';
+import { bindStateProofVerifier } from '../chain/authenticated';
 import type { WalletConfig } from '../chain/config';
 import { ProverClient } from '../worker/client';
 import type { ProverAccount, ProverLimits } from '../worker/protocol';
@@ -101,6 +102,7 @@ export class Session {
   ): Promise<ChainContext> {
     await this.disconnect();
     const context = await connect(endpoint);
+    bindStateProofVerifier(context, this.prover);
     this.context = context;
     this.watching.push(
       watchConnection(context, {

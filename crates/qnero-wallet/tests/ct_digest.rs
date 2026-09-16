@@ -19,6 +19,7 @@ use qnero_wallet::wallet::output_ct_digest;
 
 fn runtime() -> ChainMetadata {
     ChainMetadata {
+        protocol_profile: qnero_circuit::profile::SUPPORTED_PROFILE,
         shielded_pallet_index: 24,
         submit_private_batch: 0,
         submit_public_batch: 1,

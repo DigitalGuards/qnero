@@ -15,6 +15,7 @@ qnero-verifier = { workspace = true, features = ["leaf"] }
 qp-plonky2 = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 rand = { workspace = true }
+blake2 = { workspace = true }
 
 [features]
 default = []

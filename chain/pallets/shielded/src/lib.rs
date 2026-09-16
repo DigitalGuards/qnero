@@ -61,6 +61,10 @@ use alloc::{vec, vec::Vec};
 use lazy_static::lazy_static;
 pub use pallet::*;
 use qnero_circuit::padding::PADDING_BLOCK_HASH;
+pub use qnero_circuit::profile::{
+	CIPHERTEXT_RETENTION_BLOCKS, EXPERIMENTAL_PROOF_SYSTEM, MAX_CIPHERTEXTS_PER_BLOCK,
+	MAX_CIPHERTEXT_PRUNES_PER_BLOCK,
+};
 use qnero_verifier::{
 	PrivateBatchPublicInputs, PublicBatchPublicInputs, QneroPrivateBatchVerifier,
 	QneroPublicBatchVerifier,
@@ -346,12 +350,118 @@ pub mod pallet {
 	pub type BalanceOf<T> =
 		<<T as Config>::Currency as Inspect<<T as frame_system::Config>::AccountId>>::Balance;
 
-	/// A fresh pallet with no predecessor state and no migrations.
-	pub const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+	/// Version 2 adds bounded live ciphertext retention and resumable cleanup.
+	pub const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
 	#[pallet::pallet]
 	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
+
+	impl<T: Config> Pallet<T> {
+		fn ciphertexts_written_this_block() -> u32 {
+			let (block, count) = CiphertextsWrittenThisBlock::<T>::get();
+			if block == frame_system::Pallet::<T>::block_number() {
+				count
+			} else {
+				0
+			}
+		}
+
+		/// Read-only admission check, repeated at settlement before writes.
+		fn ensure_ciphertext_capacity(count: u32) -> Result<(), Error<T>> {
+			ensure!(
+				Self::ciphertexts_written_this_block()
+					.checked_add(count)
+					.is_some_and(|total| total <= T::MaxCiphertextsPerBlock::get()),
+				Error::<T>::TooManyCiphertextsInBlock
+			);
+			ensure!(
+				CiphertextQueueTail::<T>::get().checked_add(u64::from(count)).is_some(),
+				Error::<T>::CiphertextQueueOverflow
+			);
+			Ok(())
+		}
+
+		/// The caller checked capacity for its complete operation before any
+		/// writes. Queue positions are independent of commitment tree indices.
+		fn store_ciphertext(index: u64, bytes: &BoundedVec<u8, T::MaxCiphertextBytes>) {
+			let tail = CiphertextQueueTail::<T>::get();
+			let now = frame_system::Pallet::<T>::block_number();
+			Ciphertexts::<T>::insert(index, bytes);
+			CiphertextQueue::<T>::insert(tail, (now, index));
+			CiphertextQueueTail::<T>::put(tail.saturating_add(1));
+			CiphertextsWrittenThisBlock::<T>::mutate(|(block, count)| {
+				*count = if *block == now { count.saturating_add(1) } else { 1 };
+				*block = now;
+			});
+		}
+
+		/// At most the configured number of queue entries or legacy indices
+		/// are deleted. A full creation block cannot outrun the next expiry
+		/// pass, and the remaining budget drains pre-upgrade state.
+		fn prune_ciphertexts(now: BlockNumberFor<T>) {
+			let mut remaining = T::MaxCiphertextPrunesPerBlock::get();
+			let mut head = CiphertextQueueHead::<T>::get();
+			let tail = CiphertextQueueTail::<T>::get();
+			while remaining > 0 && head < tail {
+				let Some((created, leaf_index)) = CiphertextQueue::<T>::get(head) else {
+					break;
+				};
+				if now < created.saturating_add(T::CiphertextRetentionBlocks::get().into()) {
+					break;
+				}
+				Ciphertexts::<T>::remove(leaf_index);
+				CiphertextQueue::<T>::remove(head);
+				head = head.saturating_add(1);
+				remaining -= 1;
+			}
+			CiphertextQueueHead::<T>::put(head);
+
+			if let Some((mut cursor, end, eligible)) = LegacyCiphertextCleanup::<T>::get() {
+				if now >= eligible {
+					let stop = end.min(cursor.saturating_add(u64::from(remaining)));
+					while cursor < stop {
+						Ciphertexts::<T>::remove(cursor);
+						cursor += 1;
+					}
+					if cursor == end {
+						LegacyCiphertextCleanup::<T>::kill();
+					} else {
+						LegacyCiphertextCleanup::<T>::put((cursor, end, eligible));
+					}
+				}
+			}
+		}
+	}
+
+	#[pallet::extra_constants]
+	impl<T: Config> Pallet<T> {
+		/// Canonical protocol and exact embedded verifier identity.
+		#[pallet::constant_name(ProtocolProfile)]
+		fn protocol_profile() -> [u8; qnero_circuit::profile::PROFILE_LEN] {
+			circuit_config::PROTOCOL_PROFILE
+		}
+	}
+
+	/// The profile executed by this runtime, committed by the header's state root.
+	/// Its SCALE encoding is exactly 192 bytes, with no length prefix.
+	#[pallet::storage]
+	pub type ActiveProtocolProfile<T: Config> =
+		StorageValue<_, [u8; qnero_circuit::profile::PROFILE_LEN], OptionQuery>;
+
+	#[pallet::genesis_config]
+	#[derive(frame_support::DefaultNoBound)]
+	pub struct GenesisConfig<T: Config> {
+		#[serde(skip)]
+		pub _marker: core::marker::PhantomData<T>,
+	}
+
+	#[pallet::genesis_build]
+	impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
+		fn build(&self) {
+			ActiveProtocolProfile::<T>::put(circuit_config::PROTOCOL_PROFILE);
+		}
+	}
 
 	/// The two note ciphertexts of one real leaf slot, in output order: `ct_1`
 	/// belongs to `cm_1`.
@@ -464,7 +574,7 @@ pub mod pallet {
 		/// the ciphertext cap allows. The chain never parses these bytes, so a
 		/// settler is not held to a real `NoteCiphertext`: it commits its proof
 		/// to two fields of arbitrary bytes up to
-		/// [`Config::MaxCiphertextBytes`], and `Ciphertexts` is never pruned
+		/// [`Config::MaxCiphertextBytes`], and `Ciphertexts` has bounded live retention
 		/// and carries no storage deposit. This makes the floor linear in the
 		/// payload, so the state a settlement adds is paid for in proportion.
 		///
@@ -495,6 +605,18 @@ pub mod pallet {
 		#[pallet::constant]
 		type MaxCiphertextBytes: Get<u32>;
 
+		/// Live-cache lifetime. Archived creation state retains recovery data.
+		#[pallet::constant]
+		type CiphertextRetentionBlocks: Get<u32>;
+
+		/// Maximum ciphertexts appended to the live cache in one block.
+		#[pallet::constant]
+		type MaxCiphertextsPerBlock: Get<u32>;
+
+		/// Maximum expired entries and legacy indices processed in one block.
+		#[pallet::constant]
+		type MaxCiphertextPrunesPerBlock: Get<u32>;
+
 		/// Weights.
 		type WeightInfo: WeightInfo;
 	}
@@ -510,15 +632,37 @@ pub mod pallet {
 	#[pallet::getter(fn used_nullifiers)]
 	pub type UsedNullifiers<T: Config> = StorageMap<_, Blake2_128Concat, Hash256, (), OptionQuery>;
 
-	/// The note ciphertext stored against the leaf index of its commitment.
+	/// The recent note ciphertext cache, keyed by commitment leaf index.
 	///
-	/// A recipient finds its notes by trial decryption, so it needs every
-	/// ciphertext. They are emitted in an event as well; this map is what lets a
-	/// wallet that was offline catch up from state.
+	/// Entries expire after `CiphertextRetentionBlocks`. Recovery reads this
+	/// same key at its authenticated creation block from an archive node.
+	/// Ciphertexts also remain in the original block bodies and events.
 	#[pallet::storage]
 	#[pallet::getter(fn ciphertext)]
 	pub type Ciphertexts<T: Config> =
 		StorageMap<_, Identity, u64, BoundedVec<u8, T::MaxCiphertextBytes>, OptionQuery>;
+
+	/// FIFO of recent ciphertexts, independent of unrelated tree leaves.
+	#[pallet::storage]
+	pub type CiphertextQueue<T: Config> =
+		StorageMap<_, Identity, u64, (BlockNumberFor<T>, u64), OptionQuery>;
+
+	#[pallet::storage]
+	pub type CiphertextQueueHead<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+	#[pallet::storage]
+	pub type CiphertextQueueTail<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+	#[pallet::storage]
+	pub type CiphertextsWrittenThisBlock<T: Config> =
+		StorageValue<_, (BlockNumberFor<T>, u32), ValueQuery>;
+
+	/// `(next leaf index, exclusive end, first eligible block)` captured at
+	/// upgrade. Existing history is cleaned incrementally after the retention
+	/// grace period, sharing the hook's fixed pruning budget with the FIFO.
+	#[pallet::storage]
+	pub type LegacyCiphertextCleanup<T: Config> =
+		StorageValue<_, (u64, u64, BlockNumberFor<T>), OptionQuery>;
 
 	/// The block a leaf was appended in, by leaf index. A wallet syncing from a
 	/// height resolves which leaves are new without walking every block.
@@ -734,10 +878,33 @@ pub mod pallet {
 		/// builder for one and charges nothing for the bytes, so the field is
 		/// refused until both exist.
 		CoinbasePayloadNotSupported,
+		/// This block has reached its live ciphertext creation budget.
+		TooManyCiphertextsInBlock,
+		/// The monotonic ciphertext queue cannot allocate another position.
+		CiphertextQueueOverflow,
 	}
 
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+		fn on_runtime_upgrade() -> Weight {
+			// Refresh on every runtime replacement, including a circuit-only
+			// upgrade whose storage layout version stays unchanged.
+			ActiveProtocolProfile::<T>::put(circuit_config::PROTOCOL_PROFILE);
+			let db = <T as frame_system::Config>::DbWeight::get();
+			if StorageVersion::get::<Pallet<T>>() < STORAGE_VERSION {
+				let end = T::ZkTree::leaf_count();
+				if end > 0 {
+					let eligible = frame_system::Pallet::<T>::block_number()
+						.saturating_add(T::CiphertextRetentionBlocks::get().into());
+					LegacyCiphertextCleanup::<T>::put((0u64, end, eligible));
+				}
+				STORAGE_VERSION.put::<Pallet<T>>();
+				db.reads_writes(3, 3)
+			} else {
+				db.reads_writes(1, 1)
+			}
+		}
+
 		/// Clear the previous block's coinbase payload and reserve what minting
 		/// this block's costs.
 		///
@@ -747,12 +914,18 @@ pub mod pallet {
 		/// fails is a dead block. The reservation covers the work
 		/// `deposit_coinbase` does in `pallet-mining-rewards`' `on_finalize`,
 		/// which is one tree append, three map writes and the pool update, at
-		/// the largest ciphertext this runtime accepts. Nothing else in the
-		/// pallet runs from a hook.
-		fn on_initialize(_block_number: BlockNumberFor<T>) -> Weight {
+		/// the largest ciphertext this runtime accepts. Ciphertext cleanup is
+		/// bounded separately and its entire budget is reserved here.
+		fn on_initialize(block_number: BlockNumberFor<T>) -> Weight {
 			PendingCoinbase::<T>::kill();
+			CiphertextsWrittenThisBlock::<T>::kill();
+			Self::prune_ciphertexts(block_number);
 			T::WeightInfo::mint_coinbase(T::MaxCiphertextBytes::get())
 				.saturating_add(<T as frame_system::Config>::DbWeight::get().writes(1))
+				.saturating_add(weights::ciphertext_pruning_weight::<T>(
+					T::MaxCiphertextPrunesPerBlock::get(),
+					T::MaxCiphertextBytes::get(),
+				))
 		}
 
 		/// Both embedded verifier artifacts have to load.
@@ -762,6 +935,18 @@ pub mod pallet {
 		/// node operator is watching. This fails at runtime construction, which
 		/// is where a mismatched or corrupted artifact belongs.
 		fn integrity_test() {
+			assert!(
+				T::CiphertextRetentionBlocks::get() > 0,
+				"ciphertext retention must be positive"
+			);
+			assert!(
+				T::MaxCiphertextsPerBlock::get() > 0,
+				"ciphertext creation budget must be positive"
+			);
+			assert!(
+				T::MaxCiphertextPrunesPerBlock::get() > T::MaxCiphertextsPerBlock::get(),
+				"ciphertext pruning must exceed creation so legacy cleanup makes progress"
+			);
 			assert!(
 				private_batch_verifier().is_ok(),
 				"the embedded private-batch verifier artifact did not pass its profile"
@@ -883,8 +1068,8 @@ pub mod pallet {
 			// spend proof has to carry it, or the no-wrap argument behind the
 			// circuit's balance equation does not hold for the notes created
 			// this way.
-			let steps = u64::try_from(value_u128 / POOL_STEP)
-				.map_err(|_| Error::<T>::ValueOutOfRange)?;
+			let steps =
+				u64::try_from(value_u128 / POOL_STEP).map_err(|_| Error::<T>::ValueOutOfRange)?;
 			ensure!(steps <= qnero_circuit::chain::MAX_VALUE, Error::<T>::ValueOutOfRange);
 
 			let commitment = qnero_circuit::chain::commitment(&inner, steps)
@@ -893,6 +1078,7 @@ pub mod pallet {
 				ciphertext.clone().try_into().map_err(|_| Error::<T>::CiphertextTooLarge)?;
 
 			ensure!(T::ZkTree::remaining_capacity() >= 1, Error::<T>::TreeFull);
+			Self::ensure_ciphertext_capacity(1)?;
 
 			// Burning is the simpler of the two entries the design left open.
 			// Value inside the pool is accounted by `PoolValue` and moves only
@@ -914,7 +1100,7 @@ pub mod pallet {
 			let entry_index = EntryCount::<T>::get();
 			EntryCount::<T>::put(entry_index.saturating_add(1));
 			let leaf_index = T::ZkTree::insert_commitment(commitment)?;
-			Ciphertexts::<T>::insert(leaf_index, &stored);
+			Self::store_ciphertext(leaf_index, &stored);
 			LeafBlocks::<T>::insert(leaf_index, frame_system::Pallet::<T>::block_number());
 			PoolValue::<T>::mutate(|pool| *pool = pool.saturating_add(value));
 
@@ -1608,6 +1794,7 @@ pub mod pallet {
 			// author's fee share.
 			let appends = u64::from(slots).saturating_mul(2).saturating_add(1);
 			ensure!(appends <= T::ZkTree::remaining_capacity(), Error::<T>::TreeFull);
+			Self::ensure_ciphertext_capacity(slots.saturating_mul(2))?;
 
 			// The fee leaves the pool, so the pool has to hold it. A fee above
 			// `PoolValue` means the circuit's balance equation was broken or an
@@ -1755,8 +1942,8 @@ pub mod pallet {
 		/// floor plus one step per started
 		/// [`Config::CiphertextBytesPerFeeQuantum`] bytes of ciphertext.
 		///
-		/// The payload term is what prices the permanent state a slot adds.
-		/// `Ciphertexts` is never pruned, the chain never parses these bytes,
+		/// The payload term is what prices the archived payload a slot adds.
+		/// `Ciphertexts` has bounded live retention, the chain never parses these bytes,
 		/// and a settler can fill both fields to
 		/// [`Config::MaxCiphertextBytes`] with anything it likes, so a flat
 		/// floor buys as much state as the cap allows for one step.
@@ -1807,8 +1994,8 @@ pub mod pallet {
 					// The `?` is what keeps that an assertion.
 					let first = T::ZkTree::insert_commitment(slot.commitments[0])?;
 					let second = T::ZkTree::insert_commitment(slot.commitments[1])?;
-					Ciphertexts::<T>::insert(first, &output.ct_1);
-					Ciphertexts::<T>::insert(second, &output.ct_2);
+					Self::store_ciphertext(first, &output.ct_1);
+					Self::store_ciphertext(second, &output.ct_2);
 					LeafBlocks::<T>::insert(first, block_number);
 					LeafBlocks::<T>::insert(second, block_number);
 
@@ -1909,6 +2096,11 @@ pub mod pallet {
 			};
 
 			let pending_fee = PendingCoinbaseFee::<T>::get();
+			// The current protocol only supports derived coinbases. Keep the
+			// settlement boundary explicit even when called outside an inherent.
+			if !payload.ciphertext.is_empty() {
+				return Err(minted);
+			}
 			let total = minted.saturating_add(pending_fee);
 			let Ok(total_planck) = TryInto::<u128>::try_into(total) else {
 				return Err(minted);
@@ -1932,8 +2124,7 @@ pub mod pallet {
 			let Ok(leaf_index) = T::ZkTree::insert_commitment(commitment) else {
 				return Err(minted);
 			};
-			let Ok(value) =
-				TryInto::<BalanceOf<T>>::try_into(steps_u128.saturating_mul(POOL_STEP))
+			let Ok(value) = TryInto::<BalanceOf<T>>::try_into(steps_u128.saturating_mul(POOL_STEP))
 			else {
 				return Err(minted);
 			};
@@ -1942,14 +2133,6 @@ pub mod pallet {
 			};
 
 			let block_number = frame_system::Pallet::<T>::block_number();
-			// Only when there is one, which under v1 is never: the inherent
-			// refuses a non-empty payload, and a derived coinbase carries none
-			// anyway. The branch is where a priced third-party payload would
-			// land, and an empty entry would be a key the wallet reads for
-			// nothing.
-			if !payload.ciphertext.is_empty() {
-				Ciphertexts::<T>::insert(leaf_index, &payload.ciphertext);
-			}
 			LeafBlocks::<T>::insert(leaf_index, block_number);
 			CoinbaseValues::<T>::insert(leaf_index, steps);
 			PoolValue::<T>::mutate(|pool| *pool = pool.saturating_add(value));

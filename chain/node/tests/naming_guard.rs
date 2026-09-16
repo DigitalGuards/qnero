@@ -150,8 +150,9 @@ fn chain_spec(id: &str) -> Option<serde_json::Value> {
 /// still pays a placeholder address nobody holds a key for, so `build-spec
 /// --chain mainnet` refuses: a spec built from that table would mint 2% of the
 /// supply into an account that can never spend it. The refusal is the flag
-/// doing its job. The two `mainnet` ids keep their rows in the list below, so
-/// this guard covers them again the moment an allocation is decided.
+/// doing its job. Independent cryptographic qualification is also required.
+/// The two `mainnet` ids keep their rows in the list below, so this guard
+/// covers them again when both release conditions are satisfied.
 fn the_mainnet_preset_builds() -> bool {
 	use qnero_runtime::genesis_config_presets::{preset_names, MAINNET_RUNTIME_PRESET};
 

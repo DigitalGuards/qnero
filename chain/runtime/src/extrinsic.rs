@@ -1,5 +1,17 @@
-//! The transparent entry's extrinsic type, and the consensus rule that keeps it
-//! to one signature scheme.
+//! Extrinsic admission: the transparent entry uses one signature scheme, and
+//! every submitted call must satisfy the chain's privacy policy.
+//!
+//! [`crate::configs::QneroCallFilter`] runs for every extrinsic format during
+//! [`Checkable::check`]. A forbidden call returns [`InvalidTransaction::Call`]
+//! before signature verification, transaction extensions, fees, or recording
+//! the extrinsic in the block. The filter also covers calls nested in its
+//! supported wrappers. Bare inherents and unsigned settlements pass the same
+//! policy before their own origin and validity checks.
+//!
+//! The same filter remains installed as `BaseCallFilter` for internal dispatch.
+//! This admission rule prevents accidental publication of an unsupported
+//! transparent transfer as a failed extrinsic. Calls that deliberately publish
+//! arbitrary bytes still require the sender to protect their own data.
 //!
 //! # Consensus rule: the transparent entry admits ML-DSA-87 only
 //!
@@ -55,11 +67,12 @@
 //!
 //! ## Upgrade caveat
 //!
-//! This is a consensus break, and it is one on purpose. Before it, an ML-DSA-65
-//! extrinsic was admitted and included (refused only later, at dispatch, by the
-//! v1 call filter). A block already carrying one fails to re-execute under this
-//! rule. Qnero is devnet-only, so no such block exists outside a local chain,
-//! and a devnet carrying one has to be reset.
+//! These admission rules change consensus validity. The signature restriction
+//! was introduced before the public testnet. Early call filtering must activate
+//! through a coordinated runtime upgrade or an explicit testnet reset: an old
+//! block carrying a filtered call cannot be replayed under the new rule. The
+//! SCALE encoding and extension tuple stay unchanged, so this moves
+//! `spec_version` while retaining `transaction_version`.
 
 extern crate alloc;
 
@@ -68,7 +81,7 @@ use alloc::vec::Vec;
 use codec::{Decode, DecodeWithMemTracking, Encode};
 use frame_support::{
 	dispatch::{DispatchInfo, GetDispatchInfo},
-	traits::{InherentBuilder, SignedTransactionBuilder},
+	traits::{Contains, InherentBuilder, SignedTransactionBuilder},
 };
 use qp_dilithium_crypto::DilithiumSignatureScheme;
 use scale_info::TypeInfo;
@@ -142,6 +155,19 @@ impl QneroUncheckedExtrinsic {
 			Preamble::Bare(..) | Preamble::General(..) => Ok(()),
 		}
 	}
+
+	/// Apply the dispatch policy before a call can enter the pool or a block.
+	///
+	/// Independent of the preamble: bare and general transactions must meet
+	/// the same policy as signed ones. Both consensus checking paths call this
+	/// before forwarding to the upstream extrinsic implementation.
+	fn ensure_allowed_call(&self) -> Result<(), TransactionValidityError> {
+		if crate::configs::QneroCallFilter::contains(self.0.call()) {
+			Ok(())
+		} else {
+			Err(InvalidTransaction::Call.into())
+		}
+	}
 }
 
 /// Forwarded so the extrinsic's metadata entry is the upstream one, byte for
@@ -165,6 +191,7 @@ where
 
 	fn check(self, lookup: &C) -> Result<Self::Checked, TransactionValidityError> {
 		self.ensure_supported_signature_scheme()?;
+		self.ensure_allowed_call()?;
 		self.0.check(lookup)
 	}
 
@@ -174,6 +201,7 @@ where
 		lookup: &C,
 	) -> Result<Self::Checked, TransactionValidityError> {
 		self.ensure_supported_signature_scheme()?;
+		self.ensure_allowed_call()?;
 		self.0.unchecked_into_checked_i_know_what_i_am_doing(lookup)
 	}
 }

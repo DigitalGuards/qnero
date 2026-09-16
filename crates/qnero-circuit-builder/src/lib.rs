@@ -10,6 +10,8 @@
 //! public_batch_verifier.bin         verifier data for the public batch
 //! config.json                       the dimensions the set was built for
 //! qnero_circuit_config.rs           those dimensions as Rust constants
+//! protocol_profile.bin             canonical release identity (public-batch sets)
+//! protocol_profile.json            readable release manifest (public-batch sets)
 //! ```
 //!
 //! A verifier file is one whole `VerifierCircuitData`: common data and
@@ -48,6 +50,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
+use blake2::{digest::consts::U32, Blake2b, Digest as _};
 
 use qnero_aggregator::artifacts::{
     canonical_public_batch_verifier_data, commit_artifact_set, read_artifact_file,
@@ -85,9 +88,10 @@ pub const CIRCUIT_CONFIG_SNIPPET: &str = "qnero_circuit_config.rs";
 /// to land on the dimensions the chain embeds, or its proofs carry the wrong
 /// public-input length and the chain refuses them with nothing in the message
 /// naming the dimension.
-pub const DEFAULT_NUM_LEAF_PROOFS: usize = 6;
+pub const DEFAULT_NUM_LEAF_PROOFS: usize = qnero_circuit::profile::RELEASE_NUM_LEAVES;
 /// See [`DEFAULT_NUM_LEAF_PROOFS`].
-pub const DEFAULT_NUM_PRIVATE_BATCH_PROOFS: usize = 53;
+pub const DEFAULT_NUM_PRIVATE_BATCH_PROOFS: usize =
+    qnero_circuit::profile::RELEASE_NUM_PRIVATE_BATCHES;
 
 /// Generate the whole artifact set into `output_dir`.
 ///
@@ -236,14 +240,54 @@ fn generate_into(
         })?;
     }
 
+    let mut snippet = circuit_config_snippet(config);
+    if let Some(num_inner) = config.num_private_batch_proofs {
+        let profile = qnero_circuit::profile::protocol_profile(
+            config.num_leaf_proofs,
+            num_inner,
+            artifact_digest(&staging.join("leaf_verifier.bin"))?,
+            artifact_digest(&staging.join("private_batch_verifier.bin"))?,
+            artifact_digest(&staging.join("public_batch_verifier.bin"))?,
+        );
+        if config.num_leaf_proofs == DEFAULT_NUM_LEAF_PROOFS
+            && num_inner == DEFAULT_NUM_PRIVATE_BATCH_PROOFS
+        {
+            qnero_circuit::profile::ensure_supported(&profile, config.num_leaf_proofs).map_err(
+                |reason| {
+                    anyhow!("regenerated release artifacts differ from the release pin: {reason}")
+                },
+            )?;
+        }
+        snippet.push_str(&format!(
+            "pub const PROTOCOL_PROFILE: [u8; {}] = {:?};\n",
+            profile.len(),
+            profile
+        ));
+        let profile_hex: String = profile.iter().map(|byte| format!("{byte:02x}")).collect();
+        let manifest = format!(
+            "{{\n  \"profile_encoding\": \"qnero-profile-v1\",\n  \"artifact_digest\": \"blake2b-256\",\n  \"num_leaf_proofs\": {},\n  \"num_private_batch_proofs\": {},\n  \"profile_hex\": \"{}\"\n}}\n",
+            config.num_leaf_proofs, num_inner, profile_hex,
+        );
+        commit_artifact_set(
+            staging,
+            &[
+                ("protocol_profile.bin", profile.to_vec()),
+                ("protocol_profile.json", manifest.into_bytes()),
+            ],
+            &[],
+        )?;
+    }
+
     commit_artifact_set(
         staging,
-        &[(
-            CIRCUIT_CONFIG_SNIPPET,
-            circuit_config_snippet(config).into_bytes(),
-        )],
+        &[(CIRCUIT_CONFIG_SNIPPET, snippet.into_bytes())],
         &[],
     )
+}
+
+/// Blake2b configured for a 256-bit output, over the complete verifier file.
+fn artifact_digest(path: &Path) -> Result<[u8; 32]> {
+    Ok(Blake2b::<U32>::digest(read_artifact_file(path)?).into())
 }
 
 /// Read a staged file back through the loader or validator its consumer uses.

@@ -1,6 +1,7 @@
-//! High-security accounts may include at most 16 signed extrinsics in a
-//! rolling 24h window (`DAYS` blocks). The 17th is rejected even if it is a
-//! whitelisted no-op.
+//! The inherited high-security extension permits at most 16 signed calls in
+//! a rolling 24h window (`DAYS` blocks). These tests exercise that layer
+//! directly because production admission rejects its reversible calls first.
+//! `transaction_policy.rs` covers production admission separately.
 //!
 //! `DAYS` is derived from the target block time, so the window is a day at any
 //! target: 720 blocks at the public 120 s one. The assertion below guards the
@@ -9,10 +10,9 @@
 //! this test would pass on nothing.
 
 use super::high_security_tip::{bogus_cancel, empty_batch_all, funded_ext, pair, signed_call};
+use crate::common::apply_through_transaction_extensions;
 use frame_support::pallet_prelude::{InvalidTransaction, TransactionValidityError};
-use qnero_runtime::{
-	transaction_extensions::HIGH_SECURITY_TX_QUOTA_EXCEEDED, Executive, System, DAYS,
-};
+use qnero_runtime::{transaction_extensions::HIGH_SECURITY_TX_QUOTA_EXCEEDED, System, DAYS};
 use sp_core::Pair;
 use sp_runtime::traits::IdentifyAccount;
 
@@ -30,7 +30,7 @@ fn high_security_account_is_capped_at_sixteen_signed_extrinsics_per_rolling_day(
 
 		let blocked = signed_call(&pair, account.clone(), bogus_cancel(), 16, 0);
 		assert_eq!(
-			Executive::apply_extrinsic(blocked).unwrap_err(),
+			apply_through_transaction_extensions(blocked).unwrap_err(),
 			TransactionValidityError::Invalid(InvalidTransaction::Custom(
 				HIGH_SECURITY_TX_QUOTA_EXCEEDED
 			))
@@ -40,7 +40,7 @@ fn high_security_account_is_capped_at_sixteen_signed_extrinsics_per_rolling_day(
 		System::set_block_number(1 + DAYS - 1);
 		let still_blocked = signed_call(&pair, account.clone(), bogus_cancel(), 16, 0);
 		assert_eq!(
-			Executive::apply_extrinsic(still_blocked).unwrap_err(),
+			apply_through_transaction_extensions(still_blocked).unwrap_err(),
 			TransactionValidityError::Invalid(InvalidTransaction::Custom(
 				HIGH_SECURITY_TX_QUOTA_EXCEEDED
 			))
@@ -66,6 +66,6 @@ fn normal_account_is_not_capped_by_the_high_security_quota() {
 
 fn assert_included(xt: qnero_runtime::UncheckedExtrinsic, nonce: u32) {
 	// The quota gates inclusion; the dispatch outcome is irrelevant here.
-	let _ = Executive::apply_extrinsic(xt)
+	let _ = apply_through_transaction_extensions(xt)
 		.unwrap_or_else(|e| panic!("nonce {nonce} should be included: {e:?}"));
 }

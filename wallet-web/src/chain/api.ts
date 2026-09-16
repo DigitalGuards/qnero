@@ -25,7 +25,8 @@
  */
 
 import { ApiPromise, WsProvider } from '@polkadot/api';
-import type { QueryableStorageEntry } from '@polkadot/api/types';
+import { blake2AsHex, xxhashAsHex } from '@polkadot/util-crypto';
+import { hexToBytes } from '../lib/hex';
 
 export const CHAIN_TYPES = {
   U512: '[u8; 64]',
@@ -113,6 +114,8 @@ export interface ChainContext {
   tokenSymbol: string;
   tokenDecimals: number;
   genesisHash: string;
+  /** Metadata compatibility hint, checked against authenticated storage before proving. */
+  protocolProfile: string;
   /** The format version the runtime declares. A bare preamble decodes at 4 and 5. */
   extrinsicVersion: number;
   constants: ShieldedConstants;
@@ -302,6 +305,11 @@ function describe(
       storageDrift.push(`${required.pallet} declares no storage`);
       continue;
     }
+    const declaredPrefix = pallet.storage.unwrap().prefix.toString();
+    if (declaredPrefix !== required.pallet) {
+      storageDrift.push(`${required.pallet} stores under ${declaredPrefix}; this wallet requires ${required.pallet}`);
+      continue;
+    }
     const item = pallet.storage
       .unwrap()
       .items.find((entry) => entry.name.toString() === required.item);
@@ -368,6 +376,7 @@ function describe(
     tokenSymbol: properties?.tokenSymbol.unwrapOr([])[0]?.toString() ?? 'QNR',
     tokenDecimals: properties?.tokenDecimals.unwrapOr([])[0]?.toNumber() ?? 12,
     genesisHash: api.genesisHash.toHex(),
+    protocolProfile: constantOf('ProtocolProfile'),
     extrinsicVersion: extrinsicVersionOf(metadata),
     constants: {
       blockHashWindow: Number(leBigInt(constantOf('BlockHashWindow'))),
@@ -396,15 +405,65 @@ export function ensureBarePreambleDecodes(context: ChainContext): void {
   }
 }
 
-/** One storage entry, by the camel-case names polkadot-js derives from metadata. */
+export interface CanonicalStorageEntry {
+  key: (argument?: number | bigint | string) => string;
+  keyPrefix: () => string;
+}
+
+const CANONICAL_STORAGE = new Map(REQUIRED_STORAGE.map(({ pallet, item, hasher }) => {
+  const prefix = xxhashAsHex(pallet, 128) + xxhashAsHex(item, 128).slice(2);
+  const name = `${pallet.charAt(0).toLowerCase()}${pallet.slice(1)}.${item.charAt(0).toLowerCase()}${item.slice(1)}`;
+  const entry: CanonicalStorageEntry = {
+    keyPrefix: () => prefix,
+    key: (argument) => {
+      if (hasher === null) {
+        if (argument !== undefined) throw new Error(`${name} takes no storage key`);
+        return prefix;
+      }
+      if (hasher === 'Blake2_128Concat') {
+        if (typeof argument !== 'string' || !/^(?:0x)?[0-9a-fA-F]{64}$/.test(argument)) {
+          throw new Error(`${name} requires a 32-byte nullifier`);
+        }
+        const bytes = hexToBytes(argument);
+        return prefix + blake2AsHex(bytes, 128).slice(2) + argument.replace(/^0x/, '').toLowerCase();
+      }
+      if (hasher !== 'Identity') throw new Error(`unsupported Qnero storage hasher ${hasher}`);
+      if (argument === undefined ||
+          (typeof argument === 'number' && !Number.isSafeInteger(argument)) ||
+          (typeof argument === 'string' && !/^[0-9]+$/.test(argument))) {
+        throw new Error(`${name} requires a u64 leaf index`);
+      }
+      let index = BigInt(argument);
+      if (index < 0n || index > 0xffffffffffffffffn) {
+        throw new Error(`${name} requires a u64 leaf index`);
+      }
+      let encoded = '';
+      for (let byte = 0; byte < 8; byte += 1) {
+        encoded += Number(index & 255n).toString(16).padStart(2, '0');
+        index >>= 8n;
+      }
+      return prefix + encoded;
+    },
+  };
+  return [name, entry] as const;
+}));
+
+/** Fixed Qnero namespaces and key encodings, independent of mutable RPC metadata. */
+export function canonicalStorage(pallet: string, item: string): CanonicalStorageEntry {
+  const entry = CANONICAL_STORAGE.get(`${pallet}.${item}`);
+  if (entry === undefined) throw new Error(`unsupported Qnero storage ${pallet}.${item}`);
+  return entry;
+}
+
+/**
+ * Storage keys come from this wallet's supported protocol. ApiPromise can refresh
+ * its metadata after connection, so using api.query here would let that refresh
+ * change the namespace whose values and absence the trie proof authenticates.
+ */
 export function storage(
-  context: ChainContext,
+  _context: ChainContext,
   pallet: string,
   item: string,
-): QueryableStorageEntry<'promise'> {
-  const entry = context.api.query[pallet]?.[item];
-  if (entry === undefined) {
-    throw new Error(`the runtime declares no ${pallet}.${item}`);
-  }
-  return entry;
+): CanonicalStorageEntry {
+  return canonicalStorage(pallet, item);
 }

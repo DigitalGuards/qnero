@@ -1,3 +1,4 @@
+import { TEST_PROTOCOL_PROFILE } from './fixtures/protocol-profile';
 /**
  * What the node is asked, which is the property no answer can show.
  *
@@ -13,7 +14,7 @@
  *
  * The four properties, from `docs/WALLET.md` and the CLI's own rules:
  *
- * 1. No request names a nullifier this wallet holds. `UsedNullifiers` is
+ * 1. No request selects an unpublished nullifier from this wallet. `UsedNullifiers` is
  *    `Blake2_128Concat`, so a point lookup carries the raw 32 bytes, and an
  *    unspent note's nullifier has appeared nowhere else in the world.
  * 2. No request names one of this wallet's leaves. Leaves are read as a
@@ -35,7 +36,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { chainAdapter } from '../src/app/adapters';
-import type { ChainContext } from '../src/chain/api';
+import { canonicalStorage, type ChainContext } from '../src/chain/api';
+import { storagePrefix, indexKey, indexOfKey } from './fixtures/storage-key';
+import { bindFixtureProofs, fixtureProof } from './fixtures/state-proof';
+import { ACTIVE_PROFILE_KEY } from '../src/chain/profile';
 import { watchHead } from '../src/chain/reads';
 import { runSync, type ScannedNote, type SyncCrypto } from '../src/wallet/sync';
 import { spend } from '../src/wallet/send';
@@ -134,14 +138,14 @@ function entry(prefix: string): unknown {
 }
 
 const KEYS = {
-  leaves: '0xleaves-',
-  leafCount: '0xleafcount',
-  depth: '0xdepth',
-  ciphertexts: '0xciphertexts-',
-  leafBlocks: '0xleafblocks-',
-  coinbaseValues: '0xcoinbase-',
-  entryCount: '0xentrycount',
-  usedNullifiers: '0xusednullifiers-',
+  leaves: storagePrefix('ZkTree', 'Leaves'),
+  leafCount: storagePrefix('ZkTree', 'LeafCount'),
+  depth: storagePrefix('ZkTree', 'Depth'),
+  ciphertexts: storagePrefix('Shielded', 'Ciphertexts'),
+  leafBlocks: storagePrefix('Shielded', 'LeafBlocks'),
+  coinbaseValues: storagePrefix('Shielded', 'CoinbaseValues'),
+  entryCount: storagePrefix('Shielded', 'EntryCount'),
+  usedNullifiers: storagePrefix('Shielded', 'UsedNullifiers'),
 } as const;
 
 function recordingContext(): { context: ChainContext; calls: Call[] } {
@@ -151,14 +155,14 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
   values.set(KEYS.depth, le(3n, 1));
   values.set(KEYS.entryCount, le(2n, 8));
   for (let index = 0; index < LEAF_COUNT; index += 1) {
-    values.set(`${KEYS.leaves}${index}`, `0x${(index === OUR_LEAF ? OUR_COMMITMENT : 'cd'.repeat(32))}`);
-    values.set(`${KEYS.leafBlocks}${index}`, le(BigInt(blockOfLeaf(index)), 4));
+    values.set(`${KEYS.leaves}${indexKey(index)}`, `0x${(index === OUR_LEAF ? OUR_COMMITMENT : 'cd'.repeat(32))}`);
+    values.set(`${KEYS.leafBlocks}${indexKey(index)}`, le(BigInt(blockOfLeaf(index)), 4));
     if (isCoinbaseLeaf(index)) {
       // Its block's last leaf: a value and no payload, which is what the
       // inherent writes under v1.
-      values.set(`${KEYS.coinbaseValues}${index}`, le(BigInt(index + 1), 8));
+      values.set(`${KEYS.coinbaseValues}${indexKey(index)}`, le(BigInt(index + 1), 8));
     } else {
-      values.set(`${KEYS.ciphertexts}${index}`, vecU8('00112233'));
+      values.set(`${KEYS.ciphertexts}${indexKey(index)}`, vecU8('00112233'));
     }
   }
 
@@ -195,27 +199,23 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
         digest: { logs: [`0x06706f775f80${'9a'.repeat(32)}`] },
       } as T);
     }
-    if (method === 'state_queryStorageAt') {
-      const keys = params[0] as string[];
-      return Promise.resolve([
-        {
-          block: String(params[1]),
-          changes: keys.map((key) => [key, values.get(key) ?? null] as [string, string | null]),
-        },
-      ] as T);
+    if (method === 'state_getReadProof') {
+      const entries: [string, string | null][] = [...values];
+      entries.push([canonicalStorage('shielded', 'usedNullifiers').key(`0x${'12'.repeat(32)}`), '0x']);
+      entries.push([canonicalStorage('shielded', 'usedNullifiers').key(`0x${'34'.repeat(32)}`), '0x']);
+      return Promise.resolve(fixtureProof(String(params[1]), entries) as T);
     }
     if (method === 'state_getKeysPaged') {
       // Two settled nullifiers, neither of them this wallet's, returned as one
       // short page so the walk ends.
-      const prefix = String(params[0]);
       const cursor = params[2];
       if (cursor !== null) {
         return Promise.resolve([] as T);
       }
       return Promise.resolve([
-        `${prefix}${'00'.repeat(16)}${'12'.repeat(32)}`,
-        `${prefix}${'00'.repeat(16)}${'34'.repeat(32)}`,
-      ] as T);
+        canonicalStorage('shielded', 'usedNullifiers').key(`0x${'12'.repeat(32)}`),
+        canonicalStorage('shielded', 'usedNullifiers').key(`0x${'34'.repeat(32)}`),
+      ].sort() as T);
     }
     throw new Error(`this test's node was asked ${method}, which a sync must not call`);
   };
@@ -249,6 +249,7 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
     targetBlockTimeMs: 12_000,
   } as unknown as ChainContext;
 
+  bindFixtureProofs(context, (anchor) => hashAt(anchor.block_number));
   return { context, calls };
 }
 
@@ -328,11 +329,14 @@ describe('the request stream a sync makes', () => {
       expect(call.params[0]).toBe(KEYS.usedNullifiers);
       expect(call.params[1]).toBe(1000);
     }
-    // No point lookup at a `UsedNullifiers` key, which is the request that
-    // would carry a raw nullifier.
-    for (const call of calls.filter((entryCall) => entryCall.method === 'state_queryStorageAt')) {
+    // Proof requests repeat the complete public page and contain no private
+    // note-dependent selection.
+    for (const call of calls.filter((entryCall) => entryCall.method === 'state_getReadProof')) {
       for (const key of call.params[0] as string[]) {
-        expect(key.startsWith(KEYS.usedNullifiers)).toBe(false);
+        if (key.startsWith(KEYS.usedNullifiers) && key !== KEYS.usedNullifiers) {
+          expect([canonicalStorage('shielded', 'usedNullifiers').key(`0x${'12'.repeat(32)}`),
+            canonicalStorage('shielded', 'usedNullifiers').key(`0x${'34'.repeat(32)}`)]).toContain(key);
+        }
       }
     }
   });
@@ -340,10 +344,10 @@ describe('the request stream a sync makes', () => {
   it('reads leaves as one contiguous range, so it names none of them', async () => {
     const { calls } = await syncOnce();
     const asked = new Set<number>();
-    for (const call of calls.filter((entryCall) => entryCall.method === 'state_queryStorageAt')) {
+    for (const call of calls.filter((entryCall) => entryCall.method === 'state_getReadProof')) {
       for (const key of call.params[0] as string[]) {
         if (key.startsWith(KEYS.leaves)) {
-          asked.add(Number(key.slice(KEYS.leaves.length)));
+          asked.add(indexOfKey(key, KEYS.leaves));
         }
       }
     }
@@ -366,7 +370,7 @@ describe('the request stream a sync makes', () => {
     const allowed = new Set([
       'chain_getBlockHash',
       'chain_getHeader',
-      'state_queryStorageAt',
+      'state_getReadProof',
       'state_getKeysPaged',
     ]);
     for (const call of calls) {
@@ -382,7 +386,7 @@ describe('the request stream a sync makes', () => {
     const { calls } = await syncOnce();
     const totals = calls.filter(
       (call) =>
-        call.method === 'state_queryStorageAt' &&
+        call.method === 'state_getReadProof' &&
         (call.params[0] as string[]).includes(KEYS.entryCount),
     );
     expect(totals).toHaveLength(1);
@@ -392,8 +396,8 @@ describe('the request stream a sync makes', () => {
   it('pins every read of the pass to one block hash', async () => {
     const { calls } = await syncOnce();
     const pinned = calls
-      .filter((call) => call.method === 'state_queryStorageAt' || call.method === 'state_getKeysPaged')
-      .map((call) => (call.method === 'state_queryStorageAt' ? call.params[1] : call.params[3]));
+      .filter((call) => call.method === 'state_getReadProof' || call.method === 'state_getKeysPaged')
+      .map((call) => (call.method === 'state_getReadProof' ? call.params[1] : call.params[3]));
     expect(new Set(pinned)).toEqual(new Set([HEAD_HASH]));
   });
 });
@@ -469,11 +473,12 @@ function spendContext(options: { refuseSubmission?: boolean; leafCount?: number 
   const calls: Call[] = [];
   const leafCount = options.leafCount ?? LEAF_COUNT;
   const values = new Map<string, string>();
+  values.set(ACTIVE_PROFILE_KEY, `0x${TEST_PROTOCOL_PROFILE}`);
   values.set(KEYS.leafCount, le(BigInt(leafCount), 8));
   values.set(KEYS.depth, le(3n, 1));
   for (let index = 0; index < leafCount; index += 1) {
     values.set(
-      `${KEYS.leaves}${index}`,
+      `${KEYS.leaves}${indexKey(index)}`,
       `0x${index === SPEND_LEAF ? SPEND_COMMITMENT : 'cd'.repeat(32)}`,
     );
   }
@@ -501,22 +506,11 @@ function spendContext(options: { refuseSubmission?: boolean; leafCount?: number 
         rawHeader(at === HEAD_HASH ? HEAD_NUMBER : SUBMITTED_IN_BLOCK) as T,
       );
     }
-    if (method === 'state_queryStorageAt') {
+    if (method === 'state_getReadProof') {
       const keys = params[0] as string[];
-      return Promise.resolve([
-        {
-          block: String(params[1]),
-          changes: keys.map((key) => {
-            if (key.startsWith(KEYS.usedNullifiers)) {
-              // Settled, but only once the bytes are in a block: this is the
-              // confirmation of a settlement, and there is nothing to confirm
-              // before one exists.
-              return [key, submitted === null ? null : '0x'] as [string, string | null];
-            }
-            return [key, values.get(key) ?? null] as [string, string | null];
-          }),
-        },
-      ] as T);
+      return Promise.resolve(fixtureProof(String(params[1]), keys.map((key) => [key,
+        key.startsWith(KEYS.usedNullifiers) ? (submitted === null ? null : '0x') : values.get(key) ?? null,
+      ])) as T);
     }
     if (method === 'author_submitExtrinsic') {
       if (options.refuseSubmission === true) {
@@ -536,6 +530,7 @@ function spendContext(options: { refuseSubmission?: boolean; leafCount?: number 
 
   const context = {
     send,
+    protocolProfile: TEST_PROTOCOL_PROFILE,
     extrinsicVersion: 4,
     genesisHash: GENESIS,
     constants: {
@@ -570,6 +565,7 @@ function spendContext(options: { refuseSubmission?: boolean; leafCount?: number 
     targetBlockTimeMs: 12_000,
   } as unknown as ChainContext;
 
+  bindFixtureProofs(context, (anchor) => anchor.block_number === HEAD_NUMBER ? HEAD_HASH : hashOf(anchor.block_number));
   return { context, calls };
 }
 
@@ -633,6 +629,7 @@ const LIMITS = {
   tree_arity: 4,
   siblings_per_level: 3,
   chain_num_leaves: 6,
+  protocol_profile: TEST_PROTOCOL_PROFILE,
 };
 
 /** A store that records what it was told and holds nothing. */
@@ -711,10 +708,10 @@ describe('the request stream a payment makes', () => {
     // touches is asking the node which leaf is being spent.
     const { calls } = await spendOnce();
     const asked = new Set<number>();
-    for (const call of calls.filter((entryCall) => entryCall.method === 'state_queryStorageAt')) {
+    for (const call of calls.filter((entryCall) => entryCall.method === 'state_getReadProof')) {
       for (const key of call.params[0] as string[]) {
         if (key.startsWith(KEYS.leaves)) {
-          asked.add(Number(key.slice(KEYS.leaves.length)));
+          asked.add(indexOfKey(key, KEYS.leaves));
         }
       }
     }
@@ -738,7 +735,7 @@ describe('the request stream a payment makes', () => {
     const { calls } = await spendOnce();
     const namesNullifier = calls.findIndex(
       (call) =>
-        call.method === 'state_queryStorageAt' &&
+        call.method === 'state_getReadProof' &&
         (call.params[0] as string[]).some((key) => key.startsWith(KEYS.usedNullifiers)),
     );
     const inBlock = calls.findIndex((call) => call.method === 'chain_getBlock');
@@ -760,7 +757,7 @@ describe('the request stream a payment makes', () => {
     const allowed = new Set([
       'chain_getBlockHash',
       'chain_getHeader',
-      'state_queryStorageAt',
+      'state_getReadProof',
       'author_submitExtrinsic',
       'chain_getBlock',
     ]);

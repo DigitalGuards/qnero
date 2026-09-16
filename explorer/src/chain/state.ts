@@ -22,7 +22,7 @@ async function stateCallInt(context: ChainContext, method: string): Promise<bigi
 export interface ConsensusConstants {
   seedEpochBlocks: number;
   seedEpochLag: number;
-  /** Blocks below the tip that a reorg may still replace. There is no finality gadget under this. */
+  /** Legacy compatibility value. It is not a confirmation or finality threshold. */
   maxReorgDepth: number;
   /**
    * The chain's target block time, in milliseconds, or null when the node
@@ -80,7 +80,7 @@ export interface PoolState {
 export interface ChainSnapshot {
   headNumber: number;
   headHash: string;
-  /** What the node calls finalized. This chain is proof of work with no finality gadget. */
+  /** The node's irreversible checkpoint. New networks retain genesis; confirmations stay probabilistic. */
   finalizedNumber: number;
   finalizedHash: string;
   difficulty: bigint;

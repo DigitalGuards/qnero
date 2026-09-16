@@ -240,6 +240,14 @@ export class ProverClient {
     return this.call({ kind: 'noteDigests', value: value.toString(), rho, r });
   }
 
+  readStateProof(root: string, nodes: string[], keys: string[]): Promise<(string | null)[]> {
+    return this.call({ kind: 'readStateProof', root, nodes, keys });
+  }
+
+  readStatePrefix(root: string, nodes: string[], prefix: string): Promise<[string, string][]> {
+    return this.call({ kind: 'readStateProof', root, nodes, keys: [], prefix });
+  }
+
   headerBlockHash(anchor: Anchor): Promise<string> {
     return this.call({ kind: 'headerBlockHash', anchor });
   }

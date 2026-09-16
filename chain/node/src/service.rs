@@ -823,7 +823,19 @@ pub type Service = sc_service::PartialComponents<
 >;
 
 #[allow(clippy::result_large_err)]
-pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
+pub fn new_partial(config: &mut Configuration) -> Result<Service, ServiceError> {
+	// The live node and offline import/check commands share this policy.
+	// Every valid historical branch needs executable state and block bodies.
+	config.blocks_pruning = sc_service::BlocksPruning::KeepAll;
+	config.state_pruning = Some(sc_service::PruningMode::ArchiveAll);
+	if !matches!(config.network.sync_mode, sc_network::config::SyncMode::Full) {
+		return Err(ServiceError::Other(
+			"Qnero reversible proof of work requires --sync full; state and warp sync \
+             depend on irreversible finalized checkpoints."
+				.into(),
+		));
+	}
+
 	let telemetry = config
 		.telemetry_endpoints
 		.clone()
@@ -843,6 +855,8 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 			executor,
 		)?;
 	let client = Arc::new(client);
+	sc_consensus_randomx::ensure_pow_database::<Block, _>(&*client)
+		.map_err(|error| ServiceError::Other(error.to_string()))?;
 
 	// Initialize genesis block's achieved work if not already set.
 	// Genesis has achieved work = 1 (represents the start of the chain).
@@ -932,7 +946,7 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 pub fn new_full<
 	N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>,
 >(
-	config: Configuration,
+	mut config: Configuration,
 	rewards_address: AccountId32,
 	miner_key: Option<qnero_note_core::MinerKey>,
 	stratum_config: Option<stratum::StratumConfig>,
@@ -953,7 +967,7 @@ pub fn new_full<
 		select_chain: _,
 		transaction_pool,
 		other: (pow_block_import, mut telemetry, engine),
-	} = new_partial(&config)?;
+	} = new_partial(&mut config)?;
 
 	// The pool has to be at least as deep as the number of threads leasing from
 	// it, or every mining round past its depth creates and destroys a VM: a
@@ -1093,8 +1107,8 @@ pub fn new_full<
 		);
 	}
 
-	// Note: Finalization is now handled synchronously in import_block,
-	// so we don't need a separate finalization task.
+	// Genesis is the sole irreversible checkpoint. Best-chain notifications
+	// report work-based progress; applications apply their confirmation policy.
 
 	Ok(task_manager)
 }

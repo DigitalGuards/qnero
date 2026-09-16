@@ -2,10 +2,13 @@
 //!
 //! Tips are set the same way a wallet does:
 //! `ChargeTransactionPayment::from(tip)` in the signed `TxExtension` extra,
-//! then `Executive::apply_extrinsic`. The zero-tip policy is enforced by
-//! `HighSecurityFungibleAdapter` inside `OnChargeTransaction`.
+//! then the checked transaction extension pipeline. Production admission now
+//! rejects reversible calls earlier, so these tests isolate the inherited
+//! fee policy. `transaction_policy.rs` covers production admission separately.
+//! The zero-tip policy is enforced by `HighSecurityFungibleAdapter` inside
+//! `OnChargeTransaction`.
 
-use crate::common::TestCommons;
+use crate::common::{apply_through_transaction_extensions, TestCommons};
 use codec::Encode;
 use frame_support::{
 	dispatch::GetDispatchInfo,
@@ -13,7 +16,7 @@ use frame_support::{
 	traits::{Currency, Hooks},
 };
 use qnero_runtime::{
-	transaction_extensions::HIGH_SECURITY_TIP_FORBIDDEN, Balances, Executive, MiningRewards,
+	transaction_extensions::HIGH_SECURITY_TIP_FORBIDDEN, Balances, MiningRewards,
 	ReversibleTransfers, Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin, System,
 	UncheckedExtrinsic, EXISTENTIAL_DEPOSIT, MILLI_UNIT, UNIT,
 };
@@ -168,7 +171,7 @@ fn assert_tip_cannot_move_extra_value(
 	let free_before = Balances::free_balance(account);
 	let total_before = Balances::total_balance(account);
 
-	match Executive::apply_extrinsic(xt) {
+	match apply_through_transaction_extensions(xt) {
 		Err(_) => {
 			assert_eq!(
 				Balances::free_balance(account),
@@ -236,7 +239,7 @@ fn high_security_signed_schedule_transfer_nonzero_tip_is_rejected() {
 		let xt = signed_call(&pair, account.clone(), schedule_small_transfer(), 0, tip);
 
 		assert_eq!(
-			Executive::apply_extrinsic(xt).unwrap_err(),
+			apply_through_transaction_extensions(xt).unwrap_err(),
 			TransactionValidityError::Invalid(InvalidTransaction::Custom(
 				HIGH_SECURITY_TIP_FORBIDDEN
 			))
@@ -266,7 +269,7 @@ fn high_security_padded_dest_is_rejected_before_fees() {
 
 		let before = Balances::free_balance(&account);
 		assert_eq!(
-			Executive::apply_extrinsic(raw_xt).unwrap_err(),
+			apply_through_transaction_extensions(raw_xt).unwrap_err(),
 			TransactionValidityError::Invalid(InvalidTransaction::Custom(1))
 		);
 		assert_eq!(Balances::free_balance(&account), before);
@@ -288,7 +291,7 @@ fn high_security_batch_all_padded_dest_is_rejected_before_fees() {
 		let before = Balances::free_balance(&account);
 		let xt = signed_call(&pair, account.clone(), call, 0, 0);
 		assert_eq!(
-			Executive::apply_extrinsic(xt).unwrap_err(),
+			apply_through_transaction_extensions(xt).unwrap_err(),
 			TransactionValidityError::Invalid(InvalidTransaction::Custom(1))
 		);
 		assert_eq!(Balances::free_balance(&account), before);
@@ -314,7 +317,7 @@ fn high_security_signed_schedule_transfer_zero_tip_is_charged_and_refused() {
 		let before = Balances::free_balance(&account);
 
 		assert_eq!(
-			Executive::apply_extrinsic(xt)
+			apply_through_transaction_extensions(xt)
 				.expect("zero-tip schedule_transfer is valid")
 				.expect_err("v1 refuses a scheduled transfer"),
 			sp_runtime::DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
@@ -353,7 +356,7 @@ fn normal_account_signed_transfer_with_tip_pays_the_tip_and_moves_nothing() {
 		let before = Balances::free_balance(&account);
 
 		assert_eq!(
-			Executive::apply_extrinsic(xt)
+			apply_through_transaction_extensions(xt)
 				.expect("tipped transfer is valid")
 				.expect_err("v1 refuses a transparent transfer"),
 			sp_runtime::DispatchError::from(frame_system::Error::<Runtime>::CallFiltered)
@@ -372,8 +375,8 @@ fn normal_account_signed_transfer_with_tip_pays_the_tip_and_moves_nothing() {
 // NOTE: plain whitelist rejections (empty `batch_all`, `Vesting::claim`, ...)
 // are covered by the `check_call` unit tests in
 // `runtime/src/transaction_extensions.rs`; the integration tests here only
-// assert what those cannot — fee and balance effects through the full
-// `Executive::apply_extrinsic` pipeline.
+// assert what those cannot: fee and balance effects through the full
+// checked transaction extension pipeline.
 
 #[test]
 fn high_security_empty_batch_all_cannot_drain_via_tip() {
@@ -433,7 +436,7 @@ fn high_security_held_pending_transfer_survives_a_tip_on_remaining_free() {
 
 		assert_tip_cannot_move_extra_value(&pair, &account, empty_batch_all(), 0);
 
-		// The hold itself cannot be tipped — this must stay true whether the
+		// The hold itself cannot be tipped: this must stay true whether the
 		// leftover-free tip is rejected or only the inclusion fee is charged.
 		assert_eq!(
 			pallet_reversible_transfers::PendingTransfersBySender::<Runtime>::get(&account).len(),
@@ -458,7 +461,7 @@ fn high_security_tip_is_not_reminted_to_the_block_author() {
 		let xt = signed_call(&pair, account.clone(), call, 0, tip);
 		let fee_ceiling = inclusion_fee(&xt);
 
-		let _ = Executive::apply_extrinsic(xt);
+		let _ = apply_through_transaction_extensions(xt);
 
 		// Whatever the inclusion outcome, a high-security tip must not be sitting
 		// in CollectedFees waiting for the author.

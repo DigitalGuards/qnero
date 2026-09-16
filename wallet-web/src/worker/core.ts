@@ -52,6 +52,7 @@ export interface WasmModule {
   initThreadPool?: (threads: number) => Promise<void>;
   entropySelfCheck: () => void;
   walletLimits: () => string;
+  readStateProof: (requestJson: string) => string;
   deriveAccount: (seedHex: string) => string;
   minerKey: (seedHex: string) => string;
   decryptNote: (seedHex: string, ciphertext: Uint8Array, expected: string) => string;
@@ -150,6 +151,8 @@ export class ProverCore {
 
   async handle(request: WorkerRequest, progress: Progress): Promise<Answer> {
     switch (request.kind) {
+      case 'readStateProof':
+        return { value: JSON.parse(this.requireWasm().readStateProof(JSON.stringify(request))) };
       case 'init': {
         const started = performance.now();
         progress('module', 'fetching and instantiating the prover');

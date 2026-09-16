@@ -1,15 +1,13 @@
 //! Weights for `pallet-shielded`.
 //!
-//! **TODO(M5): these are calibrated constants. No benchmark has produced
-//! them.** What is here is built the way `pallet-wormhole`'s weights are
-//! built, from proof-verification times and from the storage operations a
-//! settlement performs, so a runtime has a defensible ceiling to meter against
-//! before the benchmarks land.
+//! These declarations require executor qualification on release hardware.
+//! `docs/WASM-BUDGET.md` describes the offline WASM component gate. What is here is built the way
+//! `pallet-wormhole`'s weights are built, from proof-verification times and from the storage
+//! operations a settlement performs. `docs/BENCH.md` records the measured component costs;
+//! full-block execution and admission capacity still require qualification.
 //!
-//! Three figures carry real uncertainty and are marked below: the two proof
-//! verifications, which are measured natively where the runtime executes in
-//! wasm, and the public-batch one, which has never been measured at the chain's
-//! dimensions at any speed.
+//! The constants retain their conservative estimates. Component measurements
+//! on one workstation do not establish the complete release-hardware budget.
 
 use core::marker::PhantomData;
 
@@ -24,10 +22,10 @@ use frame_support::{traits::Get, weights::Weight};
 /// dominant cost of every settlement by roughly this factor, and settlements
 /// are `Pays::No`, so nobody pays the difference.
 ///
-/// **Five is a conservative stand-in. Nobody has measured it.** M5 owes a number
-/// measured inside the runtime (a benchmark, or an `sc-executor` harness
-/// calling the validation entry points through the compiled wasm) at the
-/// chain's `N = 6` / `n = 53`.
+/// Five remains a conservative estimate. The runtime-WASM component harness
+/// measures private and public verification at `N = 6` / `n = 53`; its record
+/// is in `docs/BENCH.md`. Qualify full settlement and block execution on the
+/// designated reference hardware before changing these declarations.
 ///
 /// **Open issue, M5.** The same measurement owes an answer on the cost a
 /// transaction pool absorbs that no weight bounds: admission pays one cheap
@@ -50,8 +48,9 @@ pub const PRIVATE_BATCH_VERIFY_REF_TIME_PS: u64 = 5_000_000_000 * WASM_VERIFY_FA
 
 /// Reference time of one public-batch proof verification, in picoseconds.
 ///
-/// **Not measured, at either speed.** The public batch has never been built or
-/// timed at the chain default of 53 inner proofs; M3 exercised it at two.
+/// Public verifier artifacts at 53 inner proofs are generated and pinned by
+/// the release builder. The WASM budget harness also measures a valid public
+/// proof; `docs/BENCH.md` records the artifact identities and observed costs.
 /// Upstream's comparable circuit verifies in about 11 ms at eight inner proofs
 /// and its pallet meters 21 ms, and the Qnero public batch is the same shape
 /// with a wider forwarded public-input region, whose parse is linear in
@@ -74,9 +73,9 @@ pub const PUBLIC_BATCH_VERIFY_REF_TIME_PS: u64 = 30_000_000_000 * WASM_VERIFY_FA
 /// constant scaled by the felt ratio would over-declare it by a factor of
 /// fifty, because the blob round trip does not scale with the public inputs.
 ///
-/// **Neither term is measured.** 100 nanoseconds per felt is chosen to be wrong
-/// in the safe direction: it is roughly an order of magnitude above what a copy
-/// and a range-reduced comparison cost natively.
+/// These terms remain estimates. The WASM component harness checks their sum
+/// at both release proof shapes. The per-felt estimate includes margin above
+/// the native cost of copying and checking a field element.
 pub const PRE_VALIDATE_BASE_REF_TIME_PS: u64 = 1_000_000_000 * WASM_VERIFY_FACTOR;
 
 /// Reference time the parse spends per public-input field element. See
@@ -117,6 +116,37 @@ pub const POSEIDON_EVAL_REF_TIME_PS: u64 = pallet_zk_tree::POSEIDON_EVAL_REF_TIM
 /// Proof-of-validity size charged per storage key touched, matching
 /// `pallet-zk-tree`'s figure for a tree key.
 pub const KEY_POV: u64 = pallet_zk_tree::TREE_KEY_POV;
+
+/// Reserve the entire bounded pruning pass, including a final young-entry
+/// probe, head/tail reads, the legacy cursor, and the per-block counter reset.
+/// Each expired FIFO entry removes both its queue record and ciphertext.
+pub fn ciphertext_pruning_weight<T: frame_system::Config>(limit: u32, max_bytes: u32) -> Weight {
+	let limit = u64::from(limit);
+	<T as frame_system::Config>::DbWeight::get()
+		.reads_writes(limit.saturating_add(4), limit.saturating_mul(2).saturating_add(3))
+		.saturating_add(Weight::from_parts(
+			limit.saturating_mul(1_000_000),
+			limit
+				.saturating_add(4)
+				.saturating_mul(KEY_POV)
+				.saturating_add(limit.saturating_mul(u64::from(max_bytes))),
+		))
+}
+
+/// Additional queue bookkeeping beyond the ciphertext write already charged
+/// by shield/settlement weights. Reserve two capacity checks for settlement's
+/// pre-dispatch and dispatch paths, plus each append's tail/count/block-number
+/// reads and queue/tail/count writes.
+fn ciphertext_queue_weight<T: frame_system::Config>(count: u64) -> Weight {
+	let reads = count.saturating_mul(3).saturating_add(6);
+	let writes = count.saturating_mul(3);
+	<T as frame_system::Config>::DbWeight::get()
+		.reads_writes(reads, writes)
+		.saturating_add(Weight::from_parts(
+			count.saturating_mul(1_000_000),
+			reads.saturating_mul(KEY_POV),
+		))
+}
 
 /// Field elements the byte sponge absorbs per Poseidon2 permutation
 /// (`qp_poseidon_core::SPONGE_RATE`).
@@ -181,12 +211,11 @@ pub trait WeightInfo {
 	/// `slots` is the number of real leaf slots, which is the number of
 	/// `ShieldedOutput`s the call carries, and `ciphertext_bytes` their total
 	/// payload. The payload is a weight term of its own: the per-slot
-	/// `ct_digest` is a byte sponge over it, and the bytes are written to
-	/// permanent state.
+	/// `ct_digest` is a byte sponge over it, and the bytes remain in the archived block history.
 	fn submit_private_batch(slots: u32, ciphertext_bytes: u32) -> Weight;
 	fn submit_public_batch(slots: u32, ciphertext_bytes: u32) -> Weight;
 	/// `ciphertext_bytes` is the one ciphertext a shield writes into
-	/// `Ciphertexts`, which is the same never-pruned map a settlement writes
+	/// `Ciphertexts`, which is the same bounded live cache a settlement writes
 	/// to, so it carries the same proof-size term.
 	fn shield(ciphertext_bytes: u32) -> Weight;
 	/// Recording the block's coinbase payload: one bounded write and the
@@ -262,6 +291,7 @@ fn settlement_weight<T: frame_system::Config>(slots: u32, ciphertext_bytes: u32)
 			hashing,
 			reads.saturating_mul(KEY_POV).saturating_add(ciphertext_bytes),
 		))
+		.saturating_add(ciphertext_queue_weight::<T>(slots.saturating_mul(2)))
 }
 
 pub struct SubstrateWeight<T>(PhantomData<T>);
@@ -310,9 +340,10 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 			.saturating_mul(POSEIDON_EVAL_REF_TIME_PS);
 		<T as frame_system::Config>::DbWeight::get()
 			.reads_writes(reads, writes)
+			.saturating_add(ciphertext_queue_weight::<T>(1))
 			// The ciphertext is in the proof size for the same reason
 			// `settlement_weight` puts one there: a shield writes it into
-			// `Ciphertexts`, the same never-pruned map a settled slot writes
+			// `Ciphertexts`, the same bounded live cache a settled slot writes
 			// two of. The runtime leaves `proof_size` uncapped today, so
 			// nothing is metered against this yet; the term is here so that
 			// the declaration is an upper bound on the day it is.

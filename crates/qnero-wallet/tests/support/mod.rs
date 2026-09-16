@@ -41,6 +41,12 @@ pub struct NodeState {
     pub requests: Vec<String>,
     /// Set when a submission should be included in the next block.
     pub include_submissions: bool,
+    /// Omit nodes while retaining the genuine selected header for integrity tests.
+    pub missing_proof_nodes: bool,
+    /// Raw nodes from a different fixture state, used to check root binding.
+    pub proof_node_override: Option<Vec<Vec<u8>>>,
+    /// Hide a public key from enumeration while preserving the underlying trie.
+    pub hidden_listing_keys: BTreeSet<String>,
     /// Which branch this node is on.
     ///
     /// Mixed into the hash of every block at or above `fork_from`, so bumping
@@ -186,9 +192,21 @@ pub struct NodeState {
     /// everything `build` reads, so a test that reaches into any of those
     /// fields between syncs still gets a fresh chain.
     pub chain_cache: std::cell::RefCell<Option<(u64, Arc<ChainView>)>>,
+    /// Immutable historical state used to build genuine RPC read proofs.
+    pub trie_history: std::cell::RefCell<BTreeMap<(u8, u32), Vec<(Vec<u8>, Vec<u8>)>>>,
 }
 
 impl NodeState {
+    /// Complete raw proof for this small fixture's selected state.
+    pub fn complete_state_proof(&self) -> Vec<Vec<u8>> {
+        let entries = trie_entries(self, self.head_number);
+        let keys = entries
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        qnero_state_proof::fixtures::proof(&entries, &keys).1
+    }
+
     /// Whether any request carried this substring. The privacy assertions are
     /// all of this shape.
     pub fn asked_about(&self, needle: &str) -> bool {
@@ -299,7 +317,12 @@ pub struct ChainView {
 
 impl ChainView {
     fn build(state: &NodeState) -> Self {
-        let leaf_count = node_leaf_count(state).min(MAX_FIXTURE_LEAVES);
+        let declared = node_leaf_count(state);
+        let leaf_count = if declared <= MAX_FIXTURE_LEAVES {
+            declared
+        } else {
+            0
+        };
         let dates = leaf_blocks(state);
         let leaves: Vec<(Digest, u32)> = (0..leaf_count)
             .map(|index| {
@@ -340,12 +363,8 @@ impl ChainView {
                     &[b"somebody else", &number.to_le_bytes()[..]].concat(),
                 ),
             };
-            let mut state_root = [0x11u8; 32];
-            state_root[0] = if number >= state.fork_from {
-                state.fork_tag
-            } else {
-                0
-            };
+            let entries = trie_entries(state, number);
+            let (state_root, _) = qnero_state_proof::fixtures::proof(&entries, &[]);
             let logs = if state.unlabelled.contains(&number) {
                 Vec::new()
             } else {
@@ -631,6 +650,31 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
             Ok(json!({"block": {"extrinsics": extrinsics}}))
         }
         "state_getRuntimeVersion" => Ok(json!({"specVersion": 152, "transactionVersion": 6})),
+        "state_getReadProof" => {
+            let at = params
+                .get(1)
+                .and_then(Value::as_str)
+                .ok_or("a read proof must be pinned")?;
+            let number = state.chain().number_of(at).ok_or("unknown proof block")?;
+            let keys = params
+                .get(0)
+                .and_then(Value::as_array)
+                .ok_or("missing proof keys")?
+                .iter()
+                .map(|key| hex::decode(key.as_str().unwrap_or("").trim_start_matches("0x")))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            let (_, mut proof) =
+                qnero_state_proof::fixtures::proof(&trie_entries(state, number), &keys);
+            if let Some(nodes) = &state.proof_node_override {
+                proof = nodes.clone();
+            }
+            if state.missing_proof_nodes {
+                proof.clear();
+            }
+            Ok(json!({"at": at, "proof": proof.iter().map(|node|
+                format!("0x{}", hex::encode(node))).collect::<Vec<_>>()}))
+        }
         "state_getStorage" => {
             let key = params.get(0).and_then(Value::as_str).unwrap_or_default();
             // `ZkTree::LeafCount` is answered as of the block asked about,
@@ -687,7 +731,7 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
             let keys: Vec<Value> = state
                 .storage
                 .keys()
-                .filter(|key| key.starts_with(prefix))
+                .filter(|key| key.starts_with(prefix) && !state.hidden_listing_keys.contains(*key))
                 .filter(|key| match start {
                     Some(cursor) => key.as_str() > cursor,
                     None => true,
@@ -785,6 +829,9 @@ fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
     }
     if index >= node_leaf_count(state) {
         return None;
+    }
+    if item == LeafKey::Leaves {
+        return Some(filler_leaf(index));
     }
     let wrote_value = has_storage(state, "Shielded", "CoinbaseValues", index);
     let mints_here = ends_its_block(state, index);
@@ -890,7 +937,12 @@ const MAX_FIXTURE_LEAVES: u64 = 4096;
 /// block order and a wallet now checks exactly that against the root in each
 /// header.
 fn leaf_blocks(state: &NodeState) -> Vec<u32> {
-    let count = node_leaf_count(state).min(MAX_FIXTURE_LEAVES);
+    let declared = node_leaf_count(state);
+    let count = if declared <= MAX_FIXTURE_LEAVES {
+        declared
+    } else {
+        0
+    };
     let mut out = Vec::with_capacity(count as usize);
     let mut floor = 0u32;
     for index in 0..count {
@@ -976,6 +1028,7 @@ pub fn block_hash(number: u32) -> [u8; 32] {
 /// entry.
 pub fn test_metadata() -> ChainMetadata {
     ChainMetadata {
+        protocol_profile: qnero_circuit::profile::SUPPORTED_PROFILE,
         shielded_pallet_index: 24,
         submit_private_batch: 0,
         submit_public_batch: 1,
@@ -1015,4 +1068,91 @@ pub fn scratch_dir(name: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     dir
+}
+
+/// A small state trie at one fixture height. Published historical snapshots
+/// remain stable when the fixture appends a new block.
+fn trie_entries(state: &NodeState, number: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let tag = if number >= state.fork_from {
+        state.fork_tag
+    } else {
+        0
+    };
+    let cache_key = (tag, number);
+    if number < state.head_number {
+        if let Some(entries) = state.trie_history.borrow().get(&cache_key) {
+            return entries.clone();
+        }
+    }
+    let mut entries: BTreeMap<Vec<u8>, Vec<u8>> = state
+        .storage
+        .iter()
+        .filter(|(key, _)| leaf_key(key).is_none())
+        .map(|(key, value)| {
+            (
+                hex::decode(key.trim_start_matches("0x")).unwrap(),
+                value.clone(),
+            )
+        })
+        .collect();
+    entries.insert(
+        qnero_wallet::scale::storage_prefix("Shielded", "ActiveProtocolProfile"),
+        qnero_circuit::profile::SUPPORTED_PROFILE.to_vec(),
+    );
+    let dates = leaf_blocks(state);
+    let count = dates.iter().filter(|date| **date <= number).count() as u64;
+    let count_key = qnero_wallet::scale::storage_prefix("ZkTree", "LeafCount");
+    if number < state.head_number {
+        entries.insert(count_key, count.to_le_bytes().to_vec());
+    } else if let Some(short) = state.short_leaf_count {
+        entries.insert(count_key, short.to_le_bytes().to_vec());
+    }
+    for index in 0..count.min(MAX_FIXTURE_LEAVES) {
+        let mints_here = dates.get(index as usize + 1) != dates.get(index as usize);
+        let wrote_value = has_storage(state, "Shielded", "CoinbaseValues", index);
+        for (pallet, item, withheld) in [
+            ("ZkTree", "Leaves", &state.withheld_leaves),
+            ("Shielded", "Ciphertexts", &state.withheld_ciphertexts),
+            ("Shielded", "LeafBlocks", &state.withheld_leaf_blocks),
+            (
+                "Shielded",
+                "CoinbaseValues",
+                &state.withheld_coinbase_values,
+            ),
+        ] {
+            if withheld.contains(&index) {
+                continue;
+            }
+            let key = qnero_wallet::scale::identity_map_key(pallet, item, index);
+            let hex_key = format!("0x{}", hex::encode(&key));
+            let value = if item == "LeafBlocks" && state.misdated_leaves.contains_key(&index) {
+                state.misdated_leaves.get(&index).map(codec::Encode::encode)
+            } else if let Some(value) = state.storage.get(&hex_key) {
+                Some(value.clone())
+            } else {
+                match item {
+                    "Leaves" => Some(filler_leaf(index)),
+                    "LeafBlocks" => dates.get(index as usize).map(codec::Encode::encode),
+                    "Ciphertexts" if !wrote_value && !mints_here => {
+                        Some(codec::Encode::encode(&filler_ciphertext(index)))
+                    }
+                    "CoinbaseValues" if mints_here => {
+                        Some(codec::Encode::encode(&filler_coinbase_value(index)))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(value) = value {
+                entries.insert(key, value);
+            }
+        }
+    }
+    // A harmless key distinguishes explicit fixture fork tags in the state.
+    entries.insert(b"fixture/branch".to_vec(), vec![tag]);
+    let entries: Vec<_> = entries.into_iter().collect();
+    state
+        .trie_history
+        .borrow_mut()
+        .insert(cache_key, entries.clone());
+    entries
 }

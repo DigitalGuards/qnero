@@ -404,7 +404,7 @@ describe('a leaf whose kind the headers decide', () => {
     // made the list stop being read. The balance screen renders it under the
     // warnings and at less weight.
     expect(hidden.report.warnings).toEqual([]);
-    expect(hidden.report.hints.some((hint) => hint.includes('Shielded::Ciphertexts'))).toBe(true);
+    expect(hidden.report.hints.some((hint) => hint.includes('does not verify proof of work'))).toBe(true);
 
     // An honest node serving the same headers recovers nothing on an ordinary
     // pass: no checkpoint moves, so the scan starts above the leaf.
@@ -584,7 +584,7 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.meta.nextLeaf).toBe(3);
     // What the operator is given instead: the hint, which states the whole
     // bound because one rescan is the recovery for every part of it.
-    expect(hidden.report.hints.some((hint) => hint.includes('at every level'))).toBe(true);
+    expect(hidden.report.hints.some((hint) => hint.includes('does not verify proof of work'))).toBe(true);
 
     // An honest node serving the same headers recovers nothing on an ordinary
     // pass: no checkpoint moves, so the scan starts above the leaf.
@@ -684,7 +684,7 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.report.warnings).toEqual([]);
     expect(hidden.meta.nextLeaf).toBe(8);
     expect(
-      hidden.report.hints.some((hint) => hint.includes("where a leaf sits inside its block's own range")),
+      hidden.report.hints.some((hint) => hint.includes('does not verify proof of work')),
     ).toBe(true);
 
     const ordinary = await runSync(
@@ -772,7 +772,7 @@ describe('a leaf whose kind the headers decide', () => {
     expect(hidden.meta.nextLeaf).toBe(2);
     expect(
       hidden.report.hints.some((hint) =>
-        hint.includes('neither the leaf count nor the height'),
+        hint.includes('does not verify proof of work'),
       ),
     ).toBe(true);
 

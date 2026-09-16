@@ -81,6 +81,7 @@ pub struct RpcClient {
     next_id: std::cell::Cell<u64>,
     batches: std::cell::Cell<BatchSupport>,
     requests: std::cell::Cell<u64>,
+    state_roots: std::cell::RefCell<std::collections::BTreeMap<[u8; 32], [u8; 32]>>,
 }
 
 impl std::fmt::Debug for RpcClient {
@@ -101,6 +102,7 @@ impl RpcClient {
             next_id: std::cell::Cell::new(1),
             batches: std::cell::Cell::new(BatchSupport::Unknown),
             requests: std::cell::Cell::new(0),
+            state_roots: Default::default(),
         }
     }
 
@@ -329,57 +331,141 @@ impl RpcClient {
         Ok(Some(out))
     }
 
-    /// `state_getStorage`, decoded from `0x`-hex. `None` is an absent key.
-    pub fn storage(&self, key: &[u8], at: Option<&str>) -> Result<Option<Vec<u8>>> {
-        let params = match at {
-            Some(hash) => json!([hex_0x(key), hash]),
-            None => json!([hex_0x(key)]),
-        };
-        let value = self.call("state_getStorage", params)?;
-        match value {
-            Value::Null => Ok(None),
-            Value::String(s) => Ok(Some(decode_hex(&s)?)),
-            other => bail!("state_getStorage returned {other}"),
+    /// Authenticate the root through the requested header's own hash. Header
+    /// selection still depends on the wallet's trusted node and checkpoints.
+    pub fn state_root(&self, at: &str) -> Result<[u8; 32]> {
+        let hash = decode_hash(at)?;
+        if let Some(root) = self.state_roots.borrow().get(&hash) {
+            return Ok(*root);
         }
+        let header: crate::chain::RawHeader = self.call_as("chain_getHeader", json!([at]))?;
+        if header.to_header_inputs()?.block_hash().to_bytes() != hash {
+            bail!("storage header does not hash to its requested block {at}");
+        }
+        let root = decode_hash(&header.state_root)?;
+        let mut roots = self.state_roots.borrow_mut();
+        if roots.len() >= 64 {
+            roots.clear();
+        }
+        roots.insert(hash, root);
+        Ok(root)
     }
 
-    /// `state_queryStorageAt` over many keys at one block. Returns the values
-    /// in the order the keys were given, `None` for an absent key.
-    ///
-    /// Batched because a scan reads two keys per leaf and a chain that has run
-    /// for a day has tens of thousands of them.
+    /// Raw proof nodes pinned to exactly the requested block. There is no
+    /// fallback to an unproven storage response when proof serving fails.
+    pub fn read_proof(&self, keys: &[Vec<u8>], at: &str) -> Result<Vec<Vec<u8>>> {
+        #[derive(serde::Deserialize)]
+        struct ReadProof {
+            at: String,
+            proof: Vec<String>,
+        }
+        let keys: Vec<String> = keys.iter().map(|key| hex_0x(key)).collect();
+        let proof: ReadProof = self.call_as("state_getReadProof", json!([keys, at]))?;
+        if decode_hash(&proof.at)? != decode_hash(at)? {
+            bail!("state_getReadProof answered for a different block");
+        }
+        let mut total = 0usize;
+        if proof.proof.len() > qnero_state_proof::MAX_PROOF_NODES {
+            bail!("state proof has too many nodes");
+        }
+        proof
+            .proof
+            .iter()
+            .map(|node| {
+                total = total
+                    .checked_add(node.len() / 2)
+                    .context("state proof size overflow")?;
+                if total > qnero_state_proof::MAX_PROOF_BYTES {
+                    bail!("state proof exceeds the verification memory budget");
+                }
+                decode_hex(node)
+            })
+            .collect()
+    }
+
+    /// One authenticated value or proven absence. An unpinned request first
+    /// selects one block and uses that hash for both header and proof.
+    pub fn storage(&self, key: &[u8], at: Option<&str>) -> Result<Option<Vec<u8>>> {
+        let selected: String;
+        let at = match at {
+            Some(at) => at,
+            None => {
+                selected = self.call_as("chain_getBlockHash", json!([]))?;
+                &selected
+            }
+        };
+        Ok(self.storage_batch(&[key.to_vec()], at)?.remove(0))
+    }
+
+    /// Reconstruct batched values directly from authenticated trie nodes.
     pub fn storage_batch(&self, keys: &[Vec<u8>], at: &str) -> Result<Vec<Option<Vec<u8>>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let hex_keys: Vec<String> = keys.iter().map(|key| hex_0x(key)).collect();
-        let result = self.call("state_queryStorageAt", json!([hex_keys, at]))?;
-        let blocks = result
-            .as_array()
-            .ok_or_else(|| anyhow!("state_queryStorageAt returned a non-array"))?;
-        let mut values: std::collections::HashMap<String, Vec<u8>> =
-            std::collections::HashMap::new();
-        for block in blocks {
-            let changes = block
-                .get("changes")
-                .and_then(Value::as_array)
-                .ok_or_else(|| anyhow!("state_queryStorageAt returned a block with no changes"))?;
-            for change in changes {
-                let pair = change
-                    .as_array()
-                    .ok_or_else(|| anyhow!("a storage change is not a [key, value] pair"))?;
-                let (Some(Value::String(key)), Some(value)) = (pair.first(), pair.get(1)) else {
-                    bail!("a storage change is not a [key, value] pair");
-                };
-                if let Value::String(encoded) = value {
-                    values.insert(key.clone(), decode_hex(encoded)?);
+        let root = self.state_root(at)?;
+        let proof = self.read_proof(keys, at)?;
+        qnero_state_proof::read_values(root, proof, keys).map_err(anyhow::Error::msg)
+    }
+
+    /// Authenticate a complete public map prefix. Listings only locate proof
+    /// nodes; the local traversal decides the set and proves completeness.
+    pub fn storage_prefix(
+        &self,
+        prefix: &[u8],
+        at: &str,
+        page: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if page == 0 || page > 4096 {
+            bail!("invalid state prefix page size");
+        }
+        let root = self.state_root(at)?;
+        let prefix_hex = hex_0x(prefix);
+        let mut nodes: std::collections::BTreeSet<Vec<u8>> = self
+            .read_proof(&[prefix.to_vec()], at)?
+            .into_iter()
+            .collect();
+        let mut bytes: usize = nodes.iter().map(Vec::len).sum();
+        let mut count = 0usize;
+        let mut cursor: Option<String> = None;
+        loop {
+            let keys: Vec<String> =
+                self.call_as("state_getKeysPaged", json!([prefix_hex, page, cursor, at]))?;
+            if keys.len() > page {
+                bail!("state key page exceeds its requested size");
+            }
+            let mut last = cursor.as_deref().map(decode_hex).transpose()?;
+            let mut decoded = Vec::with_capacity(keys.len());
+            for key in &keys {
+                let key = decode_hex(key)?;
+                if !key.starts_with(prefix) || last.as_ref().is_some_and(|last| key <= *last) {
+                    bail!("state key page has an out-of-prefix or non-increasing key");
+                }
+                last = Some(key.clone());
+                decoded.push(key);
+            }
+            count += keys.len();
+            if count > qnero_state_proof::MAX_PREFIX_ENTRIES {
+                bail!("state prefix exceeds the supported scan size");
+            }
+            if !decoded.is_empty() {
+                for node in self.read_proof(&decoded, at)? {
+                    if nodes.insert(node.clone()) {
+                        bytes += node.len();
+                    }
                 }
             }
+            if bytes > qnero_state_proof::MAX_PROOF_BYTES
+                || nodes.len() > qnero_state_proof::MAX_PROOF_NODES
+            {
+                bail!("state prefix proof exceeds the verification memory budget");
+            }
+            if keys.len() < page {
+                break;
+            }
+            cursor = keys.last().cloned();
         }
-        Ok(hex_keys
-            .iter()
-            .map(|key| values.get(key).cloned())
-            .collect())
+        qnero_state_proof::read_prefix(root, nodes.into_iter().collect(), prefix)
+            .map_err(anyhow::Error::msg)
     }
 }
 
