@@ -25,7 +25,11 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: 'nice -n 19 npm run build && nice -n 19 npx vite preview --port 4173 --strictPort',
+    // The build carries the public testnet's config, which is what a
+    // deployed directory has to carry. The suite reads a dev node on
+    // loopback, so the copy in dist/ is pointed at it between the two.
+    command:
+      'nice -n 19 npm run build && nice -n 19 npx vite-node e2e/point-at-devnet.ts && nice -n 19 npx vite preview --port 4173 --strictPort',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: false,
     timeout: 180_000,

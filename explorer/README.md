@@ -67,11 +67,13 @@ decoding needs.
 
 `config.json` sits beside the built assets and is read at startup, so one build
 serves a devnet and a testnet. Edit the file in `dist/`, or replace it at
-deploy time; nothing about a chain is compiled in.
+deploy time; nothing about a chain is compiled in. What ships names the public
+testnet, which has been live since 2026-09-15, because the header prints this
+chain name to whoever opens the page:
 
 ```json
 {
-  "rpcEndpoint": "wss://rpc.example.invalid",
+  "rpcEndpoint": "wss://rpc.qnero.io",
   "chainName": "Qnero testnet",
   "recentBlocks": 12,
   "searchWindowBlocks": 512,
@@ -79,16 +81,31 @@ deploy time; nothing about a chain is compiled in.
 }
 ```
 
+For a local `--dev` node, point it at `ws://127.0.0.1:9944` and name the chain
+`Qnero devnet`. `npm run dev` reads `public/config.json` as it is; the
+Playwright suite rewrites the copy in `dist/` after the build, so the file the
+repository ships stays the one a deployment wants.
+
 | Key | Meaning |
 |---|---|
 | `rpcEndpoint` | Required. Must be `ws://` or `wss://`: the live head is a subscription and subscriptions are WebSocket only |
-| `chainName` | Required. The name in the rail and the home page heading |
+| `chainName` | Required. The chain page's heading, and the header's status slot on every other page |
 | `recentBlocks` | Blocks in the home list and in the rolling block-time window. Default 12 |
 | `searchWindowBlocks` | How far back a search by extrinsic hash or nullifier walks before giving up. Default 512. A walk that needs a block's events also needs the node's state at that block, and a node started without `--state-pruning archive` keeps only a few hundred blocks of it, so on a pruned node a walk ends at the bottom of that window and says so |
 | `nullifierPageLimit` | Pages of 1000 keys the nullifier count reads before reporting a floor instead of a total. Default 25 |
 
 A page served over `https` cannot open a `ws://` socket. Put the node behind
 the same TLS the site uses and configure `wss://`.
+
+### When the page says No connection
+
+Every figure here is read live, so a node that does not answer inside fifteen
+seconds leaves the site with nothing to show. The page says which endpoint did
+not answer, offers one `Try again`, and retries on its own at 5, 15 and 60
+seconds with the header counting it down. If it keeps failing, the endpoint in
+`config.json` is the first thing to check: it is read at startup from beside
+the built assets, and a `wss://` host that resolves but refuses the upgrade
+fails exactly like a node that is down.
 
 ## Deploy it
 
@@ -122,7 +139,7 @@ server {
 
     # The page talks to the node and to nothing else.
     add_header Content-Security-Policy
-        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' wss://rpc.example.invalid; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" always;
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' wss://rpc.qnero.io; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" always;
     add_header Referrer-Policy "no-referrer" always;
     add_header X-Content-Type-Options "nosniff" always;
 }

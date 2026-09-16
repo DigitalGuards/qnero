@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import { parseConfig } from '../src/chain/config';
@@ -32,5 +34,26 @@ describe('runtime config', () => {
     expect(() => parseConfig({ ...minimal, recentBlocks: 0 })).toThrow(/recentBlocks/);
     expect(() => parseConfig({ ...minimal, searchWindowBlocks: -1 })).toThrow(/searchWindowBlocks/);
     expect(parseConfig({ ...minimal, nullifierPageLimit: 4 }).nullifierPageLimit).toBe(4);
+  });
+});
+
+describe('the chain the shipped file names', () => {
+  const shipped = parseConfig(
+    JSON.parse(
+      readFileSync(new URL('../public/config.json', import.meta.url), 'utf8'),
+    ) as Record<string, unknown>,
+  );
+
+  // The public testnet has been live since 2026-09-15 and public/config.json
+  // is what a built directory carries. A build shipped naming a devnet on
+  // loopback puts "Qnero devnet" in the header of every page and connects to
+  // nothing. The Playwright suite rewrites the copy in dist/ after the build.
+  it('is the public testnet, because the header prints it to whoever opens the page', () => {
+    expect(shipped.rpcEndpoint).toBe('wss://rpc.qnero.io');
+    expect(shipped.chainName).toBe('Qnero testnet');
+  });
+
+  it('is a wss endpoint, because a page served over https cannot open a ws socket', () => {
+    expect(shipped.rpcEndpoint.startsWith('wss://')).toBe(true);
   });
 });

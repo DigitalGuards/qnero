@@ -5,7 +5,15 @@
  * WS only, which is why the configured endpoint has to be one.
  */
 
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
 
 import { connect, type ChainContext } from '../chain/api';
 import { BlockCache } from '../chain/blocks';
@@ -30,6 +38,17 @@ export type ConnectionStatus = 'connecting' | 'live' | 'offline' | 'failed';
  */
 const CONNECT_DEADLINE_MS = 15_000;
 
+/**
+ * How long the page waits before trying again, per attempt.
+ *
+ * A phone that lost signal for fifteen seconds used to stay on the No
+ * connection page until its reader worked out that a reload was the way back:
+ * the code gave up at the deadline, disconnected the attempt, and offered
+ * nothing. The last value repeats, so a node that is down for an hour is
+ * retried once a minute rather than never and rather than continuously.
+ */
+const RETRY_SECONDS = [5, 15, 60] as const;
+
 export interface Head {
   header: BlockHeader;
   hash: string;
@@ -49,7 +68,7 @@ export interface ChainBundle {
   cache: BlockCache;
 }
 
-interface ChainState {
+interface Connection {
   status: ConnectionStatus;
   bundle: ChainBundle | null;
   /** Held from the moment config.json is read, so a failing address can be shown while it fails. */
@@ -62,6 +81,15 @@ interface ChainState {
   chainName: string | null;
   head: Head | null;
   error: string | null;
+  /** When the next automatic attempt is due, or null when none is scheduled. */
+  retryAt: number | null;
+}
+
+export interface ChainState extends Connection {
+  /** Seconds until the automatic retry, or null when none is scheduled. */
+  retryInSeconds: number | null;
+  /** Start a connection now, from the No connection page's one button. */
+  retry: () => void;
 }
 
 const Context = createContext<ChainState>({
@@ -71,6 +99,9 @@ const Context = createContext<ChainState>({
   chainName: null,
   head: null,
   error: null,
+  retryAt: null,
+  retryInSeconds: null,
+  retry: () => undefined,
 });
 
 /** The connection, with a deadline, and no socket left retrying behind a failed page. */
@@ -84,7 +115,7 @@ async function connectWithin(endpoint: string, ms: number): Promise<ChainContext
         timer = setTimeout(() => {
           reject(
             new Error(
-              `${endpoint} did not answer in ${ms / 1000} seconds. The node may be down, or this page may be configured with the wrong endpoint.`,
+              `The node at ${endpoint} did not answer in ${ms / 1000} seconds. It may be down, or this page may be configured with the wrong endpoint.`,
             ),
           );
         }, ms);
@@ -106,14 +137,24 @@ export function useChain(): ChainState {
 }
 
 export function ChainProvider({ children }: { children: ReactNode }): ReactNode {
-  const [state, setState] = useState<ChainState>({
+  const [state, setState] = useState<Connection>({
     status: 'connecting',
     bundle: null,
     endpoint: null,
     chainName: null,
     head: null,
     error: null,
+    retryAt: null,
   });
+  const [attempt, setAttempt] = useState(0);
+  // What the countdown is read against. It moves once a second while a retry
+  // is pending and never otherwise.
+  const [now, setNow] = useState(() => Date.now());
+
+  const retry = useCallback(() => {
+    setState((previous) => ({ ...previous, status: 'connecting', error: null, retryAt: null }));
+    setAttempt((previous) => previous + 1);
+  }, []);
 
   useEffect(() => {
     const session = { live: true };
@@ -142,7 +183,7 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
         constantsError: null,
         cache: new BlockCache(),
       };
-      setState((previous) => ({ ...previous, status: 'live', bundle, error: null }));
+      setState((previous) => ({ ...previous, status: 'live', bundle, error: null, retryAt: null }));
 
       // The consensus constants are three runtime calls, and a page that needs
       // none of them should not wait for them or die with them.
@@ -212,6 +253,8 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
 
     start().catch((error: unknown) => {
       if (stillLive()) {
+        const seconds = RETRY_SECONDS[Math.min(attempt, RETRY_SECONDS.length - 1)] ?? 60;
+        setNow(Date.now());
         setState((previous) => ({
           status: 'failed',
           bundle: null,
@@ -219,6 +262,7 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
           chainName: previous.chainName,
           head: null,
           error: messageOf(error),
+          retryAt: Date.now() + seconds * 1000,
         }));
       }
     });
@@ -228,8 +272,40 @@ export function ChainProvider({ children }: { children: ReactNode }): ReactNode 
       unsubscribe?.();
       void bundle?.context.api.disconnect();
     };
-  }, []);
+  }, [attempt]);
 
-  const value = useMemo(() => state, [state]);
+  /**
+   * The countdown to the next attempt.
+   *
+   * One interval, running only while a retry is pending, ticking against a
+   * deadline rather than a counter so a backgrounded tab comes back with the
+   * right number instead of a frozen one.
+   */
+  const retryAt = state.retryAt;
+  useEffect(() => {
+    if (retryAt === null) {
+      return;
+    }
+    const id = setInterval(() => {
+      if (Date.now() >= retryAt) {
+        clearInterval(id);
+        setState((previous) => ({ ...previous, status: 'connecting', error: null, retryAt: null }));
+        setAttempt((previous) => previous + 1);
+        return;
+      }
+      setNow(Date.now());
+    }, 1000);
+    return () => {
+      clearInterval(id);
+    };
+  }, [retryAt]);
+
+  const retryInSeconds =
+    retryAt === null ? null : Math.max(0, Math.ceil((retryAt - now) / 1000));
+
+  const value = useMemo(
+    () => ({ ...state, retryInSeconds, retry }),
+    [state, retryInSeconds, retry],
+  );
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }

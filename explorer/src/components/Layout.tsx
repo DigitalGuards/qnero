@@ -26,7 +26,7 @@ const NAV: { label: string; route: Route; match: Route['name'][] }[] = [
  * which are the two places it answers a question.
  */
 function Masthead({ current }: { current: Route['name'] }): ReactNode {
-  const { status, chainName, head } = useChain();
+  const { status, chainName, head, retryInSeconds } = useChain();
   const live = status === 'live' || status === 'offline';
   const modifier =
     status === 'failed'
@@ -53,7 +53,11 @@ function Masthead({ current }: { current: Route['name'] }): ReactNode {
       <span className={`masthead__status${modifier}`} role="status">
         <span className={dot} aria-hidden="true" />
         {status === 'connecting' ? <span>Reading the chain head</span> : null}
-        {status === 'failed' ? <span>connection failed</span> : null}
+        {status === 'failed' ? (
+          <span>
+            {retryInSeconds === null ? 'connection failed' : `retrying in ${retryInSeconds} s`}
+          </span>
+        ) : null}
         {live && status === 'offline' ? <span>no node</span> : null}
         {live && named ? <span className="masthead__chain">{chainName}</span> : null}
         {live && named && head !== null ? (
