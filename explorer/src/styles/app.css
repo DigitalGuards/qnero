@@ -382,12 +382,15 @@ p {
 
 /* Panels and fields --------------------------------------------------- */
 
+/* Panel padding 15, gap between panels 20: the two were the other way round,
+   which spent the wider number on the inside of the box and left the boxes
+   reading as one run. */
 .panel {
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: var(--space-4);
-  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 
 /* Prose carries its measure on the box. A panel holding a table or the field
@@ -766,6 +769,15 @@ tbody tr:hover {
 @media (max-width: 640px), (pointer: coarse) {
   tbody td {
     padding-block: 13px;
+  }
+}
+
+/* The four columns the recent list keeps have to fit the column they are in,
+   so the cells give up two pixels a side where the room is scarcest. */
+@media (max-width: 640px) {
+  th,
+  td {
+    padding-inline: 6px;
   }
 }
 
