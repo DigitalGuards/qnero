@@ -6,6 +6,7 @@ license = "MIT-0"
 repository = "https://github.com/quantus-network/chain#"
 
 [workspace]
+exclude = ["patches/sc-basic-authorship"]
 members = [
 	"client/cli",
 	"client/consensus/randomx",
@@ -126,7 +127,7 @@ cfg-if = { version = "1.0" }
 chrono = { version = "0.4.31" }
 cid = { version = "0.11.3" }
 clap = { version = "4.5.13" }
-# rust-crypto ML-KEM only — avoid default use-pqclean-* (unmaintained pqcrypto-kyber).
+# rust-crypto ML-KEM only; avoid default use-pqclean-* (unmaintained pqcrypto-kyber).
 clatter = { version = "2.2.0", default-features = false, features = [
 	"getrandom",
 	"std",
@@ -403,6 +404,7 @@ litep2p = { path = "./client/litep2p" }
 pallet-transaction-payment = { path = "./pallets/transaction-payment" }
 pallet-transaction-payment-rpc = { path = "./pallets/transaction-payment-rpc" }
 pallet-transaction-payment-rpc-runtime-api = { path = "./pallets/transaction-payment-rpc-runtime-api" }
+sc-basic-authorship = { path = "./patches/sc-basic-authorship" }
 sc-cli = { path = "./client/cli" }
 sc-executor-wasmtime = { path = "./client/executor-wasmtime" }
 sc-informant = { path = "./client/informant" }

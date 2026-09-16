@@ -236,7 +236,7 @@ async fn submit_mined_block(
 	if worker_handle.submit(seal).await {
 		let mining_time = mining_start_time.elapsed().as_secs();
 		log::info!(
-			"🥇 Successfully mined and submitted a new block{} (mining time: {}s)",
+			"Successfully mined and submitted a new block{} (mining time: {}s)",
 			source,
 			mining_time
 		);

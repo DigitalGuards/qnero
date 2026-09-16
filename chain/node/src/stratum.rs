@@ -1185,7 +1185,7 @@ impl StratumServer {
 				self.counters.block_candidates.fetch_add(1, Ordering::Relaxed);
 				log::info!(
 					target: LOG_TARGET,
-					"🥇 Share from {worker:?} meets the block difficulty {} at height {}",
+					"Share from {worker:?} meets the block difficulty {} at height {}",
 					job.difficulty,
 					job.height,
 				);
