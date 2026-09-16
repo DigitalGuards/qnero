@@ -34,13 +34,13 @@ export function TabBar(): ReactNode {
                 cn(
                   // No colour transition: see `UI/Button.tsx`. A theme swap
                   // animated every tab label through a grey neither theme owns.
-                  'flex h-14 flex-col items-center justify-center gap-1 text-label uppercase',
+                  'flex min-h-16 flex-col items-center justify-center gap-1 py-2 text-label uppercase',
                   'tracking-label',
                   isActive ? 'text-accent' : 'text-muted hover:text-ink',
                 )
               }
             >
-              <tab.icon className="size-4" aria-hidden />
+              <tab.icon className="size-5" aria-hidden />
               {tab.label}
             </NavLink>
           </li>

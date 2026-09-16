@@ -1146,19 +1146,14 @@ export function App(): ReactNode {
       >
         Skip to content
       </a>
-      {/*
-        The header is one row and it is a header: 44 px on the deep ground with
-        a rule under it, the wordmark at the left gutter and the one live fact
-        about this wallet at the right. Nothing else. It used to carry a theme
-        control as well, which is the only thing in this wallet that is about
-        the page rather than about the wallet; that lives in Settings.
-      */}
+      {/* The wordmark and chain status share the content gutters and wrap
+          when a narrow viewport needs another line. */}
       <header className="border-b border-edge bg-deep">
         <div
           className={
             open
-              ? 'mx-auto flex h-11 w-full max-w-[var(--shell-width)] items-center justify-between gap-3 px-4'
-              : 'mx-auto flex h-11 w-full max-w-[var(--wizard-width)] items-center justify-between gap-3 px-4'
+              ? 'mx-auto flex min-h-16 w-full max-w-[var(--shell-width)] flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-4'
+              : 'mx-auto flex min-h-16 w-full max-w-[var(--wizard-width)] flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-4'
           }
         >
           {/* The wordmark, in MyMonero's header type: the name in the body
@@ -1208,11 +1203,11 @@ export function App(): ReactNode {
       <div
         className={
           open
-            ? 'mx-auto w-full max-w-[var(--shell-width)] px-4 pb-24 pt-5'
-            : 'mx-auto w-full max-w-[var(--wizard-width)] px-4 pb-10 pt-5'
+            ? 'mx-auto w-full max-w-[var(--shell-width)] px-4 pb-28 pt-6 sm:pt-8'
+            : 'mx-auto w-full max-w-[var(--wizard-width)] px-4 pb-12 pt-6 sm:pt-8'
         }
       >
-        <main id="main" className="space-y-3">
+        <main id="main" className="space-y-4">
           {error !== null && (
             <Notice tone="error" testId="app-error" sensitive>
               {error}

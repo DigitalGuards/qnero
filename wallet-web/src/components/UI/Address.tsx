@@ -30,7 +30,7 @@ export function Address({
   className?: string;
   testId?: string;
   tone?: 'default' | 'secret';
-  /** How many 16 px line boxes the value is given before it scrolls. */
+  /** How many complete lines the value is given before it scrolls. */
   lines?: number;
 }): ReactNode {
   return (
@@ -41,7 +41,7 @@ export function Address({
     // line horizontally through the middle of its glyphs and read as a
     // rendering fault rather than as a box that scrolls. The padding is on the
     // outer box and the cap is on the inner one, where it is a whole number of
-    // 16 px line boxes and nothing else.
+    // line boxes that scale with the text.
     //
     // The whole value stays in the box and `user-select: all` still takes all
     // of it in one gesture, so nothing is hidden from a copy or from a reader.
@@ -54,8 +54,8 @@ export function Address({
     >
       <p
         data-testid={testId}
-        className="mm-secret m-0 overflow-y-auto text-meta leading-4 text-ink"
-        style={{ maxHeight: `${lines * 16}px` }}
+        className="mm-secret m-0 overflow-y-auto text-meta leading-normal text-ink"
+        style={{ maxHeight: `${lines * 1.5}em` }}
       >
         {value}
       </p>
