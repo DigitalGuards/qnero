@@ -86,7 +86,12 @@ li a,
   border-bottom: 1px solid var(--border);
 }
 
+/* The one link every screen carries back to the chain page. It was the text's
+   own 18 px inside a 44 px row, so the row it sits in is the target. */
 .masthead__brand {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
   margin-right: auto;
   font-family: var(--font-mono);
   font-size: var(--fs-ui);
@@ -840,12 +845,15 @@ tbody tr:hover .dim {
 }
 
 @media (max-width: 640px) {
-  /* In a hand. A utility button is 40 px and the one primary is 44. */
+  /* In a hand. A utility button is 40 px and the one primary is 44. The
+     primary carries both class names, because `.button:not(.button--icon)` is
+     two selectors and `.button--action` was one: the utility height won the
+     cascade and every primary on this site measured 40 px on a phone. */
   .button:not(.button--icon) {
     min-height: 40px;
   }
 
-  .button--action {
+  .button.button--action {
     min-height: 44px;
   }
 }

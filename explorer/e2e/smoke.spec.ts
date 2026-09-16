@@ -616,6 +616,21 @@ test('every page is reachable from the keyboard and readable at 400 px', async (
   expect(occurrences(blocks, 'Qnero devnet')).toBe(1);
   await open(page, '#/');
 
+  // A press in a hand. The primary is 44 px and a utility button is 40; the
+  // primary carries both class names because the utility rule is two
+  // selectors and won the cascade, which left every primary at 40 px.
+  await open(page, '#/search');
+  expect(
+    await page.locator('.button--action').first().evaluate((el) => el.getBoundingClientRect().height),
+  ).toBeGreaterThanOrEqual(44);
+
+  // The wordmark is the row it sits in. It was the text's own 18 px of height
+  // inside a 44 px header, on the one link every screen carries home.
+  await open(page, '#/');
+  expect(
+    await page.locator('.masthead__brand').evaluate((el) => el.getBoundingClientRect().height),
+  ).toBeGreaterThanOrEqual(40);
+
   // The first tab stop is the skip link, then the header in the order it is
   // read: the wordmark, the four sections, and the theme control last.
   await page.keyboard.press('Tab');
