@@ -5,10 +5,8 @@ import { cn } from '../../utils/cn';
 /**
  * A panel: one thing, with its name over it.
  *
- * MyMonero's screens are stacks of these, and one screen is one job. The
- * measure is on the panel rather than on the paragraph, because a `ch` cap on
- * a paragraph tracks that paragraph's own font size and an 11 px note would
- * then stop at half the width of the 13 px text above it.
+ * Panels share a reading measure and comfortable gutters across screen sizes.
+ * Flush content keeps its own horizontal gutters for tables and lists.
  */
 export function Panel({
   title,
@@ -25,14 +23,14 @@ export function Panel({
     <section
       className={cn(
         'elev-raised rounded-panel border border-edge bg-panel',
-        flush ? 'py-4' : 'p-4',
+        flush ? 'py-5 sm:py-6' : 'p-5 sm:p-6',
         className,
       )}
     >
       {title !== undefined && (
         <h2
           className={cn(
-            'mb-3 text-label uppercase tracking-label text-muted',
+            'mb-4 text-label uppercase tracking-label text-muted',
             flush && 'px-4',
           )}
         >

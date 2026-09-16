@@ -27,7 +27,7 @@
    *
    * A colour token and a size token may not share a name. `--color-body`
    * and `--text-body` both generate the class `text-body`, the colour won,
-   * and every `text-body` in this app set a colour instead of the 13 px
+   * and every `text-body` in this app set a colour instead of the
    * body size: a filled button's label took `--bg-body` and looked right
    * only because that value is near black in the dark theme, and would have
    * moved with any retune of the page ground.
@@ -62,17 +62,17 @@
   --color-notice-bg: var(--notice-bg);
   --color-notice-edge: var(--notice-border);
 
-  /* MyMonero's scale: 13 body, 12 control, 11 meta, 10 label. */
+  /* Relative line heights follow the readable type scale and browser zoom. */
   --text-body: var(--fs-body);
-  --text-body--line-height: 20px;
+  --text-body--line-height: 1.5;
   --text-ui: var(--fs-ui);
-  --text-ui--line-height: 18px;
+  --text-ui--line-height: 1.5;
   --text-meta: var(--fs-meta);
-  --text-meta--line-height: 16px;
+  --text-meta--line-height: 1.5;
   --text-label: var(--fs-label);
-  --text-label--line-height: 14px;
-  --text-display: 32px;
-  --text-display--line-height: 38px;
+  --text-label--line-height: 1.5;
+  --text-display: 2rem;
+  --text-display--line-height: 1.2;
 
   --radius-control: var(--radius-sm);
   --radius-field: var(--radius-input);
@@ -95,7 +95,7 @@
     color: var(--text-primary);
     font-family: var(--font-stack-ui);
     font-size: var(--fs-body);
-    line-height: 20px;
+    line-height: 1.5;
     -webkit-font-smoothing: subpixel-antialiased;
   }
 
@@ -129,34 +129,20 @@
     box-shadow: var(--shadow-inset);
   }
 
-  /*
-   * The sunken input: the control height, 4 px radius, field ground, inset
-   * edge. 29 px where a pointer is and 40 px in a hand, from `--input-h`.
-   *
-   * The text is 16 px on a phone whatever the scale says, because Safari zooms
-   * the page when a field under 16 px takes focus, and a page zoomed by the
-   * browser is a form the reader then has to pan.
-   */
+  /* Sunken inputs stay readable on desktop and avoid iOS focus zoom. */
   .mm-input {
     display: block;
     width: 100%;
     min-height: var(--input-h);
-    padding: 5px 7px;
+    padding: 0.5rem 0.75rem;
     border: 1px solid var(--border);
     border-radius: var(--radius-input);
     background: var(--bg-field);
     color: var(--text-primary);
     font-family: var(--font-stack-mono);
     font-size: max(16px, var(--fs-body));
-    line-height: 20px;
+    line-height: 1.5;
     box-shadow: var(--shadow-inset);
-  }
-
-  @media (min-width: 641px) {
-    .mm-input {
-      font-size: var(--fs-body);
-      line-height: 17px;
-    }
   }
 
   /* Muted rather than dim: a placeholder is read, and the dim ink measures
@@ -184,12 +170,13 @@
     border-color: var(--destructive);
   }
 
-  /* The uppercase field label, 10 px with half a pixel of tracking. */
+  /* Uppercase field labels retain half a pixel of tracking. */
   .mm-label {
     display: block;
-    margin-bottom: 4px;
+    margin-bottom: 0.375rem;
     color: var(--text-muted);
     font-size: var(--fs-label);
+    line-height: 1.5;
     letter-spacing: var(--ls-wide);
     text-transform: uppercase;
   }
@@ -206,9 +193,9 @@
    * thing on the panel, at 3.18:1. See `lib/units.ts`.
    */
   .mm-balance {
-    font-size: 32px;
+    font-size: 2rem;
     font-weight: 100;
-    line-height: 38px;
+    line-height: 1.2;
     letter-spacing: -0.5px;
   }
 
@@ -292,23 +279,10 @@
     }
   }
 
-  /*
-   * A sentence, at a size a sentence is read at.
-   *
-   * 11 px is this scale's label size and it carried paragraphs of fifty and
-   * seventy-nine words on a phone. A note is 13 px in a hand and 11 px from
-   * 641 px up, where the scale MyMonero's carry-over comes from is a pointer's.
-   */
+  /* Notes use body-sized text on every viewport. */
   .mm-note {
     font-size: var(--fs-body);
-    line-height: 20px;
-  }
-
-  @media (min-width: 641px) {
-    .mm-note {
-      font-size: var(--fs-meta);
-      line-height: 16px;
-    }
+    line-height: 1.5;
   }
 
   /*

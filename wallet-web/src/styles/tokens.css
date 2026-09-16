@@ -1,13 +1,7 @@
 /*
- * The token set, carried over from MyMonero's web wallet.
- *
- * See `NOTICE`. What is carried is the design system that stylesheet states by
- * repetition: the dark surface ramp, the text ramp above it, the two-part
- * elevation recipe (a half-pixel inset highlight over a one-pixel dark
- * shadow), the 13/12/11/10 px scale with 0.5 px tracking on every label, the
- * 3 px button radius, the 4 px input radius and the 5 px panel radius, the
- * 32 px action button, the 29 px input, and the label-over-value field row
- * that every form in that wallet is built from.
+ * The MyMonero-derived palette and elevation, with Qloak's readable sizing.
+ * See `NOTICE`. Typography and control sizes use rem units so browser text
+ * preferences scale the interface. Labels keep the original subtle tracking.
  *
  * The accent is Qnero's own, and it is the same one the explorer uses so the
  * two read as one project. MyMonero's cyan is the one value in that palette
@@ -20,7 +14,7 @@
  *
  * Every text token is measured against the surface it actually lands on.
  * `--text-muted` carries the field labels, the table headers and every
- * provenance note at 10 to 11 px, and clears 4.5:1 on the panel and on the
+ * provenance note, and clears 4.5:1 on the panel and on the
  * body in both themes. `--text-dim` measures 2.8:1 to 3.3:1 on the surfaces it
  * lands on, in both themes, so it carries no prose anywhere in this app: it is
  * a placeholder, a disabled control and a strip dot, and it is lifted to
@@ -94,10 +88,10 @@
   --shadow-edge: rgba(27, 26, 25, 0.25);
   --shadow-edge-fade: rgba(27, 26, 25, 0);
 
-  --fs-body: 13px;
-  --fs-ui: 12px;
-  --fs-meta: 11px;
-  --fs-label: 10px;
+  --fs-body: 1rem;
+  --fs-ui: 0.9375rem;
+  --fs-meta: 0.875rem;
+  --fs-label: 0.8125rem;
   --ls-wide: 0.5px;
 
   --space-1: 4px;
@@ -110,11 +104,9 @@
   --radius-input: 4px;
   --radius-md: 5px;
 
-  --control-h: 32px;
-  /* The one action a screen is for. MyMonero's desktop geometry everywhere a
-     pointer is, and a thumb's target on a phone: see the phone block below. */
-  --primary-h: 32px;
-  --input-h: 29px;
+  --control-h: 2.75rem;
+  --primary-h: 3rem;
+  --input-h: 2.75rem;
   --strip-height: 24px;
   /*
    * How much of the balance's trailing pad recedes.
@@ -125,11 +117,10 @@
    * Light gets more of the ink.
    */
   --pad-opacity: 0.55;
-  /* Reading measure, on the container rather than the paragraph: a `ch` cap
-     tracks the child's font size, so an 11 px note would stop at half a box. */
-  --measure: 560px;
-  --shell-width: 760px;
-  --wizard-width: 420px;
+  /* Shared container widths keep prose and controls aligned. */
+  --measure: 40rem;
+  --shell-width: 62.5rem;
+  --wizard-width: 35rem;
 
   --font-stack-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
     'Open Sans', 'Helvetica Neue', sans-serif;
@@ -211,26 +202,4 @@
   --shadow-modal: 0 8px 32px 0 rgba(0, 0, 0, 0.55);
   --shadow-edge: rgba(255, 255, 255, 0.22);
   --shadow-edge-fade: rgba(255, 255, 255, 0);
-}
-
-/*
- * The phone.
- *
- * MyMonero's 32 px button and 29 px input are a pointer's geometry, and on the
- * screens this wallet was measured on three to eight controls per screen were
- * under 44 px in one dimension. So a control is 40 px here, the one action a
- * screen is for is 44, and an input is 40 with its text at 16 px, which is
- * what stops iOS zooming the page when a field takes focus.
- *
- * The label size goes to 11 px with it: 10 px is a caption on a desk and a
- * squint in a hand, and every panel title, field label and tab in this wallet
- * is drawn at it.
- */
-@media (max-width: 640px) {
-  :root {
-    --control-h: 40px;
-    --primary-h: 44px;
-    --input-h: 40px;
-    --fs-label: 11px;
-  }
 }
