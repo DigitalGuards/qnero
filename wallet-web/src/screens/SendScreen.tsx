@@ -23,7 +23,6 @@ import { Field, Input, Textarea } from '../components/UI/Field';
 import { Notice } from '../components/UI/Notice';
 import { Address } from '../components/UI/Address';
 import { Panel, Prose } from '../components/UI/Panel';
-import { Tooltip } from '../components/UI/Tooltip';
 import { PHASES, progressFraction } from './sendPhases';
 import { Num, Table, TableScroll } from '../components/UI/Table';
 import { formatBytes, formatDuration, parseQnrToSteps } from '../lib/format';
@@ -192,6 +191,11 @@ export function SendScreen({
                       , then up to one block interval of {blockSeconds} seconds before it settles.
                     </>
                   )}
+                  {/* The first payment of a session pays for the circuit build
+                      as well, which is the fact a notice over the empty form
+                      used to carry. It belongs to the wait, so it is said
+                      inside the wait. */}
+                  {!circuitsBuilt && ' This first payment builds the circuits as well.'}
                 </>
               ) : (
                 <>
@@ -245,12 +249,6 @@ export function SendScreen({
 
   return (
     <Panel title="Send Qnero">
-      {!circuitsBuilt && (
-        <Notice className="mb-3">
-          The proving circuits are not resident yet. The first payment of this session builds them,
-          which is seconds on top of the proof.
-        </Notice>
-      )}
       {syncing && (
         <Notice className="mb-3" testId="send-blocked">
           A scan is running. It reads everything this wallet holds before it starts and commits at
@@ -286,12 +284,11 @@ export function SendScreen({
               validate: async (value) => {
                 const address = value.trim();
                 if (address.length === 0) {
-                  return 'enter the address this payment goes to';
+                  return 'Enter the address this payment goes to.';
                 }
                 return (
                   (await checkAddress(address)) ||
-                  'that is not a valid Qnero address: its checksum does not hold, which is what a ' +
-                    'truncated or edited paste looks like'
+                  'Not a valid Qnero address. Paste it again, whole.'
                 );
               },
             })}
@@ -319,8 +316,8 @@ export function SendScreen({
                 }
                 if (parsed + feeFloor > reachable) {
                   return (
-                    `one payment reaches ${formatStepsAsQnr(reachable)} and this one needs ` +
-                    `${formatStepsAsQnr(parsed + feeFloor)} including the fee`
+                    `One payment reaches ${formatStepsAsQnr(reachable)} and this one needs ` +
+                    `${formatStepsAsQnr(parsed + feeFloor)} including the fee.`
                   );
                 }
                 return true;
@@ -334,9 +331,8 @@ export function SendScreen({
           htmlFor="send-memo"
           hint={
             memoIsPlainAscii(memo)
-              ? `${memoLength} of ${memoBytes} bytes, padded to ${memoBytes} so both ciphertexts ` +
-                'are one size and the memo\'s length is not published in the clear'
-              : 'anything outside printable ASCII will be shown escaped at the other end'
+              ? `${memoLength} of ${memoBytes} characters`
+              : `${memoLength} of ${memoBytes} bytes, shown escaped at the other end`
           }
           error={form.formState.errors.memo?.message}
         >
@@ -356,23 +352,10 @@ export function SendScreen({
         </Field>
 
         <div className="mt-4 flex items-center justify-between gap-2 border-t border-edge pt-3">
-          {/* The explanation is a tooltip rather than four lines of 11 px text
-              between the fee and the button, which is where MyMonero puts its
-              own fee note and what the Tooltip primitive was carried over
-              for. The padding half of it belongs on the memo field's hint,
-              which is where a reader is when it matters. */}
-          <Tooltip
-            label={`The floor this runtime charges for one slot: a flat minimum plus 0.01 QNR
-              per block of ciphertext bytes. It is a public input fixed at proving time, so it
-              cannot be raised after the proof exists.`}
-          >
-            <button
-              type="button"
-              className="mm-label mb-0 cursor-help underline decoration-dotted underline-offset-2"
-            >
-              Fee
-            </button>
-          </Tooltip>
+          {/* A label and the amount. What the floor is made of was a tooltip,
+              which a touch screen cannot reach at all; the sentence is on the
+              sent screen, under the fee it was charged. */}
+          <span className="mm-label mb-0">Fee</span>
           <span className="font-mono text-body text-ink" data-testid="send-fee">
             {formatStepsAsQnr(feeFloor)}
           </span>
