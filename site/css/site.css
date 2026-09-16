@@ -135,7 +135,10 @@
 }
 
 :root {
-  --fs-display: clamp(2rem, 1.4rem + 2.8vw, 3.25rem);
+  /* 28 px at 375 and 44 px at 1280. One step down from the size the wordmark
+     used to take here: the h1 is a sentence now, and a sentence set at 52 px
+     spends three lines of a phone screen on the first thing the reader sees. */
+  --fs-display: clamp(1.75rem, 1.4rem + 2vw, 2.75rem);
   --fs-h2: clamp(1.4rem, 1.2rem + 1vw, 1.9rem);
   --fs-h3: 1.1rem;
   --fs-lede: clamp(1.15rem, 1.05rem + 0.5vw, 1.2rem);
@@ -600,10 +603,13 @@ h1 .mark {
   color: var(--text-primary);
 }
 
+/* Balanced for the reason the lede under it is: the h1 is a proposition in a
+   sentence, and an unbalanced one leaves a single word on its last line. */
 .hero h1 {
   font-size: var(--fs-display);
   letter-spacing: -0.02em;
   margin-bottom: var(--space-3);
+  text-wrap: balance;
 }
 
 /* Balanced for the same reason .band h2 is: a lede sits directly under a 52px
