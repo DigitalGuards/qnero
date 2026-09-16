@@ -21,9 +21,8 @@
 # thing least worth restarting, so a faucet edit had the worst deploy in this
 # repository: the node stage was the only path to the binary and it restarts
 # the chain mid-block to deliver it. `faucet` is that path without the chain.
-# It stays
-# out of the default run because `node` already builds and installs the same
-# binary, and running both would build it twice and restart it twice.
+# It stays out of the default run because `node` already builds and installs
+# the same binary, and running both would build it twice and restart it twice.
 #
 # **Nothing is built on the host.** The build wants cmake and a C++17 compiler
 # for randomx-rs, libclang for the rocksdb bindings, and a pallet build script
