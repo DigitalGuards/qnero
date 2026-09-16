@@ -50,17 +50,12 @@ export function Blocks({ before }: { before: number | null }): ReactNode {
           )
         ) : null}
         <div className="pager">
-          <a
-            className="button"
-            style={{ lineHeight: '30px' }}
-            href={href({ name: 'blocks', before: null })}
-          >
+          <a className="button" href={href({ name: 'blocks', before: null })}>
             Newest
           </a>
           {newer === null ? null : (
             <a
               className="button"
-              style={{ lineHeight: '30px' }}
               href={href({
                 name: 'blocks',
                 before: head === null ? newer : Math.min(newer, head.header.number),
@@ -70,7 +65,7 @@ export function Blocks({ before }: { before: number | null }): ReactNode {
             </a>
           )}
           {older < 0 ? null : (
-            <a className="button" style={{ lineHeight: '30px' }} href={href({ name: 'blocks', before: older })}>
+            <a className="button" href={href({ name: 'blocks', before: older })}>
               Older
             </a>
           )}

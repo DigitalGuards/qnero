@@ -570,8 +570,35 @@ td {
   vertical-align: top;
 }
 
+/*
+ * A row that leads somewhere is the tap target.
+ *
+ * Only the height number was a link: 14 px tall inside a 31 px row, so more
+ * than half the row's height and about 90% of its width did nothing when
+ * tapped, on the list that is this site's primary navigation to every block.
+ * The link still is the link, and its box is stretched over the row, so there
+ * is one target per row and the keyboard order is unchanged.
+ */
 tbody tr {
+  position: relative;
   transition: background-color 0.1s ease-out;
+}
+
+.row-link a::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+
+/* The ring belongs to the area that is pressed, so it is drawn on the row and
+   not on the number inside it. */
+.row-link a:focus-visible {
+  outline: none;
+}
+
+tbody tr:has(.row-link a:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 tbody tr:hover {
@@ -594,7 +621,10 @@ tbody tr:hover .dim {
 /* Controls ------------------------------------------------------------ */
 
 .button {
-  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
   padding: 0 var(--space-3);
   font-family: var(--font-ui);
   font-size: var(--fs-ui);
@@ -611,9 +641,36 @@ tbody tr:hover .dim {
   background: var(--bg-hover);
 }
 
+/* A disabled control is never faded: at 0.5 the label fell under every
+   contrast bar on the page, on the one control a reader is trying to work out
+   why they cannot press. It keeps the raised fill and says so in its label and
+   in the line beside it. */
 .button:disabled {
-  opacity: 0.5;
+  color: var(--text-secondary);
+  background: var(--bg-raised);
   cursor: default;
+}
+
+/* An icon control: 32 px square, with the 8 px of clear space the row gives
+   it. The block pager was two 13 px inline links 8 px apart. */
+.button--icon {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+}
+
+@media (max-width: 640px) {
+  /* In a hand. A utility button is 40 px and the one primary is 44. */
+  .button:not(.button--icon) {
+    min-height: 40px;
+  }
+
+  .button--action {
+    min-height: 44px;
+  }
 }
 
 .button--action {
@@ -662,6 +719,19 @@ tbody tr:hover .dim {
   gap: var(--space-2);
   align-items: center;
   margin-top: var(--space-3);
+}
+
+/* Beside the heading, at the right of the row. */
+.pager--head {
+  margin-top: 0;
+  margin-left: auto;
+}
+
+.page__head--pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
 }
 
 .slot {

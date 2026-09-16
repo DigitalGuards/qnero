@@ -109,23 +109,37 @@ export function Block({ id }: { id: string }): ReactNode {
   return (
     <>
       <header className="page__head">
-        <h1>Block {formatCount(block.header.number)}</h1>
+        {/* Two 32 px buttons beside the heading. They were 13 px inline links
+            8 px apart at the end of an ISO timestamp with milliseconds in it. */}
+        <div className="page__head--pager">
+          <h1>Block {formatCount(block.header.number)}</h1>
+          <div className="pager pager--head">
+            {block.header.number === 0 ? null : (
+              <a
+                className="button button--icon"
+                href={href({ name: 'block', id: block.header.parentHash })}
+                aria-label="Previous block"
+                title="Previous block"
+              >
+                &larr;
+              </a>
+            )}
+            {head === null || block.header.number >= head.header.number ? null : (
+              <a
+                className="button button--icon"
+                href={href({ name: 'block', id: String(block.header.number + 1) })}
+                aria-label="Next block"
+                title="Next block"
+              >
+                &rarr;
+              </a>
+            )}
+          </div>
+        </div>
         <p className="page__lede">
           {block.timestampMs === null || block.timestampMs === 0
             ? 'no timestamp: genesis carries none and a pruned block no longer answers for one'
             : new Date(block.timestampMs).toISOString()}
-          {block.header.number === 0 ? null : (
-            <>
-              {' · '}
-              <a href={href({ name: 'block', id: block.header.parentHash })}>previous</a>
-            </>
-          )}
-          {head === null || block.header.number >= head.header.number ? null : (
-            <>
-              {' · '}
-              <a href={href({ name: 'block', id: String(block.header.number + 1) })}>next</a>
-            </>
-          )}
         </p>
       </header>
 

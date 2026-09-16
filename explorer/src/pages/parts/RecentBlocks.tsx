@@ -32,6 +32,10 @@ function age(timestampMs: number | null): ReactNode {
  * cells as every other row, because a spanning cell leaves the table two
  * columns short of its header once the narrow layout drops the wide ones.
  *
+ * The row is the tap target: the height's link is stretched over it, so a tap
+ * anywhere on the row opens the block it names and the keyboard order is one
+ * stop per row.
+ *
  * At phone width the columns that carry the block's answer stay and the author
  * label goes. It is the widest cell in the row and, by its own note, groups
  * nothing across blocks, so clipping the coinbase amount to keep it would be
@@ -61,7 +65,7 @@ export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): R
         <tbody>
           {blocks.map((block) => (
             <tr key={block.hash}>
-              <td className="num">
+              <td className="num row-link">
                 <a href={href({ name: 'block', id: block.hash })}>
                   {formatCount(block.header.number)}
                 </a>
