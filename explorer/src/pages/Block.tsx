@@ -13,7 +13,14 @@ import {
 } from '../chain/blocks';
 import { decodeU512, formatDifficulty } from '../lib/difficulty';
 import { seedHeight } from '../lib/seed';
-import { formatBytes, formatCount, formatQnr, REFERENCE_CIPHERTEXT_BYTES } from '../lib/units';
+import {
+  formatAgo,
+  formatBytes,
+  formatCount,
+  formatQnr,
+  formatUtc,
+  REFERENCE_CIPHERTEXT_BYTES,
+} from '../lib/units';
 import {
   Empty,
   Field,
@@ -136,11 +143,6 @@ export function Block({ id }: { id: string }): ReactNode {
             )}
           </div>
         </div>
-        <p className="page__lede">
-          {block.timestampMs === null || block.timestampMs === 0
-            ? 'no timestamp: genesis carries none and a pruned block no longer answers for one'
-            : new Date(block.timestampMs).toISOString()}
-        </p>
       </header>
 
       {block.stateError === null ? null : (
@@ -154,21 +156,89 @@ export function Block({ id }: { id: string }): ReactNode {
         </Notice>
       )}
 
+      {/* What happened in this block, before the 275 hex characters of how it
+          was sealed. The page used to open on the header in storage order: the
+          first human number was at about y 760 and the block's answer, its
+          coinbase and its settlements, began 1.6 screens down. */}
+      <Panel title="Summary">
+        <Fields>
+          <Field
+            label="Time"
+            value={
+              block.timestampMs === null || block.timestampMs === 0
+                ? 'none'
+                : `${formatUtc(block.timestampMs)}, ${formatAgo(block.timestampMs)}`
+            }
+            note={
+              block.timestampMs === null || block.timestampMs === 0
+                ? 'genesis carries none and a pruned block no longer answers for one'
+                : undefined
+            }
+            wide
+          />
+          <Field
+            label="Coinbase"
+            display
+            value={
+              <span className="num">
+                {block.coinbase === null ? '-' : formatQnr(block.coinbase.valuePlanck)}
+              </span>
+            }
+            note={
+              block.coinbase !== null
+                ? undefined
+                : block.stateError === null
+                  ? 'this block minted no coinbase note'
+                  : 'state not kept at this block, so this is not an absence'
+            }
+          />
+          <Field
+            label="Settlements"
+            display
+            value={
+              <span className="num">
+                {block.stateError === null ? formatCount(block.settlements.length) : '-'}
+              </span>
+            }
+            note={block.stateError === null ? undefined : 'not counted: the state read failed'}
+          />
+          <Field
+            label="Shield entries"
+            display
+            value={
+              <span className="num">
+                {block.stateError === null ? formatCount(block.entries.length) : '-'}
+              </span>
+            }
+            note={block.stateError === null ? undefined : 'not counted: the state read failed'}
+          />
+          <Field
+            label="Extrinsics"
+            display
+            value={<span className="num">{formatCount(block.extrinsics.length)}</span>}
+            note="the body is archived, so this count is read whatever the state answers"
+          />
+        </Fields>
+      </Panel>
+
       <Panel title="Header">
         <Fields>
-          <Field label="Hash" value={<Hash value={block.hash} full />} wide />
+          {/* The block hash is the one value shown whole: it is what a reader
+              came here holding or is about to paste somewhere. The rest are
+              head and tail with the whole value one press away. */}
+          <Field label="Hash" value={<Hash value={block.hash} full copy />} wide />
           <Field
             label="Parent"
             value={
               // Genesis names an all-zero parent that is no block, which is why
               // the lede drops "previous" there too.
               block.header.number === 0 ? (
-                <Hash value={block.header.parentHash} full />
+                <Hash value={block.header.parentHash} copy />
               ) : (
                 <Hash
                   value={block.header.parentHash}
                   href={href({ name: 'block', id: block.header.parentHash })}
-                  full
+                  copy
                 />
               )
             }
@@ -181,15 +251,15 @@ export function Block({ id }: { id: string }): ReactNode {
               block.header.authorLabel === null ? (
                 <span className="dim">none</span>
               ) : (
-                <Hash value={block.header.authorLabel} full />
+                <Hash value={block.header.authorLabel} copy />
               )
             }
             note="H(cvk, parent_hash): a label for this block alone, which changes with the parent"
             wide
           />
-          <Field label="zk tree root" value={<Hash value={block.header.zkTreeRoot} full />} wide />
-          <Field label="State root" value={<Hash value={block.header.stateRoot} />} />
-          <Field label="Extrinsics root" value={<Hash value={block.header.extrinsicsRoot} />} />
+          <Field label="zk tree root" value={<Hash value={block.header.zkTreeRoot} copy />} wide />
+          <Field label="State root" value={<Hash value={block.header.stateRoot} copy />} />
+          <Field label="Extrinsics root" value={<Hash value={block.header.extrinsicsRoot} copy />} />
           <Field
             label="Mined at difficulty"
             value={<span className="num">{minedAt === null ? '-' : formatDifficulty(minedAt)}</span>}
@@ -264,7 +334,7 @@ export function Block({ id }: { id: string }): ReactNode {
               label="Settled fees folded in"
               value={<span className="num">{formatQnr(block.coinbase.authorFeePlanck)}</span>}
             />
-            <Field label="Inner hash" value={<Hash value={block.coinbase.inner} full />} wide
+            <Field label="Inner hash" value={<Hash value={block.coinbase.inner} copy />} wide
               note="published in the clear and still opaque: recognising it takes the matching coinbase viewing key together with the miner’s address" />
           </Fields>
         )}
@@ -321,25 +391,36 @@ export function Block({ id }: { id: string }): ReactNode {
               <table>
                 <thead>
                   <tr>
-                    <th scope="col">Signer</th>
+                    {/* A phone keeps the three columns a shield reader came
+                        for. The signer was 40 characters wide and pushed Value,
+                        the one number they came for, off the screen. */}
+                    <th className="col--wide" scope="col">
+                      Signer
+                    </th>
                     <th scope="col">Value</th>
                     <th scope="col">Leaf</th>
                     <th scope="col">Entry</th>
-                    <th scope="col">Commitment</th>
-                    <th scope="col">Ciphertext</th>
+                    <th className="col--wide" scope="col">
+                      Commitment
+                    </th>
+                    <th className="col--wide" scope="col">
+                      Ciphertext
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {block.entries.map((entry) => (
                     <tr key={entry.commitment}>
-                      <td className="mono">{entry.who}</td>
+                      <td className="mono col--wide" title={entry.who}>
+                        {entry.who.length > 12 ? `${entry.who.slice(0, 12)}…` : entry.who}
+                      </td>
                       <td className="num">{formatQnr(entry.valuePlanck)}</td>
                       <td className="num">{formatCount(entry.leafIndex)}</td>
                       <td className="num">{formatCount(entry.entryIndex)}</td>
-                      <td>
+                      <td className="col--wide">
                         <Hash value={entry.commitment} />
                       </td>
-                      <td className="num">
+                      <td className="num col--wide">
                         {formatBytes(entry.ciphertextBytes)}
                         {entry.ciphertextBytes === REFERENCE_CIPHERTEXT_BYTES ? '' : ' (non-reference)'}
                       </td>
@@ -460,9 +541,15 @@ function OtherExtrinsics({
             <tr>
               <th scope="col">#</th>
               <th scope="col">Call</th>
-              <th scope="col">Kind</th>
-              <th scope="col">Size</th>
-              <th scope="col">Hash</th>
+              <th className="col--wide" scope="col">
+                Kind
+              </th>
+              <th className="col--wide" scope="col">
+                Size
+              </th>
+              <th className="col--wide" scope="col">
+                Hash
+              </th>
               <th scope="col">Outcome</th>
             </tr>
           </thead>
@@ -470,19 +557,24 @@ function OtherExtrinsics({
             {block.extrinsics.map((extrinsic) => (
               <tr key={extrinsic.hash}>
                 <td className="num">{extrinsic.index}</td>
-                <td className="mono">{extrinsic.name}</td>
-                <td>{summaryOf(extrinsic)}</td>
-                <td className="num">{formatBytes(extrinsic.byteLength)}</td>
-                <td>
+                {/* The link is on the call, which is the column a phone keeps.
+                    On the hash it disappeared with the three columns that drop
+                    at phone width, and the row's identity is what it called. */}
+                <td className="mono">
                   {isSettlement(extrinsic.index) ? (
                     <SettlementLink txHash={extrinsic.hash} blockHash={block.hash}>
-                      <span className="mono">{extrinsic.hash.slice(0, 10)}…</span>
+                      {extrinsic.name}
                     </SettlementLink>
                   ) : (
-                    <span className="mono" title={extrinsic.hash}>
-                      {extrinsic.hash.slice(0, 10)}…
-                    </span>
+                    extrinsic.name
                   )}
+                </td>
+                <td className="col--wide">{summaryOf(extrinsic)}</td>
+                <td className="num col--wide">{formatBytes(extrinsic.byteLength)}</td>
+                <td className="col--wide">
+                  <span className="mono" title={extrinsic.hash}>
+                    {extrinsic.hash.slice(0, 10)}…
+                  </span>
                 </td>
                 <td className={extrinsic.succeeded === null ? 'dim' : undefined}>
                   {extrinsic.succeeded === null ? (

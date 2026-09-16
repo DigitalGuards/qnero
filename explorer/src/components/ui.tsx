@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 
 import { shortHash } from '../lib/hex';
 
@@ -210,27 +210,74 @@ export function PageSkeleton({
   );
 }
 
-/** A hash, shortened for the eye with the whole value one hover or one copy away. */
+/**
+ * The whole value, for the reader who needs the whole value.
+ *
+ * A shortened hash is readable and a shortened hash cannot be pasted into
+ * anything. A hover title answers a pointer and answers nothing on a phone,
+ * which is where most of the hex on this site is read.
+ */
+export function Copy({ value }: { value: string }): ReactNode {
+  const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle');
+  const label =
+    state === 'done' ? 'Copied' : state === 'failed' ? 'Select it by hand' : 'Copy the whole value';
+  return (
+    <button
+      type="button"
+      className="copy"
+      aria-label={label}
+      title={label}
+      onClick={() => {
+        try {
+          void navigator.clipboard.writeText(value).then(
+            () => {
+              setState('done');
+            },
+            () => {
+              setState('failed');
+            },
+          );
+        } catch {
+          // No clipboard on this origin. The title says what to do instead.
+          setState('failed');
+        }
+      }}
+    >
+      {state === 'done' ? 'copied' : 'copy'}
+    </button>
+  );
+}
+
+/** A hash, shortened for the eye with the whole value one press away. */
 export function Hash({
   value,
   href,
   full = false,
+  copy = false,
 }: {
   value: string;
   href?: string;
   full?: boolean;
+  copy?: boolean;
 }): ReactNode {
   const text = full ? value : shortHash(value);
-  if (href === undefined) {
-    return (
+  const body =
+    href === undefined ? (
       <span className="mono" title={value}>
         {text}
       </span>
+    ) : (
+      <a className="mono" href={href} title={value}>
+        {text}
+      </a>
     );
+  if (!copy) {
+    return body;
   }
   return (
-    <a className="mono" href={href} title={value}>
-      {text}
-    </a>
+    <span className="hashline">
+      {body}
+      <Copy value={value} />
+    </span>
   );
 }

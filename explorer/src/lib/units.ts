@@ -73,6 +73,55 @@ export function formatSeconds(ms: number): string {
   return `${(ms / 1000).toFixed(1)} s`;
 }
 
+const MONTHS = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
+/**
+ * A block's time, written the way a reader reads a clock.
+ *
+ * It was an ISO timestamp with milliseconds in it, which is a machine's form
+ * and the first thing on a block page. UTC because a chain has no local time
+ * and a block explorer that prints the reader's zone invites two readers of
+ * the same block to disagree about when it was.
+ */
+export function formatUtc(ms: number): string {
+  const at = new Date(ms);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  const month = MONTHS[at.getUTCMonth()] ?? '???';
+  return `${at.getUTCDate()} ${month} ${at.getUTCFullYear()} ${pad(at.getUTCHours())}:${pad(
+    at.getUTCMinutes(),
+  )}:${pad(at.getUTCSeconds())} UTC`;
+}
+
+/** How long ago, in the largest unit that leaves a number a reader can hold. */
+export function formatAgo(ms: number, now: number = Date.now()): string {
+  const seconds = Math.max(0, Math.round((now - ms) / 1000));
+  if (seconds < 60) {
+    return `${seconds} s ago`;
+  }
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} min ago`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) {
+    return `${hours} h ago`;
+  }
+  return `${Math.round(hours / 24)} days ago`;
+}
+
 /**
  * A span of milliseconds as the largest unit that leaves a number a reader can
  * hold: seconds under two minutes, then minutes, hours and days.

@@ -14,6 +14,19 @@ function field(page: Page, label: string) {
   return page.locator(`[data-field="${label}"] .field__value`).first();
 }
 
+/**
+ * The whole hash under a field label.
+ *
+ * Header hashes render head-and-tail with a copy control beside them, and both
+ * the shortening and the control are presentation. The title carries the value
+ * the chain published, which is what a test is asserting on.
+ */
+async function hashOf(page: Page, label: string): Promise<string> {
+  const value = await page.locator(`[data-field="${label}"] .mono`).first().getAttribute('title');
+  expect(value, `no hash under ${label}`).not.toBeNull();
+  return String(value);
+}
+
 function panel(page: Page, title: string) {
   return page.locator(`[data-panel="${title}"]`).first();
 }
@@ -99,9 +112,20 @@ test('the shield block names the payer, the amount and the leaf together', async
   await open(page, `#/block/${facts().shieldHeight}`);
   await expect(page.getByRole('heading', { name: `Block ${facts().shieldHeight}` })).toBeVisible();
 
-  await expect(field(page, 'Author label')).toHaveText(/^0x[0-9a-f]{64}$/);
-  await expect(field(page, 'zk tree root')).toHaveText(/^0x[0-9a-f]{64}$/);
-  await expect(field(page, 'Hash')).toHaveText(/^0x[0-9a-f]{64}$/);
+  // The summary is the first panel: what happened in this block, before the
+  // 275 hex characters of how it was sealed.
+  await expect(panel(page, 'Summary')).toBeVisible();
+  await expect(field(page, 'Time')).toContainText(/ UTC, /);
+  await expect(field(page, 'Extrinsics')).toHaveText(/\d/);
+  await expect(field(page, 'Coinbase')).toContainText('QNR');
+
+  // Header hashes are head and tail with the whole value one press away; the
+  // block hash alone is shown whole, because it is what a reader came holding.
+  await expect(field(page, 'Author label')).toContainText(/^0x[0-9a-f]{8}…[0-9a-f]{6}$/);
+  expect(await hashOf(page, 'Author label')).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(await hashOf(page, 'zk tree root')).toMatch(/^0x[0-9a-f]{64}$/);
+  await expect(field(page, 'Hash')).toContainText(/0x[0-9a-f]{64}/);
+  await expect(page.locator('[data-field="Hash"] .copy')).toBeVisible();
   await expect(field(page, 'RandomX seed height')).toHaveText('0');
 
   const coinbase = panel(page, 'Coinbase note');
@@ -236,7 +260,7 @@ test('search answers a height, a block hash and a settled nullifier', async ({ p
 
   // A block hash, taken from the block page itself.
   await open(page, `#/block/${facts().settlementHeight}`);
-  const blockHash = await field(page, 'Hash').innerText();
+  const blockHash = await hashOf(page, 'Hash');
   const nullifier = await page
     .locator('[data-panel="Settlements (1)"] .slot .field__value')
     .first()
@@ -485,7 +509,7 @@ test('a settlement whose block state is gone is never written up as one that set
 }) => {
   const refuse = await relayWithStateBoundary(page);
   await open(page, `#/block/${facts().settlementHeight}`);
-  const blockHash = await field(page, 'Hash').innerText();
+  const blockHash = await hashOf(page, 'Hash');
   const link = await page
     .getByRole('link', { name: /submit_private_batch/ })
     .first()
@@ -587,25 +611,40 @@ test('every page is reachable from the keyboard and readable at 400 px', async (
   expect(await page.evaluate(() => window.location.hash)).toBe('#/');
   await expect(page.getByRole('heading', { name: 'Qnero devnet' })).toBeVisible();
 
-  // A wide table scrolls inside its wrapper instead of collapsing its cells:
-  // a hash is one line and an amount is never clipped into a smaller amount.
+  // The block's tables keep the columns that carry the answer at phone width
+  // and drop the three that pushed them off the screen. Whatever is left
+  // scrolls inside its wrapper instead of collapsing its cells: a call is one
+  // line and an amount is never clipped into a smaller amount.
   await open(page, `#/block/${facts().settlementHeight}`);
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
     ),
   ).toBe(0);
-  const extrinsics = page.locator('[data-panel^="Extrinsics"] .table-wrap');
-  const box = await extrinsics.evaluate((element) => ({
-    scroll: element.scrollWidth,
-    client: element.clientWidth,
-  }));
-  expect(box.scroll).toBeGreaterThan(box.client);
-  const cell = await page
-    .locator('[data-panel^="Extrinsics"] td.mono')
+  const extrinsics = page.locator('[data-panel^="Extrinsics"]');
+  await expect(extrinsics.locator('thead th', { hasText: 'Kind' })).toBeHidden();
+  await expect(extrinsics.locator('thead th', { hasText: 'Size' })).toBeHidden();
+  await expect(extrinsics.locator('thead th', { hasText: 'Call' })).toBeVisible();
+  await expect(extrinsics.locator('thead th', { hasText: 'Outcome' })).toBeVisible();
+  const cell = await extrinsics
+    .locator('td.mono')
     .first()
     .evaluate((element) => element.getBoundingClientRect().height);
   expect(cell).toBeLessThan(40);
+
+  // The settlement link is on the call, which is a column a phone keeps. On
+  // the hash it went with the columns that drop.
+  await expect(extrinsics.getByRole('link', { name: /submit_private_batch/ })).toBeVisible();
+
+  // A shield reader's three columns: the value, the leaf and the entry. The
+  // 40-character signer was pushing the value off the screen.
+  await open(page, `#/block/${facts().shieldHeight}`);
+  const entries = page.locator('[data-panel^="Shield entries"]');
+  await expect(entries.locator('thead th', { hasText: 'Signer' })).toBeHidden();
+  await expect(entries.locator('thead th', { hasText: 'Commitment' })).toBeHidden();
+  await expect(entries.locator('thead th', { hasText: 'Value' })).toBeVisible();
+  await expect(entries.locator('thead th', { hasText: 'Leaf' })).toBeVisible();
+  await expect(entries.locator('tbody tr').first()).toContainText(facts().shieldQnr);
 
   // The block list drops the author label at phone width and keeps the amount.
   await open(page, '#/');
