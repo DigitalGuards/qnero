@@ -1,6 +1,7 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 
 import { cn } from '../../utils/cn';
+import { Button } from './Button';
 
 /**
  * A long value shown whole: an address, a miner key, a seed.
@@ -24,12 +25,27 @@ export function Address({
   className,
   testId,
   tone = 'default',
+  lines = 10,
+  expandable = false,
 }: {
   value: string;
   className?: string;
   testId?: string;
   tone?: 'default' | 'secret';
+  /** How many 16 px line boxes the value is given before it scrolls. */
+  lines?: number;
+  /**
+   * Whether the box opens to the whole value on request.
+   *
+   * The receive screen collapses the address to three lines, because the code
+   * above it is what a payment is made from and sixty-five lines of hex between
+   * the code and the rest of the screen is a scroller inside the page scroll.
+   * Nothing is hidden from a copy: `user-select: all` still takes all of it.
+   */
+  expandable?: boolean;
 }): ReactNode {
+  const [whole, setWhole] = useState(false);
+  const shown = expandable && !whole ? 3 : lines;
   return (
     // Two boxes, and the split is the fix. Capped and scrollable rather than
     // 2600 characters tall, but a scroll container's bottom padding is
@@ -51,10 +67,23 @@ export function Address({
     >
       <p
         data-testid={testId}
-        className="mm-secret m-0 max-h-[calc(10*16px)] overflow-y-auto text-meta leading-4 text-ink"
+        className="mm-secret m-0 overflow-y-auto text-meta leading-4 text-ink"
+        style={{ maxHeight: `${shown * 16}px` }}
       >
         {value}
       </p>
+      {expandable && (
+        <Button
+          variant="quiet"
+          className="mt-1"
+          data-testid="show-whole-address"
+          onClick={() => {
+            setWhole(!whole);
+          }}
+        >
+          {whole ? 'Show less' : 'Show whole'}
+        </Button>
+      )}
     </div>
   );
 }

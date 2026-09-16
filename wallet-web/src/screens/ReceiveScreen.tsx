@@ -4,8 +4,13 @@
  * The address is long. It carries an ML-KEM-1024 encapsulation key, which is
  * 1568 bytes of the roughly 2600 characters, so it does not shorten and there
  * is no second short form: an integrated address or a subaddress would be
- * another thing to get wrong. It is shown whole, selectable in one gesture,
- * with the code beside it.
+ * another thing to get wrong. The code is what a payment is made from, so the
+ * code is first and the address is collapsed to three lines under it, whole on
+ * request and selectable in one gesture either way.
+ *
+ * How transparent value gets into the pool is a command-line step and it lives
+ * in `docs/WALLET.md`. What a reader of this screen needs on the public
+ * testnet is the faucet, which is a link beside the copy control.
  *
  * The miner key is not the address and the screen says so before it shows one.
  * It carries the coinbase viewing key, so whoever holds it can pick this
@@ -21,7 +26,7 @@ import { Button } from '../components/UI/Button';
 import { CopyButton } from '../components/UI/CopyButton';
 import { Dialog, DialogContent, DialogTrigger } from '../components/UI/Dialog';
 import { Notice } from '../components/UI/Notice';
-import { Panel, Prose } from '../components/UI/Panel';
+import { Panel } from '../components/UI/Panel';
 import { Qr } from '../components/UI/Qr';
 
 export function ReceiveScreen({
@@ -38,37 +43,29 @@ export function ReceiveScreen({
   return (
     <div className="space-y-3">
       <Panel title="Receive Qnero">
-        <Prose>
-          <p>
-            Anything sent to this address arrives as a payment only this wallet can open. The
-            chain publishes its entry in the tree and the ciphertext and nothing else: not the
-            amount, not the sender, not which of a settlement&apos;s two slots is this one.
-          </p>
-        </Prose>
-        <Address value={address} testId="receive-address" />
-        <div className="mb-3 flex gap-2">
-          <CopyButton value={address} label="Copy address" testId="copy-address" />
-        </div>
+        {/* The code first. A receive screen owes a phone the thing a payment
+            is made from, and this one opened with a forty-four word paragraph
+            and ten lines of an address, which put the code at y 517 of a
+            667 px screen. */}
         <Qr value={address} uppercase caption="the same address, uppercase inside the code" />
-        <Notice className="mt-3">
-          Moving transparent value into the pool is a command-line step. A shield is signed with
-          ML-DSA-87 and this browser&apos;s prover exports no signing at all, so this wallet is
-          funded by a payment from another wallet, by{' '}
-          <span className="font-mono">qnero-wallet shield</span> followed by a send, or by a node
-          configured with the miner key below.
-        </Notice>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <CopyButton value={address} label="Copy address" testId="copy-address" />
+          <Button asChild data-testid="receive-faucet">
+            <a href="https://faucet.qnero.io" target="_blank" rel="noreferrer">
+              Get test QNR from the faucet
+            </a>
+          </Button>
+        </div>
+        <Address value={address} testId="receive-address" expandable />
+        <p className="text-meta text-muted">
+          Payments to this address are private; the chain shows nothing about them.
+        </p>
       </Panel>
 
       <Panel title="Miner key">
-        <Prose>
-          <p>
-            <strong className="text-ink">This is not the address, and it is secret bearing.</strong>{' '}
-            It is what a node you run is configured with so that the blocks it wins mint their
-            reward to this wallet. It carries the coinbase viewing key, so whoever holds it can pick
-            this wallet&apos;s mining rewards out of the tree. It cannot spend them, and it says
-            nothing about anything else this wallet holds.
-          </p>
-        </Prose>
+        <p className="text-body text-ink-2">
+          What a node you run is configured with, so the blocks it wins pay this wallet.
+        </p>
         {locked ? (
           <Notice className="mt-3">Unlock this wallet to derive its miner key.</Notice>
         ) : minerKey === null ? (
@@ -82,11 +79,21 @@ export function ReceiveScreen({
             <DialogContent
               title="Show the miner key?"
               description={
-                <p>
-                  Whoever holds it can pick this wallet&apos;s mining rewards out of the tree and
-                  read what a miner earned block by block. Do not hand it out the way an address is
-                  handed out.
-                </p>
+                <>
+                  {/* The whole warning, in the one place a reader is deciding.
+                      It was a four-sentence paragraph on the screen, above a
+                      button, where it was read before there was anything to
+                      decide. */}
+                  <p>
+                    This is not the address and it is secret bearing. It carries the coinbase
+                    viewing key, so whoever holds it can pick this wallet&apos;s mining rewards
+                    out of the tree and read what a miner earned block by block.
+                  </p>
+                  <p>
+                    It cannot spend them, and it says nothing about anything else this wallet
+                    holds. Do not hand it out the way an address is handed out.
+                  </p>
+                </>
               }
             >
               <Button
