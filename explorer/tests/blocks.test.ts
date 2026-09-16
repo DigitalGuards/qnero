@@ -81,7 +81,7 @@ describe('the rolling block time', () => {
       }),
     );
 
-  it('divides the span by the heights it spans, not by the samples that answered', () => {
+  it('divides the span by the heights it spans rather than by the samples that answered', () => {
     // Twelve consecutive blocks, 6 s apart, newest first.
     const full = window(Array.from({ length: 12 }, (_unused, offset) => 1_000_000 - offset * 6_000));
     expect(rollingBlockTimeMs(full)).toBe(6_000);
