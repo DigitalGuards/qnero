@@ -42,6 +42,7 @@
   --space-5: 32px;
   --gutter: 20px;
   --measure: 36em;
+  --fs-label: 10px;
 
   --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
     'Open Sans', 'Helvetica Neue', sans-serif;
@@ -318,7 +319,7 @@ code {
 
 .label {
   display: block;
-  font-size: 10px;
+  font-size: var(--fs-label);
   letter-spacing: 0.5px;
   text-transform: uppercase;
   color: var(--text-muted);
@@ -346,6 +347,13 @@ code {
   resize: none;
 }
 
+/* The placeholder was the browser's own #757575: 2.60:1 in dark and 3.98:1 in
+   light, both under the 4.5:1 this page holds everywhere else. */
+.input::placeholder {
+  color: var(--text-secondary);
+  opacity: 1;
+}
+
 /* The confirmation of a paste, in the family's body size. This page carries no
    11 px reading matter. */
 .check {
@@ -356,8 +364,16 @@ code {
   overflow-wrap: anywhere;
 }
 
+/* The one action on the page was the smallest control on it: 126 x 34 px,
+   left-aligned with 167 px of empty panel beside it, against the 44 px Apple
+   asks for and the 48 dp Material does. inline-flex so an anchor wearing this
+   class is the same box as a button. */
 .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   margin-top: var(--space-3);
+  min-height: 44px;
   font-family: inherit;
   font-size: 13px;
   font-weight: 600;
@@ -365,7 +381,8 @@ code {
   background: var(--accent-fill);
   border: 1px solid var(--accent-fill);
   border-radius: var(--radius-sm);
-  padding: 9px 18px;
+  padding: 12px 18px;
+  text-decoration: none;
   cursor: pointer;
 }
 
@@ -374,9 +391,16 @@ code {
   border-color: var(--accent-fill-hover);
 }
 
+/* Not faded. At 0.55 the label was 3.42:1 in dark, 2.65:1 in light, and the
+   amber fill against the light panel was 1.53:1: the button all but vanished
+   at the moment a reader most needs to see the page is busy. A raised fill and
+   a secondary label is 6.7:1 and still reads as out of reach. */
 .button:disabled {
-  opacity: 0.55;
-  cursor: progress;
+  opacity: 1;
+  background: var(--bg-raised);
+  border-color: var(--border);
+  color: var(--text-secondary);
+  cursor: default;
 }
 
 .cf-turnstile {
@@ -407,4 +431,24 @@ code {
 
 .list li + li {
   margin-top: var(--space-2);
+}
+
+/* A phone. Every target in the form is 44 px in its short dimension, the
+   primary is the width of the column it sits in, and the field is at 16 px,
+   which is the size below which iOS zooms the page on focus and leaves it
+   zoomed. 10 px is MyMonero's label size and it is right on a desktop panel;
+   on a phone it is under the 11 px floor the family holds. */
+@media (max-width: 640px) {
+  :root {
+    --fs-label: 11px;
+  }
+
+  .input {
+    font-size: 16px;
+    min-height: 44px;
+  }
+
+  .button {
+    width: 100%;
+  }
 }
