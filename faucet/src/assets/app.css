@@ -41,7 +41,11 @@
   --space-4: 20px;
   --space-5: 32px;
   --gutter: 20px;
-  --measure: 36em;
+  /* The site's 36em measure, in rem. It caps the column rather than a
+     paragraph now, and an em would resolve against whatever font-size the
+     element carries: on the 11 px strip that is 396 px, so the strip would
+     sit in a narrower column than the page under it. */
+  --measure: 36rem;
   --fs-label: 10px;
 
   --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
@@ -98,8 +102,13 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* One measure for the whole page. The lede was capped at 36em, the sub and the
+   list at 36em of their own smaller size and the panel at the 600 px column, so
+   a wide screen showed four different right edges: 600, 468, 468 and 396 px
+   inside one column. The cap moves to the column itself, and everything in it
+   shares an edge. */
 .wrap {
-  max-width: 640px;
+  max-width: calc(var(--measure) + 2 * var(--gutter));
   margin: 0 auto;
   padding: 0 var(--gutter);
 }
@@ -248,18 +257,16 @@ body {
   color: var(--text-primary);
 }
 
+/* 32 top and bottom. The bottom was 64 against a 32 top, which is right on a
+   page that scrolls and wrong on one that now fits a screen. */
 .main {
-  padding: var(--space-5) var(--gutter) calc(var(--space-5) * 2);
+  padding: var(--space-5) var(--gutter);
 }
 
 h1 {
   font-size: clamp(1.6rem, 1.3rem + 1.4vw, 2.1rem);
   line-height: 1.2;
   margin: 0 0 var(--space-2);
-}
-
-p {
-  max-width: var(--measure);
 }
 
 .lede {
