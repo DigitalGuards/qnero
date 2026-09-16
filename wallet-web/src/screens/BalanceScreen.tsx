@@ -20,41 +20,19 @@ import { Check, RefreshCw } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 
+import { Amount } from '../components/UI/Amount';
 import { Button } from '../components/UI/Button';
 import { Notice } from '../components/UI/Notice';
 import { Panel } from '../components/UI/Panel';
 import { Pill } from '../components/UI/Address';
 import { Tooltip } from '../components/UI/Tooltip';
 import { Num, Table, TableScroll } from '../components/UI/Table';
-import { formatCount, formatStepsAsQnr, splitAmountForDisplay } from '../lib/units';
+import { formatCount, formatStepsAsQnr } from '../lib/units';
 import { formatDuration } from '../lib/format';
 import { renderMemo } from '../lib/memo';
 import { SYNC_PHASES, syncFraction, syncPhaseIndex } from './syncPhases';
 import type { Balances, NoteRow, RejectedNote } from '../wallet/model';
 import type { SyncReport } from '../wallet/sync';
-
-/**
- * The amount, split so the padding can be dimmed and nothing else.
- *
- * Amounts move in steps of 0.01 QNR, so a shielded balance carries exactly two
- * significant decimals and no padding at all: in practice this renders at one
- * weight, which is what MyMonero does for an amount with nothing to pad. See
- * [`splitAmountForDisplay`].
- */
-function Amount({ steps, testId }: { steps: bigint; testId?: string }): ReactNode {
-  const { significant, pad } = splitAmountForDisplay(formatStepsAsQnr(steps).replace(' QNR', ''));
-  return (
-    <div className="mm-balance text-ink" data-testid={testId}>
-      {significant}
-      {pad !== '' && <span className="mm-balance-fraction">{pad}</span>}
-      {/* A real space, because the margin is only an optical gap. Without it
-          the element's text is "10.00QNR" to anything that reads it rather
-          than looks at it: a screen reader, a copy-paste, the `balance-held`
-          probe in the end-to-end suite. */}{' '}
-      <span className="text-ui font-normal text-muted">QNR</span>
-    </div>
-  );
-}
 
 /**
  * One figure, with the sentence that says what it counts.

@@ -18,10 +18,12 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 
+import { Amount } from '../components/UI/Amount';
 import { Button } from '../components/UI/Button';
+import { CopyButton } from '../components/UI/CopyButton';
 import { Field, Input, Textarea } from '../components/UI/Field';
 import { Notice } from '../components/UI/Notice';
-import { Address } from '../components/UI/Address';
+import { Hash } from '../components/UI/Address';
 import { Panel, Prose } from '../components/UI/Panel';
 import { PHASES, progressFraction } from './sendPhases';
 import { Num, Table, TableScroll } from '../components/UI/Table';
@@ -415,36 +417,48 @@ function SendResultView({
           </Notice>
         )
       )}
-      <TableScroll>
-        <Table testId="send-result">
-          <tbody>
-            <tr>
-              <td>amount</td>
-              <Num testId="send-amount-paid">{formatStepsAsQnr(result.amount)}</Num>
-            </tr>
-            <tr>
-              <td>fee</td>
-              <Num>{formatStepsAsQnr(result.fee)}</Num>
-            </tr>
-            <tr>
-              <td>change</td>
-              <Num testId="send-change">{formatStepsAsQnr(result.change)}</Num>
-            </tr>
-            <tr>
-              <td>{settled ? 'settled in block' : included ? 'included in block' : 'not included'}</td>
-              <Num testId="send-block">{result.inclusion?.blockNumber ?? '-'}</Num>
-            </tr>
-            <tr>
-              <td>inputs spent</td>
-              <Num>{result.inputs.length}</Num>
-            </tr>
-          </tbody>
-        </Table>
-      </TableScroll>
-      <div className="mt-3">
-        <div className="mm-label">To</div>
-        <Address value={result.to} testId="send-recipient" />
+      {/* What the payment was, at the size the balance is: it is the same
+          question answered about a different moment. The result used to open
+          with a five-row table of 11 px cells and put Done at y 678 of a
+          667 px screen, under the whole recipient address. */}
+      <Amount steps={result.amount} note="sent" testId="send-amount-paid" />
+      <dl className="mt-3 space-y-1 border-t border-edge pt-3 text-meta">
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted">
+            {settled ? 'settled in block' : included ? 'included in block' : 'not included'}
+          </dt>
+          <dd className="font-mono tabular-nums text-ink" data-testid="send-block">
+            {result.inclusion?.blockNumber ?? '-'}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted">fee</dt>
+          <dd className="font-mono tabular-nums text-ink">{formatStepsAsQnr(result.fee)}</dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted">change</dt>
+          <dd className="font-mono tabular-nums text-ink" data-testid="send-change">
+            {formatStepsAsQnr(result.change)}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted">to</dt>
+          <dd className="min-w-0 text-ink" data-testid="send-recipient" title={result.to}>
+            <Hash value={result.to} head={12} tail={8} />
+          </dd>
+        </div>
+      </dl>
+      {/* The sentence the fee field used to hide in a tooltip, said once,
+          where a reader has just paid one. */}
+      <p className="mt-2 text-meta text-muted">
+        The fee is the floor this runtime charges for one slot, fixed at proving time.
+      </p>
+      <div className="mt-3 flex gap-2">
+        <CopyButton value={result.to} label="Copy address" testId="copy-recipient" />
       </div>
+      <Button variant="action" size="block" className="mt-4" data-testid="send-done" onClick={onDismiss}>
+        Done
+      </Button>
       <details className="mt-3">
         <summary className="cursor-pointer text-meta text-muted">What the proof cost</summary>
         <TableScroll>
@@ -462,20 +476,19 @@ function SendResultView({
                 <td>peak linear memory</td>
                 <Num>{(result.peakLinearMemoryBytes / (1024 * 1024)).toFixed(1)} MiB</Num>
               </tr>
+              <tr>
+                <td>transfers spent</td>
+                <Num>{result.inputs.length}</Num>
+              </tr>
             </tbody>
           </Table>
         </TableScroll>
+        <p className="mt-2 text-meta text-muted">
+          The payment landed in slot {result.paymentSlot}, drawn for this spend. Either slot
+          settles the same way, and drawing it is what stops a chain reader telling the
+          recipient&apos;s slot from the change.
+        </p>
       </details>
-      <p className="mt-3 text-meta text-muted">
-        The payment landed in slot {result.paymentSlot}, drawn for this spend. The circuit derives
-        each slot&apos;s <code>rho</code> from its position and the proving module draws each
-        slot&apos;s <code>r</code> fresh, so either assignment settles the same way, and drawing it
-        is what stops a chain reader telling the counterparty&apos;s slot from the sender&apos;s
-        change.
-      </p>
-      <Button variant="action" size="block" className="mt-4" data-testid="send-done" onClick={onDismiss}>
-        Done
-      </Button>
     </Panel>
   );
 }

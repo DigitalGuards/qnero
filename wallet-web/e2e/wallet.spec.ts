@@ -364,10 +364,15 @@ test.describe('the browser wallet against a dev chain', () => {
     const settledBlock = (await page.getByTestId('send-block').innerText()).trim();
     expect(settledBlock).not.toBe('-');
 
-    // The result leads with what the payment was. The prover's own figures are
-    // behind a disclosure, which this opens to read them.
+    // The result leads with what the payment was, at the size the balance is.
+    // The recipient is shortened with the whole value on the element, because
+    // 2,600 characters between the amount and Done put Done below the fold;
+    // the prover's own figures are behind a disclosure, which this opens.
     await expect(page.getByTestId('send-amount-paid')).toContainText('3.00 QNR');
-    await expect(page.getByTestId('send-recipient')).toContainText(facts.recipientAddress);
+    await expect(page.getByTestId('send-recipient')).toHaveAttribute(
+      'title',
+      facts.recipientAddress,
+    );
     await page.getByText('What the proof cost').click();
     const proverText = await page.getByTestId('send-prover').innerText();
     measurements.push({
