@@ -121,7 +121,7 @@ li a,
 }
 
 .masthead__sep {
-  color: var(--text-dim);
+  color: var(--text-muted);
 }
 
 .masthead__status--warn {
@@ -493,7 +493,7 @@ p {
   font-family: var(--font-mono);
   font-size: var(--fs-label);
   letter-spacing: var(--ls-wide);
-  color: var(--text-secondary);
+  color: var(--text-primary);
   background: var(--bg-raised);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -541,6 +541,22 @@ p {
 .notice p {
   color: inherit;
   margin: 0;
+}
+
+/*
+ * A sentence is 13 px in a hand, whatever box it is in.
+ *
+ * 11 px is this scale's label size, and the scale is MyMonero's, which is a
+ * pointer's. The notes under the values carry real sentences: the seed
+ * rotation runs to four lines at 375 px and the settled-nullifier note to
+ * three. They are 11 px again from 641 px up, which is the width the scale
+ * came from. Qloak's notes do the same thing.
+ */
+@media (max-width: 640px) {
+  .notice,
+  .field__note {
+    font-size: var(--fs-body);
+  }
 }
 
 .notice p + p {
@@ -738,6 +754,19 @@ tbody tr:has(.row-link a:focus-visible) {
 
 tbody tr:hover {
   background: var(--bg-hover);
+}
+
+/*
+ * A row under a finger is 44 px.
+ *
+ * The width query is not enough on its own: a tablet in portrait is 768 px
+ * wide and is still tapped, and the rows there were 31 px like everywhere
+ * else.
+ */
+@media (max-width: 640px), (pointer: coarse) {
+  tbody td {
+    padding-block: 13px;
+  }
 }
 
 /* Muted on the hovered row is 3.34:1 in dark, and the hovered row is the one
