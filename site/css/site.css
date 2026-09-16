@@ -464,9 +464,14 @@ svg {
   margin-right: auto;
 }
 
-/* The nav's order is the reading order the header row shows. The theme
-   control sits last on a wide screen and at the end of the wordmark row on a
-   phone, where the nav is a row of its own. */
+/* The theme control sits last on a wide screen and at the right of the
+   wordmark row on a phone, where the nav is a row of its own. It is third in
+   the markup so that the phone's tab order is the phone's reading order:
+   wordmark, control, then the nav row under them. The cost is on a wide
+   screen, where the control is reached one stop before the nav it sits to the
+   right of. The site has one such control, it carries its own label, and
+   nothing in the header is unreachable either way, so the phone wins the
+   tie. */
 .site-header .theme-toggle {
   order: 3;
 }
