@@ -88,20 +88,14 @@
         <p id="result" class="result" role="status" hidden></p>
       </form>
 
-      <section class="panel panel--quiet">
-        <h2>What it does not do</h2>
-        <ul class="list">
-          <li>It pays one address at a time and refuses a second claim inside the cooldown.</li>
-          <li>
-            It cannot pay transparent QNR. There is no transparent transfer on this chain, so the
-            funds appear in your wallet once it has synced, and there is no public ledger entry to
-            look up.
-          </li>
-          <li>
-            These tokens are worth nothing. The network may be reset without notice, which takes
-            every balance on it with it.
-          </li>
-        </ul>
+      <section class="before">
+        <h2 class="before__label">Before you claim</h2>
+        <p>These tokens are worth nothing, and the network may be reset without notice.</p>
+        <p>
+          A payment on Qnero shows only in the receiving wallet, after it syncs. There is nothing
+          to look up on silQ Road.
+        </p>
+        <p>One claim per address per <!--COOLDOWN-->.</p>
       </section>
     </main>
 

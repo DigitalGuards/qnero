@@ -258,11 +258,6 @@ h1 {
   margin: 0 0 var(--space-2);
 }
 
-h2 {
-  font-size: 1.1rem;
-  margin: 0 0 var(--space-2);
-}
-
 p {
   max-width: var(--measure);
 }
@@ -311,11 +306,6 @@ code {
   box-shadow: var(--shadow-raised);
   padding: var(--space-4);
   margin: var(--space-4) 0;
-}
-
-.panel--quiet {
-  background: transparent;
-  box-shadow: none;
 }
 
 .label {
@@ -550,15 +540,34 @@ code {
   color: var(--bad);
 }
 
-.list {
-  margin: 0;
-  padding-left: 1.2em;
-  max-width: var(--measure);
-  color: var(--text-secondary);
-  font-size: 13px;
+/* Three things a reader should know, under a run-in label. They were a second
+   bordered box of exactly the form panel's weight, 274 px against the form's
+   151 px at 375 px, so the warnings were 1.8 times the size of the action and
+   the page had two boxes competing. In light its border was 1.32:1 against the
+   page, a box that half existed. A heading beginning "What it does not do"
+   also framed the page as a refusal before the reader had asked for anything.
+   The order is the reset warning first, because that is the truth that
+   changed this week. */
+.before {
+  margin-top: var(--space-4);
 }
 
-.list li + li {
+.before__label {
+  margin: 0 0 var(--space-2);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.before p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.before p + p {
   margin-top: var(--space-2);
 }
 
