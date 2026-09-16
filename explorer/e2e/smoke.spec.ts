@@ -358,7 +358,7 @@ test('search answers a height, a block hash and a settled nullifier', async ({ p
   );
 });
 
-test('genesis and an unknown hash are pages, not stack traces', async ({ page }) => {
+test('genesis and an unknown hash each render as a page with a way out', async ({ page }) => {
   await open(page, '#/block/0');
   await expect(page.getByRole('heading', { name: 'Block 0' })).toBeVisible();
   // Genesis names an all-zero parent that is no block on this chain, so the

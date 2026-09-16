@@ -295,15 +295,15 @@ export function Home(): ReactNode {
               </span>
             }
             note={
-              // The observed time and not the target: difficulty is expected
-              // hashes per block, so dividing by what the chain actually took
-              // is what measures the network. A chain running ahead of or
-              // behind its target reads as the rate it really has.
+              // Difficulty is expected hashes per block, so dividing by what
+              // the chain actually took is what measures the network. A chain
+              // running ahead of or behind its target reads as the rate it
+              // really has, which is why the target stays out of this.
               constants === null || constants.targetBlockTimeMs === null
                 ? 'estimated from difficulty and the observed block time'
-                : `estimated from difficulty and the observed block time, not the ${formatSeconds(
+                : `estimated from difficulty and the observed block time. The ${formatSeconds(
                     constants.targetBlockTimeMs,
-                  )} target`
+                  )} target is no part of it`
             }
           />
           <Field

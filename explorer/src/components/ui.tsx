@@ -180,10 +180,10 @@ export interface SkeletonPanel {
  * One line on 667 px of screen reads as a broken page rather than as progress.
  *
  * So the head and the panel frames render at once with their titles, and the
- * values are short muted rules until they are values. The movement that says
- * the page is working is the one 2 px bar under the header, not here. The
- * rules carry no information, so they are hidden from a reader who is being
- * read to; the masthead's status slot is what speaks.
+ * values are short muted rules until they are values. The rules carry no
+ * information, so they are hidden from a reader who is being read to; the
+ * masthead's status slot is what speaks, and the movement that says the page
+ * is working is the one 2 px bar under the header.
  */
 export function PageSkeleton({
   title,

@@ -9,8 +9,8 @@
  * A walk also ends where the node stops answering. A node keeps state for a
  * bounded number of finalized blocks and this chain finalizes its reorg depth
  * behind the tip, so a default-pruned node holds only a few hundred blocks of
- * state. Reaching the bottom of that is a boundary the answer names, not an
- * error that takes the page down.
+ * state. Reaching the bottom of that is a boundary the answer names rather
+ * than an error that takes the page down.
  */
 
 import { blockHashAt, fetchBlockState, fetchDetail, type BlockDetail } from './blocks';
