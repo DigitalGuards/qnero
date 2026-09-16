@@ -21,6 +21,33 @@ use std::{path::PathBuf, process::Command};
 
 const NODE: &str = env!("CARGO_BIN_EXE_qnero-node");
 
+/// Check source locations before compaction/compression can hide their bytes.
+#[test]
+fn runtime_wasm_uses_portable_source_paths() {
+	let Some(wasm) = qnero_runtime::WASM_BINARY_BLOATY else {
+		assert!(std::env::var_os("SKIP_WASM_BUILD").is_some(), "runtime WASM is required");
+		return;
+	};
+	assert!(wasm.starts_with(b"\0asm"), "inspect the uncompressed runtime");
+	let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+	let source = manifest.parent().unwrap().parent().unwrap();
+	let mut prefixes = vec![source.to_string_lossy().into_owned()];
+	for name in ["CARGO_HOME", "HOME", "USERPROFILE"] {
+		if let Some(path) = std::env::var_os(name) {
+			let prefix = path.to_string_lossy().into_owned();
+			if prefix.len() > 1 {
+				prefixes.push(prefix);
+			}
+		}
+	}
+	for prefix in prefixes {
+		assert!(
+			!wasm.windows(prefix.len()).any(|bytes| bytes == prefix.as_bytes()),
+			"runtime contains a local source or home path; inspect build-script remapping"
+		);
+	}
+}
+
 fn committed_spec_path() -> PathBuf {
 	PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("chain-specs/qnero-testnet.json")
 }
