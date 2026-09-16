@@ -612,7 +612,7 @@ h1 .mark {
 }
 
 .band--hero {
-  padding-block: clamp(40px, 6vw, 80px) var(--band-y);
+  padding-block: clamp(32px, 6vw, 80px) var(--band-y);
 }
 
 .band__label {
@@ -778,6 +778,15 @@ h1 .mark {
 .btn--ghost:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* 44 px on a phone, the floor every tap target on this site keeps. Desktop
+   holds MyMonero's 32. */
+@media (max-width: 640px) {
+  .btn {
+    min-height: 44px;
+    padding: 0.9em 1.5rem;
+  }
 }
 
 /* An M11 address: the host as a link, in the mono face the rest of the site
