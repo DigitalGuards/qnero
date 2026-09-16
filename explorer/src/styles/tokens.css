@@ -40,8 +40,14 @@
 
   --accent: #8a4b06;
   --accent-hover: #6f3c05;
-  --accent-fill: #8a4b06;
-  --accent-on-fill: #ffffff;
+  /* The amber is the identity, and a filled ground owes contrast to its own
+     label rather than to the page: #161416 on #e6a145 is 8.33:1 in either
+     theme. So the one primary on a screen is the same amber in both, the way
+     the site's and Qloak's are, and the dark amber above stays for the text
+     that sits on the page itself. */
+  --accent-fill: #e6a145;
+  --accent-fill-hover: #f2b968;
+  --accent-on-fill: #161416;
   --destructive: #a32020;
   --notice: #6b4a00;
   --notice-bg: rgba(184, 134, 11, 0.1);
@@ -108,6 +114,7 @@
     --accent: #e6a145;
     --accent-hover: #f2b968;
     --accent-fill: #e6a145;
+    --accent-fill-hover: #f2b968;
     --accent-on-fill: #161416;
     --destructive: #f97777;
     --notice: #f5e67e;
@@ -139,6 +146,7 @@
   --accent: #e6a145;
   --accent-hover: #f2b968;
   --accent-fill: #e6a145;
+  --accent-fill-hover: #f2b968;
   --accent-on-fill: #161416;
   --destructive: #f97777;
   --notice: #f5e67e;

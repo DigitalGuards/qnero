@@ -868,8 +868,8 @@ tbody tr:hover .dim {
 }
 
 .button--action:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
+  background: var(--accent-fill-hover);
+  border-color: var(--accent-fill-hover);
 }
 
 .input {
