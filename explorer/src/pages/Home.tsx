@@ -414,7 +414,7 @@ export function Home(): ReactNode {
           recent.value.length === 0 ? (
             <Empty>No blocks yet.</Empty>
           ) : (
-            <RecentBlocks blocks={recent.value} />
+            <RecentBlocks blocks={recent.value} label="Recent blocks, newest first" />
           )
         ) : null}
       </Panel>

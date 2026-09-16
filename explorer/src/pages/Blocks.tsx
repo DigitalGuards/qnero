@@ -46,7 +46,7 @@ export function Blocks({ before }: { before: number | null }): ReactNode {
           blocks.value.length === 0 ? (
             <Empty>No blocks in this range.</Empty>
           ) : (
-            <RecentBlocks blocks={blocks.value} />
+            <RecentBlocks blocks={blocks.value} label={`Blocks from height ${formatCount(top)}, newest first`} />
           )
         ) : null}
         <div className="pager">

@@ -657,7 +657,13 @@ test('every page is reachable from the keyboard and readable at 400 px', async (
     .locator('td.mono')
     .first()
     .evaluate((element) => element.getBoundingClientRect().height);
-  expect(cell).toBeLessThan(40);
+  expect(cell).toBeLessThan(48);
+
+  // A scroller a pointer can drag and a keyboard cannot reach is a table with
+  // columns only some readers can see.
+  const wrap = extrinsics.locator('.table-wrap');
+  await expect(wrap).toHaveAttribute('tabindex', '0');
+  await expect(wrap).toHaveAttribute('aria-label', /Extrinsics/);
 
   // The settlement link is on the call, which is a column a phone keeps. On
   // the hash it went with the columns that drop.

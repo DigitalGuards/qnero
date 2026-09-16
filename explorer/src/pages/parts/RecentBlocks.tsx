@@ -3,7 +3,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { href } from '../../app/router';
 import type { BlockSummary } from '../../chain/blocks';
 import { formatAgo, formatCount, formatQnr } from '../../lib/units';
-import { Hash } from '../../components/ui';
+import { Hash, TableWrap } from '../../components/ui';
 
 /**
  * The clock the ages are read against.
@@ -65,10 +65,16 @@ function age(timestampMs: number | null, now: number): ReactNode {
  * nothing across blocks, so clipping the coinbase amount to keep it would be
  * trading a number for a label.
  */
-export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): ReactNode {
+export function RecentBlocks({
+  blocks,
+  label = 'Blocks, newest first',
+}: {
+  blocks: readonly BlockSummary[];
+  label?: string;
+}): ReactNode {
   const now = useSecond();
   return (
-    <div className="table-wrap">
+    <TableWrap label={label}>
       <table>
         <thead>
           <tr>
@@ -137,6 +143,6 @@ export function RecentBlocks({ blocks }: { blocks: readonly BlockSummary[] }): R
           ))}
         </tbody>
       </table>
-    </div>
+    </TableWrap>
   );
 }

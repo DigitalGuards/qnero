@@ -30,6 +30,7 @@ import {
   Notice,
   PageSkeleton,
   Panel,
+  TableWrap,
   Why,
 } from '../components/ui';
 import { Problem } from './parts/Problem';
@@ -390,7 +391,7 @@ export function Block({ id }: { id: string }): ReactNode {
                 moment it is burned.
               </p>
             </Why>
-            <div className="table-wrap">
+            <TableWrap label="Shield entries in this block">
               <table>
                 <thead>
                   <tr>
@@ -431,7 +432,7 @@ export function Block({ id }: { id: string }): ReactNode {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableWrap>
           </>
         )}
       </Panel>
@@ -477,7 +478,7 @@ function RefusedCalls({ block }: { block: BlockDetail }): ReactNode {
         </>
       )}
       {block.failures.length === 0 ? null : (
-        <div className="table-wrap">
+        <TableWrap label="Refused and failed calls in this block">
           <table>
             <thead>
               <tr>
@@ -503,7 +504,7 @@ function RefusedCalls({ block }: { block: BlockDetail }): ReactNode {
               })}
             </tbody>
           </table>
-        </div>
+        </TableWrap>
       )}
     </Panel>
   );
@@ -540,7 +541,7 @@ function OtherExtrinsics({
   }
   return (
     <Panel title={`Extrinsics (${formatCount(block.extrinsics.length)})`}>
-      <div className="table-wrap">
+      <TableWrap label="Extrinsics in this block">
         <table>
           <thead>
             <tr>
@@ -594,7 +595,7 @@ function OtherExtrinsics({
             ))}
           </tbody>
         </table>
-      </div>
+      </TableWrap>
     </Panel>
   );
 }

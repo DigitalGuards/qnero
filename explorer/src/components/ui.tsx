@@ -33,6 +33,23 @@ export function Fields({ children }: { children: ReactNode }): ReactNode {
 }
 
 /**
+ * A table that may be wider than the column it sits in.
+ *
+ * The phone layouts keep the columns that carry the answer, and a long call
+ * name still runs past the edge. The wrapper takes focus and carries a name,
+ * because a scroll container a pointer can drag and a keyboard cannot reach is
+ * a table with columns only some readers can see. The edge shadow says which
+ * side is cut off.
+ */
+export function TableWrap({ label, children }: { label: string; children: ReactNode }): ReactNode {
+  return (
+    <div className="table-wrap" tabIndex={0} role="region" aria-label={label}>
+      {children}
+    </div>
+  );
+}
+
+/**
  * One labelled value.
  *
  * `display` is the balance treatment Qloak has and this site did not: every
