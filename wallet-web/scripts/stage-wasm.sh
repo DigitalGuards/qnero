@@ -26,6 +26,36 @@ if [[ ! -f "${crate_dir}/www/pkg/qnero_prover_wasm.js" ]]; then
     exit 1
 fi
 
+# The built module has to be as new as the crate's surface, or the bundle
+# ships calling exports that are not there. That happened on 2026-09-17: the
+# crate gained `readStateProof`, the deploy staged a module built three days
+# earlier, and every wallet screen that read state died with "readStateProof
+# is not a function". Nothing in the build catches it, because the module is
+# fetched at runtime and never typed against. So it is checked here: every
+# top-level `js_name` the crate declares must appear in the generated glue.
+check_exports() {
+    local glue="$1" label="$2" missing=""
+    local name
+    while read -r name; do
+        if ! grep -qw "${name}" "${glue}"; then
+            missing="${missing} ${name}"
+        fi
+    done < <(grep -oE '^#\[wasm_bindgen\(js_name = [A-Za-z0-9_]+' "${crate_dir}/src/lib.rs" \
+        | sed 's/.*= //' | sort -u)
+    if [[ -n "${missing}" ]]; then
+        cat >&2 <<MSG
+the ${label} prover is stale: the crate exports${missing} and the built module
+does not. Rebuild it before staging:
+
+    ${crate_dir#"${repo_dir}"/}/scripts/build-wasm.sh
+    ${crate_dir#"${repo_dir}"/}/scripts/build-threaded-wasm.sh
+MSG
+        exit 1
+    fi
+}
+
+check_exports "${crate_dir}/www/pkg/qnero_prover_wasm.js" single-threaded
+
 mkdir -p "${out_dir}"
 cp "${crate_dir}/www/pkg/qnero_prover_wasm.js" "${out_dir}/"
 cp "${crate_dir}/www/pkg/qnero_prover_wasm_bg.wasm" "${out_dir}/"
@@ -34,6 +64,7 @@ echo "staged the single-threaded prover into public/wasm/"
 if [[ "${want_threaded}" == "1" ]]; then
     threaded_pkg="${crate_dir}/www/pkg-threaded"
     if [[ -f "${threaded_pkg}/qnero_prover_wasm.js" ]]; then
+        check_exports "${threaded_pkg}/qnero_prover_wasm.js" threaded
         rm -rf "${out_dir}/threaded"
         mkdir -p "${out_dir}/threaded"
         # Recursive: wasm-bindgen-rayon emits a `snippets/` directory beside

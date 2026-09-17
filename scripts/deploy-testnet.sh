@@ -9,7 +9,8 @@
 #   node      build qnero-node and qnero-faucet, copy both, restart the units
 #   spec      copy the committed raw chain spec (does NOT restart anything)
 #   site      build nothing, rsync site/
-#   wallet    build Qloak against wss://rpc.<domain>, rsync wallet-web/dist/
+#   wallet    rebuild the wasm prover, build Qloak against wss://rpc.<domain>,
+#             rsync wallet-web/dist/
 #   explorer  build silQ Road, rsync explorer/dist/
 #   config    write the two runtime config.json files
 #
@@ -259,6 +260,16 @@ if has_stage wallet; then
   (
     cd "$here/wallet-web"
     nice -n 19 npm ci
+    # The prover is rebuilt here rather than staged from whatever build is
+    # lying in the crate. A stale module is a wallet whose screens die on an
+    # export that is not there, and the bundle cannot know: the module is
+    # fetched at runtime, never imported, never typed. stage-wasm.sh also
+    # refuses a module missing an export the crate declares, as the backstop.
+    (
+      cd "$here/crates/qnero-prover-wasm"
+      "${build_nice[@]}" ./scripts/build-wasm.sh
+      "${build_nice[@]}" ./scripts/build-threaded-wasm.sh
+    )
     ./scripts/stage-wasm.sh --threaded
     # Pinning the endpoint at build time narrows the bundle's own
     # content-security-policy from `connect-src 'self' ws: wss:` to this one
