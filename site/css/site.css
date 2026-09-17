@@ -3,137 +3,24 @@
  *
  * One stylesheet, no build step, no third-party request.
  *
- * The surface ramp, the two-part elevation recipe (a half-pixel inset
- * highlight over a one-pixel dark shadow), the 13/12/11/10 px scale with
- * 0.5 px tracking and the 3 px and 5 px radii are carried over from
- * MyMonero's stylesheet (BSD-3-Clause, see NOTICE). The accent is Qnero's
- * own. The token names and values match the two Qnero apps, so the site,
- * Qloak and silQ Road read as one project: explorer/src/styles/tokens.css
- * is the source of truth for everything below the display sizes. Three
- * tokens here are the site's own and have no counterpart there: in light,
- * --accent-fill and --accent-on-fill are the amber pair rather than the
- * apps' #8a4b06 on #ffffff, because the site's filled controls sit on their
- * own ground; --accent-fill-hover, --mark and --col-self-* exist only here.
+ * The palette, the font stacks and the corner radius are not here: they are
+ * `brand-tokens.css` and `brand-fonts.css`, copied in from brand/ by
+ * `scripts/sync-brand.mjs` and linked ahead of this file by every page. That
+ * is the whole of the brand, shared with Qloak, silQ Road and the faucet, so
+ * the four cannot drift the way four hand-maintained copies of one palette
+ * had. `scripts/sync-brand.mjs --check` fails if a copy is stale and
+ * `scripts/check-contrast.mjs` measures every pair.
  *
- * Dark is the default. A reader whose system asks for light gets the light
- * palette, and the toggle wins over both.
+ * What is below is this site's own: a display type scale the apps have no use
+ * for, the band rhythm, the container and the gutter.
  *
- * Contrast: --text-muted carries labels, table headers and provenance notes
- * at 10 to 11 px and clears 4.5:1 on every ground this sheet paints.
- * --text-dim and --shadow-float are held so this block stays a copy of the
- * apps' and are used by no rule here.
+ * The 13/12/11/10 px scale with 0.5 px tracking, the two-part elevation recipe
+ * and the surface ramp are carried over from MyMonero's stylesheet
+ * (BSD-3-Clause, see NOTICE).
+ *
+ * Dark is the brand's default and `brand-tokens.css` sets it. A reader whose
+ * system asks for light gets the light palette, and the toggle wins over both.
  */
-
-:root {
-  --bg-deep: #161416;
-  --bg-body: #272527;
-  --bg-panel: #1d1b1d;
-  --bg-raised: #383638;
-  --bg-hover: #3f3e3f;
-  --border: #494749;
-  --border-strong: #6d6b6d;
-
-  --text-primary: #fcfbfc;
-  --text-bright: #ffffff;
-  --text-secondary: #9e9c9e;
-  --text-muted: #909090;
-  --text-dim: #6b696b;
-
-  --accent: #e6a145;
-  --accent-hover: #f2b968;
-  --accent-fill: #e6a145;
-  --accent-fill-hover: #f2b968;
-  --accent-on-fill: #161416;
-  --mark: #e6a145;
-  --band-accent-bg: #1f1a14;
-  --col-self-bg: #2c2418;
-  --col-self-hover: #3a2f1c;
-
-  --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
-  --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
-  --shadow-edge: rgba(255, 255, 255, 0.22);
-  --shadow-edge-fade: rgba(255, 255, 255, 0);
-
-  color-scheme: dark;
-}
-
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme='dark']) {
-    --bg-deep: #f4f2f0;
-    --bg-body: #fbfaf9;
-    --bg-panel: #ffffff;
-    --bg-raised: #f0eeec;
-    --bg-hover: #e9e6e3;
-    --border: #d8d4d0;
-    --border-strong: #8f8a86;
-
-    --text-primary: #1b1a19;
-    --text-bright: #000000;
-    --text-secondary: #55514e;
-    --text-muted: #6a6460;
-    --text-dim: #948d88;
-
-    /* --accent is dark because it carries link text on a near-white ground.
-       --accent-fill is a ground of its own and only owes contrast to its own
-       label, so it keeps the amber the favicon and the card lead with:
-       #e6a145 under #161416 measures 8.33:1, and --accent-fill-hover is the
-       lighter amber at 10.40:1. --accent-hover is the wrong token for a filled
-       ground here: #161416 on #6f3c05 measures 2.03:1.
-       --mark is the identity Q. A logotype is exempt from the 4.5:1 text rule
-       (WCAG 1.4.3, logotypes), so it keeps #e6a145 in both themes: at #9c5c05
-       it read as brown beside a black wordmark while the amber primary button
-       sat next to it, which split the identity colour from the accent. */
-    --accent: #8a4b06;
-    --accent-hover: #6f3c05;
-    --accent-fill: #e6a145;
-    --accent-fill-hover: #f2b968;
-    --accent-on-fill: #161416;
-    --mark: #e6a145;
-    --band-accent-bg: #f8f1e4;
-    --col-self-bg: #f8f1e4;
-    --col-self-hover: #f0e4cd;
-
-    --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
-    --shadow-float: 0 1px 4px 0 rgba(27, 26, 25, 0.16);
-    --shadow-edge: rgba(27, 26, 25, 0.25);
-    --shadow-edge-fade: rgba(27, 26, 25, 0);
-
-    color-scheme: light;
-  }
-}
-
-:root[data-theme='light'] {
-  --bg-deep: #f4f2f0;
-  --bg-body: #fbfaf9;
-  --bg-panel: #ffffff;
-  --bg-raised: #f0eeec;
-  --bg-hover: #e9e6e3;
-  --border: #d8d4d0;
-  --border-strong: #8f8a86;
-
-  --text-primary: #1b1a19;
-  --text-bright: #000000;
-  --text-secondary: #55514e;
-  --text-muted: #6a6460;
-  --text-dim: #948d88;
-
-  --accent: #8a4b06;
-  --accent-hover: #6f3c05;
-  --accent-fill: #e6a145;
-  --accent-fill-hover: #f2b968;
-  --accent-on-fill: #161416;
-  --mark: #e6a145;
-  --band-accent-bg: #f8f1e4;
-  --col-self-bg: #f8f1e4;
-  --col-self-hover: #f0e4cd;
-
-  --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
-  --shadow-float: 0 1px 4px 0 rgba(27, 26, 25, 0.16);
-  --shadow-edge: rgba(27, 26, 25, 0.25);
-  --shadow-edge-fade: rgba(27, 26, 25, 0);
-
-  color-scheme: light;
-}
 
 :root {
   /* 28 px at 375 and 44 px at 1280. One step down from the size the wordmark
@@ -156,20 +43,12 @@
   --space-4: 20px;
   --space-5: 32px;
 
-  --radius-sm: 3px;
-  --radius-md: 5px;
-
   --band-y: clamp(48px, 7vw, 96px);
   --gutter: 20px;
   --container: 1160px;
   /* A character measure, in em so it tracks the element's own size: a `ch`
      or px cap set once would leave an 11 px note at a third of a box. */
   --measure: 36em;
-
-  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
-    'Open Sans', 'Helvetica Neue', sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono',
-    'Liberation Mono', monospace;
 }
 
 @media (min-width: 768px) {
@@ -210,15 +89,28 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Headings take Archivo's width axis: 125% for the page title, which is the
+   one line a reader sees first, and 110% below it. The weights are the brand's
+   800 and 700. Until Archivo loads, `font-stretch` is inert and the fallback
+   sets at its own width -- that is the cost of `font-display: swap`, and it is
+   cheaper than blocking the first paint on a font. */
 h1,
 h2,
 h3,
 h4 {
   line-height: 1.2;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-weight: 700;
+  font-stretch: var(--stretch-heading);
+  letter-spacing: -0.015em;
   margin: 0;
   color: var(--text-bright);
+}
+
+h1 {
+  font-weight: 800;
+  font-stretch: var(--stretch-display);
+  letter-spacing: -0.02em;
+  line-height: 1.04;
 }
 
 p {
@@ -269,7 +161,12 @@ code {
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 0.05em 0.35em;
+  /* 0.3em, not 0.35em. IBM Plex Mono sets wider than the system mono this
+     replaced, and on a broken chip Chromium hangs the cloned fragment's
+     trailing padding and border past the line box rather than breaking a word
+     earlier: at 0.35em the `cm = H(CM, ...)` formula on how-it-works.html
+     overhung its column by 2 px at 400 px. tools/check-layout.mjs measures it. */
+  padding: 0.05em 0.3em;
   white-space: nowrap;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
@@ -428,8 +325,8 @@ svg {
   height: 7px;
   border-radius: 50%;
   /* A 7px dot carries no text and owes no text contrast, so it takes the fill
-     token and stays the one identity amber in both themes. `--accent` is for
-     text and focus rings, where the darker light value is the correct one. */
+     token and stays the one identity orange in both themes. `--accent` is for
+     text and focus rings, where Ember ink is the correct light value. */
   background: var(--accent-fill);
   transform: translateY(-1px);
 }
@@ -455,13 +352,28 @@ svg {
   padding-block: var(--space-3);
 }
 
+/* The wordmark: the mark, then the name in the brand's display face. Archivo
+   at 800 on the wide end of its width axis is how `Qnero` is set everywhere,
+   so the tracking the old wordmark added by hand is the width axis's job now. */
 .wordmark {
-  font-size: 1.05rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  font-size: 1.15rem;
+  font-weight: 800;
+  font-stretch: var(--stretch-display);
+  letter-spacing: -0.01em;
   color: var(--text-bright);
   text-decoration: none;
   margin-right: auto;
+}
+
+/* The mark scales with the wordmark rather than sitting at a fixed 22 px, so a
+   reader who has raised their browser's text size gets a mark to match. */
+.wordmark__mark {
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
 }
 
 /* The theme control sits last on a wide screen and at the right of the
@@ -480,12 +392,17 @@ svg {
   color: var(--text-bright);
 }
 
-/* The Q is the identity, and the favicon and the open-graph card both paint it
-   amber. --accent is a link colour and goes dark brown in light, so the mark
-   carries --mark instead and stays amber in both themes. */
-.wordmark .mark,
-h1 .mark {
-  color: var(--mark);
+/* Three squares on the text ramp and a fourth lit: a 4-ary Poseidon node with
+   one leaf stepping out. --accent is a link colour and goes to Ember ink in
+   light, so the lit leaf carries --mark instead and stays #FF6600 in both
+   themes -- a logotype is exempt from the 4.5:1 text rule (WCAG 1.4.3,
+   logotypes), which is what lets it.
+
+   `fill` is set here and not as a presentation attribute on the rect: `var()`
+   is not substituted in presentation attributes, so `fill="var(--mark)"` in
+   the markup would paint the leaf black. */
+.wordmark__leaf {
+  fill: var(--mark);
 }
 
 .nav {
@@ -835,8 +752,8 @@ h1 .mark {
 
 /* --accent-hover is a link-text token and is darker than --accent, which is
    right on a near-white ground and wrong under a near-black label: in light it
-   would put #161416 on #6f3c05 at 2.03:1. The filled hover goes the other way,
-   to the lighter amber, 10.40:1. */
+   would put #141312 on #943600 at 2.5:1. The filled hover goes the other way,
+   to the lighter orange, 7.65:1. */
 .btn--primary:hover {
   background: var(--accent-fill-hover);
   color: var(--accent-on-fill);
@@ -920,8 +837,8 @@ h1 .mark {
 
 .status-panel {
   max-width: var(--measure);
-  /* Same rule as the strip's dot: a 3px rail is not text. This is the amber the
-     comparison table's column rails already use. */
+  /* Same rule as the strip's dot: a 3px rail is not text. This is the orange
+     the comparison table's column rails already use. */
   border-left: 3px solid var(--accent-fill);
 }
 
@@ -1271,11 +1188,11 @@ tbody tr:hover td.col-self {
   }
 }
 
-/* --band-accent-bg is tuned against --bg-deep and is invisible on the panel
-   ground a cell sits on: in dark, #1f1a14 over #1d1b1d is 1.009:1. The cell
-   tint is its own token, and the two amber rails carry the mark whatever the
-   ground and whatever the hover does, the way .d-accent strokes the settlement
-   box rather than trusting its fill. */
+/* --band-accent-bg is tuned against --bg-deep and is near-invisible on the
+   panel ground a cell sits on: in dark, #241a12 over #1e1c1a is 1.004:1. The
+   cell tint is its own token, and the two orange rails carry the mark whatever
+   the ground and whatever the hover does, the way .d-accent strokes the
+   settlement box rather than trusting its fill. */
 .col-self {
   background: var(--col-self-bg);
   box-shadow:

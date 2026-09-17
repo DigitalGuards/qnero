@@ -1,10 +1,13 @@
 //! The one page this server serves, in the project site's type.
 //!
-//! Four files, none of them inline, so the content policy the runbook writes
-//! for `faucet.<domain>` can say `script-src 'self'` and mean it. The tokens
-//! are `site/css/site.css`'s, copied rather than linked because the faucet is
-//! its own origin and a cross-origin stylesheet would be one more request and
-//! one more thing to get wrong in a policy.
+//! Every file is served from this origin and none is inline, so the content
+//! policy the runbook writes for `faucet.<domain>` can say `script-src 'self'`
+//! and mean it. The palette, the two typefaces and the mark are brand/'s,
+//! copied in by `scripts/sync-brand.mjs` and compiled into this binary, rather
+//! than linked from the site: the faucet is its own origin, and a cross-origin
+//! stylesheet would be one more request and one more thing to get wrong in a
+//! policy. The fonts are served here for the same reason they are self-hosted
+//! everywhere else -- a font CDN would see every visitor's address.
 //!
 //! The Turnstile widget is the one third-party element, and it appears only
 //! when a site key is configured. With no key the page has no outbound
@@ -14,10 +17,23 @@ use crate::config::Config;
 
 pub const APP_CSS: &str = include_str!("assets/app.css");
 pub const APP_JS: &str = include_str!("assets/app.js");
-/// The project site's own icon, byte for byte (`site/img/favicon.svg`). The
-/// faucet is its own origin, so a browser asks this origin for `/favicon.svg`
-/// and got a 404: the amber Q beside every other tab in the family, and a
-/// default globe beside this one.
+/// The shared palette and the `@font-face` block, byte for byte the same files
+/// the site, Qloak and silQ Road load. `scripts/sync-brand.mjs --check` fails
+/// if these copies drift from `brand/`.
+pub const BRAND_TOKENS_CSS: &str = include_str!("assets/brand-tokens.css");
+pub const BRAND_FONTS_CSS: &str = include_str!("assets/brand-fonts.css");
+
+/// The two typefaces, latin subsets, at the paths `brand-fonts.css` asks for.
+/// Both are OFL 1.1 and the licence text ships beside them in `assets/fonts/`.
+pub const FONT_ARCHIVO: &[u8] = include_bytes!("assets/fonts/archivo-variable-latin.woff2");
+pub const FONT_MONO_400: &[u8] = include_bytes!("assets/fonts/ibm-plex-mono-400-latin.woff2");
+pub const FONT_MONO_500: &[u8] = include_bytes!("assets/fonts/ibm-plex-mono-500-latin.woff2");
+pub const FONT_MONO_600: &[u8] = include_bytes!("assets/fonts/ibm-plex-mono-600-latin.woff2");
+
+/// The project's own mark, byte for byte (`brand/favicon.svg`). The faucet is
+/// its own origin, so a browser asks this origin for `/favicon.svg` and got a
+/// 404: the Qnero mark beside every other tab in the family, and a default
+/// globe beside this one.
 pub const FAVICON: &str = include_str!("assets/favicon.svg");
 const INDEX: &str = include_str!("assets/index.html");
 

@@ -1,5 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Qnero">
-  <rect width="32" height="32" rx="5" fill="#161416" />
-  <circle cx="15" cy="14.5" r="7.5" fill="none" stroke="#e6a145" stroke-width="3" />
-  <path d="M17.5 19.5 L24 26" fill="none" stroke="#e6a145" stroke-width="3" stroke-linecap="round" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Qnero">
+  <rect width="120" height="120" rx="19" fill="#141312" />
+  <rect x="22" y="22" width="34" height="34" rx="4" fill="#f4f2f0" />
+  <rect x="64" y="22" width="34" height="34" rx="4" fill="#f4f2f0" />
+  <rect x="22" y="64" width="34" height="34" rx="4" fill="#f4f2f0" />
+  <rect x="70" y="70" width="34" height="34" rx="4" fill="#ff6600" />
 </svg>

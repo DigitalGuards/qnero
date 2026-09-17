@@ -1,0 +1,66 @@
+/*
+ * Qnero's two typefaces, served from Qnero's own origin.
+ *
+ * Archivo (OFL 1.1) carries the width axis the brand's display type is drawn
+ * at, so the variable face is the one that ships: one file covers every weight
+ * from 100 to 900 and every width from 62% to 125%, which is smaller than the
+ * three static cuts it replaces. IBM Plex Mono (OFL 1.1) carries identifiers,
+ * hashes, endpoints and amounts at 400, 500 and 600.
+ *
+ * Latin subsets only (U+0000-00FF and the usual punctuation), which is what
+ * these four apps set: 132 KB for all four files. The licences travel with
+ * them in fonts/OFL-Archivo.txt and fonts/OFL-IBMPlexMono.txt, as OFL 1.1
+ * requires.
+ *
+ * Self-hosted, not fetched from a font CDN. Every app here states that it
+ * makes no third-party request, and a privacy coin whose front page hands a
+ * CDN each reader's IP address has broken that promise before the reader has
+ * read a word. `scripts/sync-brand.mjs` copies these files next to this
+ * stylesheet in each app, so `./fonts/` resolves in all four.
+ *
+ * `font-display: swap` paints the fallback immediately and swaps when the face
+ * arrives. Display type is set with `font-stretch`, which is inert until
+ * Archivo loads, so the swap changes width as well as shape: that is the cost
+ * of never blocking the first paint on a font.
+ */
+
+@font-face {
+  font-family: 'Archivo';
+  font-style: normal;
+  font-weight: 100 900;
+  font-stretch: 62% 125%;
+  font-display: swap;
+  src: url('./fonts/archivo-variable-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/ibm-plex-mono-400-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/ibm-plex-mono-500-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./fonts/ibm-plex-mono-600-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
