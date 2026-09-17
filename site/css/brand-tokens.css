@@ -1,0 +1,267 @@
+/*
+ * Qnero brand tokens. One file, four apps.
+ *
+ * This is the source of truth for every colour, every font stack and the
+ * corner radius across qnero.io, Qloak, silQ Road and the faucet. It is
+ * copied into each app by `scripts/sync-brand.mjs`, and
+ * `node scripts/sync-brand.mjs --check` fails if a copy has drifted, so the
+ * four hand-synced palettes this replaced cannot come apart again.
+ *
+ * What is NOT here: type scale, spacing and control heights. Those are app
+ * ergonomics rather than identity, and the apps disagree on purpose: Qloak
+ * sizes in `rem` so a browser's text preference scales the interface, while
+ * silQ Road and the site keep the 13/12/11/10 px scale. Each app keeps those
+ * tokens in its own stylesheet.
+ *
+ * Dark first. The identity is a dark one, so the bare `:root` carries the
+ * complete dark palette and a reader whose system asks for light gets the
+ * light block. Both `prefers-color-scheme` and `data-theme` redefine the same
+ * names in both directions, so the in-page toggle wins either way and a page
+ * whose JavaScript has not run still reads. All three toggles (site/js/theme.js,
+ * explorer/public/theme.js, wallet-web/src/app/theme.ts) set `data-theme` and
+ * remove it to fall back to the system, which is what makes that work.
+ *
+ * Contrast. Every text token is measured against the surface it actually
+ * lands on, and the ratios below are computed, not estimated:
+ *
+ *   --text-muted   carries field labels, table headers and provenance notes.
+ *                  6.7:1 on the dark panel, 5.2:1 on the light body. Clears
+ *                  4.5:1 everywhere it is used.
+ *   --text-dim     is a placeholder, a disabled control and a strip dot. It
+ *                  carries no prose anywhere; lift it to --text-muted first.
+ *   --border-strong is the edge that makes a control a control: 3.4:1 on the
+ *                  dark panel, 3.7:1 on the light one, clearing 3:1 (WCAG
+ *                  1.4.11) in both.
+ *   --accent       is link and label ink on the page's own ground: 5.8:1 on
+ *                  the dark panel, 5.5:1 on light.
+ *   --accent-fill  is a ground of its own and owes contrast only to the label
+ *                  on it: #141312 on #FF6600 measures 6.3:1, and 7.7:1 on the
+ *                  hover. So the one action a screen is for is the same orange
+ *                  in both themes, and all four apps read as one project.
+ *
+ * These ratios are not a claim: `node scripts/check-contrast.mjs` parses this
+ * file and fails on any pair below its bar, in all three blocks.
+ *
+ * Provenance. The surface ramp and the two-part elevation recipe (a half-pixel
+ * inset highlight over a one-pixel dark shadow) descend from MyMonero's
+ * stylesheet, BSD-3-Clause; see each app's NOTICE. The palette itself is
+ * Qnero's own, drawn from the brand canvas: Monero orange #FF6600 against a
+ * warm neutral ramp of Graphite, Coal, Seam, Ash and Bone.
+ */
+
+:root {
+  /* Graphite, Coal, Seam: the ground, the surface, the rules. */
+  --bg-deep: #141312;
+  --bg-body: #262320;
+  --bg-panel: #1e1c1a;
+  --bg-raised: #35312c;
+  --bg-field: #1e1c1a;
+  --bg-hover: #3d3832;
+  --border: #2e2b28;
+  --border-strong: #726e68;
+
+  /* Bone, then Ash. */
+  --text-primary: #f4f2f0;
+  --text-bright: #ffffff;
+  --text-secondary: #c9c3bb;
+  --text-muted: #a8a29a;
+  --text-dim: #7a736b;
+
+  /*
+   * Monero orange, one per view.
+   *
+   * In dark the link ink and the filled ground are the same value: #FF6600
+   * measures 5.8:1 as text on the panel and carries #141312 at 6.3:1 as a
+   * ground. In light they part, because orange text on near-white does not
+   * clear 4.5:1 -- see the light block.
+   */
+  --accent: #ff6600;
+  --accent-hover: #ff8533;
+  --accent-fill: #ff6600;
+  --accent-fill-hover: #ff8533;
+  --accent-on-fill: #141312;
+
+  /*
+   * The identity mark's orange, in both themes.
+   *
+   * A logotype is exempt from the 4.5:1 text rule (WCAG 1.4.3, logotypes), so
+   * the mark keeps #FF6600 on light grounds where --accent has to darken.
+   */
+  --mark: #ff6600;
+
+  /*
+   * Danger, pushed off the accent's hue.
+   *
+   * #FF6600 sits at 24 degrees. A conventional red lands within about 24
+   * degrees of it, so "do this" and "this destroys something" would read as
+   * one warm band. #FF5370 is at 350 degrees, far enough to separate at a
+   * glance, and measures 5.4:1 on the panel.
+   */
+  --destructive: #ff5370;
+  --destructive-fill: #ff5370;
+  --destructive-on-fill: #141312;
+  --positive: #7fd4a0;
+
+  /*
+   * The notice role, unsaturated on purpose.
+   *
+   * A yellow notice beside an orange accent leaves roughly 29 degrees between
+   * "do this" and "be careful", so the two read as one block. The warm hue is
+   * the accent's alone and appears on exactly one thing per screen: the action
+   * that screen is for. A notice is a strong border and the secondary ink,
+   * with an icon carrying "be careful" and the sentence carrying the rest.
+   * `wallet-web/tests/policy.test.ts` holds the separation at 60 degrees.
+   *
+   * Through `var()` rather than repeated in each block: the values are the
+   * ramp's own, so they follow it wherever the ramp is redefined.
+   */
+  --notice: var(--text-secondary);
+  --notice-bg: transparent;
+  --notice-border: var(--border-strong);
+
+  /* Site-only roles: the accent band and a highlighted comparison column. */
+  --band-accent-bg: #241a12;
+  --col-self-bg: #2e2119;
+  --col-self-hover: #3b2a1d;
+
+  /* Elevation: a shadow below, a highlight at the top edge. */
+  --shadow-raised: 0 0.5px 1px 0 #141312, inset 0 0.5px 0 0 #35312c;
+  --shadow-inset: 0 0.5px 0 0 rgba(53, 49, 44, 0.5), inset 0 0.5px 0 0 #141312;
+  --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
+  --shadow-modal: 0 8px 32px 0 rgba(0, 0, 0, 0.55);
+  --shadow-edge: rgba(255, 255, 255, 0.22);
+  --shadow-edge-fade: rgba(255, 255, 255, 0);
+
+  /*
+   * Archivo carries the width axis the brand's display type is drawn at:
+   * 125% for display, 110% for headings, 100% for body. A static fallback
+   * cannot reproduce that, so `font-stretch` is a no-op when Archivo has not
+   * loaded and the text still sets at a sane width.
+   *
+   * Both families are self-hosted (see brand/fonts.css). Neither is fetched
+   * from a third party: that is the rule the site and the explorer state for
+   * themselves, and a font CDN would hand every reader's IP to a third party
+   * on a privacy coin's own front page.
+   */
+  --font-ui: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu,
+    Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
+    'DejaVu Sans Mono', 'Liberation Mono', monospace;
+  /* Qloak spells these two `--font-stack-*`; both names resolve. */
+  --font-stack-ui: var(--font-ui);
+  --font-stack-mono: var(--font-mono);
+
+  --stretch-display: 125%;
+  --stretch-heading: 110%;
+  --stretch-body: 100%;
+
+  /* One radius, per the brand canvas. */
+  --radius-sm: 4px;
+  --radius-input: 4px;
+  --radius-md: 4px;
+
+  color-scheme: dark;
+}
+
+/*
+ * Light.
+ *
+ * The canvas draws the dark side only, so this ramp is derived from its two
+ * light values -- Bone #F4F2F0 as the ground and Ember ink #B84300 as orange
+ * text on it -- with every pair measured rather than eyeballed.
+ */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --bg-deep: #eae7e3;
+    --bg-body: #f4f2f0;
+    --bg-panel: #ffffff;
+    --bg-raised: #edeae6;
+    --bg-field: #f7f5f3;
+    --bg-hover: #e5e1dc;
+    --border: #d8d3cd;
+    --border-strong: #8a847c;
+
+    --text-primary: #1a1816;
+    --text-bright: #000000;
+    --text-secondary: #55504a;
+    --text-muted: #6a645c;
+    --text-dim: #948d84;
+
+    /*
+     * Ember ink for text, Monero orange for grounds.
+     *
+     * #FF6600 as text on near-white measures 2.9:1 and fails, so link and
+     * label ink darkens to #B84300 at 5.5:1 on the panel and 4.9:1 on the
+     * body. --accent-fill stays #FF6600, because a filled ground owes
+     * contrast to its own label and #141312 on it is 6.3:1 in either theme.
+     * --accent-hover is the wrong token for a filled ground here: #141312 on
+     * #943600 measures 2.5:1.
+     */
+    --accent: #b84300;
+    --accent-hover: #943600;
+    --accent-fill: #ff6600;
+    --accent-fill-hover: #ff8533;
+    --accent-on-fill: #141312;
+    --mark: #ff6600;
+
+    --destructive: #b3232c;
+    --destructive-fill: #b3232c;
+    --destructive-on-fill: #ffffff;
+    --positive: #1f6b3a;
+
+    --band-accent-bg: #fff0e6;
+    --col-self-bg: #fff0e6;
+    --col-self-hover: #ffe0cc;
+
+    --shadow-raised: 0 0.5px 1px 0 rgba(26, 24, 22, 0.16), inset 0 0.5px 0 0 #ffffff;
+    --shadow-inset: 0 0.5px 0 0 rgba(26, 24, 22, 0.08), inset 0 0.5px 0 0 rgba(26, 24, 22, 0.14);
+    --shadow-float: 0 1px 4px 0 rgba(26, 24, 22, 0.16);
+    --shadow-modal: 0 8px 32px 0 rgba(26, 24, 22, 0.28);
+    --shadow-edge: rgba(26, 24, 22, 0.25);
+    --shadow-edge-fade: rgba(26, 24, 22, 0);
+
+    color-scheme: light;
+  }
+}
+
+:root[data-theme='light'] {
+  --bg-deep: #eae7e3;
+  --bg-body: #f4f2f0;
+  --bg-panel: #ffffff;
+  --bg-raised: #edeae6;
+  --bg-field: #f7f5f3;
+  --bg-hover: #e5e1dc;
+  --border: #d8d3cd;
+  --border-strong: #8a847c;
+
+  --text-primary: #1a1816;
+  --text-bright: #000000;
+  --text-secondary: #55504a;
+  --text-muted: #6a645c;
+  --text-dim: #948d84;
+
+  --accent: #b84300;
+  --accent-hover: #943600;
+  --accent-fill: #ff6600;
+  --accent-fill-hover: #ff8533;
+  --accent-on-fill: #141312;
+  --mark: #ff6600;
+
+  --destructive: #b3232c;
+  --destructive-fill: #b3232c;
+  --destructive-on-fill: #ffffff;
+  --positive: #1f6b3a;
+
+  --band-accent-bg: #fff0e6;
+  --col-self-bg: #fff0e6;
+  --col-self-hover: #ffe0cc;
+
+  --shadow-raised: 0 0.5px 1px 0 rgba(26, 24, 22, 0.16), inset 0 0.5px 0 0 #ffffff;
+  --shadow-inset: 0 0.5px 0 0 rgba(26, 24, 22, 0.08), inset 0 0.5px 0 0 rgba(26, 24, 22, 0.14);
+  --shadow-float: 0 1px 4px 0 rgba(26, 24, 22, 0.16);
+  --shadow-modal: 0 8px 32px 0 rgba(26, 24, 22, 0.28);
+  --shadow-edge: rgba(26, 24, 22, 0.25);
+  --shadow-edge-fade: rgba(26, 24, 22, 0);
+
+  color-scheme: light;
+}
