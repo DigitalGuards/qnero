@@ -18,7 +18,20 @@ const site = resolve(here, '..');
 const from = process.env.PLAYWRIGHT_FROM || resolve(site, '../explorer/package.json');
 const { chromium } = createRequire(from)('playwright');
 
-const browser = await chromium.launch();
+/*
+ * Where the browser binary is.
+ *
+ * Playwright normally finds its own download. On a machine where Chromium is
+ * provisioned outside that cache -- a CI image, a container that ships one --
+ * `PLAYWRIGHT_CHROMIUM` names the executable and nothing has to be downloaded.
+ * Unset, this is exactly the default.
+ */
+function launchOptions() {
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM;
+  return executablePath ? { executablePath } : {};
+}
+
+const browser = await chromium.launch(launchOptions());
 try {
   const og = await browser.newPage({ viewport: { width: 1200, height: 630 } });
   await og.goto('file://' + resolve(here, 'og-template.html'));

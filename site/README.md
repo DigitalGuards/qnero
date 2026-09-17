@@ -72,8 +72,12 @@ server {
 Every host, path and certificate above is a placeholder. The site makes no
 outbound request, so no content policy of its own is required; a host that
 sends one can send `default-src 'none'; style-src 'self'; script-src 'self';
-img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
-and the pages still render, with the stored theme intact. That policy is the
+img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none';
+frame-ancestors 'none'` and the pages still render, with the stored theme
+intact. `font-src 'self'` is load-bearing: the two typefaces are served from
+this origin rather than from a font CDN, and under `default-src 'none'` a
+policy without it blocks them silently -- the text sets in the fallback stack
+and nothing reports a failure. That policy is the
 reason there is no inline script and no inline style anywhere in the eight
 files: `script-src 'self'` would block an inline theme bootstrap and discard a
 reader's choice on every load, silently and with no visible failure.

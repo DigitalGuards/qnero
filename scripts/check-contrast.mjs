@@ -76,13 +76,32 @@ function contrast(a, b) {
 const PAIRS = [
   ['--text-primary', '--bg-panel', 4.5, 'body text on a panel'],
   ['--text-primary', '--bg-body', 4.5, 'body text on the body'],
+  ['--text-primary', '--bg-deep', 4.5, 'body text on the page ground'],
   ['--text-secondary', '--bg-panel', 4.5, 'secondary prose on a panel'],
   ['--text-secondary', '--bg-body', 4.5, 'secondary prose on the body'],
   ['--text-muted', '--bg-panel', 4.5, 'labels and table headers on a panel'],
   ['--text-muted', '--bg-body', 4.5, 'labels and table headers on the body'],
   ['--text-muted', '--bg-raised', 4.5, 'labels on a raised surface'],
+  ['--text-muted', '--bg-deep', 4.5, 'labels on the page ground'],
+  ['--text-secondary', '--bg-deep', 4.5, 'secondary prose on the page ground'],
   ['--accent', '--bg-panel', 4.5, 'link ink on a panel'],
   ['--accent', '--bg-body', 4.5, 'link ink on the body'],
+  /*
+   * The site paints `--bg-deep` on `body`, so it is a text ground and not just
+   * a frame. It was missing here, and a rendered-page audit caught Ember ink
+   * at 4.44:1 on it across every section label and link on the site. A ground
+   * that carries text belongs in this list.
+   */
+  ['--accent', '--bg-deep', 4.5, 'link ink on the page ground'],
+  ['--accent', '--bg-raised', 4.5, 'link ink on a raised surface'],
+  /*
+   * A hovered table row keeps its links, and the row's own ground is lighter
+   * than the panel it sits on, so the pair that has to clear the bar there is
+   * the hover ink on the hover ground -- not the resting ink. `app.css` in
+   * silQ Road lifts a hovered row's links to `--accent-hover` for exactly
+   * this, the way it already lifts that row's muted cells to `--text-primary`.
+   */
+  ['--accent-hover', '--bg-hover', 4.5, 'a link inside a hovered row'],
   ['--accent-on-fill', '--accent-fill', 4.5, 'the primary action label'],
   ['--accent-on-fill', '--accent-fill-hover', 4.5, 'the primary action label, hovered'],
   ['--destructive', '--bg-panel', 4.5, 'destructive ink on a panel'],

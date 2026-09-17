@@ -1,3 +1,5 @@
+@import './brand-fonts.css';
+@import './brand-tokens.css';
 @import './tokens.css';
 
 *,
@@ -88,14 +90,20 @@ li a,
 
 /* The one link every screen carries back to the chain page. It was the text's
    own 18 px inside a 44 px row, so the row it sits in is the target. */
+/* The wordmark, in the brand's display face: Archivo at 800 on the wide end of
+   its width axis, which is how `Qnero` is set on every other surface. It was
+   the mono face at 600, which read as one more data field in a masthead full
+   of them. */
 .masthead__brand {
   display: flex;
   align-items: center;
   align-self: stretch;
   margin-right: auto;
-  font-family: var(--font-mono);
-  font-size: var(--fs-ui);
-  font-weight: 600;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 800;
+  font-stretch: var(--stretch-display);
+  letter-spacing: -0.01em;
   color: var(--text-primary);
   /* The name carries a space and a browser with a minimum font size set read
      it as "silQ" over "Road". The name cannot break. */
@@ -314,11 +322,14 @@ li a,
 
 /* Type ---------------------------------------------------------------- */
 
+/* Headings take the brand's width axis rather than tracking. Archivo at 110%
+   width does the widening the 0.5 px letter-spacing used to, and does it
+   without opening gaps inside the word. The weight is the brand's 700. */
 h1,
 h2,
 h3 {
-  font-weight: 600;
-  letter-spacing: var(--ls-wide);
+  font-weight: 700;
+  font-stretch: var(--stretch-heading);
   margin: 0;
 }
 
@@ -785,6 +796,17 @@ tbody tr:has(.row-link a:focus-visible) {
 
 tbody tr:hover {
   background: var(--bg-hover);
+}
+
+/* A hovered row lifts its links the way it lifts its muted cells.
+ *
+ * The row's ground is lighter than the panel under it, and Monero orange is a
+ * darker ink than the amber it replaced: `--accent` on `--bg-hover` measures
+ * 3.95:1, under the bar, for every link in the row the cursor is not actually
+ * on. `--accent-hover` is the lighter orange and measures 4.78:1 there, and a
+ * link that brightens under the pointer is what a link does anyway. */
+tbody tr:hover a {
+  color: var(--accent-hover);
 }
 
 /*

@@ -1,40 +1,24 @@
 /*
  * Qnero testnet faucet.
  *
- * The tokens are site/css/site.css's, copied because the faucet is its own
- * origin: a cross-origin stylesheet would be one more request and one more
- * directive in the content policy. Dark is the default and a reader whose
- * system asks for light gets the light palette, exactly as the site does.
+ * The palette, the font stacks and the radius are `brand-tokens.css` and
+ * `brand-fonts.css`, copied in from brand/ by `scripts/sync-brand.mjs` and
+ * served from this origin by `http.rs`. They are the same files the site,
+ * Qloak and silQ Road load, so the four read as one project and cannot drift.
+ * Serving rather than linking keeps the faucet's own origin: a cross-origin
+ * stylesheet would be one more request and one more directive in the content
+ * policy the runbook writes.
+ *
+ * What is left here is the faucet's own: the column, the gutter and two status
+ * roles.
  */
 
 :root {
-  --bg-deep: #161416;
-  --bg-body: #272527;
-  --bg-panel: #1d1b1d;
-  --bg-raised: #383638;
-  --border: #494749;
-  --border-strong: #6d6b6d;
+  /* Two names for two palette roles, so the rules below read as what they
+     mean: a claim that worked and a claim that did not. */
+  --ok: var(--positive);
+  --bad: var(--destructive);
 
-  --text-primary: #fcfbfc;
-  --text-bright: #ffffff;
-  --text-secondary: #9e9c9e;
-  --text-muted: #909090;
-
-  --accent: #e6a145;
-  --accent-fill: #e6a145;
-  --accent-fill-hover: #f2b968;
-  --accent-on-fill: #161416;
-  --mark: #e6a145;
-  --ok: #7fc08a;
-  --bad: #e88b7d;
-  /* The status strip's ground. The site tunes it against --bg-deep, and the
-     strip is the one band on this page that is not the page's own black. */
-  --band-accent-bg: #1f1a14;
-
-  --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
-
-  --radius-sm: 3px;
-  --radius-md: 5px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 15px;
@@ -47,43 +31,6 @@
      sit in a narrower column than the page under it. */
   --measure: 36rem;
   --fs-label: 10px;
-
-  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
-    'Open Sans', 'Helvetica Neue', sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono',
-    'Liberation Mono', monospace;
-
-  color-scheme: dark;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg-deep: #f4f2f0;
-    --bg-body: #fbfaf9;
-    --bg-panel: #ffffff;
-    --bg-raised: #f0eeec;
-    --border: #d8d4d0;
-    --border-strong: #8f8a86;
-
-    --text-primary: #1b1a19;
-    --text-bright: #000000;
-    --text-secondary: #55514e;
-    --text-muted: #6a6460;
-
-    --accent: #8a4b06;
-    /* The Q is the identity and a logotype is exempt from the 4.5:1 text
-       rule, so the mark is the one amber in both themes. --accent is a link
-       colour and goes dark brown here, which is the correct value for text
-       and for a focus ring and the wrong one for the wordmark. */
-    --mark: #e6a145;
-    --ok: #1f6b33;
-    --bad: #9d3320;
-    --band-accent-bg: #f8f1e4;
-
-    --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
-
-    color-scheme: light;
-  }
 }
 
 *,
@@ -213,17 +160,31 @@ body {
    the project site, which is the answer to "what is this" and was not on the
    page at all. */
 .wordmark {
-  font-size: 1.05rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  font-size: 1.15rem;
+  font-weight: 800;
+  font-stretch: var(--stretch-display);
+  letter-spacing: -0.01em;
   color: var(--text-bright);
   text-decoration: none;
   padding-block: 12px;
   line-height: 20px;
 }
 
-.wordmark .mark {
-  color: var(--mark);
+.wordmark__mark {
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+}
+
+/* The lit leaf keeps --mark, which is #FF6600 in both themes: a logotype is
+   exempt from the 4.5:1 text rule (WCAG 1.4.3, logotypes), while --accent is a
+   link colour and goes to Ember ink in light. `fill` is set here rather than
+   on the rect because `var()` is not substituted in presentation attributes. */
+.wordmark__leaf {
+  fill: var(--mark);
 }
 
 /* The section, once. The word testnet lives in the h1 and nowhere in this

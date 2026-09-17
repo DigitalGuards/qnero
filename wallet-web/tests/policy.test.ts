@@ -16,7 +16,9 @@
  * not visible in a screenshot of one screen either: what went wrong was that
  * the accent and the notice ended up 11 to 16 degrees apart, so the storage
  * warning over "Create new wallet" and the circuits notice over "Send" read as
- * one warm block. The rule is stated here because nothing else can hold it.
+ * one warm block. Monero orange sits at 24 degrees and made that worse, not
+ * better: a yellow notice beside it is about 29 degrees away. The rule is
+ * stated here because nothing else can hold it.
  *
  * The reconnect delay decides whether a session survives a laptop sleeping, a
  * network changing or a node restarting. `WsProvider` takes `false` for "do
@@ -177,7 +179,21 @@ describe('the socket the page follows', () => {
 // The palette, and the one thing a screenshot of a single screen cannot show.
 // ---------------------------------------------------------------------------
 
-const TOKENS = readFileSync(new URL('../src/styles/tokens.css', import.meta.url), 'utf8');
+/*
+ * The palette is `brand-tokens.css`, not `tokens.css`.
+ *
+ * Colour moved to brand/ so that the site, Qloak, silQ Road and the faucet
+ * cannot drift apart again; `scripts/sync-brand.mjs --check` holds the copies
+ * byte for byte and `scripts/check-contrast.mjs` measures every pair in all
+ * three blocks. What this file still holds is the rule that script cannot
+ * reach: the one about what Qloak's own screens may do with the accent.
+ *
+ * It is also dark first now, where this file was written against a light-first
+ * one. The bare `:root` carries the complete dark palette and
+ * `[data-theme='light']` overrides it, so the two constants below are built
+ * the other way round from how they were.
+ */
+const TOKENS = readFileSync(new URL('../src/styles/brand-tokens.css', import.meta.url), 'utf8');
 const APP_CSS = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
 
 /** The declarations of one rule block, by the selector that opens it. */
@@ -207,9 +223,9 @@ function declarations(selector: string): Map<string, string> {
   return out;
 }
 
-const LIGHT = declarations(':root {');
-const DARK_OVER = declarations(":root[data-theme='dark'] {");
-const DARK = new Map([...LIGHT, ...DARK_OVER]);
+const DARK = declarations(':root {');
+const LIGHT_OVER = declarations(":root[data-theme='light'] {");
+const LIGHT = new Map([...DARK, ...LIGHT_OVER]);
 
 /** One token's value, following `var()` indirection the way a browser does. */
 function resolve(theme: Map<string, string>, name: string, depth = 0): string {
@@ -309,14 +325,15 @@ describe.each([
     expect(hsl(resolve(theme, '--accent-fill')).saturation).toBeGreaterThan(0.3);
   });
 
-  it('fills the one action a screen is for with the same amber in both themes', () => {
+  it('fills the one action a screen is for with the same orange in both themes', () => {
     // The link ink and the filled ground are two roles. In light the ink is
-    // the dark amber, because it is text on a near-white ground; the fill is a
-    // ground of its own and owes contrast only to its own label, so it stays
-    // the amber this project is recognised by. `site/css/site.css` carries the
-    // identical pair, and a wallet whose primary button went brown in daylight
-    // is a wallet that reads as another project.
-    expect(resolve(theme, '--accent-fill')).toBe('#e6a145');
+    // Ember ink #B84300, because it is text on a near-white ground and
+    // #FF6600 there measures 2.9:1; the fill is a ground of its own and owes
+    // contrast only to its own label, so it stays the Monero orange this
+    // project is recognised by. All four apps load the identical pair from
+    // brand/, and a wallet whose primary button changed colour in daylight is
+    // a wallet that reads as another project.
+    expect(resolve(theme, '--accent-fill')).toBe('#ff6600');
     expect(contrast(resolve(theme, '--accent-on-fill'), resolve(theme, '--accent-fill')))
       .toBeGreaterThanOrEqual(4.5);
     // And hovering it stays a fill, rather than taking the link ink's hover.

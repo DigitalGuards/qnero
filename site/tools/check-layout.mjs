@@ -32,7 +32,20 @@ const PAGES = [
 ];
 
 const problems = [];
-const browser = await chromium.launch();
+/*
+ * Where the browser binary is.
+ *
+ * Playwright normally finds its own download. On a machine where Chromium is
+ * provisioned outside that cache -- a CI image, a container that ships one --
+ * `PLAYWRIGHT_CHROMIUM` names the executable and nothing has to be downloaded.
+ * Unset, this is exactly the default.
+ */
+function launchOptions() {
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM;
+  return executablePath ? { executablePath } : {};
+}
+
+const browser = await chromium.launch(launchOptions());
 const page = await browser.newPage();
 
 for (const width of WIDTHS) {

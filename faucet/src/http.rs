@@ -42,6 +42,12 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/app.css", get(app_css))
         .route("/app.js", get(app_js))
+        .route("/brand-tokens.css", get(brand_tokens_css))
+        .route("/brand-fonts.css", get(brand_fonts_css))
+        .route("/fonts/archivo-variable-latin.woff2", get(font_archivo))
+        .route("/fonts/ibm-plex-mono-400-latin.woff2", get(font_mono_400))
+        .route("/fonts/ibm-plex-mono-500-latin.woff2", get(font_mono_500))
+        .route("/fonts/ibm-plex-mono-600-latin.woff2", get(font_mono_600))
         .route("/favicon.svg", get(favicon))
         .route("/health", get(health))
         .route("/status", get(status))
@@ -99,6 +105,55 @@ async fn app_js() -> Response {
         page::APP_JS,
     )
         .into_response()
+}
+
+async fn brand_tokens_css() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        page::BRAND_TOKENS_CSS,
+    )
+        .into_response()
+}
+
+async fn brand_fonts_css() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        page::BRAND_FONTS_CSS,
+    )
+        .into_response()
+}
+
+/// A font file, at the path `brand-fonts.css` asks for.
+///
+/// These four are the one thing this server sends that a cache is worth
+/// having: they are immutable, they are 132 KB together, and unlike the page
+/// they do not change when the faucet is redeployed. A new face would arrive
+/// under a new filename, so a year is safe.
+fn woff2(body: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+async fn font_archivo() -> Response {
+    woff2(page::FONT_ARCHIVO)
+}
+
+async fn font_mono_400() -> Response {
+    woff2(page::FONT_MONO_400)
+}
+
+async fn font_mono_500() -> Response {
+    woff2(page::FONT_MONO_500)
+}
+
+async fn font_mono_600() -> Response {
+    woff2(page::FONT_MONO_600)
 }
 
 /// No `Cache-Control`, exactly as `/app.css` and `/app.js` carry none: the

@@ -17,6 +17,8 @@
  * into the utility and leave the dark theme half applied.
  */
 
+@import './brand-fonts.css';
+@import './brand-tokens.css';
 @import './tokens.css';
 @import 'tailwindcss';
 
@@ -49,9 +51,9 @@
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
   --color-accent-fill: var(--accent-fill);
-  /* The lighter amber, for hovering a filled button. `--accent-hover` is the
-     link ink's hover and in light it is the dark amber, which under the fill's
-     own near-black label is about 1.9:1. */
+  /* The lighter orange, for hovering a filled button. `--accent-hover` is the
+     link ink's hover and in light it is Ember ink's darker step, which under
+     the fill's own near-black label is about 2.5:1. */
   --color-accent-fill-hover: var(--accent-fill-hover);
   --color-on-accent: var(--accent-on-fill);
   --color-destructive: var(--destructive);

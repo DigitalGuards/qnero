@@ -1,66 +1,19 @@
 /*
- * One token set for the Qnero web apps.
+ * silQ Road's own sizing. The brand lives in `brand-tokens.css`.
  *
- * The surface ramp, the half-pixel inset highlight over a one-pixel dark
- * shadow, and the 13/12/11/10 px scale are carried over from MyMonero's
- * stylesheet (BSD-3-Clause, see NOTICE). The accent is Qnero's own: MyMonero's
- * cyan is the one value in that palette which carries its identity.
+ * Colours, font stacks and the corner radius come from brand/, which
+ * `scripts/sync-brand.mjs` copies in beside this file and
+ * `scripts/sync-brand.mjs --check` holds in sync with the other three apps.
+ * What stays here is what is this app's alone: the type scale, the spacing
+ * step and the two chrome rows.
  *
- * Light is the default so a page with no JavaScript running still reads, and
- * both the media query and the data-theme attribute redefine the same tokens.
- *
- * Every text token carries small text at 10 to 11 px, so each is measured
- * against the surface it actually lands on: `--text-muted` holds the field
- * labels, the panel titles, the table headers and every provenance note, and
- * it clears 4.5:1 on the panel and on the body in both themes. On the hovered
- * row it is 3.34:1 in dark, which is why `app.css` lifts a hovered row's muted
- * cells to `--text-primary` rather than lifting the token past
- * `--text-secondary` and inverting the ramp. `--text-dim` is a strip dot and
- * must be lifted before it is given prose.
- *
- * `--border-strong` is the edge that makes a control a control, so it clears
- * 3:1 against the panel in both themes; `--border` is a hairline between
- * surfaces and is held to no such bar.
+ * The 13/12/11/10 px scale with 0.5 px tracking is carried over from
+ * MyMonero's stylesheet (BSD-3-Clause, see NOTICE). Qloak sizes the same roles
+ * in `rem` so a browser's text preference scales its interface; this app keeps
+ * the px scale, which is why the two files are not one.
  */
 
 :root {
-  --bg-deep: #f4f2f0;
-  --bg-body: #fbfaf9;
-  --bg-panel: #ffffff;
-  --bg-raised: #f0eeec;
-  --bg-hover: #e9e6e3;
-  --border: #d8d4d0;
-  --border-strong: #8f8a86;
-
-  --text-primary: #1b1a19;
-  --text-bright: #000000;
-  --text-secondary: #55514e;
-  --text-muted: #6a6460;
-  --text-dim: #948d88;
-
-  --accent: #8a4b06;
-  --accent-hover: #6f3c05;
-  /* The amber is the identity, and a filled ground owes contrast to its own
-     label rather than to the page: #161416 on #e6a145 is 8.33:1 in either
-     theme. So the one primary on a screen is the same amber in both, the way
-     the site's and Qloak's are, and the dark amber above stays for the text
-     that sits on the page itself. */
-  --accent-fill: #e6a145;
-  --accent-fill-hover: #f2b968;
-  --accent-on-fill: #161416;
-  --destructive: #a32020;
-  --notice: #6b4a00;
-  --notice-bg: rgba(184, 134, 11, 0.1);
-  --notice-border: rgba(138, 100, 8, 0.45);
-
-  --shadow-raised: 0 0.5px 1px 0 rgba(27, 26, 25, 0.16), inset 0 0.5px 0 0 #ffffff;
-  --shadow-float: 0 1px 4px 0 rgba(27, 26, 25, 0.16);
-  /* The cue that a table is cut off. It is a shadow over a light surface and a
-     highlight over a dark one, so it inverts with the ground rather than
-     vanishing into it. */
-  --shadow-edge: rgba(27, 26, 25, 0.25);
-  --shadow-edge-fade: rgba(27, 26, 25, 0);
-
   --fs-body: 13px;
   --fs-ui: 12px;
   --fs-meta: 11px;
@@ -73,90 +26,16 @@
   --space-4: 20px;
   --space-5: 32px;
 
-  --radius-sm: 3px;
-  --radius-md: 5px;
-
   /* The two chrome rows. A phone gets 85 px of header, where it used to get
      155 px: a wrapping status strip over a three-line wordmark. */
   --masthead-h: 44px;
   --nav-h: 40px;
   /* Reading measure, on the container rather than on the paragraph: a `ch` cap
      tracks the child's font size and an 11px note would stop at half a box.
-     At 13 px system sans with 0.5 px letter-spacing the average advance is
-     about 6.9 px, so 640 px held about 93 characters per line and 560 holds
-     about 80. A line is read comfortably between 45 and 75. */
+     At 13 px with 0.5 px letter-spacing the average advance is about 6.9 px,
+     so 640 px held about 93 characters per line and 560 holds about 80. A line
+     is read comfortably between 45 and 75. */
   --measure: 560px;
-
-  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
-    'Open Sans', 'Helvetica Neue', sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono',
-    'Liberation Mono', monospace;
-
-  color-scheme: light dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    --bg-deep: #161416;
-    --bg-body: #272527;
-    --bg-panel: #1d1b1d;
-    --bg-raised: #383638;
-    --bg-hover: #3f3e3f;
-    --border: #494749;
-    --border-strong: #6d6b6d;
-
-    --text-primary: #fcfbfc;
-    --text-bright: #ffffff;
-    --text-secondary: #9e9c9e;
-    --text-muted: #909090;
-    --text-dim: #6b696b;
-
-    --accent: #e6a145;
-    --accent-hover: #f2b968;
-    --accent-fill: #e6a145;
-    --accent-fill-hover: #f2b968;
-    --accent-on-fill: #161416;
-    --destructive: #f97777;
-    --notice: #f5e67e;
-    --notice-bg: rgba(245, 230, 125, 0.05);
-    --notice-border: rgba(245, 230, 125, 0.3);
-
-    --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
-    --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
-    --shadow-edge: rgba(255, 255, 255, 0.22);
-    --shadow-edge-fade: rgba(255, 255, 255, 0);
-  }
-}
-
-:root[data-theme='dark'] {
-  --bg-deep: #161416;
-  --bg-body: #272527;
-  --bg-panel: #1d1b1d;
-  --bg-raised: #383638;
-  --bg-hover: #3f3e3f;
-  --border: #494749;
-  --border-strong: #6d6b6d;
-
-  --text-primary: #fcfbfc;
-  --text-bright: #ffffff;
-  --text-secondary: #9e9c9e;
-  --text-muted: #909090;
-  --text-dim: #6b696b;
-
-  --accent: #e6a145;
-  --accent-hover: #f2b968;
-  --accent-fill: #e6a145;
-  --accent-fill-hover: #f2b968;
-  --accent-on-fill: #161416;
-  --destructive: #f97777;
-  --notice: #f5e67e;
-  --notice-bg: rgba(245, 230, 125, 0.05);
-  --notice-border: rgba(245, 230, 125, 0.3);
-
-  --shadow-raised: 0 0.5px 1px 0 #161416, inset 0 0.5px 0 0 #494749;
-  --shadow-float: 0 1px 4px 0 rgba(0, 0, 0, 0.4);
-  --shadow-edge: rgba(255, 255, 255, 0.22);
-  --shadow-edge-fade: rgba(255, 255, 255, 0);
 }
 
 /*
