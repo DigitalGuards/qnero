@@ -129,7 +129,7 @@ body {
   height: 7px;
   border-radius: 50%;
   /* A 7 px dot carries no text and owes no text contrast, so it takes the fill
-     token and stays the one identity amber in both themes. */
+     token and stays the one identity orange in both themes. */
   background: var(--accent-fill);
   transform: translateY(-1px);
 }
@@ -156,9 +156,9 @@ body {
 }
 
 /* The site header's wordmark, copied from site/css/site.css so the faucet
-   wears the same name: one word, Qnero, with the Q amber. It is an anchor to
-   the project site, which is the answer to "what is this" and was not on the
-   page at all. */
+   wears the same name: the mark, then Qnero. It is an anchor to the project
+   site, which is the answer to "what is this" and was not on the page at
+   all. */
 .wordmark {
   display: inline-flex;
   align-items: center;
@@ -374,7 +374,7 @@ code {
 }
 
 /* Not faded. At 0.55 the label was 3.42:1 in dark, 2.65:1 in light, and the
-   amber fill against the light panel was 1.53:1: the button all but vanished
+   accent fill against the light panel was 1.53:1: the button all but vanished
    at the moment a reader most needs to see the page is busy. A raised fill and
    a secondary label is 4.39:1 in dark and 6.79:1 in light, and still reads as
    out of reach.
@@ -467,7 +467,7 @@ code {
   color: var(--text-secondary);
 }
 
-/* One rule of amber across the top edge of the panel, covering the border. It
+/* One rule of orange across the top edge of the panel, covering the border. It
    is the whole of the motion on this page, and under reduced motion it stops
    and stays lit. */
 .panel__bar {

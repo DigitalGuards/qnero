@@ -4,11 +4,17 @@ follows MyMonero's web wallet (https://github.com/mymonero/mymonero-web-js),
 both BSD-3-Clause, Copyright (c) 2014-2019, MyMonero.com, read on 2026-09-15.
 
 What is carried over is the design those stylesheets state by repetition: the
-full-bleed alternating band as the page's unit, the surface ramp (#161416,
-#272527, #1d1b1d, #383638, #494749), the text ramp above it, the two-part
-elevation recipe (a half-pixel inset highlight over a one-pixel dark shadow),
-the 13/12/11/10 px type scale with 0.5 px tracking, the 3 px and 5 px radii,
-the 24 px status strip and the label-over-value field row. No file was copied.
+full-bleed alternating band as the page's unit, the shape of a surface ramp and
+the text ramp above it, the two-part elevation recipe (a half-pixel inset
+highlight over a one-pixel dark shadow), the 13/12/11/10 px type scale with
+0.5 px tracking, the 24 px status strip and the label-over-value field row.
+
+The ramp's values are no longer MyMonero's. They were that stylesheet's
+(#161416, #272527, #1d1b1d, #383638, #494749) until 2026-09-17, when the four
+Qnero surfaces moved to one palette of their own in `brand/tokens.css`: a warm
+neutral ramp of #141312, #262320, #1e1c1a, #322e29 and #2e2b28. The radii were
+MyMonero's 3 px and 5 px and are now a single 4 px. What remains derived is the
+structure above, not the numbers. No file was copied.
 css/site.css states those values as custom properties, which the original does
 not have, and every component here is written against them.
 
@@ -16,8 +22,13 @@ What is not carried over: the accent colour, which is the one value in that
 palette that carries MyMonero's identity; the logo and the wordmark; the
 download band and its OS detection; the testimonials band; and the `Native-*`
 typefaces, which are a licensed retail family outside the BSD grant on the
-source. The type roles here are filled by system stacks and the site self-hosts
-no font.
+source. The type roles here are filled by Archivo and IBM Plex Mono, both SIL
+Open Font License 1.1, self-hosted from `css/fonts/` with their licence text
+beside them.
+
+The palette itself is no longer stated here: it is `brand/tokens.css`, shared
+with Qloak, silQ Road and the faucet, and `css/brand-tokens.css` is a copy of
+it.
 
 BSD-3-Clause clause 3 forbids using the copyright holder's or contributors'
 names to endorse or promote products derived from this software. The MyMonero

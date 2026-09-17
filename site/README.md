@@ -1,9 +1,15 @@
 # qnero.io
 
-The project site. Eight pages of hand-written HTML, one stylesheet, two small
-scripts, three images. There is no build step, no framework, no package.json, no
-font download, no analytics and no third-party request of any kind, which is
-the rule the explorer states for itself and the rule this site lives by.
+The project site. Eight pages of hand-written HTML, three stylesheets, two
+small scripts, three images and two typefaces. There is no build step, no
+framework, no package.json, no analytics and no third-party request of any
+kind, which is the rule the explorer states for itself and the rule this site
+lives by.
+
+The typefaces are served from this origin, not from a font CDN. They are
+`brand/`'s, copied into `css/` by `scripts/sync-brand.mjs` along with the
+palette, so the site, Qloak, silQ Road and the faucet cannot drift apart. A
+host's content policy needs `font-src 'self'` for them; see below.
 
 ```
 site/
@@ -171,7 +177,7 @@ and it resolves Playwright from `explorer/node_modules` the way
 configured with is an address a reader copies rather than a control a browser
 can follow. Each carries its state beside it in a `.tag`.
 
-Every page that has a live thing to open leads with one amber primary that
+Every page that has a live thing to open leads with one orange primary that
 opens it, and one ghost `Source` after it: index "Open the wallet", wallet
 "Open wallet.qnero.io", explorer "Open explorer.qnero.io", mine "Get testnet
 QNR". `.hostline` is the mono caption under that button and is reserved for

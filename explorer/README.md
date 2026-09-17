@@ -228,9 +228,12 @@ Each of these is a decision.
 - **It does not decode a settlement's anchor height.** The anchor is a public
   input inside the proof. The settlement page states the window the chain
   enforced, which is what the site can establish from chain state alone.
-- **No analytics, no fonts, no images, no CDN.** The only requests the page
-  makes are to the configured node and to the host serving the page, which
-  answers for `config.json` at startup and for the page's own assets.
+- **No analytics, no images, no CDN.** The only requests the page makes are to
+  the configured node and to the host serving the page, which answers for
+  `config.json` at startup and for the page's own assets. The two typefaces are
+  among those assets: they are built into the bundle from `src/styles/fonts/`
+  and served from this origin, because a font CDN would be handed every
+  reader's address on a page whose whole claim is that it contacts nothing.
 
 ## What it reads, and what that costs
 

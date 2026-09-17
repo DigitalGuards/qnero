@@ -607,18 +607,58 @@ async fn a_full_queue_is_a_503_and_not_a_wait() {
     assert_eq!(queued.len(), 2);
 }
 
-/// The page is served, with the three files beside it. The icon is one of
-/// them: a browser asks this origin for `/favicon.svg`, and a 404 there is the
-/// default globe beside a tab whose whole family shows an amber Q.
+/// The page is served, with every file beside it that it asks for.
+///
+/// The icon is one: a browser asks this origin for `/favicon.svg`, and a 404
+/// there is the default globe beside a tab whose whole family shows the Qnero
+/// mark. The two brand stylesheets and the four font files are the rest, and
+/// they are the ones a route list can quietly lose: `brand-fonts.css` names
+/// each `./fonts/*.woff2` by path, nothing in the page fails visibly when one
+/// 404s, and the text simply sets in the fallback stack. Every path this
+/// server is expected to answer for is listed here for that reason.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_page_and_its_three_files_are_served() {
+async fn the_page_and_its_files_are_served() {
     let dir = tempdir::TempDir::new("cfg");
     let harness = start(config_in(dir.path())).await;
 
-    for path in ["/", "/app.css", "/app.js", "/favicon.svg"] {
+    for path in [
+        "/",
+        "/app.css",
+        "/app.js",
+        "/favicon.svg",
+        "/brand-tokens.css",
+        "/brand-fonts.css",
+        "/fonts/archivo-variable-latin.woff2",
+        "/fonts/ibm-plex-mono-400-latin.woff2",
+        "/fonts/ibm-plex-mono-500-latin.woff2",
+        "/fonts/ibm-plex-mono-600-latin.woff2",
+    ] {
         let (status, _, _) = request("GET", format!("{}{path}", harness.base), None, None).await;
         assert_eq!(status, 200, "{path} was not served");
     }
+}
+
+/// Every url `brand-fonts.css` asks for is a url this server answers.
+///
+/// The stylesheet and the route list are edited in different files, and a
+/// mismatch between them is silent in a browser. This reads the paths out of
+/// the stylesheet rather than repeating them, so adding a face to brand/ and
+/// forgetting its route fails here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_font_the_stylesheet_names_is_routed() {
+    let dir = tempdir::TempDir::new("cfg");
+    let harness = start(config_in(dir.path())).await;
+
+    let sheet = fetch_text(format!("{}/brand-fonts.css", harness.base)).await;
+    let mut found = 0;
+    for piece in sheet.split("url('./").skip(1) {
+        let path = piece.split('\'').next().expect("a closing quote");
+        let (status, _, _) =
+            request("GET", format!("{}/{path}", harness.base), None, None).await;
+        assert_eq!(status, 200, "brand-fonts.css names /{path}, which 404s");
+        found += 1;
+    }
+    assert!(found >= 4, "expected at least four faces, found {found}");
 }
 
 /// What the reader is actually handed: a page with the configured figures in

@@ -325,8 +325,8 @@ svg {
   height: 7px;
   border-radius: 50%;
   /* A 7px dot carries no text and owes no text contrast, so it takes the fill
-     token and stays the one identity amber in both themes. `--accent` is for
-     text and focus rings, where the darker light value is the correct one. */
+     token and stays the one identity orange in both themes. `--accent` is for
+     text and focus rings, where Ember ink is the correct light value. */
   background: var(--accent-fill);
   transform: translateY(-1px);
 }
@@ -837,8 +837,8 @@ svg {
 
 .status-panel {
   max-width: var(--measure);
-  /* Same rule as the strip's dot: a 3px rail is not text. This is the amber the
-     comparison table's column rails already use. */
+  /* Same rule as the strip's dot: a 3px rail is not text. This is the orange
+     the comparison table's column rails already use. */
   border-left: 3px solid var(--accent-fill);
 }
 

@@ -29,17 +29,20 @@ copy keeps that wallet's register: short sentences, sentence case in prose,
 uppercase field labels.
 
 No file was copied. Where a value is MyMonero's it is stated as a custom
-property in `tokens.css`, which the original does not have, and the components
-are written against those properties rather than against inline styles.
+property -- the sizing in `tokens.css`, the surface ramp and elevation in
+`brand-tokens.css`, which is `brand/tokens.css` copied in and shared with the
+other three Qnero surfaces -- and the components are written against those
+properties rather than against inline styles.
 
 What is not carried over: the accent colour, which is the one value in that
 palette carrying MyMonero's identity, replaced by Qnero's own; the yellow
-notice fill that goes with it, because that yellow is eleven degrees of hue
-from Qnero's amber where it is a hundred and forty-one from MyMonero's cyan,
-so the notice here is a border and the secondary ink; the light palette, which
-is this project's; and the `Native-*` typefaces, which are a licensed retail
-family outside the BSD grant on the source, whose roles are filled by system
-stacks instead.
+notice fill that goes with it, because that yellow is twenty-nine degrees of
+hue from Qnero's Monero orange where it is a hundred and forty-one from
+MyMonero's cyan, so the notice here is a border and the secondary ink; the
+light palette, which is this project's; and the `Native-*` typefaces, which are
+a licensed retail family outside the BSD grant on the source, whose roles are
+filled by Archivo and IBM Plex Mono, both SIL Open Font License 1.1,
+self-hosted with their licence text beside them in `src/styles/fonts/`.
 
 BSD-3-Clause clause 3 forbids using the copyright holder's or contributors'
 names to endorse or promote products derived from this software. The MyMonero
