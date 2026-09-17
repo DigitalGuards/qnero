@@ -64,7 +64,9 @@ for (const page of pages) {
     }
 
     const [path, fragment] = ref.split('#');
-    const target = path === '/' ? 'index.html' : path.replace(/^\//, '');
+    // A `?v=N` on an icon link is a cache-buster for browsers that hold a
+    // favicon by URL; the file on disk has no query.
+    const target = path === '/' ? 'index.html' : path.replace(/^\//, '').replace(/\?.*$/, '');
     if (!existsSync(join(site, target))) {
       problems.push(`${page}: ${ref} points at ${target}, which does not exist`);
       continue;

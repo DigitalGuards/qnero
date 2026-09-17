@@ -18,7 +18,7 @@ site/
   css/site.css        one stylesheet, tokens first
   js/theme.js         the stored theme, applied before the first paint
   js/site.js          the theme toggle, and nothing else
-  img/favicon.svg     img/favicon-32.png  img/og.png
+  img/favicon.svg     img/favicon-{32,48,96,180}.png  img/og.png  favicon.ico
   robots.txt          sitemap.xml         NOTICE
   tools/              the open-graph template and its renderer, kept out of the deploy
 ```
@@ -136,12 +136,25 @@ the strip has to stay one line; `.status-strip p` holds it to one with
 
 ## Images
 
-`img/og.png` is rendered from `tools/og-template.html`, and `img/favicon-32.png`
-from `img/favicon.svg`, by one headless Chromium:
+`img/og.png` is rendered from `tools/og-template.html`, and the PNG icons
+(`img/favicon-{32,48,96,180}.png`) from `img/favicon.svg`, by one headless
+Chromium:
 
 ```
 node site/tools/make-images.mjs
 ```
+
+The 48 and 96 exist for Google: it shows a favicon beside a result only when
+the icon is square and a multiple of 48 px, and it also asks for `/favicon.ico`
+at the root. That file holds the 16, 32 and 48 px renders:
+
+```
+python3 -c "from PIL import Image; Image.open('site/img/favicon-96.png').convert('RGBA') \
+  .save('site/favicon.ico', format='ICO', sizes=[(16,16),(32,32),(48,48)])"
+```
+
+Every icon link carries `?v=N`. Browsers cache a favicon by URL and ignore the
+cache headers, so bump N whenever the mark changes.
 
 Playwright is resolved from `explorer/node_modules`, so the site keeps no
 dependencies of its own. Set `PLAYWRIGHT_FROM` to another `package.json` to

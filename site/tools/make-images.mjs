@@ -38,13 +38,22 @@ try {
   await og.screenshot({ path: resolve(site, 'img/og.png') });
   console.log('wrote site/img/og.png');
 
-  const icon = await browser.newPage({
-    viewport: { width: 32, height: 32 },
-    deviceScaleFactor: 1,
-  });
-  await icon.goto('file://' + resolve(site, 'img/favicon.svg'));
-  await icon.screenshot({ path: resolve(site, 'img/favicon-32.png'), omitBackground: true });
-  console.log('wrote site/img/favicon-32.png');
+  // 32 for browsers that will not take an SVG. 48 and 96 because Google only
+  // shows a favicon beside a result when it is square and a multiple of 48 px;
+  // 180 is what iOS asks for as apple-touch-icon.
+  for (const size of [32, 48, 96, 180]) {
+    const icon = await browser.newPage({
+      viewport: { width: size, height: size },
+      deviceScaleFactor: 1,
+    });
+    await icon.goto('file://' + resolve(site, 'img/favicon.svg'));
+    await icon.screenshot({
+      path: resolve(site, `img/favicon-${size}.png`),
+      omitBackground: true,
+    });
+    console.log(`wrote site/img/favicon-${size}.png`);
+  }
+  console.log('now regenerate site/favicon.ico from the 16/32/48 PNGs (see site/README.md)');
 } finally {
   await browser.close();
 }
