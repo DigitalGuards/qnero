@@ -149,6 +149,26 @@ pub struct Cli {
 	/// Sync: block request timeout in seconds (default: 30).
 	#[arg(long, default_value_t = 30)]
 	pub sync_block_request_timeout: u64,
+
+	/// Side-branch admission budget, in blocks per hour (0 = unlimited).
+	///
+	/// A block on a parent other than the tip whose difficulty is below 1/8 of
+	/// the tip's draws one token from a bucket of 1024 that refills at this
+	/// rate. When the bucket is empty the block is refused as a verification
+	/// failure and offered again by sync later. It bounds what a peer can make
+	/// this node execute and archive; an honest heavier chain is admitted at
+	/// this rate and never refused for good.
+	#[arg(long, value_name = "BLOCKS_PER_HOUR", default_value_t = sc_consensus_randomx::DEFAULT_SIDE_BRANCH_BLOCKS_PER_HOUR)]
+	pub side_branch_budget: u32,
+
+	/// RandomX seed-fill budget, in fills per hour (0 = unlimited).
+	///
+	/// A block that does not extend the tip and needs a 256 MiB RandomX cache
+	/// fill for a seed this node does not hold draws one token from a bucket
+	/// of 4 that refills at this rate. The seeds the node mines under are
+	/// pinned and never charged.
+	#[arg(long, value_name = "FILLS_PER_HOUR", default_value_t = sc_consensus_randomx::DEFAULT_SEED_FILLS_PER_HOUR)]
+	pub seed_fill_budget: u32,
 }
 
 #[derive(Debug, clap::Subcommand)]

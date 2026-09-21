@@ -24,6 +24,7 @@
 //! rounding mode wasm cannot set), so the runtime no longer verifies a nonce.
 //! It answers what the difficulty is and the client does the rest.
 
+pub mod admission;
 mod chain_management;
 mod worker;
 
@@ -33,6 +34,11 @@ pub mod seed;
 pub mod target;
 pub mod vm;
 
+pub use admission::{
+	classify_side_branch, is_difficulty_admissible, AdmissionBudgets, Budget, SideBranchClass,
+	TipView, TokenBucket, DEFAULT_SEED_FILLS_PER_HOUR, DEFAULT_SIDE_BRANCH_BLOCKS_PER_HOUR,
+	SEED_FILL_BUDGET_CAPACITY, SIDE_BRANCH_BUDGET_CAPACITY, SIDE_BRANCH_DIFFICULTY_FRACTION,
+};
 pub use chain_management::{
 	delete_cumulative_achieved_work, ensure_pow_database, get_chain_work,
 	get_cumulative_achieved_work, initialize_genesis_achieved_work, is_heavier,
@@ -137,6 +143,20 @@ pub enum Error<B: BlockT> {
 	HeightMismatch { height: u64, parent_number: u64 },
 	#[error("Block #{height} is at or below the finalized height #{finalized}")]
 	BelowFinalized { height: u64, finalized: u64 },
+	/// A policy refusal, and a retryable one: the block may well be valid. It
+	/// sits on a side branch, its difficulty is below the tip's divided by
+	/// [`SIDE_BRANCH_DIFFICULTY_FRACTION`], and the side-branch budget has no
+	/// token for it right now. Sync drops the sending peer as for any
+	/// verification failure and offers the branch again later, when the
+	/// budget has refilled. Boxed so the error stays small on every path that
+	/// returns one.
+	#[error("{0}")]
+	SideBranchBudgetExhausted(Box<SideBranchRefusal<B::Hash>>),
+	/// The other policy refusal, equally retryable: the block does not extend
+	/// the tip, verifying it needs a 256 MiB RandomX cache fill for a seed
+	/// that is neither pinned nor resident, and the seed-fill budget is spent.
+	#[error("{0}")]
+	SeedFillBudgetExhausted(Box<SeedFillRefusal<B::Hash>>),
 	#[error("RandomX engine error: {0}")]
 	Engine(EngineError),
 	#[error(transparent)]
@@ -154,6 +174,56 @@ pub enum Error<B: BlockT> {
 impl<B: BlockT> From<Error<B>> for String {
 	fn from(error: Error<B>) -> String {
 		error.to_string()
+	}
+}
+
+/// What a side-branch budget refusal says about the block it refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideBranchRefusal<H> {
+	pub height: u64,
+	pub parent: H,
+	pub difficulty: U512,
+	pub tip_difficulty: U512,
+	pub fraction: u64,
+	pub retry_after_secs: u64,
+}
+
+impl<H: std::fmt::Debug> std::fmt::Display for SideBranchRefusal<H> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(
+			f,
+			"Side-branch block #{} on parent {:?}: difficulty {} is below 1/{} of the tip's {} and the side-branch budget is spent; retry in {} s",
+			self.height,
+			self.parent,
+			self.difficulty,
+			self.fraction,
+			self.tip_difficulty,
+			self.retry_after_secs,
+		)
+	}
+}
+
+/// What a seed-fill budget refusal says about the block it refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedFillRefusal<H> {
+	pub height: u64,
+	pub parent: H,
+	pub seed: H256,
+	pub seed_height: u64,
+	pub retry_after_secs: u64,
+}
+
+impl<H: std::fmt::Debug> std::fmt::Display for SeedFillRefusal<H> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(
+			f,
+			"Block #{} on parent {:?} needs a RandomX cache fill for seed {:?} (block #{}) that is neither pinned nor resident, and the seed-fill budget is spent; retry in {} s",
+			self.height,
+			self.parent,
+			self.seed,
+			self.seed_height,
+			self.retry_after_secs,
+		)
 	}
 }
 
@@ -218,6 +288,31 @@ where
 
 	fn parent_of(&self, hash: H256) -> Result<Option<H256>, String> {
 		Ok(self.client.header(hash).map_err(|e| e.to_string())?.map(|h| *h.parent_hash()))
+	}
+}
+
+/// The client, seen as the two questions the admission classifier asks it.
+struct ClientTipView<'a, B, C> {
+	client: &'a C,
+	_block: PhantomData<B>,
+}
+
+impl<B, C> TipView for ClientTipView<'_, B, C>
+where
+	B: BlockT<Hash = H256>,
+	C: ProvideRuntimeApi<B> + HeaderBackend<B>,
+	C::Api: QPoWApi<B>,
+{
+	fn tip(&self) -> (H256, u64) {
+		let info = self.client.info();
+		(info.best_hash, info.best_number.try_into().unwrap_or(u64::MAX))
+	}
+
+	fn difficulty_after(&self, hash: H256) -> Result<U512, String> {
+		self.client
+			.runtime_api()
+			.get_difficulty(hash)
+			.map_err(|e| format!("tip difficulty: {e:?}"))
 	}
 }
 
@@ -306,6 +401,14 @@ where
 /// copy of the comparison anywhere: the miner in `MiningHandle::submit` and the
 /// stratum server both go through [`check_seal`] below, which is what this
 /// function calls once it has resolved the seed and the difficulty.
+///
+/// `budgets` is the admission policy of [`admission`], and it is charged from
+/// the import queue's verifier only. `import_block` and the node's own blocks
+/// pass `None`: a block the verifier admitted is never refused on policy a
+/// second time, so the two runs of this function cannot disagree.
+// Eight arguments: every one is a distinct input to the one rule, and a
+// parameter struct would only move the same eight names one line down.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_pow<B, C>(
 	client: &C,
 	engine: &Arc<RandomxEngine>,
@@ -314,6 +417,7 @@ pub fn verify_pow<B, C>(
 	pre_hash: B::Hash,
 	block_hash: B::Hash,
 	seal_bytes: &[u8],
+	budgets: Option<&AdmissionBudgets>,
 ) -> Result<U512, Error<B>>
 where
 	B: BlockT<Hash = H256>,
@@ -334,9 +438,76 @@ where
 		.get_difficulty(parent_hash)
 		.map_err(|e| Error::Runtime(format!("difficulty: {e:?}")))?;
 
+	// Then the class: a block on the tip is free, a block on another parent
+	// is free while its difficulty is within the fraction of the tip's, and
+	// anything cheaper will draw a token. The token is drawn once the seal is
+	// proven, below, so that a header carrying a junk seal cannot drain the
+	// budget for the price of a few hundred bytes; what it costs the node is
+	// one light hash on a resident seed, which is what any junk header costs.
+	let now = std::time::Instant::now();
+	let class = match budgets {
+		Some(budgets) => {
+			let view = ClientTipView::<B, C> { client, _block: PhantomData };
+			Some(budgets.classify(&view, parent_hash, difficulty).map_err(Error::Other)?)
+		},
+		None => None,
+	};
+
 	let (seed, _next_seed, seed_height) = seed_hashes::<B, C>(client, parent_hash, height)?;
 
+	// The fill: a block extending the tip fills its seed for free (that is
+	// initial sync, a restart on a prefix and the first block of a new epoch),
+	// and so does a block under a pinned identity whose slot is still cold,
+	// because that fill is one the node makes anyway and it lands in the slot.
+	// Any other block whose seed is not already built draws a fill token, and
+	// it draws it before the fill, because the fill is the cost.
+	if let (Some(budgets), Some(class)) = (budgets, class) {
+		if class != SideBranchClass::ExtendsTip &&
+			!engine.is_pinned(&seed.0) &&
+			!engine.is_resident(&seed.0)
+		{
+			if let Err(retry_after) = budgets.charge_seed_fill(now) {
+				return Err(Error::SeedFillBudgetExhausted(Box::new(SeedFillRefusal {
+					height,
+					parent: parent_hash,
+					seed,
+					seed_height,
+					retry_after_secs: retry_after.as_secs(),
+				})));
+			}
+		}
+	}
+
 	check_seal::<B>(engine, pre_hash, height, seed, seal, difficulty)?;
+
+	// The seal met the branch difficulty, so a cheap side-branch block now
+	// pays its token: every token spent cost its sender a real seal.
+	if let (Some(budgets), Some(class)) = (budgets, class) {
+		match budgets.charge_side_branch(&class, now) {
+			Ok(None) => {},
+			Ok(Some(left)) =>
+				if let SideBranchClass::Cheap { tip_difficulty } = class {
+					log::debug!(
+						target: LOG_TARGET,
+						"randomx: charged side-branch block #{height} at difficulty {difficulty} against tip {tip_difficulty} ({left} left)",
+					);
+				},
+			Err(retry_after) => {
+				let tip_difficulty = match class {
+					SideBranchClass::Cheap { tip_difficulty } => tip_difficulty,
+					_ => U512::zero(),
+				};
+				return Err(Error::SideBranchBudgetExhausted(Box::new(SideBranchRefusal {
+					height,
+					parent: parent_hash,
+					difficulty,
+					tip_difficulty,
+					fraction: SIDE_BRANCH_DIFFICULTY_FRACTION,
+					retry_after_secs: retry_after.as_secs(),
+				})));
+			},
+		}
+	}
 
 	log::trace!(
 		target: LOG_TARGET,
@@ -570,6 +741,7 @@ where
 			pre_hash,
 			post_header.hash(),
 			&inner_seal,
+			None,
 		)
 		.map_err(|error| {
 			log::error!(
@@ -669,6 +841,22 @@ where
 		let info = self.client.info();
 		log::debug!(target: LOG_TARGET, "📦 Canonical tip: #{} ({:?})", info.best_number, info.best_hash);
 
+		// A new tip names the seeds the next block hashes under, so a node
+		// that only verifies keeps its live seed pinned too. Naming is O(1)
+		// and never fills, so it is fine under the import lock, and it never
+		// fails the import: a block that is in is in.
+		if info.best_hash == block_hash {
+			let next_height: u64 =
+				info.best_number.try_into().unwrap_or(u64::MAX).saturating_add(1);
+			match seed_hashes::<B, C>(&*self.client, info.best_hash, next_height) {
+				Ok((seed, next, _)) => self.engine.pin_seeds(seed.0, next.0),
+				Err(error) => log::warn!(
+					target: LOG_TARGET,
+					"Could not resolve the seeds to pin after importing #{number}: {error}"
+				),
+			}
+		}
+
 		Ok(result)
 	}
 }
@@ -731,11 +919,12 @@ pub type PowImportQueue<B> = BasicQueue<B>;
 struct PowVerifier<C> {
 	client: Arc<C>,
 	engine: Arc<RandomxEngine>,
+	budgets: Arc<AdmissionBudgets>,
 }
 
 impl<C> PowVerifier<C> {
-	fn new(client: Arc<C>, engine: Arc<RandomxEngine>) -> Self {
-		Self { client, engine }
+	fn new(client: Arc<C>, engine: Arc<RandomxEngine>, budgets: Arc<AdmissionBudgets>) -> Self {
+		Self { client, engine, budgets }
 	}
 }
 
@@ -769,12 +958,39 @@ where
 			pre_hash,
 			block_hash,
 			&inner_seal,
+			Some(&self.budgets),
 		)
 		.map_err(|error| {
-			log::error!(
-				target: LOG_TARGET,
-				"Invalid seal for block #{number} on parent {parent_hash:?}: {error}"
-			);
+			// A budget refusal is policy, and retryable; it is logged apart
+			// from a bad seal so an operator reading the journal does not take
+			// a throttled peer for a chain split. One line per budget per
+			// minute, with the count of what the minute hid.
+			let budget = match &error {
+				Error::SideBranchBudgetExhausted(_) => Some(Budget::SideBranch),
+				Error::SeedFillBudgetExhausted(_) => Some(Budget::SeedFill),
+				_ => None,
+			};
+			match budget {
+				Some(budget) => {
+					if let Some(suppressed) =
+						self.budgets.should_warn(budget, std::time::Instant::now())
+					{
+						let hidden = if suppressed > 0 {
+							format!(" (+{suppressed} suppressed in the last 60 s)")
+						} else {
+							String::new()
+						};
+						log::warn!(
+							target: LOG_TARGET,
+							"randomx: budget refusal for block #{number} on parent {parent_hash:?}: {error}{hidden}"
+						);
+					}
+				},
+				None => log::error!(
+					target: LOG_TARGET,
+					"Invalid seal for block #{number} on parent {parent_hash:?}: {error}"
+				),
+			}
 			String::from(error)
 		})?;
 
@@ -788,6 +1004,7 @@ pub fn import_queue<B, C>(
 	justification_import: Option<BoxJustificationImport<B>>,
 	client: Arc<C>,
 	engine: Arc<RandomxEngine>,
+	budgets: Arc<AdmissionBudgets>,
 	spawner: &impl sp_core::traits::SpawnEssentialNamed,
 	registry: Option<&Registry>,
 ) -> Result<PowImportQueue<B>, sp_consensus::Error>
@@ -796,7 +1013,23 @@ where
 	C: ProvideRuntimeApi<B> + BlockBackend<B> + HeaderBackend<B> + Send + Sync + 'static,
 	C::Api: QPoWApi<B>,
 {
-	let verifier = PowVerifier::new(client, engine);
+	if let Some(registry) = registry {
+		match prometheus_endpoint::register(
+			prometheus_endpoint::Counter::<prometheus_endpoint::U64>::new(
+				"qnero_randomx_cache_fills_total",
+				"RandomX seed cache fills (256 MiB Argon2d each) since the node started",
+			)
+			.map_err(|e| sp_consensus::Error::Other(Box::new(e)))?,
+			registry,
+		) {
+			Ok(counter) => engine.set_fill_counter(counter),
+			Err(error) => log::warn!(
+				target: LOG_TARGET,
+				"RandomX cache fill counter not registered: {error}"
+			),
+		}
+	}
+	let verifier = PowVerifier::new(client, engine, budgets);
 	Ok(BasicQueue::new(verifier, block_import, justification_import, spawner, registry))
 }
 

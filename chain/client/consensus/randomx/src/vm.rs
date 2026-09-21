@@ -30,12 +30,28 @@ use std::{
 /// Length of a RandomX hash.
 pub const RANDOMX_HASH_LEN: usize = 32;
 
-/// Default number of seed caches held at once.
+/// Default number of unpinned seed caches held at once.
 ///
-/// Two lookup entries retain the usual current and previous epoch seeds.
-/// Historical forks can request older seeds and rebuild their caches. Each
-/// cache is 256 MiB; idle and leased VMs can retain additional cache references,
-/// so this is a lookup bound rather than a total resident-memory bound.
+/// The engine keeps two kinds of cache. Two **pinned** slots hold the seed the
+/// node hashes under now and the one the next epoch will use; they are named
+/// by [`RandomxEngine::pin_seeds`], never evicted, and they are what the miner,
+/// the stratum server and every block extending the tip hash under. Beside
+/// them an LRU of this many entries holds historical and side-branch seeds: a
+/// block from the previous epoch arriving late, or a branch that carries its
+/// own block at a seed height and therefore its own seed hash.
+///
+/// Each cache is 256 MiB, so the lookup bound is `(2 + DEFAULT_MAX_CACHES) *
+/// 256 MiB`, 1 GiB at these defaults. Resident memory can exceed that bound:
+/// an idle or leased VM keeps an `Arc` to the cache it was last keyed to, so a
+/// VM pointing at an evicted seed holds that cache alive until it is re-keyed.
+/// The practical worst case on the seed node is about 1.25 to 1.5 GiB with
+/// `max_idle_vms` at the mining thread count plus four.
+///
+/// Before the pinned slots existed, a peer naming a header on any old epoch
+/// could push the live mining seed out of a two-entry LRU and make the miner
+/// pay the 256 MiB Argon2d fill again on its next template. Pinning closes
+/// that; the fills a peer can still force land in the LRU and are budgeted by
+/// the verifier (`AdmissionBudgets` in the crate root).
 pub const DEFAULT_MAX_CACHES: usize = 2;
 
 /// A RandomX cache, shareable across threads.
@@ -90,15 +106,70 @@ struct PooledVm {
 	seed: [u8; 32],
 }
 
+/// One of the two identities the node hashes under: the slot is named before
+/// it is filled, so a pin never costs a fill, and a fill for a pinned identity
+/// lands in its slot, never in the LRU.
+struct PinnedSlot {
+	seed: [u8; 32],
+	cache: Option<Arc<SharedCache>>,
+}
+
+/// Every cache the engine can look up, under one lock so a pin and a fill
+/// cannot race each other.
+#[derive(Default)]
+struct CacheTable {
+	pinned: [Option<PinnedSlot>; 2],
+	/// Most recently used at the back; the front is what an eviction takes.
+	lru: VecDeque<([u8; 32], Arc<SharedCache>)>,
+}
+
+impl CacheTable {
+	fn pinned_lookup(&self, seed: &[u8; 32]) -> Option<Arc<SharedCache>> {
+		self.pinned
+			.iter()
+			.flatten()
+			.find(|slot| &slot.seed == seed)
+			.and_then(|slot| slot.cache.clone())
+	}
+
+	fn is_pinned_identity(&self, seed: &[u8; 32]) -> bool {
+		self.pinned.iter().flatten().any(|slot| &slot.seed == seed)
+	}
+
+	/// Take the LRU entry for `seed` out of the queue, if it is there.
+	fn take_from_lru(&mut self, seed: &[u8; 32]) -> Option<Arc<SharedCache>> {
+		let index = self.lru.iter().position(|(key, _)| key == seed)?;
+		self.lru.remove(index).map(|(_, cache)| cache)
+	}
+
+	fn touch_lru(&mut self, seed: &[u8; 32]) -> Option<Arc<SharedCache>> {
+		let cache = self.take_from_lru(seed)?;
+		self.lru.push_back((*seed, cache.clone()));
+		Some(cache)
+	}
+
+	fn push_lru(&mut self, seed: [u8; 32], cache: Arc<SharedCache>, max_caches: usize) {
+		self.lru.push_back((seed, cache));
+		while self.lru.len() > max_caches {
+			self.lru.pop_front();
+		}
+	}
+
+	fn resident(&self) -> usize {
+		self.pinned.iter().flatten().filter(|slot| slot.cache.is_some()).count() + self.lru.len()
+	}
+}
+
 /// The node's RandomX instance: seed caches, a VM pool, and the hash.
 pub struct RandomxEngine {
 	flags: RandomXFlag,
-	caches: Mutex<VecDeque<([u8; 32], Arc<SharedCache>)>>,
+	caches: Mutex<CacheTable>,
 	cache_build: Mutex<()>,
 	idle: Mutex<Vec<PooledVm>>,
 	max_caches: usize,
 	max_idle_vms: AtomicUsize,
 	cache_initialisations: AtomicUsize,
+	fill_counter: Mutex<Option<prometheus_endpoint::Counter<prometheus_endpoint::U64>>>,
 }
 
 impl RandomxEngine {
@@ -107,7 +178,8 @@ impl RandomxEngine {
 		Self::with_settings(max_idle_vms, DEFAULT_MAX_CACHES)
 	}
 
-	/// A light-mode engine with both pool sizes named.
+	/// A light-mode engine with both pool sizes named. `max_caches` is the
+	/// depth of the unpinned LRU; the two pinned slots come on top of it.
 	pub fn with_settings(max_idle_vms: usize, max_caches: usize) -> Arc<Self> {
 		// `get_recommended_flags` detects hardware AES, the JIT and the Argon2
 		// variants, and deliberately never returns FULL_MEM: that is the
@@ -116,12 +188,13 @@ impl RandomxEngine {
 		let flags = RandomXFlag::get_recommended_flags();
 		Arc::new(Self {
 			flags,
-			caches: Mutex::new(VecDeque::new()),
+			caches: Mutex::new(CacheTable::default()),
 			cache_build: Mutex::new(()),
 			idle: Mutex::new(Vec::new()),
 			max_caches: max_caches.max(1),
 			max_idle_vms: AtomicUsize::new(max_idle_vms.max(1)),
 			cache_initialisations: AtomicUsize::new(0),
+			fill_counter: Mutex::new(None),
 		})
 	}
 
@@ -151,21 +224,117 @@ impl RandomxEngine {
 		self.idle.lock().len()
 	}
 
-	/// How many Argon2d cache fills have happened, which is how many times the
-	/// seed moved under this process.
+	/// How many Argon2d cache fills have happened, which is how many times a
+	/// seed this engine did not hold was asked for.
 	pub fn cache_initialisations(&self) -> usize {
 		self.cache_initialisations.load(Ordering::Relaxed)
 	}
 
+	/// Count every cache fill on this Prometheus counter as well.
+	pub fn set_fill_counter(
+		&self,
+		counter: prometheus_endpoint::Counter<prometheus_endpoint::U64>,
+	) {
+		*self.fill_counter.lock() = Some(counter);
+	}
+
+	/// Name the two seeds the node hashes under now and next.
+	///
+	/// This is O(1) and never fills: a slot can be named before its cache
+	/// exists, and the fill happens on the first hash under it (or on
+	/// [`Self::warm`]) and lands in the slot. A cache already resident in the
+	/// LRU under one of these seeds moves into its slot; a previously pinned
+	/// cache that is neither `live` nor `next` is demoted to the back of the
+	/// LRU, evicting the LRU's oldest past `max_caches`, because at an epoch
+	/// turn the old live seed is exactly the one late blocks still arrive
+	/// under. `live == next` holds one slot.
+	pub fn pin_seeds(&self, live: [u8; 32], next: [u8; 32]) {
+		let wanted: Vec<[u8; 32]> = if live == next { vec![live] } else { vec![live, next] };
+		let mut table = self.caches.lock();
+		let already =
+			[table.pinned[0].as_ref().map(|s| s.seed), table.pinned[1].as_ref().map(|s| s.seed)];
+		if already.iter().flatten().count() == wanted.len() &&
+			wanted.iter().all(|seed| already.contains(&Some(*seed)))
+		{
+			return;
+		}
+
+		let mut slots = std::mem::take(&mut table.pinned);
+		// Keep what is still wanted, set aside what is not.
+		let mut kept: Vec<PinnedSlot> = Vec::with_capacity(2);
+		let mut demoted: Vec<PinnedSlot> = Vec::with_capacity(2);
+		for slot in slots.iter_mut().filter_map(Option::take) {
+			if wanted.contains(&slot.seed) {
+				kept.push(slot);
+			} else {
+				demoted.push(slot);
+			}
+		}
+		// Promote first: a wanted seed already resident in the LRU moves into
+		// its slot before the demotions below can push it out of a full LRU.
+		let mut next_slots: [Option<PinnedSlot>; 2] = [None, None];
+		for (index, seed) in wanted.iter().enumerate() {
+			let slot = match kept.iter().position(|slot| &slot.seed == seed) {
+				Some(position) => kept.swap_remove(position),
+				None => PinnedSlot { seed: *seed, cache: table.take_from_lru(seed) },
+			};
+			next_slots[index] = Some(slot);
+		}
+		table.pinned = next_slots;
+		// Then demote: the old live seed lands at the back of the LRU, where
+		// the late blocks still arriving under it will find it.
+		let max = self.max_caches;
+		for slot in demoted {
+			if let Some(cache) = slot.cache {
+				table.push_lru(slot.seed, cache, max);
+			}
+		}
+		log::debug!(
+			target: crate::LOG_TARGET,
+			"RandomX: pinned seeds live {} next {} ({} cache(s) resident)",
+			hex::encode(live),
+			hex::encode(next),
+			table.resident(),
+		);
+	}
+
+	/// Fill the cache for `seed` now if it is absent, so a later hash under it
+	/// pays nothing. Blocks for the Argon2d fill; call it off the critical
+	/// path.
+	pub fn warm(&self, seed: [u8; 32]) -> Result<(), EngineError> {
+		self.cache_for(&seed).map(|_| ())
+	}
+
+	/// Whether `seed` is one of the two pinned identities, filled or not.
+	pub fn is_pinned(&self, seed: &[u8; 32]) -> bool {
+		self.caches.lock().is_pinned_identity(seed)
+	}
+
+	/// Whether a hash under `seed` would find its cache already built.
+	pub fn is_resident(&self, seed: &[u8; 32]) -> bool {
+		let table = self.caches.lock();
+		table.pinned_lookup(seed).is_some() || table.lru.iter().any(|(key, _)| key == seed)
+	}
+
+	/// The two pinned identities, filled or not.
+	pub fn pinned_seeds(&self) -> [Option<[u8; 32]>; 2] {
+		let table = self.caches.lock();
+		[table.pinned[0].as_ref().map(|s| s.seed), table.pinned[1].as_ref().map(|s| s.seed)]
+	}
+
+	/// How many caches are resident right now: filled pinned slots plus the
+	/// LRU. Never more than `2 + max_caches`.
+	pub fn resident_caches(&self) -> usize {
+		self.caches.lock().resident()
+	}
+
 	fn cache_for(&self, seed: &[u8; 32]) -> Result<Arc<SharedCache>, EngineError> {
 		{
-			let mut caches = self.caches.lock();
-			if let Some(index) = caches.iter().position(|(key, _)| key == seed) {
-				// Most recently used goes to the back, so the front is what an
-				// eviction takes.
-				let entry = caches.remove(index).expect("index came from position; qed");
-				let cache = entry.1.clone();
-				caches.push_back(entry);
+			let mut table = self.caches.lock();
+			if let Some(cache) = table.pinned_lookup(seed) {
+				return Ok(cache);
+			}
+			if let Some(cache) = table.touch_lru(seed) {
 				return Ok(cache);
 			}
 		}
@@ -175,24 +344,36 @@ impl RandomxEngine {
 		// it must share one 256 MiB fill. Cached seeds remain available while
 		// this lock is held because the cache lookup uses its own short lock.
 		let _build = self.cache_build.lock();
-		{
-			let caches = self.caches.lock();
-			if let Some((_, cache)) = caches.iter().find(|(key, _)| key == seed) {
-				return Ok(cache.clone());
+		let pinned_identity = {
+			let mut table = self.caches.lock();
+			if let Some(cache) = table.pinned_lookup(seed) {
+				return Ok(cache);
 			}
-		}
+			if let Some(cache) = table.touch_lru(seed) {
+				return Ok(cache);
+			}
+			table.is_pinned_identity(seed)
+		};
 		log::info!(
 			target: crate::LOG_TARGET,
-			"⛏️ RandomX: initialising the seed cache for {} (light mode, 256 MiB)",
+			"⛏️ RandomX: initialising the seed cache for {} (light mode, 256 MiB, {})",
 			hex::encode(seed),
+			if pinned_identity { "pinned" } else { "historical" },
 		);
 		let cache = Arc::new(SharedCache(RandomXCache::new(self.flags, &seed[..])?));
 		self.cache_initialisations.fetch_add(1, Ordering::Relaxed);
+		if let Some(counter) = self.fill_counter.lock().as_ref() {
+			counter.inc();
+		}
 
-		let mut caches = self.caches.lock();
-		caches.push_back((*seed, cache.clone()));
-		while caches.len() > self.max_caches {
-			caches.pop_front();
+		let mut table = self.caches.lock();
+		// The identity may have been pinned or unpinned while the fill ran, so
+		// the slot is chosen from the table as it is now.
+		if let Some(slot) = table.pinned.iter_mut().flatten().find(|slot| &slot.seed == seed) {
+			slot.cache = Some(cache.clone());
+		} else {
+			let max = self.max_caches;
+			table.push_lru(*seed, cache.clone(), max);
 		}
 		Ok(cache)
 	}
@@ -410,6 +591,179 @@ mod tests {
 		// verifies without paying for Argon2d again.
 		engine.hash(old, b"blob").expect("old again");
 		assert_eq!(engine.cache_initialisations(), 2);
+	}
+
+	/// Naming the two seeds costs nothing: no fill, no resident cache.
+	#[test]
+	fn pin_seeds_does_not_initialise_a_cache() {
+		let engine = RandomxEngine::with_settings(1, 2);
+		let live = seed_from(b"live");
+		let next = seed_from(b"next");
+		engine.pin_seeds(live, next);
+		assert_eq!(engine.cache_initialisations(), 0);
+		assert_eq!(engine.resident_caches(), 0);
+		assert_eq!(engine.pinned_seeds(), [Some(live), Some(next)]);
+		assert!(!engine.is_resident(&live));
+	}
+
+	/// The point of the slots: however many historical seeds a peer names,
+	/// the miner's two are never refilled.
+	#[test]
+	fn pinned_seeds_survive_historical_fills() {
+		let engine = RandomxEngine::with_settings(1, 2);
+		let live = seed_from(b"live");
+		let next = seed_from(b"next");
+		engine.pin_seeds(live, next);
+		engine.hash(live, b"blob").expect("live");
+		engine.hash(next, b"blob").expect("next");
+		assert_eq!(engine.cache_initialisations(), 2);
+		for index in 0..5u8 {
+			engine.hash(seed_from(&[b'h', index]), b"blob").expect("historical");
+		}
+		assert_eq!(engine.cache_initialisations(), 7);
+		engine.hash(live, b"blob").expect("live again");
+		engine.hash(next, b"blob").expect("next again");
+		assert_eq!(engine.cache_initialisations(), 7, "the pinned seeds were never refilled");
+		assert!(engine.resident_caches() <= 4);
+		assert!(engine.is_resident(&live) && engine.is_resident(&next));
+	}
+
+	/// A cache already in the LRU moves into its slot when its seed is
+	/// pinned; nothing is rebuilt.
+	#[test]
+	fn pinning_a_resident_seed_moves_it_without_a_fill() {
+		let engine = RandomxEngine::with_settings(1, 2);
+		let x = seed_from(b"x");
+		let y = seed_from(b"y");
+		engine.hash(x, b"blob").expect("x");
+		engine.pin_seeds(x, y);
+		engine.hash(x, b"blob").expect("x again");
+		assert_eq!(engine.cache_initialisations(), 1);
+		assert_eq!(engine.resident_caches(), 1);
+	}
+
+	/// Inside an epoch the next seed is the current one, and that is one slot
+	/// and one cache.
+	#[test]
+	fn pinning_the_same_seed_twice_holds_one_cache() {
+		let engine = RandomxEngine::with_settings(1, 2);
+		let a = seed_from(b"a");
+		engine.pin_seeds(a, a);
+		assert_eq!(engine.pinned_seeds(), [Some(a), None]);
+		engine.hash(a, b"blob").expect("a");
+		assert_eq!(engine.cache_initialisations(), 1);
+		assert_eq!(engine.resident_caches(), 1);
+	}
+
+	/// At an epoch turn the old live seed is exactly the one late blocks still
+	/// arrive under, so it is demoted into the LRU and kept.
+	#[test]
+	fn re_pinning_demotes_the_old_live_into_the_lru() {
+		let engine = RandomxEngine::with_settings(1, 2);
+		let a = seed_from(b"a");
+		let b = seed_from(b"b");
+		let c = seed_from(b"c");
+		engine.pin_seeds(a, b);
+		engine.hash(a, b"blob").expect("a");
+		engine.hash(b, b"blob").expect("b");
+		engine.pin_seeds(b, c);
+		assert_eq!(engine.pinned_seeds(), [Some(b), Some(c)]);
+		engine.hash(a, b"blob").expect("a from the LRU");
+		assert_eq!(engine.cache_initialisations(), 2, "a came back from the LRU");
+		assert!(engine.is_resident(&a));
+		engine.hash(c, b"blob").expect("c");
+		assert_eq!(engine.cache_initialisations(), 3);
+		assert!(engine.resident_caches() <= 4);
+	}
+
+	/// The residual the verifier's fill budget exists for: three unpinned
+	/// seeds through an LRU of two refill on every hash. The pinned seeds are
+	/// untouched by it.
+	#[test]
+	fn three_unpinned_seeds_through_an_lru_of_two_refill_on_every_hash() {
+		let engine = RandomxEngine::with_settings(1, 2);
+		let a = seed_from(b"a");
+		let b = seed_from(b"b");
+		engine.pin_seeds(a, b);
+		let x = seed_from(b"x");
+		let y = seed_from(b"y");
+		let z = seed_from(b"z");
+		for seed in [x, y, z, x, y, z] {
+			engine.hash(seed, b"blob").expect("unpinned");
+		}
+		assert_eq!(engine.cache_initialisations(), 6);
+		engine.hash(a, b"blob").expect("a");
+		assert_eq!(engine.cache_initialisations(), 7);
+		assert!(engine.is_resident(&a));
+		for seed in [x, y, z] {
+			engine.hash(seed, b"blob").expect("unpinned");
+		}
+		assert!(engine.is_resident(&a), "the pinned seed outlives the churn");
+	}
+
+	/// The seed about to be pinned may already sit in the LRU, and the old
+	/// pinned caches are demoted into that same LRU: promotion has to come
+	/// first, or the demotions evict the very cache the pin is for.
+	#[test]
+	fn pinning_promotes_from_the_lru_before_demoting_into_it() {
+		let engine = RandomxEngine::with_settings(1, 2);
+		let a = seed_from(b"a");
+		let b = seed_from(b"b");
+		let c = seed_from(b"c");
+		engine.pin_seeds(a, b);
+		engine.hash(a, b"blob").expect("a");
+		engine.hash(b, b"blob").expect("b");
+		engine.hash(c, b"blob").expect("c into the LRU");
+		assert_eq!(engine.cache_initialisations(), 3);
+		engine.pin_seeds(c, c);
+		assert_eq!(engine.pinned_seeds(), [Some(c), None]);
+		assert!(engine.is_resident(&c), "c moved into its slot, the demotions did not evict it");
+		engine.hash(c, b"blob").expect("c again");
+		assert_eq!(engine.cache_initialisations(), 3);
+		assert!(engine.resident_caches() <= 4);
+	}
+
+	#[test]
+	fn a_pinned_identity_is_pinned_before_it_is_filled() {
+		let engine = RandomxEngine::with_settings(1, 2);
+		let live = seed_from(b"live");
+		engine.pin_seeds(live, live);
+		assert!(engine.is_pinned(&live));
+		assert!(!engine.is_resident(&live));
+		assert!(!engine.is_pinned(&seed_from(b"other")));
+	}
+
+	#[test]
+	fn resident_caches_never_exceed_pinned_plus_lru() {
+		let engine = RandomxEngine::with_settings(1, 2);
+		let a = seed_from(b"a");
+		let b = seed_from(b"b");
+		engine.pin_seeds(a, b);
+		for key in [b"a", b"b", b"c", b"d", b"e", b"f"] {
+			engine.hash(seed_from(key), b"blob").expect("hash");
+			assert!(engine.resident_caches() <= 4, "after {}", String::from_utf8_lossy(key));
+		}
+	}
+
+	/// A fill for a pinned identity lands in its slot even when the identity
+	/// was pinned cold, and a warm is that fill ahead of time.
+	#[test]
+	fn a_warm_fills_a_pinned_slot_ahead_of_the_first_hash() {
+		let engine = RandomxEngine::with_settings(1, 2);
+		let live = seed_from(b"live");
+		let next = seed_from(b"next");
+		engine.pin_seeds(live, next);
+		engine.warm(next).expect("warm");
+		assert_eq!(engine.cache_initialisations(), 1);
+		assert!(engine.is_resident(&next));
+		assert_eq!(engine.resident_caches(), 1);
+		// The LRU is still empty: the fill went to the slot.
+		engine.hash(seed_from(b"h1"), b"blob").expect("h1");
+		engine.hash(seed_from(b"h2"), b"blob").expect("h2");
+		engine.hash(seed_from(b"h3"), b"blob").expect("h3");
+		assert!(engine.is_resident(&next), "three historical fills did not evict the pinned next");
+		engine.hash(next, b"blob").expect("next");
+		assert_eq!(engine.cache_initialisations(), 4);
 	}
 
 	#[test]
