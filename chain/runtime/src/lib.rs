@@ -121,6 +121,11 @@ impl_opaque_keys! {
 // 105 adds early privacy-policy validity checks, an authenticated protocol
 // profile, and bounded ciphertext retention. Storage and transaction acceptance
 // change; signed extrinsic encoding remains at transaction_version 7.
+// 106 moves the ciphertext capacity check ahead of the ZK verify in
+// `pre_dispatch` and answers `ExhaustsResources` instead of `Call` for a full
+// block, so the block builder defers the settlement and keeps it in the pool.
+// No storage, call, event or metadata change; the signed extrinsic encoding is
+// untouched, so `transaction_version` stays at 7.
 // `the_runtime_identity_is_pinned` in `tests/call_filter.rs` is the tripwire.
 //
 // Bump `impl_version` when the emitted wasm changes under an unchanged
@@ -139,7 +144,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
 	spec_name: alloc::borrow::Cow::Borrowed("qnero"),
 	impl_name: alloc::borrow::Cow::Borrowed("qnero-node"),
 	authoring_version: 1,
-	spec_version: 105,
+	spec_version: 106,
 	impl_version: 2,
 	apis: apis::RUNTIME_API_VERSIONS,
 	transaction_version: 7,

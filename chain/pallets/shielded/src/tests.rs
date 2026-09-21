@@ -2137,6 +2137,73 @@ fn a_tampered_proof_is_refused() {
 	});
 }
 
+/// A block already at its ciphertext cap defers a settlement and keeps it in
+/// the pool.
+///
+/// The regression this pins: the capacity check used to run only inside
+/// `check_settlement`, behind the ZK verify, and its failure was reported as
+/// `InvalidTransaction::Call`. `sc-basic-authorship` reads a `Call` failure as
+/// "this transaction is invalid" and drops it from the pool, so the first
+/// settlement offered to a full block was destroyed with no event and never
+/// retried. The gate now runs ahead of the verify and answers
+/// `ExhaustsResources`, which the block builder reads as "block full": the
+/// transaction is skipped and survives for the next block.
+///
+/// One single-slot settlement writes two ciphertexts
+/// (`slots.saturating_mul(2)`), so at a cap of 2 the settlement fills a block
+/// on its own. The two shields below are what make the block full ahead of it.
+#[test]
+fn a_full_block_defers_a_settlement_instead_of_dropping_it() {
+	with_ciphertext_limits(|| {
+		new_test_ext_with_endowments(vec![(alice(), 10_000 * UNIT)]).execute_with(|| {
+			// Shields at block 1, publishes the anchor header at block 4 and
+			// leaves the chain at block 5, whose ciphertext counter reads 0.
+			let spend = shield_and_prove(4, 2);
+			let call = crate::Call::submit_private_batch {
+				proof: spend.proof.clone(),
+				outputs: spend.outputs.clone(),
+			};
+
+			// Block 5 is empty, so the settlement's two ciphertexts fit.
+			assert_ok!(<Shielded as ValidateUnsigned>::pre_dispatch(&call));
+
+			// Two shields fill block 5 to the cap of 2.
+			assert_ok!(cache_test_shield());
+			assert_ok!(cache_test_shield());
+			assert_eq!(crate::CiphertextsWrittenThisBlock::<Test>::get(), (5, 2));
+
+			// The same settlement is now deferred, and the answer says so:
+			// `ExhaustsResources` keeps it in the pool for the next block.
+			assert_eq!(
+				<Shielded as ValidateUnsigned>::pre_dispatch(&call),
+				Err(InvalidTransaction::ExhaustsResources.into())
+			);
+
+			// The dispatch backstop is unchanged: a settlement that reaches
+			// `settle` in a full block still fails on the pallet error, with
+			// nothing written.
+			assert_noop!(
+				Shielded::submit_private_batch(
+					RuntimeOrigin::none(),
+					spend.proof.clone(),
+					spend.outputs.clone(),
+				),
+				Error::<Test>::TooManyCiphertextsInBlock
+			);
+
+			// Next block, empty counter, same transaction. The anchor at block
+			// 4 is still inside `BlockHashWindow` and `BlockHash(4)` is still
+			// present, so nothing about the proof has gone stale.
+			System::set_block_number(6);
+			assert_ok!(<Shielded as ValidateUnsigned>::validate_unsigned(
+				TransactionSource::External,
+				&call
+			));
+			assert_ok!(<Shielded as ValidateUnsigned>::pre_dispatch(&call));
+		});
+	});
+}
+
 #[test]
 fn a_real_batch_anchored_at_the_wrong_block_hash_is_refused() {
 	new_test_ext_with_endowments(vec![(alice(), 10_000 * UNIT)]).execute_with(|| {

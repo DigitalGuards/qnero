@@ -442,7 +442,7 @@ fn the_runtime_identity_is_pinned() {
 	);
 	assert_eq!(
 		(version.spec_version, version.transaction_version),
-		(105, 7),
+		(106, 7),
 		"runtime metadata or the signed extrinsic encoding moved; see the rule above \
 		 `VERSION` in runtime/src/lib.rs and bump the half that changed"
 	);

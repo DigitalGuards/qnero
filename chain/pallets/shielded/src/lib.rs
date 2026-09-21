@@ -1326,9 +1326,49 @@ pub mod pallet {
 			// building: the block builder may include one, and nobody can
 			// gossip one. Its own checks are in the dispatch, where a failure
 			// is a mandatory-dispatch failure and the block dies with it.
+			//
+			// `pre_dispatch` remains the block-validity gate on import (a Bare
+			// extrinsic's `pre_dispatch` error aborts the block); the plan
+			// inside `settle` at dispatch protects storage.
+			//
+			// The per-block ciphertext cap is the one condition here that is
+			// temporary: the block being built is full, and the very same
+			// submission is valid against the next one. It is answered with
+			// `ExhaustsResources` and it is checked ahead of the ZK verify.
+			// The block builder reads `ExhaustsResources` as "block full": it
+			// skips the transaction without reporting it invalid, so the
+			// transaction stays in the pool and is offered again for the next
+			// block. The proposer's recorded end reason for such a skip reads
+			// as the weight limit, which is the same reason a genuinely
+			// weight-bound block ends on, so a cap hit and a full block look
+			// alike in the proposer's logs. `longevity(5)` bounds how long
+			// that deferral can repeat: a settlement skipped for five
+			// consecutive full blocks expires from the pool and has to be
+			// resubmitted.
+			//
+			// Every other plan failure stays `InvalidTransaction::Call`.
+			// `CiphertextQueueOverflow` in particular is a wrapped u64 queue
+			// tail and is permanent, so answering it with `ExhaustsResources`
+			// would have the block builder re-skip the same dead transaction
+			// once a block until its longevity ran out.
+			//
+			// The gate costs one extra parse and one extra `plan_settlement`
+			// per inclusion: the plan runs here, and then again inside
+			// `check_settlement` behind the verify. That repetition is
+			// deliberate. The post-verify half is left exactly as it was, so
+			// everything a successful `pre_dispatch` establishes, and every
+			// error it reports for a proof that does verify, is byte-identical
+			// to the behaviour before the gate existed.
 			match call {
 				Call::coinbase { .. } => Ok(()),
 				Call::submit_private_batch { proof, outputs } => {
+					let parsed = Self::pre_validate_private_batch(proof)
+						.map_err(|_| InvalidTransaction::Call)?;
+					Self::plan_settlement(&parsed, outputs).map_err(|e| match e {
+						Error::<T>::TooManyCiphertextsInBlock =>
+							InvalidTransaction::ExhaustsResources,
+						_ => InvalidTransaction::Call,
+					})?;
 					let bundle = Self::validate_private_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
 					Self::check_settlement(&bundle, outputs)
@@ -1336,6 +1376,13 @@ pub mod pallet {
 					Ok(())
 				},
 				Call::submit_public_batch { proof, outputs } => {
+					let parsed = Self::pre_validate_public_batch(proof)
+						.map_err(|_| InvalidTransaction::Call)?;
+					Self::plan_settlement(&parsed, outputs).map_err(|e| match e {
+						Error::<T>::TooManyCiphertextsInBlock =>
+							InvalidTransaction::ExhaustsResources,
+						_ => InvalidTransaction::Call,
+					})?;
 					let bundle =
 						Self::validate_public_batch(proof).map_err(|_| InvalidTransaction::Call)?;
 					Self::check_settlement(&bundle, outputs)
