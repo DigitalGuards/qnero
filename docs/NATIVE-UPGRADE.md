@@ -26,6 +26,41 @@ runtime constant or copying that database does not erase its finality boundary.
 The database backend can also reject an incompatible stored pruning mode before
 the explicit finality check is reached.
 
+### Side-branch admission budgets (client policy, 2026-09-21)
+
+Because every valid block on every branch is executed and archived, a peer can
+make a node pay for a side branch whose difficulty has decayed far below the
+tip's. The client bounds that with two token budgets, charged in the import
+queue's verifier only and never by `import_block` or by the node's own blocks:
+
+- **Side-branch blocks.** A block whose parent is the tip is free. A block on
+  another parent is free while its difficulty is at least the tip's divided by
+  8 (`SIDE_BRANCH_DIFFICULTY_FRACTION`). Anything cheaper draws one token from
+  a bucket of 1024 that refills at `--side-branch-budget` blocks per hour
+  (default 900, 0 = unlimited), once its seal has met the branch difficulty.
+- **RandomX cache fills.** A block extending the tip fills its seed for free.
+  Any other block whose seed is neither pinned nor resident draws one token
+  from a bucket of 4 that refills at `--seed-fill-budget` fills per hour
+  (default 24, 0 = unlimited). The seeds the node mines under now and next are
+  pinned in their own slots and never evicted by a fill a peer forces.
+
+A refusal is `randomx: budget refusal for block #N ...` at warn level, once a
+minute per budget with the count of what the minute hid. It travels the
+ordinary verification-failed path, so sync drops the sending peer and offers
+the branch again later; the block is valid or invalid independently of it, and
+an honest heavier chain is admitted at the budget's rate and can never be
+refused for good. Four counters on the Prometheus endpoint say what the budgets
+are doing: `qnero_pow_side_branch_charged_total`,
+`qnero_pow_side_branch_refused_total`, `qnero_pow_seed_fill_charged_total`,
+`qnero_pow_seed_fill_refused_total`, beside `qnero_randomx_cache_fills_total`.
+
+Neither budget is a consensus rule and neither needs a runtime bump: every
+block valid before is valid after, only admission timing and cache residency
+change. A depth floor below the tip and a hard difficulty threshold were both
+considered and rejected: with genesis as the only irreversible block, either
+one turns a partition longer than the floor, or a chain whose hashrate migrated,
+into a branch the node refuses for ever.
+
 ### Keeping an existing chain
 
 1. Preserve a consistent backup of its database, original chain specification,
@@ -118,6 +153,21 @@ Activation still needs long-partition and deep-reorganization qualification,
 replay/recovery on the selected deployed database, full-retention-window wallet
 recovery, and reference-hardware full-block and admission-capacity measurements.
 The exact cryptographic composition remains subject to independent assessment.
+
+The admission budgets bound the side-branch cost. What a
+spammer with hashrate `A` against honest hashrate `H` can still make every node
+execute is about `8 * (A/H) * 30` blocks an hour for free plus the budgeted
+900 an hour, at roughly 22 KB of archive per block, and four cache fills in a
+burst then one per 150 s. An honest chain that carries `N` cheap blocks (a
+minority partition whose hashrate returned) imports `min(N, 1024)` at once and
+the rest at the budgeted rate, each exhausted batch costing the serving peer one
+drop and the node one sync restart; a partition holding under a ninth of the
+hash settles below the free line within a few days and is charged from then
+on. Two follow-ups remain open: an ancestor search
+that recognises a known side-branch block, so budgeted recovery re-downloads
+nothing it already holds; and headers-first admission, which would verify
+seals only and execute a branch's bodies once its header work is competitive.
+Side-branch state below any horizon is never pruned.
 
 ### Local fork and wallet smoke
 

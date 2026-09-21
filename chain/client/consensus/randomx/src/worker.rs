@@ -189,6 +189,12 @@ where
 		if !self.is_authoring_enabled() {
 			return;
 		}
+		// The template names the seed it is mined under and the one the next
+		// epoch will use. Pinning is O(1) and never fills; it keeps both out
+		// of the LRU a peer's junk header can churn, so the miner and the
+		// stratum server never pay a fill twice.
+		self.engine
+			.pin_seeds(value.metadata.seed_hash.0, value.metadata.next_seed_hash.0);
 		*build = Some(value);
 		self.increment_version();
 	}

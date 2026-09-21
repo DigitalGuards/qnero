@@ -376,9 +376,12 @@ fn the_block_that_fills_a_sync_gap_is_exempt() {
 		.expect("the gap block is the one below-finality block that is importable");
 }
 
-/// And a block the node already has is exempt too, because re-verifying one is
-/// what `check-block` and `import-blocks` do and both are aimed at blocks that
-/// are below finality by construction.
+/// And a block the node already has is exempt too. On this tree the exemption
+/// is unreachable from the import queue, for peers and for the CLI alike:
+/// `check_block` runs before the verifier and answers `AlreadyInChain` for any
+/// block with state, which under `ArchiveAll` is every block, so a known block
+/// never reaches `verify_pow`. It is kept as a backend consistency rule, and
+/// because a peer cannot use it, it is not a bypass of anything.
 #[test]
 fn a_block_the_node_already_has_is_exempt() {
 	let (backend, parent) = FakeBackend::with_block_finalized_at(1_000, 5_000);
@@ -402,6 +405,13 @@ fn reversible_pow_requires_replay_of_a_legacy_finalized_database() {
 	assert!(error.to_string().contains("separate archive database"));
 }
 
+/// Reorg depth is unbounded by design: genesis is the only irreversible block
+/// and the chain is chosen by cumulative work, so a valid block on a parent
+/// ten thousand blocks below the tip is still a block the node imports. What
+/// bounds a side branch is the admission budget in `admission.rs`, which
+/// charges cheap side-branch blocks and never refuses one by height. A depth
+/// floor was considered and rejected on 2026-09-21: it would turn any
+/// partition longer than the floor into a permanent split.
 #[test]
 fn a_valid_old_parent_remains_eligible_with_genesis_finality() {
 	// The parent height is independent of the best height and confirmation

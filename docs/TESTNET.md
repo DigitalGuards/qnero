@@ -322,6 +322,17 @@ are byte-identical and the stage is idempotent. The reproducibility test
 compares everything except `bootNodes` and validates the multiaddr shape, so a
 committed list keeps it green.
 
+One caveat, found 2026-09-21: the committed spec's runtime wasm was exported by
+a binary built in a checkout at another path (the worktree PR #5 came from),
+and a build of the same sources with the same compiler and lock file in this
+checkout produces a wasm that differs in symbol names and custom-section order.
+The likely cause is cargo's crate metadata hash, which for path dependencies
+includes the path. Until the spec is regenerated at the next relaunch the byte
+comparison fails here, and it must not be regenerated before then: a different
+wasm is a different genesis hash, which would cut new nodes off from the live
+chain. Nothing about a node release depends on it; the node stage copies the
+binary and the host keeps its spec.
+
 A peer id is public and belongs in a public repository. The key that produces
 it is not, and it never leaves `/etc/qnero/node-key`.
 
@@ -785,6 +796,34 @@ check that `--force-authoring` is still on the command line if this node is the
 only authority. If the difficulty has run far above the available hash rate, the
 retarget will come back down at one 2048th per step, which is about 57 hours per
 e-fold; pointing a rig at the stratum port is faster than waiting.
+
+**Refused blocks in the log.** Two warn lines are policy and self-healing:
+
+```
+randomx: budget refusal for block #N on parent 0x…: Side-branch block #N … the side-branch budget is spent; retry in S s
+randomx: budget refusal for block #N on parent 0x…: Block #N … needs a RandomX cache fill … the seed-fill budget is spent; retry in S s
+```
+
+The first is a block on a side branch whose difficulty is below an eighth of
+the tip's, offered faster than `--side-branch-budget` (default 900 an hour)
+admits: a long-partitioned minority rejoining, or somebody spamming cheap
+branches. The second is a block off the tip that would need a 256 MiB RandomX
+cache fill, offered faster than `--seed-fill-budget` (default 24 an hour)
+admits: junk seals naming old epochs, or a branch carrying its own seed block.
+Each is printed at most once a minute per budget with the count it hid. The
+`Verification failed … received from (peer)` line and the peer drop that follow
+are expected: sync offers the branch again when the bucket has refilled, and a
+heavier honest chain always gets in at that rate. A steady stream from many
+peer identities is the attack the budgets exist for, and the four counters on
+`:9615` (`qnero_pow_side_branch_charged_total`, `…_refused_total`,
+`qnero_pow_seed_fill_charged_total`, `…_refused_total`, beside
+`qnero_randomx_cache_fills_total`) say how much it is costing. `Invalid seal for
+block` at error level is something else: a seal that does not meet the target,
+which on a healthy network is a chain-split alarm.
+
+To let a known-honest deep branch in faster than the default, restart with a
+higher budget, or `--side-branch-budget 0` for unlimited; the node never needs
+a database reset to adopt a heavier chain.
 
 **Stopping everything:**
 

@@ -737,7 +737,7 @@ pub fn run() -> sc_cli::Result<()> {
 						);
 						AccountId32::new(inner_bytes)
 					},
-					None =>
+					None => {
 						if cli.run.shared_params.is_dev() {
 							let treasury_account = qnero_runtime::configs::TreasuryPalletId::get()
 								.into_account_truncating();
@@ -760,7 +760,8 @@ pub fn run() -> sc_cli::Result<()> {
 						} else {
 							// unused for non-validator nodes, use zero placeholder.
 							AccountId32::new([0u8; 32])
-						},
+						}
+					},
 				};
 
 				// The miner key every coinbase note this node mints is derived
@@ -797,7 +798,7 @@ pub fn run() -> sc_cli::Result<()> {
 						);
 						Some(key)
 					},
-					None =>
+					None => {
 						if config.role.is_authority() {
 							eprintln!(
 								"Error: --rewards-miner-key is required when running with --validator.\n"
@@ -814,7 +815,8 @@ pub fn run() -> sc_cli::Result<()> {
 						} else {
 							// A node that does not author mints nobody's note.
 							None
-						},
+						}
+					},
 				};
 
 				// Mining only runs on authorities; fail fast instead of
@@ -947,6 +949,8 @@ pub fn run() -> sc_cli::Result<()> {
 					cli.sync_block_request_timeout,
 					allow_mining_without_peers,
 					cli.max_tip_age,
+					cli.side_branch_budget,
+					cli.seed_fill_budget,
 				)
 				.map_err(sc_cli::Error::Service)
 			})

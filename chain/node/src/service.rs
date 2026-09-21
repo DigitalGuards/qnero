@@ -11,7 +11,9 @@ use futures::FutureExt;
 use futures::StreamExt;
 use qnero_runtime::{self, apis::RuntimeApi, opaque::Block};
 use sc_client_api::Backend;
-use sc_consensus_randomx::{blob, target, MiningHandle, MiningMetadata, RandomxEngine, Seal};
+use sc_consensus_randomx::{
+	blob, target, AdmissionBudgets, MiningHandle, MiningMetadata, RandomxEngine, Seal,
+};
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
 #[cfg(feature = "tx-logging")]
@@ -333,6 +335,27 @@ async fn mine_one_template(
 	let superseded = || cancellation_token.is_cancelled() || worker_handle.version() != job_version;
 
 	let engine = worker_handle.engine();
+
+	// The next epoch's seed is announced a lag ahead of its first use, so its
+	// 256 MiB fill happens here, on a blocking thread, and never on the
+	// template that first needs it. A second spawn while one is in flight
+	// only waits on the engine's build lock and finds the cache resident.
+	if metadata.next_seed_hash != metadata.seed_hash &&
+		!engine.is_resident(&metadata.next_seed_hash.0)
+	{
+		let engine = engine.clone();
+		let next = metadata.next_seed_hash.0;
+		log::info!(
+			"⛏️ Warming the next RandomX seed {} ahead of the epoch turn",
+			hex::encode(next)
+		);
+		tokio::task::spawn_blocking(move || {
+			if let Err(error) = engine.warm(next) {
+				log::warn!("⛏️ Warming the next RandomX seed failed: {error}");
+			}
+		});
+	}
+
 	// A fresh extra nonce per template, so a node restarting on the same
 	// template does not re-walk the nonces it already tried.
 	let extra_nonce: u32 = rand::random();
@@ -819,7 +842,7 @@ pub type Service = sc_service::PartialComponents<
 	(),
 	sc_consensus::DefaultImportQueue<Block>,
 	sc_transaction_pool::TransactionPoolHandle<Block, FullClient>,
-	(PowBlockImport, Option<Telemetry>, Arc<RandomxEngine>),
+	(PowBlockImport, Option<Telemetry>, Arc<RandomxEngine>, Arc<AdmissionBudgets>),
 >;
 
 #[allow(clippy::result_large_err)]
@@ -920,11 +943,16 @@ pub fn new_partial(config: &mut Configuration) -> Result<Service, ServiceError> 
 		inherent_data_providers,
 	);
 
+	// What a peer can make this node execute and fill: budgets at their
+	// defaults here, set from the command line in `new_full`.
+	let budgets = AdmissionBudgets::new(config.prometheus_registry());
+
 	let import_queue = sc_consensus_randomx::import_queue::<Block, FullClient>(
 		Box::new(pow_block_import.clone()),
 		None,
 		Arc::clone(&client),
 		Arc::clone(&engine),
+		Arc::clone(&budgets),
 		&task_manager.spawn_essential_handle(),
 		config.prometheus_registry(),
 	)?;
@@ -937,7 +965,7 @@ pub fn new_partial(config: &mut Configuration) -> Result<Service, ServiceError> 
 		keystore_container,
 		select_chain: (),
 		transaction_pool,
-		other: (pow_block_import, telemetry, engine),
+		other: (pow_block_import, telemetry, engine, budgets),
 	})
 }
 
@@ -957,6 +985,8 @@ pub fn new_full<
 	sync_block_request_timeout: u64,
 	allow_mining_without_peers: bool,
 	max_tip_age_secs: u64,
+	side_branch_budget_per_hour: u32,
+	seed_fill_budget_per_hour: u32,
 ) -> Result<TaskManager, ServiceError> {
 	let sc_service::PartialComponents {
 		client,
@@ -966,8 +996,15 @@ pub fn new_full<
 		keystore_container,
 		select_chain: _,
 		transaction_pool,
-		other: (pow_block_import, mut telemetry, engine),
+		other: (pow_block_import, mut telemetry, engine, budgets),
 	} = new_partial(&mut config)?;
+
+	budgets.configure(side_branch_budget_per_hour, seed_fill_budget_per_hour);
+	log::info!(
+		"⛏️ Admission budgets: side-branch {} block(s)/h, seed fills {}/h (0 = unlimited)",
+		side_branch_budget_per_hour,
+		seed_fill_budget_per_hour
+	);
 
 	// The pool has to be at least as deep as the number of threads leasing from
 	// it, or every mining round past its depth creates and destroys a VM: a
@@ -1178,8 +1215,9 @@ mod tests {
 
 		match won {
 			Some(Won::Stratum(mined)) => assert_eq!(mined.job_id, "1"),
-			other =>
-				panic!("the rig's seal must win a round it did not have to wait for: {other:?}"),
+			other => {
+				panic!("the rig's seal must win a round it did not have to wait for: {other:?}")
+			},
 		}
 		assert!(
 			started.elapsed() < Duration::from_secs(1),

@@ -722,12 +722,13 @@ one-line change in `runtime/src/configs/mod.rs`:
   rebuilds its dataset here as often as it does there and no more. Under the old
   12 s target the same 2048 blocks was 6.8 hours and the epoch was the constant
   that would have had to move; it does not.
-- The lag is 64 and `MaxReorgDepth` is 100, so the seed block is still inside
-  the window a legal reorg can move. That cannot split the chain, because the
-  seed follows each candidate's ancestry, but a deep reorg across an epoch
-  boundary does change the seed under work already started. A lag of 128
-  removes even that. In wall clock the lag is 2.1 hours and the reorg window
-  3.3 hours at a 120 s target.
+- The lag is 64. `MaxReorgDepth` is `u32::MAX` since the reversible
+  consensus change (it was 100 when this was written), so reorg depth is
+  unbounded by finality and the seed block is always inside the window a legal
+  reorg can move. That cannot split the chain, because the seed follows each
+  candidate's ancestry, but a deep reorg across an epoch boundary does change
+  the seed under work already started. A lag of 128 removes even that. In wall
+  clock the lag is 2.1 hours at a 120 s target.
 
 **The difficulty floor moved with the engine.** `get_min_difficulty()` was
 Ethereum's 2^17 and is now 128. At the 33 H/s one light-mode thread manages,
@@ -4583,6 +4584,14 @@ the path that is about to reject: the block that fills a warp or fast sync gap,
 which is the exemption `sc-client` carries, and a block the node already has,
 which is what `check-block` and `import-blocks` hand back to the import queue
 by design.
+
+*Superseded 2026-09-21.* The reversible consensus change left genesis as the
+only finalized block, so this floor stopped bounding anything. What replaced
+it is in `client/consensus/randomx/src/admission.rs`: the seeds the node mines
+under are pinned in slots the LRU cannot evict, and a block off the tip that
+needs a fill draws from a token budget, as does a side-branch block below an
+eighth of the tip's difficulty. `docs/DESIGN.md` 7.5 has the argument,
+including why a depth floor was rejected a second time.
 
 **A pause now reaches the rigs that are already connected.** `pause_authoring`
 fires once on the enabled-to-disabled edge and moves the template to the grace

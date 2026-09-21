@@ -130,8 +130,10 @@ KillSignal=SIGINT
 LimitNOFILE=65535
 
 # RandomX light mode is a 256 MiB Argon2d cache per seed plus about 2 MiB per
-# VM, and briefly two caches across an epoch boundary; the rest is the rocksdb
-# block cache and the import pipeline. The remaining 3 GB of an 8 GB box is for
+# VM: two pinned caches (the live seed and the next epoch's) plus up to two
+# historical or side-branch caches in an LRU, a 1 GiB lookup bound, and a VM
+# keyed to an evicted seed holds that cache a little longer; the rest is the
+# rocksdb block cache and the import pipeline. The remaining 3 GB of an 8 GB box is for
 # the faucet, whose prover peaks around 1 GB per proof. These two numbers are
 # what stop one of them taking the machine from the other.
 MemoryHigh=4G
