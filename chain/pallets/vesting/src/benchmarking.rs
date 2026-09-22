@@ -29,10 +29,18 @@ fn benchmark_total<T: Config>() -> BalanceOf<T> {
 	T::PayoutQuantum::get().saturating_mul((NON_FINAL_PAYOUT_QUANTA * 8).saturated_into())
 }
 
+/// The origin the three administered calls need, or the verdict that there is
+/// none.
+///
+/// A runtime may configure `AdminOrigin` as `NeverEnsureOrigin`, and the qnero
+/// runtime does. The three calls behind this origin are then undispatchable,
+/// which is a benchmark with no weight to measure rather than a broken suite:
+/// `BenchmarkError::Weightless` records zero and lets the run continue, the
+/// way `pallet_scheduler`'s own benchmarks answer the same case. `claim` does
+/// not come through here, so it is measured on every runtime.
 fn admin_origin<T: Config>() -> Result<T::RuntimeOrigin, BenchmarkError> {
 	let origin: T::RuntimeOrigin = RawOrigin::Signed(treasury::<T>()?).into();
-	T::AdminOrigin::try_origin(origin.clone())
-		.map_err(|_| BenchmarkError::Stop("signed treasury is not an admin origin"))?;
+	T::AdminOrigin::try_origin(origin.clone()).map_err(|_| BenchmarkError::Weightless)?;
 	Ok(origin)
 }
 
