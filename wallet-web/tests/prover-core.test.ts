@@ -28,6 +28,12 @@ import { ProverClient } from '../src/worker/client';
 import { ENTRY_WALK_LIMIT } from '../src/worker/protocol';
 import { ProverCore, type ModuleLoader, type WasmModule, type WasmProver } from '../src/worker/core';
 
+/**
+ * `max_tree_depth` here is deliberately above the circuit's own
+ * `MAX_TREE_DEPTH`, which the relaunch moves to 20: nothing in this file
+ * bounds a leaf count against it, and an over-large stand-in keeps the case
+ * that a limit read out of the module is used rather than assumed.
+ */
 const LIMITS = {
   memo_bytes: 61,
   ciphertext_fixed_bytes: 1731,

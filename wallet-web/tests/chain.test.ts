@@ -41,7 +41,7 @@ import { waitForInclusion } from '../src/chain/submit';
 const AT = `0x${'aa'.repeat(32)}`;
 
 /** What the module reports, and what bounds a leaf count here. */
-const MAX_TREE_DEPTH = 16;
+const MAX_TREE_DEPTH = 20;
 
 /** A storage entry whose keys this test can read back. See `privacy.test.ts`. */
 function entry(prefix: string): unknown {

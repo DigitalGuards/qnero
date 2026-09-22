@@ -255,7 +255,7 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
     // zero out and zero fee, and the header can be any real block, whose
     // preimage is public chain data. That leaf still publishes two nullifiers
     // and two output commitments, which the chain writes into permanent state:
-    // two entries in the nullifier set and two slots of a depth-16 tree that is
+    // two entries in the nullifier set and two slots of a depth-20 tree that is
     // sized for the life of the chain. Settlement extrinsics are fee-free, so
     // the leaf's own `fee` public input is the only cost, and an all-dummy leaf
     // sets it to zero.

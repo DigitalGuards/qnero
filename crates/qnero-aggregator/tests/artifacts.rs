@@ -60,6 +60,11 @@ fn the_artifact_set_round_trips_through_the_loaders() {
     generate_all_artifacts(&dir, NUM_LEAVES, Some(NUM_INNER), true)
         .expect("the artifact set generates");
 
+    // A public-batch set also carries the profile pair: the builder writes
+    // `protocol_profile.bin` and its readable manifest whenever it has a
+    // public-batch dimension to encode, at these test dimensions as much as at
+    // the release ones. What this list is really guarding is the other
+    // direction, that no prover artifact is ever published.
     assert_eq!(
         file_names(&dir),
         vec![
@@ -68,6 +73,8 @@ fn the_artifact_set_round_trips_through_the_loaders() {
             "padding_leaf_proof.bin".to_string(),
             "padding_private_batch_proof.bin".to_string(),
             "private_batch_verifier.bin".to_string(),
+            "protocol_profile.bin".to_string(),
+            "protocol_profile.json".to_string(),
             "public_batch_verifier.bin".to_string(),
             "qnero_circuit_config.rs".to_string(),
         ],

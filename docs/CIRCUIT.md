@@ -81,7 +81,7 @@ Per input note, twice:
 
 - `ask` (4 felts), `nk` (4 felts): the spend credential.
 - `value` (1), `rho` (4), `r` (4): the note.
-- a Merkle path: 16 levels of 3 sibling digests plus a position hint per level.
+- a Merkle path: 20 levels of 3 sibling digests plus a position hint per level.
 - `is_dummy` (1 bit).
 
 Per output note, twice: `pk` (4), `value` (1), `r` (4). Its `rho` is derived
@@ -276,7 +276,7 @@ accident. The asymmetry the fork did not close is the
 capacity check: `insert_commitment` refuses an append past
 `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)` and `insert_leaf` cannot, because
 its caller's signature is infallible. Reaching that bound through wormhole
-transfers alone needs 4^16 of them, and `process_pending_leaves` reports the
+transfers alone needs 4^20 of them, and `process_pending_leaves` reports the
 condition through `defensive!` if it ever happens.
 
 Item 8 landed in two places, which is what the item asks for. The growth loop
@@ -461,7 +461,7 @@ attack on Poseidon2.
    `rho`, and the header can be any real block, whose preimage is public chain
    data. That leaf would still publish two nullifiers and two output
    commitments, which the chain writes into permanent state: two entries in the
-   nullifier set and two slots of a depth-16 tree sized for the life of the
+   nullifier set and two slots of a depth-20 tree sized for the life of the
    chain. Settlement extrinsics are unsigned and fee-free in the pallet this
    forks, so the leaf's own `fee` public input is the only cost, and an
    all-dummy leaf sets it to zero.
@@ -522,6 +522,15 @@ verify               : 2.2 ms
 proof bytes          : 105500
 ```
 
+Those numbers are the depth-16 circuit. The relaunch moved `MAX_TREE_DEPTH` to
+20, which is four more Merkle levels per input and 387 gates before padding.
+`docs/BENCH.md`, "The leaf circuit at tree depth 20", carries both columns
+side by side on one bench machine: the same `degree_bits = 9`, the same 512
+padded rows, the same 26 public inputs and the same 105500 proof bytes, with
+proving time inside the grinding spread. The block above is left as it was
+measured, because its timings came off the development workstation and a row
+from one machine against a row from another is not a comparison.
+
 M3 added one gate: the padding sentinel is a four-limb comparison against a
 constant and a single multiplication, and at 60 routed wires an arithmetic gate
 packs fifteen of those operations.
@@ -535,7 +544,7 @@ a public input the circuit does not constrain, and they range from 138 ms to
 381 ms. Comparing one warm number against another across a circuit change
 measures grinding luck. Compare means, over the same sample count.
 
-The gate count is dominated by the two Merkle paths: 16 levels each, evaluated
+The gate count is dominated by the two Merkle paths: 20 levels each, evaluated
 unconditionally so the cost does not leak the tree's real depth, at three
 Poseidon2 permutations per level. Proof size is a property of the FRI config, so it
 barely moves with this circuit's size, and it is the number the private batch

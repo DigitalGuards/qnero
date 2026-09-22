@@ -18,7 +18,7 @@ and the source configuration; it makes no uniform chain-wide security claim.
 | --- | --- |
 | Shielded spending authority | Knowledge of Poseidon2-derived `ask` and `nk`, membership of the committed note, nullifier derivation, and balance/range constraints in `qnero-circuit`. A spending proof enforces these together. |
 | Notes and key derivation | Poseidon2 over Goldilocks, domain-tagged field hashes and the byte sponge from `qp-poseidon-core`; `qnero-note-core` defines the layouts. |
-| Commitment tree | Sorted quaternary Poseidon2 children, depth 16. Sorted hashing does not independently authenticate a leaf's storage index; wallet trie proofs bind indexes and values. |
+| Commitment tree | Sorted quaternary Poseidon2 children, depth 20. Sorted hashing does not independently authenticate a leaf's storage index; wallet trie proofs bind indexes and values. |
 | Proof transcript and commitments | Original `PoseidonGoldilocksConfig`, including the proof Merkle commitments and Fiat-Shamir challenger. Width 12, eight full rounds, 22 partial rounds, exponent seven. These are separate from the note/tree Poseidon2 hashes. |
 | Proof soundness parameters | Goldilocks with extension degree two; configured target 100 bits, two challenges, 28 FRI queries, rate bits three, cap height four, and 16 grinding bits. Six leaves per private batch and 53 private batches per public batch. |
 | Zero knowledge | Leaf proofs stay local and use the non-ZK configuration. The private batch uses row blinding and is the first proof allowed to cross a trust boundary. The public batch wraps already blinded private proofs. The composition and implementation need independent review. |
