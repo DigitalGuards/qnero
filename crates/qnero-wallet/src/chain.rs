@@ -633,7 +633,7 @@ impl<'a> Chain<'a> {
     /// commitment, so an absent answer there is one the node withheld, and the
     /// all-zero digest there is the tree's own pad standing in for a leaf the
     /// chain never wrote: `insert_commitment` refuses an append of it by name.
-    /// Both are refused here, by [`withheld_key`] and [`padding_sentinel`].
+    /// Both are refused here, by `withheld_key` and `padding_sentinel`.
     ///
     /// This is the read the spend path rebuilds its paths from, and it used to
     /// substitute `empty_digest()` for an absent answer at any index at all.

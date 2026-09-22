@@ -156,7 +156,7 @@ fn inclusion_timeout(chain: &Chain) -> Duration {
 /// How many shield entries the origin walk hashes before it gives up.
 ///
 /// `Shielded::EntryCount` is a `u64` the node answers with, and
-/// [`entry_rho_matches`] runs one Poseidon2 hash per unit of it for every
+/// `entry_rho_matches` runs one Poseidon2 hash per unit of it for every
 /// non-coinbase note a scan receives. Unbounded, a single storage answer
 /// decides how long the sync runs. The bound is affordable because the answer
 /// is a label: `origin` separates a shield from a spend's output in the
@@ -361,7 +361,7 @@ impl Wallet {
     /// above the watermark to scan is left with the roots the chunk's own
     /// headers carry. Both refusals a too-high count trips name this birthday
     /// and the rescan, because no other node can satisfy a watermark that was
-    /// wrong when it was written: see [`birthday_watermark_note`].
+    /// wrong when it was written: see `birthday_watermark_note`.
     ///
     /// The genesis binding is written here as well, because this is an
     /// operation that commits: a birthday is a statement about one chain, and a
