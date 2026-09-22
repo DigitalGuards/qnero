@@ -55,10 +55,12 @@ import {
   MAX_BODY_EXTRINSICS,
 } from '../src/chain/authenticated';
 import { blockPayloads, extrinsicPayloads } from '../src/chain/body';
-import { hexToBytes } from '../src/lib/hex';
+import { hexToBytes, readCompact } from '../src/lib/hex';
+import { concatBytes, encodeCompact } from '../src/lib/scale';
 import {
   BARE_PREAMBLE_V4,
   BARE_PREAMBLE_V5,
+  SIGNATURE_PAYLOAD_BYTES,
   coinbaseExtrinsic,
   settlementExtrinsic,
   shieldExtrinsic,
@@ -372,6 +374,27 @@ describe('the walk out of a body', () => {
         hexToBytes(shieldExtrinsic(payload)),
       ),
     ).toThrow(/transaction extension this wallet cannot lay out/);
+  });
+
+  it('refuses an extrinsic that ends inside its transaction extensions', () => {
+    // The era byte decides the era's width, and an extrinsic that ends before
+    // it used to read `undefined` there, take the mortal branch and walk on
+    // two bytes further, which puts the call index at an offset this wallet
+    // would be guessing at. Every prefix of a signed extrinsic that stops
+    // inside the extensions is refused by name.
+    const whole = hexToBytes(shieldExtrinsic(new Uint8Array([7, 7, 7, 7])));
+    // Past the compact length prefix the fixture writes, to the extrinsic
+    // itself: the envelope is 1 preamble byte, 1 MultiAddress variant, 32
+    // signer bytes, 1 scheme byte and the signature payload.
+    const { next } = readCompact(whole, 0);
+    const inner = whole.subarray(next);
+    const extensionsAt = 2 + 32 + SIGNATURE_PAYLOAD_BYTES;
+    for (let end = extensionsAt; end < extensionsAt + 4; end += 1) {
+      const cut = inner.subarray(0, end);
+      expect(() =>
+        extrinsicPayloads(TEST_BODY_LAYOUT, concatBytes([encodeCompact(cut.length), cut])),
+      ).toThrow(/ends before its|ends inside its|runs past the end/);
+    }
   });
 
   it('refuses a call whose arguments it decodes short, naming the whole body position', () => {
