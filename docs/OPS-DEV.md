@@ -5948,6 +5948,16 @@ themselves when the binary carries a stub runtime, and every other job sets
 `SKIP_WASM_BUILD=1`, so that job builds the node with its real wasm and sets
 `QNERO_REQUIRE_WASM=1`, which turns the skip into a failure.
 
+Running that job surfaced a second thing the bundle's record does not say:
+the spec test has to run in the release profile. `substrate-wasm-builder`
+writes to `target/<outer profile>/wbuild`, and a dev-profile build leaves the
+blob uncompacted and uncompressed, 2 672 162 bytes against the release blob's
+2 799 366. So a dev-profile `cargo test -p qnero-node --test testnet_spec`
+fails `the_committed_testnet_spec_is_what_this_binary_exports` on `:code`
+alone, against a spec that is correct. The committed spec answers for the
+release binary the runbook ships, the test module says so now, and the CI job
+passes `--release`.
+
 ### Gates
 
 ```
@@ -5964,8 +5974,8 @@ cargo test -p qnero-runtime --test call_filter --test no_admin_keys
 cargo test -p pallet-shielded -p pallet-multisig -p pallet-vesting
                                                                   91 + 62 + 73 passed, 1 ignored
 cargo build --release -p qnero-node                               20m 29s, wasm built
-QNERO_REQUIRE_WASM=1 cargo test -p qnero-node
-  --test testnet_spec --test naming_guard                         see below
+QNERO_REQUIRE_WASM=1 cargo test --release -p qnero-node
+  --test testnet_spec --test naming_guard                         4 + 6 passed
 ```
 
 The workstation is shared, so every cargo invocation ran at `nice -n 19` with

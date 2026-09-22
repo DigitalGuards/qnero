@@ -100,14 +100,18 @@ jobs:
           workspaces: chain
       # No SKIP_WASM_BUILD anywhere in this job, and QNERO_REQUIRE_WASM makes
       # the tests refuse to skip, so a binary that somehow carried a stub fails
-      # here instead of reporting a pass nobody read. The node itself builds in
-      # the dev profile; only the runtime wasm needs optimizing, and its builder
-      # does that regardless of the profile the node is built in.
+      # here instead of reporting a pass nobody read.
+      #
+      # `--release` is required, not a speed choice. `substrate-wasm-builder`
+      # writes to `target/<outer profile>/wbuild`, and a dev-profile build
+      # leaves the blob uncompacted and uncompressed, so its exported `:code`
+      # is not the committed spec's. The committed spec comes from the release
+      # binary the runbook ships, and this is the profile that reproduces it.
       - name: the committed spec is what this tree exports
         env:
           QNERO_REQUIRE_WASM: 1
-        run: cargo test --locked -p qnero-node --test testnet_spec
+        run: cargo test --locked --release -p qnero-node --test testnet_spec
       - name: every chain id this node accepts is a qnero chain
         env:
           QNERO_REQUIRE_WASM: 1
-        run: cargo test --locked -p qnero-node --test naming_guard
+        run: cargo test --locked --release -p qnero-node --test naming_guard
