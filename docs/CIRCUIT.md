@@ -1044,8 +1044,8 @@ prices them is the submission floor in 9.7: the settling slots of a submission
 pay one pool step per started `CiphertextBytesPerFeeQuantum` bytes the submission
 carries, a skipped segment's bytes included, on top of `MinLeafFee` for every
 real slot it carries. Without the byte term, one settling segment beside
-fifty-two skipped ones carries up to 1.27 MB of never-pruned payload for the fee
-of six leaf slots; without the slot term, emptying those positions hands the
+fifty-two skipped ones carries up to 1.27 MB of payload into a block body
+every archive node keeps forever, for the fee of six leaf slots; without the slot term, emptying those positions hands the
 same 318 real slots of admission walk and declared weight to every node for one
 pool step.
 
@@ -1056,8 +1056,10 @@ itself stays, because the mapping from real slot to position cannot depend on
 which segments someone else settled in the meantime, and the count rule is what
 keeps that mapping the only reading of `outputs`. A **settling** position may
 not be emptied: it is refused with `EmptyCiphertext`. A settling slot appends
-two commitments and stores two ciphertexts, so an empty field there would write
-an output note its recipient can never find, behind a digest nothing evaluated.
+two commitments and publishes two ciphertexts, so an empty field there would
+write an output note its recipient can never find, behind a digest nothing
+evaluated. The chain keeps no copy of the payload, so the block body is the
+only place that note's recipient could ever have read it.
 A real `NoteCiphertext` is 1792 bytes at the wallet's pad, so the refusal costs
 nothing legitimate. Under the exact-length rule below, a half-emptied position
 is refused one step earlier, by length, because the zero-length exemption is a
@@ -1355,8 +1357,8 @@ pair, is 318 slots of walk and declared weight for the price of one.
 Pricing the slots alone leaves the first free, because the payload per slot is
 the submitter's to choose on each side independently and slot counts and bytes
 are not proportional: three skipped slots padded to `MaxCiphertextBytes` beside
-one settling slot carrying ten bytes is 12288 bytes of never-pruned payload
-inside a slot ratio of four.
+one settling slot carrying ten bytes is 12288 bytes of archived body inside a
+slot ratio of four.
 `a_submission_pays_for_every_byte_it_carries` is that one. Both terms are in
 the floor because each closes what the other leaves open, and the earlier bound
 that counted real leaf slots and allowed four carried per settled priced neither
@@ -1657,10 +1659,10 @@ Three things about them are worth carrying into M5:
   more than an order of magnitude. And an included settlement runs the parse,
   the verify and the settlement check twice, once in `pre_dispatch` and once in
   the dispatch body, so all three are charged twice.
-- **`shield` carries its ciphertext in `proof_size`.** It writes one ciphertext
-  into the same never-pruned `Ciphertexts` map a settled slot writes two of, and
-  `settlement_weight` puts that payload in its `proof_size` term, so `shield`
-  does the same. The runtime sets `proof_size` to `u64::MAX` today, so nothing
+- **`shield` carries its ciphertext in `proof_size`.** It publishes one ciphertext in its own
+  extrinsic, the way a settled slot publishes two, and `settlement_weight` puts that payload in
+  its `proof_size` term, so `shield` does the same. The bytes are validation input for every
+  node whether or not anything stores them. The runtime sets `proof_size` to `u64::MAX` today, so nothing
   is metered against either term; the declaration is an upper bound for the day
   a concrete limit lands, which `configs/mod.rs` carries as a planned change.
 - **The parse has two terms.** The blob round trip does not scale with the
@@ -1706,11 +1708,12 @@ shielded leaf already uses.
 | `ZkTree::Leaves` | leaf index | `cm` | the append, like every other note |
 | `Shielded::LeafBlocks` | leaf index | block number | the mint |
 | `Shielded::CoinbaseValues` | leaf index | value in pool steps | the mint |
-| `Shielded::Ciphertexts` | leaf index | the payload, when there is one | the mint |
 
 `CoinbaseValues` is the only new one, and presence in it is what marks a leaf a
-coinbase. A wallet reads it in the same batch as the other three, so a coinbase
-costs one extra storage key per leaf on a sync and no extra round trip.
+coinbase. A wallet reads it in the same batch as the other two, so a coinbase
+costs one extra storage key per leaf on a sync and no extra round trip. A
+coinbase note carries no ciphertext under v1, so there is nothing of it in a
+block body either.
 
 Two more items are per block rather than per leaf. `PendingCoinbase` is the
 payload the inherent recorded, killed at the start of every block and taken by
@@ -1730,9 +1733,10 @@ that mints no note at all leaves the whole share sitting in it.
 The event is `CoinbaseMinted { block_number, leaf_index, inner, value,
 has_ciphertext }`. It publishes `inner`, which the storage does not, so a wallet
 that watches events can check a note without rebuilding the commitment from the
-leaf. The payload is a flag rather than the bytes: the bytes are already in
-`Ciphertexts` under the leaf index, and republishing them would put every
-author's payload in two places forever. Under v1 the flag is false on every
+leaf. The payload is a flag rather than the bytes: the bytes are already in the
+block's own coinbase inherent, and republishing them in an event would put
+every author's payload into the `System::Events` state value an archive node
+keeps forever. Under v1 the flag is false on every
 block, because the inherent refuses a non-empty payload (section 10.4).
 
 No event and no storage item names the block's author. The header's
@@ -1809,10 +1813,10 @@ refuses one until something does and its bytes are priced (section 10.3).
 - A block with no coinbase inherent at all is refused on import, because the inherent is required.
 - The ciphertext field is empty. Nothing builds an encrypted coinbase payload yet, an inherent pays
   no fee, and a mandatory dispatch does not compete for block weight, so an accepted payload would
-  be the one place on the chain where permanent state is free. The settlement path charges
-  `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)` for the same `Ciphertexts` map, and an
-  author writing `MaxCiphertextBytes` of anything on every block it won would pay nothing for bytes
-  every full node keeps forever. A non-empty payload would also mark its own leaf, since a derived
+  be the one place on the chain where archived block body is free. The settlement path charges
+  `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)` for the same bytes, and an author
+  writing `MaxCiphertextBytes` of anything on every block it won would pay nothing for bytes
+  every archive node keeps forever. A non-empty payload would also mark its own leaf, since a derived
   coinbase publishes none. When the third-party path lands (section 10.6), the field's bytes get
   priced against the author's own credit and the refusal is lifted.
 

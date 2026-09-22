@@ -14,8 +14,10 @@ There is no unproven storage fallback.
 ## What is authenticated
 
 The scan proves the tree count and depth, commitments at their exact storage
-indices, leaf creation blocks, coinbase values, entry counter, ciphertext
-values, and complete settled-nullifier map. The spending path uses the same
+indices, leaf creation blocks, coinbase values, entry counter, and the complete
+settled-nullifier map. Note ciphertexts are not among them: the runtime keeps
+none in state, so what authenticates a payload is the header's
+`extrinsics_root` over the block body that carried it. The spending path uses the same
 read methods. The runtime's active protocol profile is authenticated before
 building or using circuits. Header and commitment-tree consistency checks
 remain additional checks.
@@ -27,20 +29,27 @@ proof error. An inline entry can be recovered directly from the proof even if
 the key listing omitted it. An empty listing still requires a proof of an empty
 prefix. The wallets do not form these requests from private note nullifiers.
 
-## Retained ciphertexts and historical recovery
+## Where the note ciphertexts are
 
-The current runtime retains ciphertexts in its state cache for a limited window.
-For an older leaf, the wallet authenticates `LeafBlocks` at its scan head, links
-the creation block to that selected chain through rehashed parent-linked header
-ranges, and reads the ciphertext with a proof at the creation block's state
-root. Historical requests are grouped by creation block. A competing branch's
-historical state cannot satisfy that ancestry check.
+The runtime keeps no note ciphertext in state. `CiphertextRetentionBlocks` is a
+`#[pallet::constant]` pinned at 0 that nothing in the runtime reads, published
+so that a wallet reading the pallet's metadata is told where the payload lives,
+and protocol profile byte 76 says the same thing inside the profile a wallet
+already authenticates against the header state root. A payload rides in the
+extrinsic that created its note: a settlement carries every settled slot's pair
+in `outputs`, a `shield` carries its own, and a coinbase note carries none
+under v1.
 
-Restoring an old wallet requires a node that serves historical state proofs.
-Ordinary state pruning can remove that service even when the node still has
-headers and block bodies. The current fallback uses historical state, so an
-archive provider must preserve it. Missing data stops the pass before its scan
-watermark or note changes are committed. Body-based recovery is separate work.
+What authenticates such a payload is the header's `extrinsics_root`, which sits
+in the Poseidon header preimage beside `state_root` and which both wallets
+already parse. A body checked against that root is complete by construction, so
+there is no absence case to prove: a node either serves the whole body or the
+recomputed root does not match.
+
+Restoring an old wallet therefore requires a node that serves historical block
+bodies rather than historical state proofs. Ordinary state pruning no longer
+removes that service. Missing data stops the pass before its scan watermark or
+note changes are committed.
 
 ## Resource limits
 
