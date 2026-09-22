@@ -148,11 +148,16 @@ fn the_storage_target_does_not_reach_the_day_denominated_windows() {
 /// open question 3 carry the decision.
 #[test]
 fn the_seed_schedule_is_the_one_the_chain_ships() {
-	let epoch = u64::from(<qnero_runtime::Runtime as pallet_qpow::Config>::SeedEpochBlocks::get());
-	let lag = u64::from(<qnero_runtime::Runtime as pallet_qpow::Config>::SeedEpochLag::get());
+	// `ConstU32` answers `Get<u32>` and `Get<Option<u32>>` both, so the
+	// binding names the one this file means.
+	let epoch: u32 = <qnero_runtime::Runtime as pallet_qpow::Config>::SeedEpochBlocks::get();
+	let lag: u32 = <qnero_runtime::Runtime as pallet_qpow::Config>::SeedEpochLag::get();
 
 	assert_eq!(epoch, 2_048, "Monero's epoch, kept because the target is Monero's 120 s");
 	assert_eq!(lag, 128, "twice Monero's lag, decided in the pre-genesis bundle");
+
+	let epoch = u64::from(epoch);
+	let lag = u64::from(lag);
 
 	assert_eq!(epoch * TARGET_BLOCK_TIME_MS, 245_760_000, "2048 blocks at 120 s is 2.84 days");
 	assert_eq!(lag * TARGET_BLOCK_TIME_MS, 15_360_000, "128 blocks at 120 s is 4.3 hours");

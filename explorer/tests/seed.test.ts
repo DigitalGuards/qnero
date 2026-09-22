@@ -75,8 +75,8 @@ describe('seed height', () => {
 
   it('opens the announcement window exactly one lag before the rotation', () => {
     // The whole point of the lag: the window is `LAG` blocks wide and opens on
-    // the block `LAG` below the rotation, so raising the lag is what buys a
-    // rig more notice and nothing else moves.
+    // the block `LAG` below the rotation, so it is the lag alone that decides
+    // how much notice a rig gets before the turn.
     const rotateAt = 2 * EPOCH + LAG + 1;
     expect(seedHeight(rotateAt - 1, EPOCH, LAG)).toBe(EPOCH);
     expect(seedHeight(rotateAt, EPOCH, LAG)).toBe(2 * EPOCH);
