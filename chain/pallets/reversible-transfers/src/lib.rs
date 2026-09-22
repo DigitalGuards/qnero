@@ -933,9 +933,11 @@ pub mod pallet {
 			// Schedule the `do_execute` call. Reversible transfers are a permissionless
 			// scheduling surface (any signed account can target an arbitrary future
 			// block), so they run at `LOWEST_PRIORITY`: the scheduler reserves agenda
-			// headroom above that priority, preventing user transfers from filling a
-			// block's agenda and censoring e.g. governance enactment scheduled at a
-			// deterministic block.
+			// headroom above that priority, so a flood of user transfers cannot fill a
+			// block's agenda and crowd out anything scheduled at a higher priority. This
+			// chain has no governance enactment to protect, and the headroom is kept
+			// because the priority is what bounds what one permissionless surface can
+			// claim of a block's agenda.
 			T::Scheduler::schedule_named(
 				schedule_id,
 				dispatch_time,

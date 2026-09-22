@@ -410,6 +410,10 @@ always present in the circuit, `merkle_root_from_path` evaluates all
 the dummy too. A leaf that proved faster with one input would publish how many
 notes it spent.
 
+Historical: this run was taken at tree depth 16. The relaunch bundle moved
+`MAX_TREE_DEPTH` to 20, so the current circuit evaluates 20 levels per input
+slot. The figures here are kept as measured.
+
 ## Where each figure came from
 
 Four invocations of the harness runner, one browser at a time, the browser
@@ -1562,7 +1566,9 @@ section. The third is the generator `chain/pallets/shielded/build.rs` calls,
 driven through the builder's own CLI at the same dimensions the build script
 passes, 6 leaf slots and 53 private batches per public batch, so the chain
 workspace and `pallet-zk-tree`'s mirrored `CIRCUIT_MAX_TREE_DEPTH` stayed
-untouched at 16 throughout.
+untouched at 16 throughout. The relaunch bundle took the depth-20 side of
+this comparison: both constants are 20 now, and the columns below are the
+measurement that decided it.
 
 One reading trap in the raw logs: the leaf test's banner line hardcodes the
 string `MAX_DEPTH=16` and prints it at either depth. The constant actually
@@ -1900,6 +1906,12 @@ written. `settled` ends on leaf 172, the newest leaf whose ciphertext is still
 inside the runtime's `CIPHERTEXT_RETENTION_BLOCKS` window of 64 blocks. `tail`
 is the last indices in the tree. Proof bytes are the sum of the returned node
 hex strings over two.
+
+Historical: this run was taken at tree depth 16 with the 64-block state
+retention window the relaunch removed. The current profile is depth 20 with
+`CIPHERTEXT_RETENTION_BLOCKS` at 0 and the ciphertexts in block bodies, so
+`Shielded::Ciphertexts` no longer exists and nothing reads it through
+`state_getReadProof`. The figures here are kept as measured.
 
 | Map | Window | Page | First leaf | Nodes | Proof bytes | Bytes per key | Values present |
 |---|---|---|---|---|---|---|---|
