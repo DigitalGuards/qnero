@@ -142,11 +142,13 @@ fn ciphertext_creation_cap_applies_to_complete_settlements_before_nullifiers_cha
 	with_ciphertext_limits(|| {
 		new_test_ext().execute_with(|| {
 			fund_pool(100);
-			let first = one_segment(10, vec![slot("cache-first", b"a", b"b", 3)]);
-			assert_ok!(Shielded::settle(first, vec![output(b"a", b"b")]));
-			let second = one_segment(10, vec![slot("cache-second", b"c", b"d", 3)]);
+			let ct_1 = suite_ciphertext(0xc1);
+			let ct_2 = suite_ciphertext(0xc2);
+			let first = one_segment(10, vec![slot("cache-first", &ct_1, &ct_2, 9)]);
+			assert_ok!(Shielded::settle(first, vec![output(&ct_1, &ct_2)]));
+			let second = one_segment(10, vec![slot("cache-second", &ct_1, &ct_2, 9)]);
 			assert_noop!(
-				Shielded::settle(second, vec![output(b"c", b"d")]),
+				Shielded::settle(second, vec![output(&ct_1, &ct_2)]),
 				Error::<Test>::TooManyCiphertextsInBlock
 			);
 			assert_eq!(crate::CiphertextQueue::<Test>::iter().count(), 2);
@@ -266,6 +268,20 @@ fn suite_ciphertext(seed: u8) -> Vec<u8> {
 	for (index, byte) in bytes[3..].iter_mut().enumerate() {
 		*byte = seed ^ (index as u8);
 	}
+	bytes
+}
+
+/// A blob padded to `MaxCiphertextBytes` behind a valid suite-1 header.
+///
+/// The header matters: filler bytes at offsets 1..3 declare whatever suite id
+/// they happen to spell, and a padded pair refused for an unknown suite would
+/// not be testing the length rule. This is the shape the payload fee term was
+/// sized against, and it is the shape the rule now refuses.
+fn capped_ciphertext(seed: u8) -> Vec<u8> {
+	let cap = <Test as crate::Config>::MaxCiphertextBytes::get() as usize;
+	let mut bytes = vec![seed; cap];
+	bytes[0] = 1;
+	bytes[1..3].copy_from_slice(&qnero_circuit::chain::CRYPTO_SUITE_ML_KEM_1024.to_le_bytes());
 	bytes
 }
 
@@ -701,8 +717,10 @@ fn the_block_author_fee_share_is_held_for_the_blocks_coinbase_note() {
 fn a_fee_larger_than_the_pool_is_refused_with_nothing_written() {
 	new_test_ext().execute_with(|| {
 		fund_pool(2);
+		// Nine steps clears the per-slot floor of eight and the submission
+		// floor, so what is left to refuse it is the pool holding two.
 		let bundle =
-			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 3)]);
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
 		let outputs = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))];
 		assert_noop!(check(&bundle, &outputs), Error::<Test>::PoolUnderflow);
 		assert_noop!(Shielded::settle(bundle, outputs), Error::<Test>::PoolUnderflow);
@@ -1015,7 +1033,7 @@ fn the_ciphertexts_of_a_skipped_segment_are_still_bound_to_the_proof() {
 		// The same position padded to the ciphertext cap does not reach the
 		// binding at all now: the length rule refuses it in front.
 		let padded = vec![
-			output(&[9u8; 2_048], &[9u8; 2_048]),
+			output(&capped_ciphertext(9), &capped_ciphertext(9)),
 			output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2)),
 		];
 		assert_noop!(check(&batch, &padded), Error::<Test>::CiphertextLengthMismatch);
@@ -1807,9 +1825,8 @@ fn the_reachable_carried_bytes_are_one_value_per_position() {
 fn a_pair_padded_to_the_cap_is_refused_not_priced() {
 	new_test_ext().execute_with(|| {
 		fund_pool(100);
-		let cap = <Test as crate::Config>::MaxCiphertextBytes::get() as usize;
-		let padded_1 = vec![5u8; cap];
-		let padded_2 = vec![6u8; cap];
+		let padded_1 = capped_ciphertext(5);
+		let padded_2 = capped_ciphertext(6);
 		let padded_outputs = vec![output(&padded_1, &padded_2)];
 
 		// Nine steps is what the old per-slot floor asked of a capped pair,
@@ -2275,7 +2292,7 @@ fn a_replay_is_refused_before_the_verify_and_before_any_hashing() {
 
 		// Junk padded to the ciphertext cap dies one step earlier, on the
 		// length rule, which is cheaper still: it reads no storage at all.
-		let over_long = vec![output(&[9u8; 2_048], &[9u8; 2_048])];
+		let over_long = vec![output(&capped_ciphertext(9), &capped_ciphertext(9))];
 		assert_noop!(plan(&replayed, &over_long), Error::<Test>::CiphertextLengthMismatch);
 
 		assert!(<Shielded as ValidateUnsigned>::validate_unsigned(
