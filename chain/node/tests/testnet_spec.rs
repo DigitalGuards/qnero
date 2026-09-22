@@ -54,6 +54,34 @@ fn allow_the_stub_runtime_skip(what: &str) {
 	);
 }
 
+/// Where the committed spec's runtime is reproducible from.
+///
+/// `substrate-wasm-builder` names every chain crate by absolute path, cargo
+/// hashes that path into symbol names, and the runtime wasm in genesis moves
+/// with the checkout directory. `scripts/build-canonical-node.sh` has the
+/// detail. So the byte comparison means something only for a build at this
+/// path, and a build anywhere else is skipped, or refused under
+/// `QNERO_REQUIRE_WASM`.
+const CANONICAL_DIR: &str = "/tmp/qnero-spec-build/";
+
+fn built_at_the_canonical_path() -> bool {
+	let manifest = env!("CARGO_MANIFEST_DIR");
+	if manifest.starts_with(CANONICAL_DIR) {
+		return true;
+	}
+	assert!(
+		std::env::var_os("QNERO_REQUIRE_WASM").is_none(),
+		"QNERO_REQUIRE_WASM is set, but this node was built at {manifest}. The committed spec \
+		 is reproducible only from a build under {CANONICAL_DIR}: run \
+		 scripts/build-canonical-node.sh and test from there."
+	);
+	eprintln!(
+		"this node was built at {manifest}, outside {CANONICAL_DIR}; skipping the committed \
+		 spec comparison. scripts/build-canonical-node.sh builds where it applies."
+	);
+	false
+}
+
 /// Check source locations before compaction/compression can hide their bytes.
 #[test]
 fn runtime_wasm_uses_portable_source_paths() {
@@ -75,10 +103,17 @@ fn runtime_wasm_uses_portable_source_paths() {
 		}
 	}
 	for prefix in prefixes {
-		assert!(
-			!wasm.windows(prefix.len()).any(|bytes| bytes == prefix.as_bytes()),
-			"runtime contains a local source or home path; inspect build-script remapping"
-		);
+		// Name the prefix and show the bytes around the first hit, so a failure
+		// on a machine nobody can log into says which path leaked and from where.
+		if let Some(at) = wasm.windows(prefix.len()).position(|bytes| bytes == prefix.as_bytes()) {
+			let from = at.saturating_sub(96);
+			let to = (at + prefix.len() + 160).min(wasm.len());
+			panic!(
+				"runtime contains the local path {prefix:?} at byte {at}; inspect build-script \
+				 remapping. Context: {:?}",
+				String::from_utf8_lossy(&wasm[from..to]),
+			);
+		}
 	}
 }
 
@@ -112,6 +147,9 @@ fn export() -> Option<Vec<u8>> {
 
 #[test]
 fn the_committed_testnet_spec_is_what_this_binary_exports() {
+	if !built_at_the_canonical_path() {
+		return;
+	}
 	let Some(exported) = export() else { return };
 	let path = committed_spec_path();
 	let committed = std::fs::read(&path).unwrap_or_else(|error| {
@@ -168,13 +206,34 @@ fn the_committed_testnet_spec_is_what_this_binary_exports() {
 		);
 	}
 	exported_json["bootNodes"] = committed_json["bootNodes"].clone();
-	assert_eq!(
-		exported_json,
-		committed_json,
-		"{} differs from what this binary exports somewhere other than bootNodes. Regenerate \
-         it with scripts/build-testnet-spec.sh, then put the bootnode list back.",
-		path.display()
-	);
+	if exported_json != committed_json {
+		// Name the genesis keys that differ with their sizes. Printing both
+		// values would be two copies of the whole runtime.
+		let top = |json: &serde_json::Value| json["genesis"]["raw"]["top"].clone();
+		let (exported_top, committed_top) = (top(&exported_json), top(&committed_json));
+		let mut keys: Vec<String> = Vec::new();
+		if let (Some(a), Some(b)) = (exported_top.as_object(), committed_top.as_object()) {
+			for key in a.keys().chain(b.keys()) {
+				if a.get(key) != b.get(key) && !keys.contains(key) {
+					let size = |v: Option<&serde_json::Value>| {
+						v.and_then(|v| v.as_str()).map_or(0, |v| v.len())
+					};
+					keys.push(key.clone());
+					keys.push(format!(
+						"(exported {} chars, committed {})",
+						size(a.get(key)),
+						size(b.get(key))
+					));
+				}
+			}
+		}
+		panic!(
+			"{} differs from what this binary exports somewhere other than bootNodes. \
+			 Differing genesis keys: {keys:?}. Regenerate it with \
+			 scripts/build-testnet-spec.sh, then put the bootnode list back.",
+			path.display()
+		);
+	}
 }
 
 /// The one client-side seam that can execute different code for a block is
