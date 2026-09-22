@@ -107,7 +107,7 @@ fn the_timestamp_bucket_follows_the_chain_target() {
 /// at another cadence. On the 12 s `dev` chain that makes each of them mean a
 /// tenth of the wall clock its name claims, and the emission divisor is the
 /// same kind of constant for the same reason. All three are metadata: a client
-/// reads a governance period and a supply schedule out of metadata, and a value
+/// reads a reversal delay and a supply schedule out of metadata, and a value
 /// that changed with a storage read is a value no metadata could state.
 /// `docs/DESIGN.md` 7.4 and `docs/OPS-DEV.md` carry the same sentence.
 #[test]

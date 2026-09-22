@@ -147,10 +147,10 @@ fn the_committed_testnet_spec_is_what_this_binary_exports() {
 /// The one client-side seam that can execute different code for a block is
 /// empty, and empty on purpose.
 ///
-/// `codeSubstitutes` is honoured by the client, not by the runtime: a node
-/// handed a spec with an entry there runs different code for the block it
-/// names, which is a node forking itself off rather than a power over anybody
-/// else. The same is true of `--wasm-runtime-overrides`. Neither is an admin
+/// `codeSubstitutes` is a client-side seam. A node handed a spec with an entry
+/// there runs different code for the block it names, which is that node forking
+/// itself off rather than a power over anybody else. The runtime never sees the
+/// field. The same is true of `--wasm-runtime-overrides`. Neither is an admin
 /// key, and neither should be mistaken for one, but a spec that shipped a
 /// non-empty map would make the "no admin keys" claim overstated for whoever
 /// took the file. So the field is asserted rather than assumed: what the

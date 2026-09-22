@@ -629,7 +629,7 @@ impl pallet_scheduler::Config for Runtime {
 //
 // Spam Prevention:
 // - Existential deposit: 0.001 UNIT
-// - Various pallet-specific deposits (multisig, governance, etc.)
+// - Various pallet-specific deposits (multisig, preimage)
 // - Miners can reject transactions below their minimum fee threshold
 //
 // ============================================================================

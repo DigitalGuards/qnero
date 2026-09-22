@@ -64,7 +64,7 @@ mod tests {
 			.assimilate_storage(&mut t)
 			.unwrap();
 
-		pallet_treasury::GenesisConfig::<Runtime> { treasury_account: treasury.clone() }
+		pallet_treasury::GenesisConfig::<Runtime> { treasury_account: treasury }
 			.assimilate_storage(&mut t)
 			.unwrap();
 
@@ -185,7 +185,7 @@ mod tests {
 		use sp_runtime::traits::Dispatchable;
 
 		for treasury in [Some(treasury_multisig()), None] {
-			new_test_ext(treasury.clone()).execute_with(|| {
+			new_test_ext(treasury).execute_with(|| {
 				let origins = [
 					RuntimeOrigin::root(),
 					RuntimeOrigin::signed(account(1)),

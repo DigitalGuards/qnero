@@ -169,12 +169,12 @@ fn heisenberg_treasury_account() -> AccountId {
 /// supports rather than one this widening invented:
 /// `pallet_treasury`'s genesis build returns early on `None`
 /// (`pallets/treasury/src/lib.rs`), `TreasuryAccountOption` answers `None`
-/// (`runtime/src/configs/mod.rs`), `EnsureTreasury` then matches no origin, and
-/// `pallet_vesting`'s admin calls refuse with `TreasuryNotConfigured`. Nothing
-/// in the runtime calls the panicking `Pallet::account_id()`. The alternative
-/// was to point the field at some account the preset already names, which on a
-/// chain with no treasury means handing that key the vesting admin origin for
-/// no reason and writing a treasury address into genesis that means nothing.
+/// (`runtime/src/configs/mod.rs`), and the only reader left is
+/// `pallet_vesting`'s end-of-schedule remainder, which no origin can reach.
+/// Nothing in the runtime calls the panicking `Pallet::account_id()`. The
+/// alternative was to point the field at some account the preset already names,
+/// which on a chain with no treasury means writing a treasury address into
+/// genesis that means nothing.
 #[derive(Clone)]
 struct TreasuryGenesis {
 	account: Option<AccountId>,

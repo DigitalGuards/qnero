@@ -49,8 +49,8 @@ fn every_leaf_call() -> Vec<RuntimeCall> {
 	let dest = MultiAddress::Id(account(2));
 	vec![
 		// System (2)
-		RuntimeCall::System(frame_system::Call::remark { remark: alloc_bytes() }),
-		RuntimeCall::System(frame_system::Call::remark_with_event { remark: alloc_bytes() }),
+		RuntimeCall::System(frame_system::Call::remark { remark: Vec::new() }),
+		RuntimeCall::System(frame_system::Call::remark_with_event { remark: Vec::new() }),
 		// Timestamp (1)
 		RuntimeCall::Timestamp(pallet_timestamp::Call::set { now: 1 }),
 		// Balances (4)
@@ -71,7 +71,7 @@ fn every_leaf_call() -> Vec<RuntimeCall> {
 		// the wrapper itself rather than a second copy of something above.
 		RuntimeCall::Utility(pallet_utility::Call::batch_all {
 			calls: vec![RuntimeCall::System(frame_system::Call::remark {
-				remark: alloc_bytes(),
+				remark: Vec::new(),
 			})],
 		}),
 		// ReversibleTransfers (6)
@@ -130,7 +130,7 @@ fn every_leaf_call() -> Vec<RuntimeCall> {
 			multisig_address: account(9),
 			proposal_id: 0,
 			call: Box::new(RuntimeCall::System(frame_system::Call::remark {
-				remark: alloc_bytes(),
+				remark: Vec::new(),
 			})),
 		}),
 		// Vesting (4)
@@ -166,10 +166,6 @@ fn every_leaf_call() -> Vec<RuntimeCall> {
 			ciphertext: Vec::new(),
 		}),
 	]
-}
-
-fn alloc_bytes() -> Vec<u8> {
-	Vec::new()
 }
 
 fn new_test_ext() -> sp_io::TestExternalities {
