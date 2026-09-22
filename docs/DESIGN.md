@@ -395,15 +395,26 @@ Allowed list below carries the reasoning. This is the allowlist as a rule:
 everything is allowed except the calls below, and `runtime/tests/call_filter.rs`
 is the test.
 
-It is a dispatch-time check, which has a cost worth stating plainly. A refused
-call is still a valid extrinsic: it passes validation, enters a block, pays its
-fee and then fails with `CallFiltered`, so its arguments stay in the block body
-and in the `System::ExtrinsicFailed` event forever. One mistaken
-`Balances::transfer_keep_alive` therefore publishes the sender, the recipient
-and the amount that the policy exists to keep private, while nothing moves. A
-wallet should refuse these calls before it signs one. Moving the refusal into a
-`TransactionExtension` beside the existing ones would reject them at validation
-instead, so they never reach a block; that is the open option here.
+The refusal is at validation, which is what keeps a refused call out of the
+block body. `QneroUncheckedExtrinsic::check` consults the filter for every
+extrinsic format, and a refused call answers `InvalidTransaction::Call` before
+pool admission, before the signature is verified, before any transaction
+extension runs and before `note_extrinsic` records the extrinsic
+(`runtime/src/extrinsic.rs`, `runtime/tests/transaction_policy.rs`). A mistaken
+`Balances::transfer_keep_alive` therefore publishes nothing at all: no body
+entry, no event, no fee and no nonce. The same filter stays installed as
+`BaseCallFilter`, which is the second line and the only guard on a call no
+extrinsic carries, a due scheduler task and a `batch_all` child re-dispatched
+under the caller's origin.
+
+The wrappers are unwrapped in the extrinsic, `Multisig::propose` included. Its
+payload is opaque `BoundedVec<u8, MaxCallSize>` bytes, so the filter decodes it
+at `MAX_MULTISIG_CALL_DEPTH`, requires the bytes to be the decoded call's own
+canonical encoding, and refuses the payload when either check fails or when the
+call it decodes to is refused. The two malformed shapes mirror the pallet's own
+propose-time checks: a payload that can never execute has no reason to enter a
+block. One level is unwrapped, and a payload carrying a proposal of its own is
+refused outright, which bounds the decode at `MaxCallSize`.
 
 Refused:
 
@@ -413,7 +424,7 @@ Refused:
 | `ReversibleTransfers::schedule_transfer`, `schedule_transfer_with_delay`, `execute_transfer`, `cancel`, `recover_funds` | transfers with a delay, and the guardian seizures of their holds |
 | `ReversibleTransfers::set_high_security` | moves nothing, and is refused anyway: it is a one-way door into a feature whose every call v1 refuses, see below |
 | `Vesting::create_schedule`, `end_schedule`, `retarget_schedule` | funds the pot from the treasury, and moves a schedule's unpaid remainder |
-| `Utility::batch_all`, `Multisig::execute` carrying any of the above | a filter that stops a call and not the wrapper carrying it is decoration |
+| `Utility::batch_all`, `Multisig::execute`, `Multisig::propose` carrying any of the above | a filter that stops a call and not the wrapper carrying it is decoration |
 
 Allowed, and load bearing:
 
@@ -442,10 +453,10 @@ Allowed, and load bearing:
 and the reason is worth writing down because it looks like an omission. The
 call is one way: the pallet has nothing that clears the flag and refuses a
 second enrolment. From the block it succeeds in, the account can sign only what
-is on `HighSecurityConfig`'s whitelist, which is checked at validation rather
-than at dispatch, and v1 refuses every value-moving call on that list at
-dispatch, so the account can sign nothing at all. The whitelist stays as it is
-anyway. Every call on it is delayed and reversible, which is the whole of the
+is on `HighSecurityConfig`'s whitelist, which a transaction extension checks,
+and v1 refuses every value-moving call on that list at admission, so the
+account can sign nothing at all. The whitelist stays as it is anyway. Every
+call on it is delayed and reversible, which is the whole of the
 guarantee the feature sells: a stolen key can only schedule, and the
 owner's `cancel` or the guardian's `recover_funds` beats the delay.
 `Shielded::shield` and `Balances::burn` would each break that, because both are
@@ -524,8 +535,9 @@ extrinsic encoding: `transaction_version` stays where it is.
 so nothing is enumerated per call. Section 7.2's call filter is a different
 question answered at a different place: the filter decides what may run, and
 this rule decides who may sign. A transparent transfer signed with ML-DSA-87 is
-still admitted and still refused at dispatch with `CallFiltered`; the same
-transfer signed with ML-DSA-65 never reaches a block at all.
+refused at validation with `InvalidTransaction::Call`; the same transfer signed
+with ML-DSA-65 is refused a layer earlier still, with
+`InvalidTransaction::BadSigner`. Neither reaches a block.
 
 The other half of one scheme is that nothing on Qnero's own paths constructs an
 account under the other one. The presets derive every key-backed account from
