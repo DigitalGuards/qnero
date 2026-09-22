@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Qnero browser scan: M16 measurement</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 24px;
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      h1 { font-size: 16px; margin: 0 0 4px; }
+      p.note { margin: 0 0 20px; max-width: 72ch; opacity: 0.75; }
+      #status { margin: 0 0 16px; font-weight: 600; }
+      #stages { margin: 0 0 20px; padding: 0; list-style: none; }
+      #stages li { padding: 2px 0; }
+      pre {
+        margin: 0;
+        padding: 12px;
+        overflow-x: auto;
+        border: 1px solid currentColor;
+        border-radius: 4px;
+        opacity: 0.9;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Qnero browser scan: M16 measurement</h1>
+    <p class="note">
+      One thread, one dedicated Worker, `decryptNote` over the same two fixture
+      ciphertexts again and again: one addressed to this wallet and one
+      addressed elsewhere. Both decapsulate. The ciphertexts come from
+      `tests/m16_scan_bench.rs`, which writes them where this page fetches them.
+    </p>
+    <p id="status">starting</p>
+    <ul id="stages"></ul>
+    <pre id="result">waiting for the worker</pre>
+    <script type="module" src="./scan-harness.js"></script>
+  </body>
+</html>

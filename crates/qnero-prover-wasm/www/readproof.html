@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Qnero read-proof verify: M16 measurement</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 24px;
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      h1 { font-size: 16px; margin: 0 0 4px; }
+      p.note { margin: 0 0 20px; max-width: 72ch; opacity: 0.75; }
+      #status { margin: 0 0 16px; font-weight: 600; }
+      pre {
+        margin: 0;
+        padding: 12px;
+        overflow-x: auto;
+        border: 1px solid currentColor;
+        border-radius: 4px;
+        opacity: 0.9;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Qnero read-proof verify: M16 measurement</h1>
+    <p class="note">
+      One thread, `readStateProof` over the raw `state_getReadProof` answers a
+      wallet scan already asks for: a page of 64 and a page of 16 leaf indices,
+      separately for `ZkTree::Leaves` and `Shielded::Ciphertexts`. The proofs
+      come from `crates/qnero-wallet/tests/m16_read_proof_bench.rs`, which
+      writes them where this page fetches them.
+    </p>
+    <p id="status">starting</p>
+    <pre id="result">waiting</pre>
+    <script type="module" src="./readproof-harness.js"></script>
+  </body>
+</html>
