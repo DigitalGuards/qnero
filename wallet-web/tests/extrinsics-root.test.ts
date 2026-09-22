@@ -23,8 +23,16 @@
  * module is the body the node served, in order, unchanged; that the answer is
  * compared against the header's field and a disagreement refuses; and the
  * three refusals that happen before the module is called at all. The known
- * answer is read from the same fixture file the Rust test reads, so the
- * request this page makes is pinned to a body whose root is byte fixed.
+ * answers are read from the same two fixture files the Rust test reads, so the
+ * request this page makes is pinned to bodies whose roots are byte fixed:
+ *
+ * - `crates/qnero-state-proof/tests/fixtures/extrinsics_root_kat.json`, three
+ *   extrinsics of 12, 19 and 5 bytes, root
+ *   `0x7f1f55587ecb666b2ed2706a153d5b470352e0c3fc6117534817b78dcb0d9112`.
+ * - `chain/runtime/tests/fixtures/extrinsics_root_kat.json`, the runtime's own,
+ *   written out of a block it executed: three extrinsics of 11, 37 and 4108
+ *   bytes, root
+ *   `0xf96118c62fc4f880fe70d20216dec4fc50c6d2e595620c12675e95c8554c1af2`.
  *
  * **Release check, left to the release runbook:** that a rebuilt module answers
  * `KAT.root` for `KAT.extrinsics`. The `extrinsicsRoot` export exists in the
@@ -47,6 +55,8 @@ import {
 import { blockPayloads, extrinsicPayloads } from '../src/chain/body';
 import { hexToBytes } from '../src/lib/hex';
 import {
+  BARE_PREAMBLE_V4,
+  BARE_PREAMBLE_V5,
   coinbaseExtrinsic,
   settlementExtrinsic,
   shieldExtrinsic,
@@ -73,6 +83,31 @@ const KAT = JSON.parse(
   ),
 ) as { extrinsics: string[]; root: string };
 
+/**
+ * The runtime's own vector, out of a block it executed.
+ *
+ * It is the authority on what a body roots to, and it is a real body rather
+ * than a hand-built one: a node-built inherent at preamble `0x05`, a second
+ * one, and a 4108-byte settlement. Its hex carries no `0x`, which
+ * `chain_getBlock` does, so it is put back on here.
+ */
+const RUNTIME_KAT = JSON.parse(
+  readFileSync(
+    new URL('../../chain/runtime/tests/fixtures/extrinsics_root_kat.json', import.meta.url),
+    'utf8',
+  ),
+) as { extrinsics: string[]; extrinsics_root: string };
+
+/** Both known answers, each driven through the same wiring. */
+const VECTORS = [
+  { name: "the wallets' fixture", extrinsics: KAT.extrinsics, root: KAT.root },
+  {
+    name: "the runtime's own fixture",
+    extrinsics: RUNTIME_KAT.extrinsics.map((extrinsic) => `0x${extrinsic}`),
+    root: `0x${RUNTIME_KAT.extrinsics_root}`,
+  },
+] as const;
+
 const AT = `0x${'aa'.repeat(32)}`;
 
 /**
@@ -87,8 +122,10 @@ function node(options: {
   headerRoot?: string;
   answersRoot?: string;
   hashesTo?: string;
+  vector?: { extrinsics: readonly string[]; root: string };
 }): { context: ChainContext; calls: { method: string; params: unknown[] }[] } {
   const calls: { method: string; params: unknown[] }[] = [];
+  const vector = options.vector ?? KAT;
   const context = {
     send: <T,>(method: string, params: unknown[]): Promise<T> => {
       calls.push({ method, params });
@@ -97,13 +134,13 @@ function node(options: {
           parentHash: `0x${'00'.repeat(32)}`,
           number: '0x9',
           stateRoot: `0x${'11'.repeat(32)}`,
-          extrinsicsRoot: options.headerRoot ?? KAT.root,
+          extrinsicsRoot: options.headerRoot ?? vector.root,
           zkTreeRoot: `0x${'33'.repeat(32)}`,
           digest: { logs: [] },
         } as T);
       }
       if (method === 'chain_getBlock') {
-        return Promise.resolve({ block: { extrinsics: options.body ?? KAT.extrinsics } } as T);
+        return Promise.resolve({ block: { extrinsics: options.body ?? vector.extrinsics } } as T);
       }
       throw new Error(`this fixture answers no ${method}`);
     },
@@ -113,7 +150,7 @@ function node(options: {
     // Stood in for. The construction is the module's and is covered in Rust;
     // what a test needs here is an answer it chose, so the comparison against
     // the header can be driven in both directions.
-    extrinsicsRoot: () => Promise.resolve(options.answersRoot ?? KAT.root),
+    extrinsicsRoot: () => Promise.resolve(options.answersRoot ?? vector.root),
     readStateProof: () => Promise.resolve([]),
     readStatePrefix: () => Promise.resolve([]),
   });
@@ -121,26 +158,44 @@ function node(options: {
 }
 
 describe('the body a header carries', () => {
-  it('sends the module the bytes the node served, in order and unchanged', async () => {
-    const { context, calls } = node({});
-    const asked = vi.fn(() => Promise.resolve(KAT.root));
-    bindStateProofVerifier(context, {
-      headerBlockHash: () => Promise.resolve(AT),
-      extrinsicsRoot: asked,
-      readStateProof: () => Promise.resolve([]),
-      readStatePrefix: () => Promise.resolve([]),
-    });
+  it.each(VECTORS)(
+    'sends the module the bytes the node served, in order and unchanged ($name)',
+    async (vector) => {
+      const { context, calls } = node({ vector });
+      const asked = vi.fn(() => Promise.resolve(vector.root));
+      bindStateProofVerifier(context, {
+        headerBlockHash: () => Promise.resolve(AT),
+        extrinsicsRoot: asked,
+        readStateProof: () => Promise.resolve([]),
+        readStatePrefix: () => Promise.resolve([]),
+      });
 
-    expect(await authenticatedBody(context, AT)).toEqual(KAT.extrinsics);
-    // The request shape, pinned: one list of `0x` hex extrinsics, in body
-    // order, with each one's compact length prefix still on it. The trie is
-    // keyed by the index, so a page that reordered or re-encoded them would
-    // reach a root no header carries.
-    expect(asked).toHaveBeenCalledWith(KAT.extrinsics);
-    // And the order of the three steps: the header first, because its
-    // `extrinsicsRoot` is what the body is checked against.
-    expect(calls.map((call) => call.method)).toEqual(['chain_getHeader', 'chain_getBlock']);
-  });
+      expect(await authenticatedBody(context, AT)).toEqual(vector.extrinsics);
+      // The request shape, pinned: one list of `0x` hex extrinsics, in body
+      // order, with each one's compact length prefix still on it. The trie is
+      // keyed by the index, so a page that reordered or re-encoded them would
+      // reach a root no header carries.
+      expect(asked).toHaveBeenCalledWith(vector.extrinsics);
+      // And the order of the three steps: the header first, because its
+      // `extrinsicsRoot` is what the body is checked against.
+      expect(calls.map((call) => call.method)).toEqual(['chain_getHeader', 'chain_getBlock']);
+    },
+  );
+
+  it.each(VECTORS)(
+    'refuses a body whose root is the other vector\'s ($name)',
+    async (vector) => {
+      // The comparison is what the wiring is for, and it is driven from the
+      // answer's side, which is the side a node controls. The other vector's
+      // root is a real root of a real body, so this is the substitution a
+      // node would actually have a value for.
+      const other = VECTORS.find((candidate) => candidate.root !== vector.root);
+      const { context } = node({ vector, answersRoot: other?.root });
+      await expect(authenticatedBody(context, AT)).rejects.toThrow(
+        /where the extrinsicsRoot in the header it hashes to is/,
+      );
+    },
+  );
 
   it('refuses a header that does not hash to the block asked for', async () => {
     // The first step, and everything rests on it: a header that does not hash
@@ -235,6 +290,43 @@ describe('the walk out of a body', () => {
       coinbaseExtrinsic(),
     ];
     expect(blockPayloads(TEST_BODY_LAYOUT, body)).toEqual([first, second, third, fourth]);
+  });
+
+  it('walks a body mixing a version 5 inherent with a version 4 settlement', () => {
+    // What a real block is. The runtime builds inherents at
+    // `EXTRINSIC_FORMAT_VERSION` 5 and this wallet settles at 4, and
+    // `Preamble::decode` admits both, so the two preamble bytes sit side by
+    // side in every body. A wallet that pinned the version in the low six
+    // bits would refuse half of every block, and a block it refuses is a
+    // block it cannot say carried no payment of its owner's.
+    const first = new Uint8Array([1, 1, 1]);
+    const second = new Uint8Array([2, 2, 2]);
+    const mixed = [
+      timestampExtrinsic(1000, BARE_PREAMBLE_V5),
+      settlementExtrinsic([[first, second]], undefined, BARE_PREAMBLE_V4),
+      coinbaseExtrinsic(BARE_PREAMBLE_V5),
+    ];
+    expect(blockPayloads(TEST_BODY_LAYOUT, mixed)).toEqual([first, second]);
+
+    // And the other way round, which is what says the version byte is read
+    // nowhere: the same two ciphertexts come back out of a settlement stamped
+    // with the version the runtime's own builder uses.
+    const swapped = [
+      timestampExtrinsic(1000, BARE_PREAMBLE_V4),
+      settlementExtrinsic([[first, second]], undefined, BARE_PREAMBLE_V5),
+      coinbaseExtrinsic(BARE_PREAMBLE_V4),
+    ];
+    expect(blockPayloads(TEST_BODY_LAYOUT, swapped)).toEqual([first, second]);
+  });
+
+  it('refuses a transaction type it cannot walk, so the tolerance is the version bits alone', () => {
+    // 0b11 is neither bare, signed nor general. Its call and every argument
+    // after it are at offsets this wallet would be guessing at.
+    expect(() =>
+      blockPayloads(TEST_BODY_LAYOUT, [
+        settlementExtrinsic([[new Uint8Array([1]), new Uint8Array([2])]], undefined, 0b1100_0000 | 4),
+      ]),
+    ).toThrow(/transaction type/);
   });
 
   it("reads a shield's ciphertext out past its ML-DSA-87 signature", () => {
