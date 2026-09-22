@@ -31,9 +31,11 @@ fn read(path: PathBuf) -> serde_json::Value {
 }
 
 fn fixture(name: &str) -> serde_json::Value {
-    read(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name))
+    read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name),
+    )
 }
 
 /// The runtime's own fixture, by a path relative to this crate.
@@ -42,8 +44,10 @@ fn fixture(name: &str) -> serde_json::Value {
 /// agree with a construction that moved, which is the one failure this file
 /// exists to catch.
 fn runtime_fixture() -> serde_json::Value {
-    read(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../chain/runtime/tests/fixtures/extrinsics_root_kat.json"))
+    read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../chain/runtime/tests/fixtures/extrinsics_root_kat.json"),
+    )
 }
 
 fn bytes(value: &serde_json::Value) -> Vec<u8> {

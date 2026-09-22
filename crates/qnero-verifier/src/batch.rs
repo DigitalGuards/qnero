@@ -462,8 +462,10 @@ pub enum ProofRejection {
     /// The bytes did not deserialize against this verifier's circuit data. A
     /// proof built for other circuit dimensions lands here.
     Deserialization,
-    /// The bytes are not the canonical encoding of the proof they decode to:
-    /// see [`decode_canonical_proof`] for what that closes.
+    /// The bytes are not the canonical encoding of the proof they decode to.
+    /// `decode_canonical_proof` in this module re-encodes what it decoded and
+    /// requires the two to be the same bytes, which is what closes the
+    /// malleability this variant names.
     NonCanonicalEncoding,
     /// The public inputs did not parse at the documented indices.
     PublicInputLayout,
