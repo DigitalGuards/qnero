@@ -216,8 +216,9 @@ what the `QpowAuthor` seam hashes a block author's digest item with.
 `pallet_custom_origins` was a storage-less, call-less, event-less origin
 declaration whose whole body was one `#[pallet::origin] enum Origin {
 FastUpgrade }`. A pallet is the only way to contribute a variant to
-`RuntimeOrigin`/`OriginCaller`, so removing it leaves `OriginCaller` at `system`
-and `Void`: no pallet in this runtime can mint a privileged origin, which
+`RuntimeOrigin`/`OriginCaller`, so removing it leaves `OriginCaller` with
+`system` and nothing else: no pallet in this runtime can mint a privileged
+origin, which
 `runtime/tests/no_admin_keys.rs::the_runtime_declares_no_custom_origin` pins.
 
 ### Index 24 - `Shielded` (`pallet-shielded`, local)

@@ -277,13 +277,15 @@ fn frame_system_dispatchables_are_remark_only() {
 /// No pallet can mint a privileged origin.
 ///
 /// `OriginCaller` is the whole set of origins this runtime can construct, and
-/// after the removal it is `frame-system`'s own and the empty `Void`. There is
-/// no third variant for a track, a collective or a body to dispatch from.
+/// after the removal it is `frame-system`'s own and nothing else. There is no
+/// second variant for a track, a collective or a body to dispatch from, so the
+/// only origins that exist are `Root`, `Signed(who)` and `None`, and `Root` has
+/// no producer.
 #[test]
 fn the_runtime_declares_no_custom_origin() {
 	assert_eq!(
 		call_names::<qnero_runtime::OriginCaller>(),
-		["system", "Void"],
+		["system"],
 		"a pallet declared a custom origin. `Origins` (index 23) held one, \
 		 `FastUpgrade`, and it was removed with the governance lane"
 	);

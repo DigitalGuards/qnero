@@ -443,8 +443,8 @@ mod runtime {
 
 	// Index 23 was `Origins` (`pallet_custom_origins`), whose only variant
 	// `FastUpgrade` existed to be dispatched by the fast-upgrade referenda track.
-	// Removed with the lane, which leaves `OriginCaller` at `system` and `Void`:
-	// no pallet in this runtime can mint a privileged origin. Kept vacant so
+	// Removed with the lane, which leaves `OriginCaller` at `system` alone: no
+	// pallet in this runtime can mint a privileged origin. Kept vacant so
 	// downstream pallet indices stay stable.
 
 	// The Qnero shielded pool, and at M6 the only place value is created. It

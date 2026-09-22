@@ -178,8 +178,8 @@ impl qp_wormhole::TransferProofRecorder<AccountId, AssetId, Balance> for NoTrans
 ///   it allows.
 /// - It does not reach a Root dispatch, and on this chain there is no Root dispatch to reach.
 ///   `frame_system`'s `filter_call` exempts the Root origin and nothing else, and no pallet here
-///   can produce one: `OriginCaller` is `system` and `Void`, the nine `frame-system` calls that
-///   could rewrite the chain are deleted, and every Root-gated config origin is
+///   can produce one: `OriginCaller` has `system` and nothing else, the nine `frame-system` calls
+///   that could rewrite the chain are deleted, and every Root-gated config origin is
 ///   `NeverEnsureOrigin`. So this filter is the whole rule for every dispatch this chain can
 ///   execute. `UnfilteredDispatchable::dispatch_bypass_filter` keeps two callers,
 ///   `pallet_utility::batch_all` under a Root origin nothing can produce and the benchmarking

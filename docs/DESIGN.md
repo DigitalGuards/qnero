@@ -462,7 +462,7 @@ stated here so they are decisions rather than discoveries:
 
 - **Root bypasses it, and nothing can produce Root.** `dispatch_bypass_filter` is how a
   privileged origin dispatches, and after section 7.6 this runtime has no privileged origin to
-  dispatch with: `OriginCaller` is `system` and `Void`, and every Root-gated config item is
+  dispatch with: `OriginCaller` has `system` and nothing else, and every Root-gated config item is
   `NeverEnsureOrigin`. The filter is therefore the whole rule for every dispatch this chain can
   execute. The two callers `dispatch_bypass_filter` keeps are `pallet_utility::batch_all` under a
   Root origin nothing can produce, and the benchmarking harness.
@@ -756,8 +756,9 @@ second bundle.
 **What goes.** `TechCollective` (`pallet-ranked-collective`, index 13) and
 `TechReferenda` (`pallet-referenda::Instance1`, index 14), with their configs
 and their parameter blocks. `Origins` (index 23), whose only variant
-`Origin::FastUpgrade` existed to be dispatched by the fast-upgrade track. The
-whole of `runtime/src/governance/`: `TechCollectiveTracksInfo`,
+`Origin::FastUpgrade` existed to be dispatched by the fast-upgrade track, and
+whose removal leaves `OriginCaller` with `system` and nothing else. The whole of
+`runtime/src/governance/`: `TechCollectiveTracksInfo`,
 `RootOrMemberForTechReferendaOrigin`, `EnsureRootRemoveKeepsMemberFloor`, the
 rank converters and `apply_test_timing` with the `fast-governance` cargo feature
 it hid behind. `PreimageDeposit` and `preimage_amount` are the one thing in that
@@ -814,9 +815,10 @@ fails there. `no_dispatchable_can_replace_the_runtime_code` constructs every
 remaining leaf call, dispatches each one with `dispatch_bypass_filter` under
 `RawOrigin::Root`, which is the strongest origin the type system can express,
 and asserts `:code` and `:heappages` are byte identical afterwards.
-`the_runtime_declares_no_custom_origin` pins `OriginCaller` to `system` and
-`Void`, which is the typed statement that no pallet can mint a privileged
-origin. `the_root_gated_config_origins_never_succeed` is defence in depth: even
+`the_runtime_declares_no_custom_origin` pins `OriginCaller` to `system` alone,
+which is the typed statement that no pallet can mint a privileged origin: the
+only origins the runtime can construct are `Root`, `Signed(who)` and `None`, and
+`Root` has no producer. `the_root_gated_config_origins_never_succeed` is defence in depth: even
 a reachable Root could not schedule a task, pin a preimage or create a vesting
 schedule. `a_stale_collective_seed_is_refused_at_genesis` covers the operator's
 half, below.

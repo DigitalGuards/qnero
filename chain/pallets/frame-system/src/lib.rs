@@ -94,7 +94,12 @@
 
 extern crate alloc;
 
-use alloc::{borrow::Cow, boxed::Box, vec, vec::Vec};
+use alloc::{borrow::Cow, boxed::Box, vec::Vec};
+// The `vec!` macro is left with one caller, the `do_task` arm of
+// `validate_unsigned`: the `apply_authorized_upgrade` arm that used the other
+// is deleted with its call.
+#[cfg(feature = "experimental")]
+use alloc::vec;
 use core::{fmt::Debug, marker::PhantomData};
 use pallet_prelude::{BlockNumberFor, HeaderFor};
 use qp_header::ZkTreeRootProvider;
