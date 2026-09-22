@@ -1493,8 +1493,8 @@ build. Keep 16 if that build moves the leaf circuit off `degree_bits = 9`.**
 | Item | Depth 16 | Depth 20 |
 |---|---|---|
 | Capacity (4-ary) | 4.29e9 leaves | 1.10e12 leaves |
-| Leaf gates in 512 padded rows | 320 | 344 to 416 |
-| `degree_bits` | 9 | 9, subject to measurement |
+| Leaf gates in 512 padded rows | 320 | 387 measured (forecast 344 to 416) |
+| `degree_bits` | 9 | 9 measured |
 | Proof bytes, leaf / private / public | 105 500 / 150 908 / 237 544 | unchanged |
 | `FINALIZE_BASE_POSEIDON_EVALS`, frontier digests | 19, 48 | 23, 60 (+384 B) |
 
@@ -1548,18 +1548,36 @@ One `spec_version` bump, one artifact regeneration, one KAT pass, one review. Ea
 constant today and a hard fork after genesis.
 
 1. Q5, circuit depth 16 to 20, gated on the depth-20 build.
+   **Done 2026-09-22.** The build ran and held the gate: 387 leaf gates in the same 512
+   padded rows at `degree_bits = 9`. `MAX_TREE_DEPTH` is 20 and the three release digests in
+   `crates/qnero-circuit/src/profile.rs` were refreshed against the artifact set built at it.
 2. Q3, ciphertexts out of state into bodies, with the settlement and weight changes. Built;
    12.9 is the shape it took.
+   **Done 2026-09-22.** All of it: the pallet writes the payload into the call, and the CLI
+   wallet, Qloak and silQ Road all read it back out of the block body, rooted to the header's
+   `extrinsicsRoot`.
 3. `CiphertextRetentionBlocks = 0`, so the constant is in metadata at genesis. Built with the
    prune deleted rather than left as a no-op branch: with the queue gone the branch had
    nothing to do, and the constant says so in its own doc comment.
+   **Done 2026-09-22.** Profile bytes 80..84 are zero and 88..92 is reserved zero, which is
+   what the release check reads to say the prune path is gone.
 4. Q1, the per-suite exact-length settlement rule.
+   **Done 2026-09-22.** Settlement only, so `shield` keeps the cap rule and the legal
+   zero-length entry ciphertext with it. 12.8 is the shape it took.
 5. RandomX seed lag 64 to 128. Decided at 128 on 2026-09-22 and closed in open question 3.
    It carries no `spec_version` bump of its own and rides the bundle's move to 106.
+   **Done 2026-09-22.** The lag is 128 with the epoch left at 2048.
 6. The call filter moved from dispatch to a `TransactionExtension` (section 7.2), since a
    mistaken transparent transfer today fails with `CallFiltered` and leaves sender, recipient
    and amount in the body forever. It moves `transaction_version`.
+   **Withdrawn 2026-09-22.** The seam it asked for already ships in `Checkable::check`
+   (`chain/runtime/src/extrinsic.rs`), which runs the filter and answers
+   `InvalidTransaction::Call` before a body is ever built. An extension would be the weaker
+   of the two, because a bare extrinsic falls to `bare_validate` and that defaults to `Ok`,
+   and it would move `transaction_version` for nothing. What remained was one filter arm,
+   reaching a multisig proposal's payload, and that shipped instead.
 7. Q2 recorded as closed. No code.
+   **Done 2026-09-22.** Recorded.
 
 Refused, with the refusal written into section 9 as a decision:
 

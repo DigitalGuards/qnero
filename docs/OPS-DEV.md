@@ -1,6 +1,6 @@
 # Running the Qnero dev chain
 
-**Runtime 105 policy:** confirmations remain reversible, genesis is the only
+**Runtime 106 policy:** confirmations remain reversible, genesis is the only
 irreversible checkpoint, and nodes retain all branch states and block bodies.
 Wallets authenticate storage and require the matching protocol profile. Read
 [NATIVE-UPGRADE.md](NATIVE-UPGRADE.md) before changing an existing database or
