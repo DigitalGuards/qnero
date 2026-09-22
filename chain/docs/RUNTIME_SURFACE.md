@@ -11,7 +11,7 @@ Reconciled with the runtime at the pre-genesis relaunch bundle (spec 106,
 (13), its referenda instance (14) and the custom origin pallet (23) are gone,
 `Preimage` (7) and `TreasuryPallet` (15) have their calls disabled, and the
 forked `frame-system` lost the nine dispatchables that could write `:code`,
-`:heappages` or a raw storage key. `docs/DESIGN.md` sections 7 and 7.6 are the
+`:heappages` or a raw storage key. `docs/DESIGN.md` sections 7 and 7.7 are the
 policy this inventory is the surface of.
 
 - **Crate:** `qnero-runtime` (`runtime/`), version `1.0.0-gm`. Renamed from `quantus-runtime` in `e3d3889`, along with the node package; the wasm it emits is `wbuild/qnero-runtime/qnero_runtime.wasm`. The chain identifies itself by the spec below.
@@ -286,7 +286,7 @@ rank converters, `apply_test_timing` and `pallet_custom_origins`. The whole
 directory was deleted with the lane. `PreimageDeposit` and `preimage_amount`,
 the one thing in it that was never governance, moved to `configs/mod.rs`.
 
-`docs/DESIGN.md` section 7.6 is the decision, its cost and what upgrade by node
+`docs/DESIGN.md` section 7.7 is the decision, its cost and what upgrade by node
 release means in practice.
 
 ---

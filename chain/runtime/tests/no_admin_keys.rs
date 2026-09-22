@@ -5,7 +5,7 @@
 //! are gone; every `frame-system` dispatchable that could write `:code`,
 //! `:heappages` or a raw storage key is deleted from the fork; and `Root`
 //! survives as a type that nothing in the runtime can produce. `docs/DESIGN.md`
-//! section 7.6 carries the decision and its cost.
+//! section 7.7 carries the decision and its cost.
 //!
 //! Five tests carry the claim, and each one fails for a different edit:
 //! restoring a `frame-system` call, adding a pallet that mints an origin,

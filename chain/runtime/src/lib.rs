@@ -128,7 +128,7 @@ impl_opaque_keys! {
 //   `#[runtime::disable_call]`, `frame-system` loses the nine dispatchables that could write
 //   `:code`, `:heappages` or a raw storage key, and every referenda and collective constant leaves
 //   the constant tables. Root survives as a type and nothing in the runtime can produce it.
-//   `docs/DESIGN.md` section 7.6 carries the decision; `tests/no_admin_keys.rs` carries the proof.
+//   `docs/DESIGN.md` section 7.7 carries the decision; `tests/no_admin_keys.rs` carries the proof.
 // That is a long metadata move and no signed-payload move: `TxExtension`
 // (`lib.rs` below) keeps its eleven members and the payload layout is
 // untouched, so `transaction_version` stays at 7.

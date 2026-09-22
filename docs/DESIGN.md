@@ -321,7 +321,7 @@ row to one placeholder ML-DSA-87 account, 419 970 QNR on the same one-year lock
 and three-year linear unlock, plus the 30 QNR of seed endowments that let the
 treasurers pay their first deposits. A second table of ten was seeded here too,
 the tech collective, and its 30 QNR went back into the placeholder row when
-section 7.6 removed the collective. The treasury holds no schedule at all. Before mainnet genesis this is replaced with a real
+section 7.7 removed the collective. The treasury holds no schedule at all. Before mainnet genesis this is replaced with a real
 allocation or deleted outright, and deleting it is a live option: a chain whose
 entire supply is mined is the cleanest thing this project could launch. Section
 7.3's pre-mainnet check carries the line.
@@ -433,7 +433,7 @@ Allowed, and load bearing:
 - `Shielded::submit_private_batch` and `submit_public_batch`, which are unsigned and fee free, and
   `Shielded::coinbase`, which is an inherent. A filtered inherent is a mandatory dispatch failure,
   which is a dead chain rather than a dropped reward.
-- `Timestamp::set` and every `System` call, which after section 7.6 is `remark` and `remark_with_event`.
+- `Timestamp::set` and every `System` call, which after section 7.7 is `remark` and `remark_with_event`.
 - `Balances::burn`, which destroys the caller's own balance and moves nothing to anyone.
 - The fee path. `ChargeTransactionPayment` is a transaction extension and never reaches a `Contains`
   check, which is what lets a filtered runtime still charge for the calls it allows.
@@ -461,7 +461,7 @@ Two things about the filter's reach, both by design in `frame_system` and both
 stated here so they are decisions rather than discoveries:
 
 - **Root bypasses it, and nothing can produce Root.** `dispatch_bypass_filter` is how a
-  privileged origin dispatches, and after section 7.6 this runtime has no privileged origin to
+  privileged origin dispatches, and after section 7.7 this runtime has no privileged origin to
   dispatch with: `OriginCaller` has `system` and nothing else, and every Root-gated config item is
   `NeverEnsureOrigin`. The filter is therefore the whole rule for every dispatch this chain can
   execute. The two callers `dispatch_bypass_filter` keeps are `pallet_utility::batch_all` under a
@@ -871,7 +871,7 @@ margin of 0.2%, so the day count in that test is worth reading as a tripwire on
 the seed hashrate and the `ln 2` precision rather than as a property of the
 retarget.
 
-### 7.6 No admin keys, and upgrade by node release (2026-09-22)
+### 7.7 No admin keys, and upgrade by node release (2026-09-22)
 
 **The decision.** The runtime ships with no privileged origin. The tech
 collective, the referenda instance it voted in and the custom origin its
