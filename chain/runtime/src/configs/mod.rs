@@ -1193,8 +1193,7 @@ parameter_types! {
 	/// those exact bytes has already been built.
 	pub const ShieldedMaxCiphertextBytes: u32 = 2048;
 	pub const ShieldedCiphertextRetentionBlocks: u32 = pallet_shielded::CIPHERTEXT_RETENTION_BLOCKS;
-	pub const ShieldedMaxCiphertextsPerBlock: u32 = pallet_shielded::MAX_CIPHERTEXTS_PER_BLOCK;
-	pub const ShieldedMaxCiphertextPrunesPerBlock: u32 = pallet_shielded::MAX_CIPHERTEXT_PRUNES_PER_BLOCK;
+	pub const ShieldedMaxOutputsPerBlock: u32 = pallet_shielded::MAX_OUTPUTS_PER_BLOCK;
 }
 
 impl pallet_shielded::Config for Runtime {
@@ -1214,7 +1213,6 @@ impl pallet_shielded::Config for Runtime {
 	type FeeBurnRate = ShieldedFeeBurnRate;
 	type MaxCiphertextBytes = ShieldedMaxCiphertextBytes;
 	type CiphertextRetentionBlocks = ShieldedCiphertextRetentionBlocks;
-	type MaxCiphertextsPerBlock = ShieldedMaxCiphertextsPerBlock;
-	type MaxCiphertextPrunesPerBlock = ShieldedMaxCiphertextPrunesPerBlock;
+	type MaxOutputsPerBlock = ShieldedMaxOutputsPerBlock;
 	type WeightInfo = pallet_shielded::weights::SubstrateWeight<Runtime>;
 }

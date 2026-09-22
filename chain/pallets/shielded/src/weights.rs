@@ -117,37 +117,6 @@ pub const POSEIDON_EVAL_REF_TIME_PS: u64 = pallet_zk_tree::POSEIDON_EVAL_REF_TIM
 /// `pallet-zk-tree`'s figure for a tree key.
 pub const KEY_POV: u64 = pallet_zk_tree::TREE_KEY_POV;
 
-/// Reserve the entire bounded pruning pass, including a final young-entry
-/// probe, head/tail reads, the legacy cursor, and the per-block counter reset.
-/// Each expired FIFO entry removes both its queue record and ciphertext.
-pub fn ciphertext_pruning_weight<T: frame_system::Config>(limit: u32, max_bytes: u32) -> Weight {
-	let limit = u64::from(limit);
-	<T as frame_system::Config>::DbWeight::get()
-		.reads_writes(limit.saturating_add(4), limit.saturating_mul(2).saturating_add(3))
-		.saturating_add(Weight::from_parts(
-			limit.saturating_mul(1_000_000),
-			limit
-				.saturating_add(4)
-				.saturating_mul(KEY_POV)
-				.saturating_add(limit.saturating_mul(u64::from(max_bytes))),
-		))
-}
-
-/// Additional queue bookkeeping beyond the ciphertext write already charged
-/// by shield/settlement weights. Reserve two capacity checks for settlement's
-/// pre-dispatch and dispatch paths, plus each append's tail/count/block-number
-/// reads and queue/tail/count writes.
-fn ciphertext_queue_weight<T: frame_system::Config>(count: u64) -> Weight {
-	let reads = count.saturating_mul(3).saturating_add(6);
-	let writes = count.saturating_mul(3);
-	<T as frame_system::Config>::DbWeight::get()
-		.reads_writes(reads, writes)
-		.saturating_add(Weight::from_parts(
-			count.saturating_mul(1_000_000),
-			reads.saturating_mul(KEY_POV),
-		))
-}
-
 /// Field elements the byte sponge absorbs per Poseidon2 permutation
 /// (`qp_poseidon_core::SPONGE_RATE`).
 pub const SPONGE_RATE: u64 = 8;
@@ -169,8 +138,9 @@ pub const CT_DIGEST_FRAMING_BYTES: u64 = 8 + 4 + 4 + 4;
 /// Reads: two `UsedNullifiers` probes, and the settlement check runs twice per
 /// included extrinsic, once in `pre_dispatch` and once in the dispatch body's
 /// `settle`, so the reads are charged twice. Writes happen once: two
-/// `UsedNullifiers`, two `Ciphertexts`, two `LeafBlocks`.
-const SLOT_DB_OPS: (u64, u64) = (4, 6);
+/// `UsedNullifiers` and two `LeafBlocks`. The two ciphertext writes went with
+/// the state copy of the payload, which now rides in the extrinsic alone.
+pub const SLOT_DB_OPS: (u64, u64) = (4, 4);
 
 /// Permutations the `ct_digest` of one slot costs, given the bytes of its two
 /// ciphertexts.
@@ -211,30 +181,30 @@ pub trait WeightInfo {
 	/// `slots` is the number of real leaf slots, which is the number of
 	/// `ShieldedOutput`s the call carries, and `ciphertext_bytes` their total
 	/// payload. The payload is a weight term of its own: the per-slot
-	/// `ct_digest` is a byte sponge over it, and the bytes remain in the archived block history.
+	/// `ct_digest` is a byte sponge over it, and the bytes remain in the
+	/// archived block body, which is now the only copy.
 	fn submit_private_batch(slots: u32, ciphertext_bytes: u32) -> Weight;
 	fn submit_public_batch(slots: u32, ciphertext_bytes: u32) -> Weight;
-	/// `ciphertext_bytes` is the one ciphertext a shield writes into
-	/// `Ciphertexts`, which is the same bounded live cache a settlement writes
-	/// to, so it carries the same proof-size term.
+	/// `ciphertext_bytes` is the one ciphertext a shield carries in its own
+	/// extrinsic, so it carries the same proof-size term a settlement's does.
 	fn shield(ciphertext_bytes: u32) -> Weight;
 	/// Recording the block's coinbase payload: one bounded write and the
 	/// author lookup over the block's digest logs. No tree work and no value
 	/// moves; see `mint_coinbase` for that half.
 	fn coinbase(ciphertext_bytes: u32) -> Weight;
 	/// Minting the coinbase note in `on_finalize`: one tree append, the
-	/// ciphertext, leaf-block and value maps, and the pool update. Reserved by
-	/// this pallet's `on_initialize` at the largest ciphertext the runtime
-	/// accepts, because the payload is already in state by then and the
-	/// reservation has to be made before it is read.
+	/// leaf-block and value maps, and the pool update. Reserved by this
+	/// pallet's `on_initialize` at the largest ciphertext the runtime accepts,
+	/// because the author's payload is already in `PendingCoinbase` by then
+	/// and the reservation has to be made before it is read.
 	fn mint_coinbase(ciphertext_bytes: u32) -> Weight;
 }
 
 /// Storage the coinbase mint performs beyond the tree's own: reads of
 /// `PendingCoinbase`, `PendingCoinbaseFee` and `PoolValue`; writes of
-/// `PendingCoinbase` (taken), `PendingCoinbaseFee`, `PoolValue`,
-/// `Ciphertexts`, `LeafBlocks` and `CoinbaseValues`.
-const MINT_COINBASE_DB_OPS: (u64, u64) = (3, 6);
+/// `PendingCoinbase` (taken), `PendingCoinbaseFee`, `PoolValue`, `LeafBlocks`
+/// and `CoinbaseValues`.
+pub const MINT_COINBASE_DB_OPS: (u64, u64) = (3, 5);
 
 /// Weight of minting one coinbase note, shared by both `WeightInfo` impls
 /// because the work does not depend on the runtime's own storage weights
@@ -291,7 +261,6 @@ fn settlement_weight<T: frame_system::Config>(slots: u32, ciphertext_bytes: u32)
 			hashing,
 			reads.saturating_mul(KEY_POV).saturating_add(ciphertext_bytes),
 		))
-		.saturating_add(ciphertext_queue_weight::<T>(slots.saturating_mul(2)))
 }
 
 pub struct SubstrateWeight<T>(PhantomData<T>);
@@ -332,21 +301,20 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		let (tree_reads, tree_writes) = pallet_zk_tree::INSERT_LEAF_DB_OPS;
 		// Reads: the signer's account, `EntryCount`, `PoolValue`, plus the
 		// tree's. Writes: the signer's account, `EntryCount`, `PoolValue`,
-		// `Ciphertexts`, `LeafBlocks`, plus the tree's.
+		// `LeafBlocks`, plus the tree's.
 		let reads = tree_reads.saturating_add(3);
-		let writes = tree_writes.saturating_add(5);
+		let writes = tree_writes.saturating_add(4);
 		let hashing = pallet_zk_tree::INSERT_LEAF_POSEIDON_EVALS
 			.saturating_add(1)
 			.saturating_mul(POSEIDON_EVAL_REF_TIME_PS);
 		<T as frame_system::Config>::DbWeight::get()
 			.reads_writes(reads, writes)
-			.saturating_add(ciphertext_queue_weight::<T>(1))
 			// The ciphertext is in the proof size for the same reason
-			// `settlement_weight` puts one there: a shield writes it into
-			// `Ciphertexts`, the same bounded live cache a settled slot writes
-			// two of. The runtime leaves `proof_size` uncapped today, so
-			// nothing is metered against this yet; the term is here so that
-			// the declaration is an upper bound on the day it is.
+			// `settlement_weight` puts one there: the bytes ride in the
+			// extrinsic and every validator reads them. The runtime leaves
+			// `proof_size` uncapped today, so nothing is metered against this
+			// yet; the term is here so that the declaration is an upper bound
+			// on the day it is.
 			.saturating_add(Weight::from_parts(
 				hashing,
 				reads.saturating_mul(KEY_POV).saturating_add(u64::from(ciphertext_bytes)),
@@ -356,10 +324,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 
 /// Marginal cost of one real leaf slot in the `()` impl, in picoseconds.
 ///
-/// Two nullifier writes, two tree appends with their Poseidon2 work, two
-/// ciphertext writes and a digest over two ciphertexts. 200 microseconds is the
-/// placeholder for the fixed part; the payload term below is the one that
-/// dominates a real slot.
+/// Two nullifier writes, two tree appends with their Poseidon2 work and a
+/// digest over two ciphertexts. 200 microseconds is the placeholder for the
+/// fixed part; the payload term below is the one that dominates a real slot.
 const SLOT_REF_TIME_PS: u64 = 200_000_000;
 
 /// For mocks and for a runtime that has not wired its own.

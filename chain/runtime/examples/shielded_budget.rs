@@ -2,8 +2,8 @@
 use std::{borrow::Cow, error::Error, path::PathBuf, time::Instant};
 
 use codec::{Decode, Encode};
-use frame_support::BoundedVec;
-use qnero_runtime::{shielded_budget::*, Runtime, System};
+use frame_support::traits::Get;
+use qnero_runtime::{shielded_budget::*, Runtime};
 use sc_executor::WasmExecutor;
 use serde_json::{json, Value};
 use sp_core::traits::{CallContext, CodeExecutor, RuntimeCode, WrappedRuntimeCode};
@@ -85,48 +85,14 @@ impl Runner {
 		repetitions: u32,
 		slots: u32,
 	) -> Result<(u64, u64, u32)> {
-		let mut ext = externalities(operation)?;
+		let mut ext = TestExternalities::default();
 		let encoded = (operation, input.to_vec(), repetitions, slots).encode();
 		let (answer, elapsed) = self.call(&mut ext, "ShieldedBudgetApi_run", &encoded)?;
 		let result = std::result::Result::<(u64, u32), Vec<u8>>::decode(&mut &answer[..])?;
 		let (declared, count) =
 			result.map_err(|error| String::from_utf8_lossy(&error).into_owned())?;
-		if operation == RETENTION_HOOK {
-			let expected = <Runtime as pallet_shielded::Config>::MaxCiphertextPrunesPerBlock::get();
-			if count != expected {
-				return Err(format!("retention pruned {count}, expected {expected}").into());
-			}
-		}
 		Ok((elapsed, declared, count))
 	}
-}
-
-fn externalities(operation: u8) -> Result<TestExternalities> {
-	let mut ext = TestExternalities::default();
-	if operation == RETENTION_HOOK {
-		ext.execute_with(|| -> Result<()> {
-			let limit = <Runtime as pallet_shielded::Config>::MaxCiphertextPrunesPerBlock::get();
-			let per_block = <Runtime as pallet_shielded::Config>::MaxCiphertextsPerBlock::get();
-			let cap = <Runtime as pallet_shielded::Config>::MaxCiphertextBytes::get();
-			let payload: BoundedVec<u8, <Runtime as pallet_shielded::Config>::MaxCiphertextBytes> =
-				vec![0u8; cap as usize].try_into().map_err(|_| "invalid fixture payload cap")?;
-			for index in 0..limit {
-				let created = 1 + index / per_block;
-				pallet_shielded::Ciphertexts::<Runtime>::insert(u64::from(index), &payload);
-				pallet_shielded::CiphertextQueue::<Runtime>::insert(
-					u64::from(index),
-					(created, u64::from(index)),
-				);
-			}
-			pallet_shielded::CiphertextQueueTail::<Runtime>::put(u64::from(limit));
-			let now = <Runtime as pallet_shielded::Config>::CiphertextRetentionBlocks::get() +
-				limit / per_block +
-				2;
-			System::set_block_number(now);
-			Ok(())
-		})?;
-	}
-	Ok(ext)
 }
 
 fn measure(
@@ -231,7 +197,6 @@ fn main() -> Result<()> {
 		1,
 		max_slots,
 	)?;
-	add("bounded_retention_hook", RETENTION_HOOK, &[], 1, 0)?;
 	let cpu = std::fs::read_to_string("/proc/cpuinfo")
 		.unwrap_or_default()
 		.lines()

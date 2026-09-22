@@ -115,8 +115,7 @@ parameter_types! {
 	/// its SCALE decode cannot pass a test here.
 	pub const MaxCiphertextBytes: u32 = 2048;
 	pub static CiphertextRetentionBlocks: u32 = crate::CIPHERTEXT_RETENTION_BLOCKS;
-	pub static MaxCiphertextsPerBlock: u32 = crate::MAX_CIPHERTEXTS_PER_BLOCK;
-	pub static MaxCiphertextPrunesPerBlock: u32 = crate::MAX_CIPHERTEXT_PRUNES_PER_BLOCK;
+	pub static MaxOutputsPerBlock: u32 = crate::MAX_OUTPUTS_PER_BLOCK;
 }
 
 /// The mock's block-author seam, which is the runtime's: the QPoW pre-runtime
@@ -154,8 +153,7 @@ impl pallet_shielded::Config for Test {
 	type FeeBurnRate = FeeBurnRate;
 	type MaxCiphertextBytes = MaxCiphertextBytes;
 	type CiphertextRetentionBlocks = CiphertextRetentionBlocks;
-	type MaxCiphertextsPerBlock = MaxCiphertextsPerBlock;
-	type MaxCiphertextPrunesPerBlock = MaxCiphertextPrunesPerBlock;
+	type MaxOutputsPerBlock = MaxOutputsPerBlock;
 	type WeightInfo = ();
 }
 

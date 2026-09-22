@@ -1,9 +1,9 @@
 //! Bounded component measurements in the runtime's WASM compilation.
 //! Enabled only by `shielded-budget-bench`; no production RPC is registered.
 
-use crate::{BlockNumber, Runtime, Shielded, System};
+use crate::Runtime;
+use frame_support::traits::Get;
 use alloc::{format, vec::Vec};
-use frame_support::traits::Hooks;
 use pallet_shielded::weights;
 
 pub const LOAD_PRIVATE: u8 = 0;
@@ -13,7 +13,6 @@ pub const LOAD_PUBLIC: u8 = 3;
 pub const PARSE_PUBLIC: u8 = 4;
 pub const VERIFY_PUBLIC: u8 = 5;
 pub const PAYLOAD_DIGEST: u8 = 6;
-pub const RETENTION_HOOK: u8 = 7;
 
 sp_api::decl_runtime_apis! {
 	pub trait ShieldedBudgetApi {
@@ -118,14 +117,6 @@ pub fn run(
 					),
 					fold,
 				)
-			},
-			RETENTION_HOOK => {
-				if repetitions != 1 {
-					return Err(error("retention setup is consumed by one call"));
-				}
-				let weight =
-					<Shielded as Hooks<BlockNumber>>::on_initialize(System::block_number());
-				(weight.ref_time(), pallet_shielded::CiphertextQueueHead::<Runtime>::get() as u32)
 			},
 			_ => return Err(error("unknown benchmark operation")),
 		};

@@ -61,142 +61,160 @@ fn protocol_profile_metadata_contract_matches_authenticated_storage() {
 	});
 }
 
-/// Small limits keep retention boundary tests independent of production load.
-/// Parameter values are restored even if a test assertion fails.
-fn with_ciphertext_limits(test: impl FnOnce()) {
-	struct Restore(u32, u32, u32);
+/// A budget of two output notes per block, so a single settlement or a pair of
+/// shields fills a block. The production value is restored even if a test
+/// assertion fails.
+fn with_output_budget(test: impl FnOnce()) {
+	struct Restore(u32);
 	impl Drop for Restore {
 		fn drop(&mut self) {
-			CiphertextRetentionBlocks::set(self.0);
-			MaxCiphertextsPerBlock::set(self.1);
-			MaxCiphertextPrunesPerBlock::set(self.2);
+			MaxOutputsPerBlock::set(self.0);
 		}
 	}
-	let _restore = Restore(
-		CiphertextRetentionBlocks::get(),
-		MaxCiphertextsPerBlock::get(),
-		MaxCiphertextPrunesPerBlock::get(),
-	);
-	CiphertextRetentionBlocks::set(2);
-	MaxCiphertextsPerBlock::set(2);
-	MaxCiphertextPrunesPerBlock::set(3);
+	let _restore = Restore(MaxOutputsPerBlock::get());
+	MaxOutputsPerBlock::set(2);
 	test();
 }
 
-fn cache_test_shield() -> sp_runtime::DispatchResult {
+/// One shield, which is one output note against the block's budget.
+fn budget_test_shield() -> sp_runtime::DispatchResult {
 	Shielded::shield(RuntimeOrigin::signed(alice()), POOL_STEP, [0; 32], b"note".to_vec())
 }
 
-fn initialize_cache_block(number: u64) {
-	use frame_support::traits::Hooks;
-	System::set_block_number(number);
-	<Shielded as Hooks<u64>>::on_initialize(number);
-}
-
 #[test]
-fn ciphertext_cache_expires_at_the_retention_boundary_and_preserves_leaf_data() {
-	with_ciphertext_limits(|| {
+fn the_output_cap_refuses_a_shield_before_burning_and_resets_for_next_block() {
+	with_output_budget(|| {
 		new_test_ext_with_endowments(vec![(alice(), 100 * UNIT)]).execute_with(|| {
-			assert_ok!(cache_test_shield());
-			assert_ok!(cache_test_shield());
-			let commitment = ZkTree::leaf(0);
-			let original_ciphertext = Shielded::ciphertext(0).unwrap();
-			initialize_cache_block(2);
-			assert_eq!(Shielded::ciphertext(0), Some(original_ciphertext.clone()));
-			assert_ok!(cache_test_shield());
-			assert_ok!(cache_test_shield());
-			initialize_cache_block(3);
-			assert_eq!(Shielded::ciphertext(0), None);
-			assert_eq!(Shielded::ciphertext(1), None);
-			assert_eq!(Shielded::ciphertext(2), Some(original_ciphertext.clone()));
-			assert_eq!(Shielded::ciphertext(3), Some(original_ciphertext));
-			assert_eq!(ZkTree::leaf(0), commitment);
-			assert_eq!(Shielded::leaf_block(0), Some(1));
-			assert_eq!(crate::CiphertextQueueHead::<Test>::get(), 2);
-			assert_eq!(crate::CiphertextQueue::<Test>::iter().count(), 2);
-			assert_eq!(Shielded::pool_value(), 4 * POOL_STEP);
-		});
-	});
-}
-
-#[test]
-fn ciphertext_creation_cap_refuses_a_shield_before_burning_and_resets_for_next_block() {
-	with_ciphertext_limits(|| {
-		new_test_ext_with_endowments(vec![(alice(), 100 * UNIT)]).execute_with(|| {
-			assert_ok!(cache_test_shield());
-			assert_ok!(cache_test_shield());
-			assert_noop!(cache_test_shield(), Error::<Test>::TooManyCiphertextsInBlock);
+			assert_ok!(budget_test_shield());
+			assert_ok!(budget_test_shield());
+			assert_noop!(budget_test_shield(), Error::<Test>::TooManyOutputsInBlock);
 			assert_eq!(ZkTree::leaf_count(), 2);
 			// Transaction-pool validation initializes the next block's system
 			// context without executing pallet hooks. The stamped counter must
 			// admit that context as well.
 			System::set_block_number(2);
-			assert_ok!(cache_test_shield());
-			assert_eq!(crate::CiphertextsWrittenThisBlock::<Test>::get(), (2, 1));
+			assert_ok!(budget_test_shield());
+			assert_eq!(crate::OutputsWrittenThisBlock::<Test>::get(), (2, 1));
 		});
 	});
 }
 
 #[test]
-fn ciphertext_creation_cap_applies_to_complete_settlements_before_nullifiers_change() {
-	with_ciphertext_limits(|| {
+fn the_output_cap_applies_to_complete_settlements_before_nullifiers_change() {
+	with_output_budget(|| {
 		new_test_ext().execute_with(|| {
 			fund_pool(100);
 			let ct_1 = suite_ciphertext(0xc1);
 			let ct_2 = suite_ciphertext(0xc2);
-			let first = one_segment(10, vec![slot("cache-first", &ct_1, &ct_2, 9)]);
+			let first = one_segment(10, vec![slot("budget-first", &ct_1, &ct_2, 9)]);
 			assert_ok!(Shielded::settle(first, vec![output(&ct_1, &ct_2)]));
-			let second = one_segment(10, vec![slot("cache-second", &ct_1, &ct_2, 9)]);
+			let second = one_segment(10, vec![slot("budget-second", &ct_1, &ct_2, 9)]);
 			assert_noop!(
 				Shielded::settle(second, vec![output(&ct_1, &ct_2)]),
-				Error::<Test>::TooManyCiphertextsInBlock
+				Error::<Test>::TooManyOutputsInBlock
 			);
-			assert_eq!(crate::CiphertextQueue::<Test>::iter().count(), 2);
+			assert_eq!(crate::OutputsWrittenThisBlock::<Test>::get().1, 2);
 			assert_eq!(crate::UsedNullifiers::<Test>::iter().count(), 2);
 		});
 	});
 }
 
+/// Nothing lives under the key a pre-bundle wallet would read.
+///
+/// The map is gone from the pallet, so its prefix is spelled out here rather
+/// than taken from a storage type. What this asserts is the thing a wallet
+/// cares about: the chain writes no value at that address, so a wallet that
+/// still asked for one would be reading a hole and finding no payment. The
+/// profile byte is what refuses such a wallet before it gets that far.
+fn no_ciphertext_key_exists() -> bool {
+	let mut prefix = sp_io::hashing::twox_128(b"Shielded").to_vec();
+	prefix.extend_from_slice(&sp_io::hashing::twox_128(b"Ciphertexts"));
+	match sp_io::storage::next_key(&prefix) {
+		Some(key) => !key.starts_with(&prefix),
+		None => true,
+	}
+}
+
+/// A settling slot appends two commitment leaves and stamps two `LeafBlocks`
+/// entries, and that is every per-leaf key it writes. The payload rides in the
+/// extrinsic that carried it, which the header's extrinsics root
+/// authenticates, and `SLOT_DB_OPS` is the declared half of the same
+/// statement: it lost the two ciphertext writes with the map.
 #[test]
-fn ciphertext_legacy_cleanup_is_delayed_bounded_resumable_and_does_not_rewind() {
-	use frame_support::traits::{Hooks, StorageVersion};
-	with_ciphertext_limits(|| {
-		new_test_ext_with_endowments(vec![(alice(), 100 * UNIT)]).execute_with(|| {
-			System::set_block_number(10);
-			let legacy: BoundedVec<u8, MaxCiphertextBytes> = b"legacy".to_vec().try_into().unwrap();
-			for index in 0..7 {
-				crate::Ciphertexts::<Test>::insert(index, &legacy);
-				crate::LeafBlocks::<Test>::insert(index, 9);
-			}
-			pallet_zk_tree::LeafCount::<Test>::put(7);
-			StorageVersion::new(1).put::<Shielded>();
-			<Shielded as Hooks<u64>>::on_runtime_upgrade();
-			assert_eq!(crate::LegacyCiphertextCleanup::<Test>::get(), Some((0, 7, 12)));
-			assert_ok!(cache_test_shield());
-			initialize_cache_block(11);
-			assert_eq!(crate::Ciphertexts::<Test>::iter().count(), 8);
-			initialize_cache_block(12);
-			// One queued ciphertext and two legacy indices exhaust this pass.
-			assert_eq!(Shielded::ciphertext(7), None);
-			assert_eq!(crate::LegacyCiphertextCleanup::<Test>::get(), Some((2, 7, 12)));
-			assert_eq!(crate::Ciphertexts::<Test>::iter().count(), 5);
-			<Shielded as Hooks<u64>>::on_runtime_upgrade();
-			assert_eq!(crate::LegacyCiphertextCleanup::<Test>::get(), Some((2, 7, 12)));
-			initialize_cache_block(13);
-			assert_eq!(crate::LegacyCiphertextCleanup::<Test>::get(), Some((5, 7, 12)));
-			initialize_cache_block(14);
-			assert_eq!(crate::LegacyCiphertextCleanup::<Test>::get(), None);
-			assert_eq!(crate::Ciphertexts::<Test>::iter().count(), 0);
-			assert_eq!(Shielded::leaf_block(0), Some(9));
-		});
+fn a_settled_slot_writes_no_ciphertext_to_state() {
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		let ct_1 = suite_ciphertext(0xd1);
+		let ct_2 = suite_ciphertext(0xd2);
+		let bundle = one_segment(10, vec![slot("no-state", &ct_1, &ct_2, 9)]);
+		assert_ok!(Shielded::settle(bundle, vec![output(&ct_1, &ct_2)]));
+
+		assert_eq!(ZkTree::leaf_count(), 2);
+		assert_eq!(Shielded::leaf_block(0), Some(System::block_number()));
+		assert_eq!(Shielded::leaf_block(1), Some(System::block_number()));
+		assert!(no_ciphertext_key_exists(), "a settlement wrote a ciphertext into state");
+		assert_eq!(weights::SLOT_DB_OPS, (4, 4));
 	});
 }
 
+/// The retention window is zero and the hook that drained it is gone, so
+/// `on_initialize` reserves the coinbase mint and nothing else, at any height.
+///
+/// The constant stays in the pallet's metadata at zero on purpose: it is how a
+/// wallet reading the metadata is told where the payload lives, and
+/// `integrity_test` refuses any other value.
 #[test]
-fn ciphertext_queue_overflow_refuses_an_entry_before_burning() {
-	new_test_ext_with_endowments(vec![(alice(), 100 * UNIT)]).execute_with(|| {
-		crate::CiphertextQueueTail::<Test>::put(u64::MAX);
-		assert_noop!(cache_test_shield(), Error::<Test>::CiphertextQueueOverflow);
+fn the_retention_constant_is_zero_and_the_prune_is_gone() {
+	use crate::weights::WeightInfo as _;
+	use frame_support::traits::Hooks;
+
+	new_test_ext().execute_with(|| {
+		assert_eq!(CiphertextRetentionBlocks::get(), 0);
+		let reservation = <() as crate::weights::WeightInfo>::mint_coinbase(
+			MaxCiphertextBytes::get(),
+		)
+		.saturating_add(<Test as frame_system::Config>::DbWeight::get().writes(1));
+		for height in [1u64, 2, 65, 1_000_000] {
+			System::set_block_number(height);
+			assert_eq!(<Shielded as Hooks<u64>>::on_initialize(height), reservation);
+		}
+	});
+}
+
+/// The counter regression. `store_ciphertext` was the only writer of the
+/// per-block output counter, and it went with the map; `record_outputs` is
+/// what replaced it. Without a writer the cap compares every submission
+/// against zero, `TooManyOutputsInBlock` never fires, and the deferral gate
+/// below it becomes unreachable code that nothing would have caught.
+///
+/// This checks the plan, which is what the gate calls, rather than the
+/// dispatch: a cap that only bound at dispatch would let the block builder
+/// spend a full verify on a settlement it cannot include.
+#[test]
+fn a_second_submission_in_a_full_block_still_returns_too_many_outputs_in_block() {
+	with_output_budget(|| {
+		new_test_ext().execute_with(|| {
+			fund_pool(100);
+			let ct_1 = suite_ciphertext(0xe1);
+			let ct_2 = suite_ciphertext(0xe2);
+			let outputs = vec![output(&ct_1, &ct_2)];
+
+			let first = one_segment(10, vec![slot("budget-first", &ct_1, &ct_2, 9)]);
+			assert_ok!(plan(&first, &outputs));
+			assert_ok!(Shielded::settle(first, outputs.clone()));
+			assert_eq!(crate::OutputsWrittenThisBlock::<Test>::get().1, 2);
+
+			// The block is full. A fresh submission, no nullifier of which this
+			// chain has seen, is refused by the budget and by nothing else.
+			let second = one_segment(10, vec![slot("budget-second", &ct_1, &ct_2, 9)]);
+			assert_noop!(plan(&second, &outputs), Error::<Test>::TooManyOutputsInBlock);
+			assert_noop!(check(&second, &outputs), Error::<Test>::TooManyOutputsInBlock);
+
+			// The counter is stamped with its block, so the next block admits
+			// the same submission with no hook run in between.
+			System::set_block_number(11);
+			assert_ok!(plan(&second, &outputs));
+		});
 	});
 }
 
@@ -628,7 +646,7 @@ fn a_slot_below_the_minimum_fee_is_refused() {
 }
 
 #[test]
-fn settling_appends_two_leaves_per_slot_and_stores_their_ciphertexts() {
+fn settling_appends_two_leaves_per_slot_and_keeps_no_payload() {
 	new_test_ext().execute_with(|| {
 		fund_pool(100);
 		let bundle = one_segment(
@@ -652,8 +670,7 @@ fn settling_appends_two_leaves_per_slot_and_stores_their_ciphertexts() {
 			assert_eq!(ZkTree::leaf(first + 1), Some(slot.commitments[1]));
 			assert_eq!(Shielded::leaf_block(first), Some(System::block_number()));
 		}
-		assert_eq!(Shielded::ciphertext(0).map(|c| c.to_vec()), Some(suite_ciphertext(0xa1)));
-		assert_eq!(Shielded::ciphertext(3).map(|c| c.to_vec()), Some(suite_ciphertext(0xb2)));
+		assert_eq!(crate::OutputsWrittenThisBlock::<Test>::get().1, 4);
 
 		// Two slots at their per-slot floor of eight. Half of the sixteen-step
 		// fee burns and half goes to the author, who is absent here, so the
@@ -929,11 +946,10 @@ fn a_segment_settled_by_an_earlier_submission_is_skipped_not_fatal() {
 		assert_ok!(Shielded::settle(batch.clone(), outputs.clone()));
 		assert_eq!(ZkTree::leaf_count(), 4);
 		assert_eq!(ZkTree::leaf(2), Some(second.commitments[0]));
-		// The skipped segment's ciphertexts were not rewritten over the
-		// earlier settlement's leaves, and the second segment's ciphertexts
-		// landed against their own leaf indices.
-		assert_eq!(Shielded::ciphertext(2).map(|c| c.to_vec()), Some(suite_ciphertext(0xb1)));
-		assert_eq!(Shielded::ciphertext(0).map(|c| c.to_vec()), Some(suite_ciphertext(0xa1)));
+		// The skipped segment appended nothing over the earlier settlement's
+		// leaves, and the second segment's commitments landed against their
+		// own leaf indices.
+		assert_eq!(ZkTree::leaf(3), Some(second.commitments[1]));
 
 		// Re-submitting the whole thing now settles nothing at all, which is a
 		// replay and is refused.
@@ -1887,10 +1903,6 @@ fn shield_burns_the_value_and_appends_the_commitment() {
 		assert_eq!(Shielded::pool_value(), 100 * POOL_STEP);
 		assert_eq!(Shielded::entry_count(), 1);
 		assert_eq!(Balances::total_issuance(), issuance_before - 100 * POOL_STEP);
-		assert_eq!(
-			Shielded::ciphertext(0).map(|c| c.to_vec()),
-			Some(b"a note ciphertext".to_vec())
-		);
 
 		// The event carries everything a recipient needs: the ciphertext to
 		// decrypt, and the `entry_index` half of the identifier its `rho` is
@@ -2142,9 +2154,8 @@ fn a_real_private_batch_settles_end_to_end() {
 		let proof = ZkTree::get_merkle_proof(1).expect("the new leaf is provable now");
 		assert!(ZkTree::verify_proof(ZkTree::leaf(1).expect("leaf 1"), &proof));
 
-		// Both output ciphertexts are stored against their own leaf index.
-		assert_eq!(Shielded::ciphertext(1).map(|c| c.to_vec()), Some(suite_ciphertext(0x01)));
-		assert_eq!(Shielded::ciphertext(2).map(|c| c.to_vec()), Some(suite_ciphertext(0x02)));
+		// The payload is in the extrinsic that carried it and nowhere else.
+		assert!(no_ciphertext_key_exists(), "a settlement wrote a ciphertext into state");
 	});
 }
 
@@ -2604,7 +2615,7 @@ fn a_wrong_length_payload_is_a_permanent_call_refusal() {
 /// on its own. The two shields below are what make the block full ahead of it.
 #[test]
 fn a_full_block_defers_a_settlement_instead_of_dropping_it() {
-	with_ciphertext_limits(|| {
+	with_output_budget(|| {
 		new_test_ext_with_endowments(vec![(alice(), 10_000 * UNIT)]).execute_with(|| {
 			// Shields at block 1, publishes the anchor header at block 4 and
 			// leaves the chain at block 5, whose ciphertext counter reads 0.
@@ -2618,9 +2629,9 @@ fn a_full_block_defers_a_settlement_instead_of_dropping_it() {
 			assert_ok!(<Shielded as ValidateUnsigned>::pre_dispatch(&call));
 
 			// Two shields fill block 5 to the cap of 2.
-			assert_ok!(cache_test_shield());
-			assert_ok!(cache_test_shield());
-			assert_eq!(crate::CiphertextsWrittenThisBlock::<Test>::get(), (5, 2));
+			assert_ok!(budget_test_shield());
+			assert_ok!(budget_test_shield());
+			assert_eq!(crate::OutputsWrittenThisBlock::<Test>::get(), (5, 2));
 
 			// The same settlement is now deferred, and the answer says so:
 			// `ExhaustsResources` keeps it in the pool for the next block.
@@ -2638,7 +2649,7 @@ fn a_full_block_defers_a_settlement_instead_of_dropping_it() {
 					spend.proof.clone(),
 					spend.outputs.clone(),
 				),
-				Error::<Test>::TooManyCiphertextsInBlock
+				Error::<Test>::TooManyOutputsInBlock
 			);
 
 			// Next block, empty counter, same transaction. The anchor at block
@@ -2869,7 +2880,6 @@ fn a_block_mints_one_coinbase_note_worth_the_reward() {
 		assert_eq!(ZkTree::leaf_count(), 1);
 		assert_eq!(pallet_zk_tree::Leaves::<Test>::get(0), Some(expected));
 		assert_eq!(Shielded::coinbase_value(0), Some(7));
-		assert_eq!(Shielded::ciphertext(0), None, "a derived coinbase stores no ciphertext");
 		assert_eq!(Shielded::leaf_block(0), Some(System::block_number()));
 		assert_eq!(Shielded::pool_value(), 7 * POOL_STEP);
 		System::assert_has_event(
@@ -3136,7 +3146,6 @@ fn a_coinbase_payload_has_no_builder_and_is_refused() {
 		assert_ok!(Shielded::coinbase(RuntimeOrigin::none(), inner, Vec::new()));
 		assert_ok!(deposit_coinbase(3 * POOL_STEP));
 		assert_eq!(Shielded::coinbase_value(0), Some(3));
-		assert_eq!(Shielded::ciphertext(0), None, "no payload, no stored bytes");
 		System::assert_has_event(
 			Event::CoinbaseMinted {
 				block_number: System::block_number(),
