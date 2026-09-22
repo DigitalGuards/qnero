@@ -1503,7 +1503,15 @@ two callers in each wallet now, the caller passing where it read the count and
 what it would have gone on to do with it (`short_tree_refusal` and `ShortTree`
 here). The scan pins every read of a pass
 to one block hash, reads the same three keys per leaf in batches of 64, and
-fetches one body per block that appended a leaf. The
+fetches one body per block that appended a leaf: `authenticatedBody` in
+`wallet-web/src/chain/authenticated.ts` is `Chain::authenticated_body`'s three
+steps in the same order, and `wallet-web/src/chain/body.ts` walks the envelope
+out to the payloads the way `crates/qnero-wallet/src/extrinsic.rs` does, off
+the runtime's own metadata. The recomputation itself crosses into the prover
+module, as an `extrinsicsRoot` request beside `readStateProof`, because the
+construction is a Blake2 trie over SCALE keys and a second implementation of
+one consensus construction would be a second way to disagree with the chain.
+The
 fee floor, the memo pad, the two-input selection with its tie on the lowest
 leaf index, the conflict-set rule and the anchor-at-the-head rule are the same
 rules, ported line for line. So are the four that decide what a balance says
@@ -1535,7 +1543,7 @@ makes is against that node's own answers, so a node whose tree is short used to
 reach the write-off and mark a real, spendable note off chain. A sync meeting
 the identical node refuses it by name. And every
 storage value a scan reads is decoded by its declared type and refused by name
-at any other width, the way `Chain::leaves` and `Chain::ciphertext` do, because
+at any other width, the way `Chain::leaves` does, because
 `REQUIRED_STORAGE` compares hashers and a changed value type would otherwise
 read as a chain on which no leaf is this wallet's. `ZkTree::LeafCount` at eight
 bytes and `ZkTree::Depth` at one are in that list, which `Chain::leaf_count_at`
@@ -1631,19 +1639,18 @@ raise. Code identifiers, type names and these docs keep the circuit's words,
 because that is where the circuit is.
 
 `leaf` is the one exception on a screen and it is deliberate, because a leaf
-index is what a reader hands a second node and the substitution detector has
-nothing else to name. It survives in three places: the four per-leaf
-substitution warnings, the last-sync detail table and
-the sync progress counters, and the settings copy explaining what a scan reads
-off the chain. Where a leaf index was only a label for a position it is gone.
-The balance table and the rejected table head that column "Entry", and the
-settings button reads "Rescan from the start".
+index is what a reader hands a second node. It survives in two places: the
+last-sync detail table with the sync progress counters, and the settings copy
+explaining what a scan reads off the chain. Where a leaf index was only a label
+for a position it is gone. The balance table and the rejected table head that
+column "Entry", and the settings button reads "Rescan from the start".
 
 The command-line wallet keeps the circuit's words outside the sentences the
-parity test binds. The four per-leaf warnings stay byte for byte identical
-across the two wallets. `CIPHERTEXT_SUBSTITUTION_HINT` uses short browser copy
-and a technical native explanation; a separate test checks their shared trust
-boundary and the browser's vocabulary. Everything else `qnero-wallet`
+parity test binds. `CIPHERTEXT_SUBSTITUTION_HINT` uses short browser copy and a
+technical native explanation; a separate test checks their shared trust
+boundary and the browser's vocabulary. The four per-leaf warnings that used to
+be held byte for byte across the two wallets are gone from both: they named a
+ciphertext answered beside a leaf, and there is no such answer any more. Everything else `qnero-wallet`
 prints, the `balance` table and the `sync` and `send` lines, still says note,
 output and nullifier, because its reader is an operator running a node beside
 it and those are the words the chain, the pallet and `docs/CIRCUIT.md` use.
