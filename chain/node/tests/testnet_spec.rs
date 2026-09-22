@@ -144,6 +144,33 @@ fn the_committed_testnet_spec_is_what_this_binary_exports() {
 	);
 }
 
+/// The one client-side seam that can execute different code for a block is
+/// empty, and empty on purpose.
+///
+/// `codeSubstitutes` is honoured by the client, not by the runtime: a node
+/// handed a spec with an entry there runs different code for the block it
+/// names, which is a node forking itself off rather than a power over anybody
+/// else. The same is true of `--wasm-runtime-overrides`. Neither is an admin
+/// key, and neither should be mistaken for one, but a spec that shipped a
+/// non-empty map would make the "no admin keys" claim overstated for whoever
+/// took the file. So the field is asserted rather than assumed: what the
+/// repository hands operators carries nothing there.
+#[test]
+fn the_shipped_spec_carries_no_code_substitute() {
+	let path = committed_spec_path();
+	let raw = std::fs::read(&path)
+		.unwrap_or_else(|error| panic!("{} is missing or unreadable ({error})", path.display()));
+	let spec: serde_json::Value =
+		serde_json::from_slice(&raw).unwrap_or_else(|error| panic!("not JSON: {error}"));
+
+	let substitutes = &spec["codeSubstitutes"];
+	assert!(
+		substitutes.is_null() ||
+			substitutes.as_object().is_some_and(|map| map.is_empty()),
+		"the committed spec carries a code substitute: {substitutes}. A node that takes          this file would execute code other than the runtime in its own genesis"
+	);
+}
+
 /// What the committed spec says about itself, read off the file rather than
 /// off a builder.
 ///

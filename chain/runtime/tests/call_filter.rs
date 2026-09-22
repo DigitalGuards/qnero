@@ -21,6 +21,13 @@ use qnero_runtime::{
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::Dispatchable, BuildStorage, DispatchError, MultiAddress};
 
+// Every `.rs` directly under `tests/` is its own integration target, so the
+// shared helper is pulled in by path rather than by `use crate::common`.
+#[path = "common.rs"]
+#[allow(dead_code)]
+mod common;
+use common::call_names;
+
 fn account(id: u8) -> AccountId {
 	let mut bytes = [0u8; 32];
 	bytes[0] = id;
@@ -311,18 +318,6 @@ fn the_coinbase_is_a_mandatory_dispatch() {
 /// rather than quietly becoming a dispatchable transfer.
 #[test]
 fn a_new_balance_moving_call_is_matched_here() {
-	fn call_names<T: scale_info::TypeInfo + 'static>() -> Vec<String> {
-		let mut registry = scale_info::Registry::new();
-		let symbol = registry.register_type(&scale_info::meta_type::<T>());
-		let portable: scale_info::PortableRegistry = registry.into();
-		let scale_info::TypeDef::Variant(variants) =
-			&portable.resolve(symbol.id).expect("just registered").type_def
-		else {
-			panic!("a pallet Call is a variant type");
-		};
-		variants.variants.iter().map(|variant| variant.name.to_string()).collect()
-	}
-
 	assert_eq!(
 		call_names::<pallet_balances::Call<Runtime>>(),
 		["transfer_allow_death", "transfer_keep_alive", "transfer_all", "burn"],
@@ -336,10 +331,12 @@ fn a_new_balance_moving_call_is_matched_here() {
 		 dispatchable, and a new inherent must be claimed by `is_inherent`"
 	);
 
-	// The three pallets the filter enumerates beside `Balances`. Two of them
-	// move value through `T::Currency` directly rather than by dispatching a
-	// `Balances` call, so the enumeration here is the only thing standing
-	// between a new payout call and a transparent transfer on a v1 chain.
+	// The two pallets the filter enumerates beside `Balances`. Both move value
+	// through `T::Currency` directly rather than by dispatching a `Balances`
+	// call, so the enumeration here is the only thing standing between a new
+	// payout call and a transparent transfer on a v1 chain. `pallet-treasury`
+	// was a third until its calls were disabled: `set_treasury_account` has no
+	// `RuntimeCall` variant any more, which `no_admin_keys.rs` pins.
 	assert_eq!(
 		call_names::<pallet_vesting::Call<Runtime>>(),
 		["claim", "create_schedule", "end_schedule", "retarget_schedule"],
@@ -359,13 +356,6 @@ fn a_new_balance_moving_call_is_matched_here() {
 		"pallet-reversible-transfers grew or lost a call; decide whether it moves \
 		 transparent value and update the filter and docs/DESIGN.md section 7"
 	);
-	assert_eq!(
-		call_names::<pallet_treasury::Call<Runtime>>(),
-		["set_treasury_account"],
-		"pallet-treasury grew or lost a call; decide whether it moves transparent \
-		 value and update the filter and docs/DESIGN.md section 7"
-	);
-
 	// The wrappers. A wrapper the filter does not unwrap is a way around every
 	// arm above, so a new one has to be added to `refused_under_v1`.
 	assert_eq!(
@@ -392,20 +382,17 @@ fn a_new_balance_moving_call_is_matched_here() {
 	// The runtime's own pallet list. A pallet added to `construct_runtime` with
 	// a transfer dispatchable is caught by nothing above, so the list itself is
 	// the tripwire. Pallets with no dispatchables of their own are absent:
-	// `QPoW`, `MiningRewards`, `ZkTree`, `TransactionPayment` and `Origins`
-	// have no calls, and `Scheduler` is `#[runtime::disable_call]`.
+	// `QPoW`, `MiningRewards`, `ZkTree` and `TransactionPayment` have no calls,
+	// and `Scheduler`, `Preimage` and `TreasuryPallet` are all
+	// `#[runtime::disable_call]`.
 	assert_eq!(
 		call_names::<RuntimeCall>(),
 		[
 			"System",
 			"Timestamp",
 			"Balances",
-			"Preimage",
 			"Utility",
 			"ReversibleTransfers",
-			"TechCollective",
-			"TechReferenda",
-			"TreasuryPallet",
 			"Multisig",
 			"Vesting",
 			"Shielded",

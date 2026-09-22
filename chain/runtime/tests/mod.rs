@@ -1,4 +1,4 @@
 #[allow(dead_code)]
 pub mod common;
-mod governance;
+mod admin;
 mod transactions;
