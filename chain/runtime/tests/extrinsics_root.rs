@@ -44,14 +44,21 @@ fn hex(bytes: &[u8]) -> String {
 	bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Suite 1's serialized length. Written out rather than read from
+/// `qnero_circuit::chain`: the vector is a fixed body on purpose, so a
+/// constant that moves has to move the root through a deliberate regeneration
+/// rather than by silently reshaping the input.
+const SUITE_1_CIPHERTEXT_BYTES: usize = 1792;
+
 /// A ciphertext of the one length settlement accepts, filled deterministically.
 /// The bytes are not a real `NoteCiphertext` and nothing here dispatches: what
 /// the vector needs is a body-sized leaf whose encoding is fixed.
-fn suite_length_ciphertext(seed: u8) -> BoundedVec<u8, <Runtime as pallet_shielded::Config>::MaxCiphertextBytes>
-{
-	let length = qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES;
-	let bytes: Vec<u8> =
-		(0..length).map(|index| seed.wrapping_add((index % 251) as u8)).collect();
+fn suite_length_ciphertext(
+	seed: u8,
+) -> BoundedVec<u8, <Runtime as pallet_shielded::Config>::MaxCiphertextBytes> {
+	let bytes: Vec<u8> = (0..SUITE_1_CIPHERTEXT_BYTES)
+		.map(|index| seed.wrapping_add((index % 251) as u8))
+		.collect();
 	BoundedVec::try_from(bytes).expect("the suite length is under MaxCiphertextBytes")
 }
 

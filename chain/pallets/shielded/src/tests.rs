@@ -169,10 +169,11 @@ fn the_retention_constant_is_zero_and_the_prune_is_gone() {
 
 	new_test_ext().execute_with(|| {
 		assert_eq!(CiphertextRetentionBlocks::get(), 0);
-		let reservation = <() as crate::weights::WeightInfo>::mint_coinbase(
-			MaxCiphertextBytes::get(),
-		)
-		.saturating_add(<Test as frame_system::Config>::DbWeight::get().writes(1));
+		let db: frame_support::weights::RuntimeDbWeight =
+			<Test as frame_system::Config>::DbWeight::get();
+		let reservation =
+			<() as crate::weights::WeightInfo>::mint_coinbase(MaxCiphertextBytes::get())
+				.saturating_add(db.writes(1));
 		for height in [1u64, 2, 65, 1_000_000] {
 			System::set_block_number(height);
 			assert_eq!(<Shielded as Hooks<u64>>::on_initialize(height), reservation);
@@ -1615,13 +1616,14 @@ fn a_segment_anchored_above_the_current_height_is_skipped_not_fatal() {
 	});
 }
 
-/// `shield` writes its ciphertext into the same bounded live `Ciphertexts` map
-/// a settled slot writes two of, so it carries the same proof-size term. The
+/// `shield` publishes its ciphertext in its own extrinsic, the way a settled
+/// slot publishes two, so it carries the same proof-size term: the bytes are
+/// validation input for every node whether or not anything stores them. The
 /// runtime leaves `proof_size` uncapped today, so this is a declaration and
 /// nothing is metered against it yet. The day it is capped, an under-declared
 /// `shield` is PoV nothing accounts for.
 #[test]
-fn the_shield_weight_carries_the_ciphertext_it_writes() {
+fn the_shield_weight_carries_the_ciphertext_it_publishes() {
 	use crate::weights::WeightInfo as _;
 
 	let empty = weights::SubstrateWeight::<Test>::shield(0);
