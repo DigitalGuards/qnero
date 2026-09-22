@@ -25,7 +25,7 @@
 
 // Substrate and Polkadot dependencies
 use crate::MILLI_UNIT;
-use codec::{Decode, Encode, MaxEncodedLen};
+use codec::{Decode, DecodeLimit, Encode, MaxEncodedLen};
 use frame_support::{
 	derive_impl,
 	pallet_prelude::TypeInfo,
@@ -210,11 +210,64 @@ fn refused_under_v1(call: &RuntimeCall) -> bool {
 			calls.iter().any(refused_under_v1),
 		// `execute` is the one that dispatches, and the executor resubmits the
 		// stored call there, verified byte-equal, so the inner call is in the
-		// extrinsic. `propose` carries its call as opaque bytes and dispatches
-		// nothing, so there is nothing to decode and nothing to stop.
+		// extrinsic.
 		RuntimeCall::Multisig(pallet_multisig::Call::execute { call, .. }) =>
 			refused_under_v1(call),
+		// `propose` dispatches nothing, and its payload is in the extrinsic
+		// all the same: opaque `BoundedVec<u8, MaxCallSize>` bytes that a
+		// block would carry forever. A proposal carrying a transparent
+		// transfer publishes the sender, the recipient and the amount, which
+		// is the triple the policy exists to deny, so the payload is decoded
+		// here and held to the same rule as any other call.
+		RuntimeCall::Multisig(pallet_multisig::Call::propose { call, .. }) =>
+			the_proposal_is_refused(call),
 		_ => moves_transparent_value(call) || enrols_in_a_feature_v1_refuses(call),
+	}
+}
+
+/// Whether a `Multisig::propose` payload is refused.
+///
+/// Three ways it is, and the two that are not about the payload's contents
+/// mirror the pallet's own phase-3 checks
+/// (`chain/pallets/multisig/src/lib.rs`, the `decode_with_depth_limit` and the
+/// canonical re-encode): bytes that do not decode at
+/// [`pallet_multisig::MAX_MULTISIG_CALL_DEPTH`], and bytes that decode but are
+/// not the decoded call's own canonical encoding, can never execute. The
+/// pallet refuses both with `InvalidCall` after taking a fee, and a payload
+/// that can never execute has no reason to enter a block at all, so this layer
+/// refuses them first and the two layers give the same verdict.
+///
+/// The third is the point of the arm: a payload that decodes to a call v1
+/// refuses is refused here too.
+///
+/// One level is unwrapped. A payload that itself carries a proposal, directly
+/// or inside a wrapper, is refused without a second decode, which keeps the
+/// work this does bounded by `MaxCallSize` in a check that runs ahead of the
+/// extrinsic's own signature verification.
+fn the_proposal_is_refused(payload: &[u8]) -> bool {
+	let Ok(decoded) = RuntimeCall::decode_with_depth_limit(
+		pallet_multisig::MAX_MULTISIG_CALL_DEPTH,
+		&mut &payload[..],
+	) else {
+		return true;
+	};
+	decoded.encode() != payload || carries_a_proposal(&decoded) || refused_under_v1(&decoded)
+}
+
+/// Whether a call is a `Multisig::propose`, or carries one in a wrapper
+/// [`refused_under_v1`] would unwrap.
+///
+/// Walks typed calls only and decodes nothing, which is what makes the
+/// one-level rule in [`the_proposal_is_refused`] a bound rather than a
+/// preference.
+fn carries_a_proposal(call: &RuntimeCall) -> bool {
+	match call {
+		RuntimeCall::Multisig(pallet_multisig::Call::propose { .. }) => true,
+		RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) =>
+			calls.iter().any(carries_a_proposal),
+		RuntimeCall::Multisig(pallet_multisig::Call::execute { call, .. }) =>
+			carries_a_proposal(call),
+		_ => false,
 	}
 }
 

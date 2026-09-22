@@ -129,6 +129,11 @@ impl_opaque_keys! {
 //   `:code`, `:heappages` or a raw storage key, and every referenda and collective constant leaves
 //   the constant tables. Root survives as a type and nothing in the runtime can produce it.
 //   `docs/DESIGN.md` section 7.7 carries the decision; `tests/no_admin_keys.rs` carries the proof.
+// - The call filter unwraps `Multisig::propose`. Its payload is opaque bytes, so a proposal
+//   carrying a transparent transfer used to enter a block with the sender, the recipient and the
+//   amount in its body. `configs/mod.rs` now decodes the payload in `Checkable::check` and refuses
+//   it when it cannot execute or when the call it decodes to is refused. That changes which
+//   extrinsics are valid with no metadata entry attached, the same shape as 103.
 // That is a long metadata move and no signed-payload move: `TxExtension`
 // (`lib.rs` below) keeps its eleven members and the payload layout is
 // untouched, so `transaction_version` stays at 7.

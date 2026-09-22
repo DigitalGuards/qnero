@@ -5,6 +5,7 @@
 #[allow(dead_code)]
 mod common;
 
+use codec::Encode;
 use common::TestCommons;
 use frame_support::traits::Currency;
 use qnero_runtime::{
@@ -58,6 +59,29 @@ fn transfer() -> RuntimeCall {
 	})
 }
 
+/// A `Multisig::propose` carrying `payload` as its opaque inner call.
+fn propose(payload: Vec<u8>) -> RuntimeCall {
+	RuntimeCall::Multisig(pallet_multisig::Call::propose {
+		multisig_address: AccountId::new([8; 32]),
+		call: payload.try_into().expect("the payload fits MaxCallSize"),
+		expiry: 100,
+	})
+}
+
+/// Valid call bytes with one byte after them.
+///
+/// `decode` does not have to consume its whole input, so this passes a bare
+/// decode and is still permanently unexecutable: `execute` requires the
+/// executor's typed call to re-encode byte-equal to the stored payload, and no
+/// typed call encodes trailing bytes. The pallet refuses it at propose time
+/// and so does the filter.
+fn non_canonical() -> Vec<u8> {
+	let mut bytes =
+		RuntimeCall::System(frame_system::Call::remark { remark: b"payload".to_vec() }).encode();
+	bytes.push(0x00);
+	bytes
+}
+
 /// Both bare encodings, the signed encoding, and the general preamble all
 /// reach the same call policy before their own authorization checks.
 fn formats(call: RuntimeCall) -> [UncheckedExtrinsic; 4] {
@@ -95,6 +119,16 @@ fn forbidden_calls() -> Vec<RuntimeCall> {
 				call: Box::new(transfer()),
 			})],
 		}),
+		// `propose` carries its inner call as opaque bytes and dispatches
+		// nothing, so the three shapes here are what the filter has to decode:
+		// a transfer, a wrapper carrying one, and a payload that can never
+		// execute at all.
+		propose(transfer().encode()),
+		propose(
+			RuntimeCall::Utility(pallet_utility::Call::batch_all { calls: vec![transfer()] })
+				.encode(),
+		),
+		propose(non_canonical()),
 		RuntimeCall::ReversibleTransfers(pallet_reversible_transfers::Call::schedule_transfer {
 			dest: MultiAddress::Id(recipient()),
 			amount: UNIT,
@@ -134,6 +168,7 @@ fn forbidden_calls_are_invalid_for_pool_admission_in_every_format() {
 
 #[test]
 fn forbidden_calls_are_invalid_before_block_recording_fees_or_nonce_changes() {
+	let empty = extrinsics_root_of_a_block_nothing_was_offered_to();
 	for call in forbidden_calls() {
 		test_ext().execute_with(|| {
 			let account_before = System::account(sender());
@@ -148,8 +183,22 @@ fn forbidden_calls_are_invalid_before_block_recording_fees_or_nonce_changes() {
 				assert_eq!(System::extrinsic_index(), index_before);
 				assert!(System::extrinsic_data(0).is_empty());
 			}
+			// The header half of the same property. `extrinsic_data` is the
+			// storage the body is built from, and `extrinsics_root` is what
+			// the header commits to, so a block offered four refused
+			// extrinsics has to hash to the block nobody offered anything to.
+			assert_eq!(
+				System::finalize().extrinsics_root,
+				empty,
+				"a refused call must leave the header it was offered to unchanged: {call:?}"
+			);
 		});
 	}
+}
+
+/// The `extrinsics_root` of the same block, finalized without the attempt.
+fn extrinsics_root_of_a_block_nothing_was_offered_to() -> H256 {
+	test_ext().execute_with(|| System::finalize().extrinsics_root)
 }
 
 #[test]

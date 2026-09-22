@@ -214,10 +214,11 @@ Each of these is a decision.
 - **It has no miner table.** The author label is `H(cvk, parent_hash)` and
   changes every block, so grouping by it groups nothing and any heuristic that
   looked like it worked would be a privacy regression shipped as a feature.
-- **It does not reprint a refused call's arguments.** A transparent transfer
-  the runtime's filter refuses still enters a block and its arguments stay in
-  the body forever. The block page names the call, says why the arguments are
-  public, and leaves them where the chain put them.
+- **It does not reprint a failed call's arguments.** A transparent transfer the
+  runtime's filter refuses reaches no block at all, so there is nothing to
+  reprint. A call a block did carry keeps its arguments in the body forever, and
+  the block page names that call, says why its arguments are public, and leaves
+  them where the chain put them.
 - **It keeps the warning colour for state.** `--notice` means "attend to this":
   a read that failed, a state the node no longer keeps, a request that carries
   the reader's own value to a node. Reasoning goes in prose, behind a

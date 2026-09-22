@@ -102,12 +102,20 @@ The runtime derives `RuntimeCall`, `RuntimeEvent`, `RuntimeError`, `RuntimeOrigi
 
 All `Config` impls live in `runtime/src/configs/mod.rs` unless noted.
 
-**Read this section against the call filter.** `frame_system::BaseCallFilter =
-QneroCallFilter` (`configs/mod.rs`) refuses every call that moves transparent
-value between accounts a user chooses, and it recurses through `Utility::batch_all`
-and `Multisig::execute`. A call listed below as dispatchable may therefore be
-refused at dispatch for an ordinary signer; `docs/DESIGN.md` section 7.2 is the
-allowlist and `runtime/tests/call_filter.rs` is the test. Root bypasses the
+**Read this section against the call filter.** `QneroCallFilter`
+(`configs/mod.rs`) refuses every call that moves transparent value between
+accounts a user chooses, and it recurses through `Utility::batch_all`,
+`Multisig::execute` and `Multisig::propose`, whose payload is opaque bytes it
+decodes. A call listed below as dispatchable may therefore be refused for an
+ordinary signer. Where the refusal lands is what matters: an extrinsic is
+checked in `QneroUncheckedExtrinsic::check` (`runtime/src/extrinsic.rs`) and a
+refused call answers `InvalidTransaction::Call` before pool admission, before
+fees and before the block body records it, so it never enters a block. The same
+filter stays installed as `frame_system::BaseCallFilter`, which covers internal
+dispatch: a due scheduler task, and a `batch_all` child re-dispatched under the
+caller's origin. `docs/DESIGN.md` section 7.2 is the allowlist,
+`runtime/tests/transaction_policy.rs` pins the admission half and
+`runtime/tests/call_filter.rs` the dispatch half. Root bypasses the
 filter, and nothing on this chain can produce Root: the filter is therefore the
 whole rule for every dispatch this chain can execute
 (`runtime/tests/no_admin_keys.rs`).
