@@ -34,8 +34,6 @@ use sp_runtime::{
 	BuildStorage, TokenError,
 };
 
-type BlockNumber = u64;
-
 // example module to test behaviors.
 #[frame_support::pallet(dev_mode)]
 pub mod example {
