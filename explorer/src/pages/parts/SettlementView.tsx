@@ -8,6 +8,11 @@ import { Field, Fields, Hash } from '../../components/ui';
 /**
  * A settlement output's ciphertext size.
  *
+ * The size and never the payload. `SlotSettled` publishes the two lengths and
+ * the ciphertexts themselves ride in this block's body, inside the settlement
+ * extrinsic that appended the leaves, which is where every wallet reads them
+ * and where they stay: no state map holds them.
+ *
  * The chain requires exactly `REFERENCE_CIPHERTEXT_BYTES` of every suite-1
  * ciphertext a settlement carries, so on a settlement leaf any other size is
  * unreachable rather than merely unusual. Saying so loudly is the point: a row
@@ -16,12 +21,12 @@ import { Field, Fields, Hash } from '../../components/ui';
  */
 function ciphertextNote(bytes: number): ReactNode {
   if (bytes === REFERENCE_CIPHERTEXT_BYTES) {
-    return `${formatBytes(bytes)} of ciphertext`;
+    return `${formatBytes(bytes)} of ciphertext in this block's body`;
   }
   return (
-    `${formatBytes(bytes)} of ciphertext, which the chain does not settle: a settlement carries ` +
-    `exactly ${formatCount(REFERENCE_CIPHERTEXT_BYTES)} bytes per output, so this is an ` +
-    'invariant violation'
+    `${formatBytes(bytes)} of ciphertext in this block's body, which the chain does not settle: ` +
+    `a settlement carries exactly ${formatCount(REFERENCE_CIPHERTEXT_BYTES)} bytes per output, ` +
+    'so this is an invariant violation'
   );
 }
 
@@ -104,7 +109,9 @@ export function SettlementView({
           "What a settled nullifier stands for", which the settlement page
           links under this panel and the masthead links from every page. */}
       <p className="field__note">
-        A nullifier marks one input position consumed and names no note.
+        A nullifier marks one input position consumed and names no note. Each output's note
+        ciphertext is in this block's body, in the settlement extrinsic above, and in no state
+        map: what the event publishes is its length.
       </p>
     </>
   );

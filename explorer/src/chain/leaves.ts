@@ -12,19 +12,26 @@
  * the node a per-viewer leaf-interest log.
  */
 
-import { hexToBytes, leBytesToBigInt, readCompact } from '../lib/hex';
+import { hexToBytes, leBytesToBigInt } from '../lib/hex';
 import { storage, type ChainContext } from './api';
 
-/** Leaves per `state_queryStorageAt` when four items are read per leaf. */
+/** Leaves per `state_queryStorageAt` when three items are read per leaf. */
 export const LEAF_BATCH = 64;
 
 /** Leaves per call when one item is read per leaf, so the page is wider. */
 export const LEAF_HASH_BATCH = 256;
 
+/**
+ * One leaf, as the chain holds it.
+ *
+ * No ciphertext and no ciphertext length: the chain publishes note ciphertexts
+ * in block bodies and in no state map. What a page shows about a payload is
+ * its size, and the `SlotSettled` and `Shielded` events publish that as a
+ * number (`lib/events.ts`).
+ */
 export interface LeafRecord {
   index: number;
   commitment: string | null;
-  ciphertextBytes: number | null;
   blockNumber: number | null;
   /** Set for exactly the leaves a block's coinbase minted, as a count of pool steps. */
   coinbaseSteps: bigint | null;
@@ -55,14 +62,6 @@ async function queryAt(
   return out;
 }
 
-/** A stored `Vec<u8>` declares its own length in a compact prefix, which is the size to show. */
-function ciphertextBytes(value: string | undefined): number | null {
-  if (value === undefined) {
-    return null;
-  }
-  return readCompact(hexToBytes(value), 0).value;
-}
-
 /** A fixed-width little-endian integer in a storage value. */
 function leInt(value: string | undefined): bigint | null {
   return value === undefined ? null : leBytesToBigInt(hexToBytes(value));
@@ -73,7 +72,7 @@ function leNumber(value: string | undefined): number | null {
   return parsed === null ? null : Number(parsed);
 }
 
-/** Four items for each leaf in `[from, to)`, at one block. */
+/** Three items for each leaf in `[from, to)`, at one block. */
 export async function fetchLeaves(
   context: ChainContext,
   from: number,
@@ -81,22 +80,16 @@ export async function fetchLeaves(
   at: string,
 ): Promise<LeafRecord[]> {
   const leaves = storage(context, 'zkTree', 'leaves');
-  const ciphertexts = storage(context, 'shielded', 'ciphertexts');
   const leafBlocks = storage(context, 'shielded', 'leafBlocks');
   const coinbaseValues = storage(context, 'shielded', 'coinbaseValues');
   const out: LeafRecord[] = [];
   for (let start = from; start < to; start += LEAF_BATCH) {
     const end = Math.min(start + LEAF_BATCH, to);
-    const rows: { index: number; keys: [string, string, string, string] }[] = [];
+    const rows: { index: number; keys: [string, string, string] }[] = [];
     for (let index = start; index < end; index += 1) {
       rows.push({
         index,
-        keys: [
-          leaves.key(index),
-          ciphertexts.key(index),
-          leafBlocks.key(index),
-          coinbaseValues.key(index),
-        ],
+        keys: [leaves.key(index), leafBlocks.key(index), coinbaseValues.key(index)],
       });
     }
     const values = await queryAt(
@@ -108,9 +101,8 @@ export async function fetchLeaves(
       out.push({
         index: row.index,
         commitment: values.get(row.keys[0]) ?? null,
-        ciphertextBytes: ciphertextBytes(values.get(row.keys[1])),
-        blockNumber: leNumber(values.get(row.keys[2])),
-        coinbaseSteps: leInt(values.get(row.keys[3])),
+        blockNumber: leNumber(values.get(row.keys[1])),
+        coinbaseSteps: leInt(values.get(row.keys[2])),
       });
     }
   }

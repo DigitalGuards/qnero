@@ -14,6 +14,14 @@ import { POOL_STEP_PLANCK, formatQnr } from '../src/lib/units';
 import settlementFixture from './fixtures/events-settlement.json' with { type: 'json' };
 import shieldFixture from './fixtures/events-shield.json' with { type: 'json' };
 
+// Both fixtures were captured from a dev node and then edited in one place:
+// `SlotSettled.ciphertexts` became `ciphertext_bytes: (u32, u32)` and
+// `Shielded.ciphertext` became `ciphertext_bytes: u32`. The payloads left the
+// events with the state map they used to be written beside, so what the chain
+// publishes about a note ciphertext is its length and the bytes themselves are
+// in the block body. Everything else in the two files is as the node served
+// it.
+
 const shield = shieldFixture.records as unknown as EventRecord[];
 const settlement = settlementFixture.records as unknown as EventRecord[];
 
@@ -31,8 +39,12 @@ describe('shield entries', () => {
     );
   });
 
-  it('measures the ciphertext the reference wallet pads to', () => {
+  it('reads the ciphertext length the event publishes, with no payload in it', () => {
     expect(decodeShieldEntries(shield)[0]?.ciphertextBytes).toBe(1792);
+    // The whole point of the event change: an archive node's historical
+    // `System::Events` keeps the number forever, where it used to keep the
+    // 1,792 bytes.
+    expect(JSON.stringify(shieldFixture)).not.toContain('"ciphertext"');
   });
 
   it('is the only place a value and an account meet, so the amount is exact', () => {
@@ -68,6 +80,14 @@ describe('settlements', () => {
       '0xd6efa3530bf81fcc71cdbfcf956a06f7224704d770bb3f5b6e7a5f8e25b19ec1',
     ]);
     expect(slot?.outputs.map((output) => output.ciphertextBytes)).toEqual([1792, 1792]);
+  });
+
+  it('publishes the two payload lengths and neither payload', () => {
+    // A settled slot appends two leaves and its event says how many bytes of
+    // ciphertext each carries. The bytes are in the block body, inside the
+    // settlement extrinsic, which is where a wallet reads them and the one
+    // place the chain keeps them.
+    expect(JSON.stringify(settlementFixture)).not.toContain('"ciphertexts"');
   });
 
   it('reads the fee in planck and the author’s share beside it', () => {

@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { canonicalStorage, type ChainContext } from '../src/chain/api';
 import { authenticatedPrefix, authenticatedValues, bindStateProofVerifier } from '../src/chain/authenticated';
-import { bindFixtureProofs, fixtureHeader, fixtureProof } from './fixtures/state-proof';
-import { fetchLeaves, fetchUsedNullifiers } from '../src/chain/reads';
-import { storagePrefix, indexKey } from './fixtures/storage-key';
+import { fetchUsedNullifiers } from '../src/chain/reads';
+import { fixtureHeader } from './fixtures/state-proof';
 
 const AT = `0x${'aa'.repeat(32)}`;
 const PREFIX = `0x${'bc'.repeat(32)}`;
@@ -23,6 +22,7 @@ function node(options: { wrongBlock?: boolean; incompletePrefix?: boolean; wrong
   } as unknown as ChainContext;
   bindStateProofVerifier(context, {
     headerBlockHash: () => Promise.resolve(options.wrongHeader ? 'bb'.repeat(32) : AT),
+    extrinsicsRoot: () => Promise.resolve(`0x${'22'.repeat(32)}`),
     readStateProof: () => Promise.resolve([null]),
     readStatePrefix: () => options.incompletePrefix ? Promise.reject(new Error('incomplete prefix proof')) : Promise.resolve([]),
   });
@@ -57,6 +57,7 @@ describe('authenticated read plumbing', () => {
     let entries: [string, string][] = [[key, '0x']];
     bindStateProofVerifier(context, {
       headerBlockHash: () => Promise.resolve(AT),
+      extrinsicsRoot: () => Promise.resolve(`0x${'22'.repeat(32)}`),
       readStateProof: () => Promise.resolve([]),
       readStatePrefix: () => Promise.resolve(entries),
     });
@@ -65,54 +66,5 @@ describe('authenticated read plumbing', () => {
     await expect(fetchUsedNullifiers(context, AT)).rejects.toThrow('unexpected encoding');
     entries = [[`${entry.keyPrefix()}${'00'.repeat(16)}${nullifier}`, '0x']];
     await expect(fetchUsedNullifiers(context, AT)).rejects.toThrow('unexpected encoding');
-  });
-});
-
-function archivalNode(available: boolean): ChainContext {
-  const keys = { leaf: storagePrefix('ZkTree', 'Leaves') + indexKey(0), ciphertext: storagePrefix('Shielded', 'Ciphertexts') + indexKey(0), block: storagePrefix('Shielded', 'LeafBlocks') + indexKey(0), coinbase: storagePrefix('Shielded', 'CoinbaseValues') + indexKey(0) };
-  const hash = (number: number): string => `0x${number.toString(16).padStart(64, '0')}`;
-  const context = {
-    api: { query: {
-      zkTree: { leaves: { key: () => keys.leaf } },
-      shielded: {
-        ciphertexts: { key: () => keys.ciphertext }, leafBlocks: { key: () => keys.block },
-        coinbaseValues: { key: () => keys.coinbase },
-      },
-    } },
-    send: <T,>(method: string, params: unknown[]): Promise<T> => {
-      if (method === 'chain_getBlockHash') {
-        const requested = params[0] as number | number[];
-        return Promise.resolve((Array.isArray(requested) ? requested.map(hash) : hash(requested)) as T);
-      }
-      if (method === 'chain_getHeader') {
-        const number = Number(BigInt(String(params[0])));
-        return Promise.resolve({ ...(fixtureHeader(number) as object), parentHash: hash(number - 1) } as T);
-      }
-      if (method === 'state_getReadProof') {
-        const at = String(params[1]);
-        if (at === hash(1) && !available) return Promise.reject(new Error('historical state was pruned'));
-        const entries: [string, string | null][] = [
-          [keys.leaf, `0x${'ab'.repeat(32)}`], [keys.block, '0x01000000'], [keys.coinbase, null],
-          [keys.ciphertext, at === hash(1) ? '0x080102' : null],
-        ];
-        return Promise.resolve(fixtureProof(at, entries) as T);
-      }
-      throw new Error(`unexpected archive RPC ${method}`);
-    },
-  } as unknown as ChainContext;
-  return bindFixtureProofs(context, (anchor) => hash(anchor.block_number));
-}
-
-describe('ciphertext archive recovery', () => {
-  const head = `0x${(100).toString(16).padStart(64, '0')}`;
-
-  it('recovers a pruned payload from a parent-linked creation block', async () => {
-    const leaves = await fetchLeaves(archivalNode(true), 0, 1, head, 1);
-    expect(leaves[0]?.ciphertext).toEqual(new Uint8Array([1, 2]));
-    expect(leaves[0]?.blockNumber).toBe(1);
-  });
-
-  it('refuses unavailable historical data', async () => {
-    await expect(fetchLeaves(archivalNode(false), 0, 1, head, 1)).rejects.toThrow('archive unavailable');
   });
 });

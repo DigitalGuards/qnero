@@ -35,13 +35,18 @@ export const CHAIN_TYPES = {
  * a key that is simply absent, and an absent key is indistinguishable from an
  * empty map, so the site would render "0 leaves, 0 nullifiers" with no error
  * anywhere. This list is checked against metadata at startup instead.
+ *
+ * Note ciphertexts are deliberately absent: the chain publishes them in block
+ * bodies and this list is the state the explorer hashes keys into. What a page
+ * shows about a payload is its length, which the `SlotSettled` and `Shielded`
+ * events carry directly. `REQUIRED_STORAGE` in `wallet-web/src/chain/api.ts`
+ * and in `crates/qnero-wallet/src/metadata.rs` holds the same list.
  */
 export const REQUIRED_STORAGE: ReadonlyArray<{
   pallet: string;
   item: string;
   hasher: string | null;
 }> = [
-  { pallet: 'Shielded', item: 'Ciphertexts', hasher: 'Identity' },
   { pallet: 'Shielded', item: 'LeafBlocks', hasher: 'Identity' },
   { pallet: 'Shielded', item: 'CoinbaseValues', hasher: 'Identity' },
   { pallet: 'Shielded', item: 'UsedNullifiers', hasher: 'Blake2_128Concat' },

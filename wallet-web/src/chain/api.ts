@@ -27,6 +27,7 @@
 import { ApiPromise, WsProvider } from '@polkadot/api';
 import { blake2AsHex, xxhashAsHex } from '@polkadot/util-crypto';
 import { hexToBytes } from '../lib/hex';
+import type { BodyLayout } from './body';
 
 export const CHAIN_TYPES = {
   U512: '[u8; 64]',
@@ -50,13 +51,19 @@ export const CHAIN_TYPES = {
  * zero, and `UsedNullifiers` read as absent is every spent note reported
  * unspent and readmitted into the next spend. So the list is checked against
  * metadata at startup and a drift refuses the sync.
+ *
+ * Note ciphertexts are deliberately absent: the chain publishes them in block
+ * bodies and this list is the state the wallet hashes keys into. A runtime
+ * that still declared `Shielded::Ciphertexts` would pass this check and then
+ * fail the profile probe, which is where the payload location is actually
+ * decided (`chain/profile.ts`, profile byte 76). `REQUIRED_STORAGE` in
+ * `crates/qnero-wallet/src/metadata.rs` holds the same list.
  */
 export const REQUIRED_STORAGE: ReadonlyArray<{
   pallet: string;
   item: string;
   hasher: string | null;
 }> = [
-  { pallet: 'Shielded', item: 'Ciphertexts', hasher: 'Identity' },
   { pallet: 'Shielded', item: 'LeafBlocks', hasher: 'Identity' },
   { pallet: 'Shielded', item: 'CoinbaseValues', hasher: 'Identity' },
   { pallet: 'Shielded', item: 'UsedNullifiers', hasher: 'Blake2_128Concat' },
@@ -118,6 +125,15 @@ export interface ChainContext {
   protocolProfile: string;
   /** The format version the runtime declares. A bare preamble decodes at 4 and 5. */
   extrinsicVersion: number;
+  /**
+   * Every offset the block-body walk needs, read off the runtime's metadata.
+   *
+   * Read once, at connect, for the same reason the storage layout is: a
+   * signature width or an extension this build guesses at is a call index read
+   * off by one, and a call index off by one is a payment silently not found.
+   * See `chain/body.ts`.
+   */
+  bodyLayout: BodyLayout;
   constants: ShieldedConstants;
   /** Storage items the runtime declares differently from what this build assumes. */
   storageDrift: string[];
@@ -298,6 +314,8 @@ function describe(
     return entry.value.toHex();
   };
 
+  const bodyLayout = readBodyLayout(metadata, shielded.index.toNumber());
+
   const storageDrift: string[] = [];
   for (const required of REQUIRED_STORAGE) {
     const pallet = [...metadata.pallets].find((entry) => entry.name.toString() === required.pallet);
@@ -378,6 +396,7 @@ function describe(
     genesisHash: api.genesisHash.toHex(),
     protocolProfile: constantOf('ProtocolProfile'),
     extrinsicVersion: extrinsicVersionOf(metadata),
+    bodyLayout,
     constants: {
       blockHashWindow: Number(leBigInt(constantOf('BlockHashWindow'))),
       minLeafFee: leBigInt(constantOf('MinLeafFee')),
@@ -385,6 +404,80 @@ function describe(
       maxCiphertextBytes: Number(leBigInt(constantOf('MaxCiphertextBytes'))),
     },
     storageDrift,
+  };
+}
+
+/**
+ * Every offset the body walk needs, out of the runtime's own metadata.
+ *
+ * Nothing about the envelope is compiled in, for the reason `submit.ts` gives
+ * about the encoding direction: the layout is the runtime's and a wallet
+ * holding a copy of it reads payloads at offsets the chain did not write them
+ * at. The three call indices are looked up by name, so a runtime that renamed
+ * or reordered a call refuses here rather than walking past a settlement.
+ * `explorer/src/chain/api.ts` reads the same four fields the same way.
+ */
+function readBodyLayout(
+  metadata: ApiPromise['runtimeMetadata']['asLatest'],
+  shieldedPallet: number,
+): BodyLayout {
+  const lookup = new Map<number, (typeof metadata.lookup.types)[number]['type']>();
+  for (const entry of metadata.lookup.types) {
+    lookup.set(entry.id.toNumber(), entry.type);
+  }
+
+  const signatureLengths = new Map<number, number>();
+  const signatureType = lookup.get(metadata.extrinsic.signatureType.toNumber());
+  if (signatureType?.def.isVariant === true) {
+    for (const variant of signatureType.def.asVariant.variants) {
+      const first = variant.fields[0];
+      if (first === undefined) {
+        continue;
+      }
+      const inner = lookup.get(first.type.toNumber());
+      const innerField = inner?.def.isComposite === true ? inner.def.asComposite.fields[0] : undefined;
+      const arrayType = innerField === undefined ? undefined : lookup.get(innerField.type.toNumber());
+      if (arrayType?.def.isArray === true) {
+        signatureLengths.set(variant.index.toNumber(), arrayType.def.asArray.len.toNumber());
+      }
+    }
+  }
+  const addressType = lookup.get(metadata.extrinsic.addressType.toNumber());
+
+  const shielded = [...metadata.pallets].find(
+    (pallet) => pallet.index.toNumber() === shieldedPallet,
+  );
+  const calls = new Map<string, number>();
+  if (shielded !== undefined && shielded.calls.isSome) {
+    const callsType = lookup.get(shielded.calls.unwrap().type.toNumber());
+    if (callsType?.def.isVariant === true) {
+      for (const variant of callsType.def.asVariant.variants) {
+        calls.set(variant.name.toString(), variant.index.toNumber());
+      }
+    }
+  }
+  const callIndex = (name: string): number => {
+    const index = calls.get(name);
+    if (index === undefined) {
+      throw new Error(
+        `the Shielded pallet declares no ${name} call, so this wallet cannot find the note ` +
+          'ciphertexts a block body carries',
+      );
+    }
+    return index;
+  };
+
+  return {
+    signatureLengths,
+    extensions: metadata.extrinsic.transactionExtensions.map((extension) =>
+      extension.identifier.toString(),
+    ),
+    multiAddress:
+      addressType === undefined ? false : addressType.path.map(String).includes('MultiAddress'),
+    shieldedPallet,
+    submitPrivateBatch: callIndex('submit_private_batch'),
+    submitPublicBatch: callIndex('submit_public_batch'),
+    shield: callIndex('shield'),
   };
 }
 

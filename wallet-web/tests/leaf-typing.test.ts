@@ -32,12 +32,7 @@ import {
   fullScanEstimate,
   HEADER_WALK_LIMIT,
   MEASURED_HEADERS_PER_SECOND,
-  movedLeafWarning,
-  movedOverflowWarning,
   runSync,
-  unplaceableLeafWarning,
-  unplaceableOverflowWarning,
-  WARNED_LEAVES_PER_PASS,
   type ScannedNote,
   type SyncChain,
   type SyncCrypto,
@@ -89,10 +84,19 @@ function meta(): StoreMeta {
   };
 }
 
+/**
+ * One leaf of a fixture's chain, and the payload its block's body carries for
+ * it.
+ *
+ * `payload` is in the body rather than beside the leaf, which is what the
+ * fixture models: the body is one list per block and nothing in it says which
+ * leaf a payload belongs to. A leaf whose payload is `null` puts nothing in
+ * the body, which is what every coinbase does.
+ */
 interface Leaf {
   commitment: string;
   block: number;
-  ciphertext: Uint8Array | null;
+  payload: Uint8Array | null;
   coinbaseSteps: bigint | null;
 }
 
@@ -102,6 +106,7 @@ function shapeOf(head: number, leaves: readonly Leaf[], ours?: ReadonlySet<numbe
     leafCount: leaves.length,
     blockOf: (index) => leaves[index]?.block ?? 1,
     commitmentAt: (index) => leaves[index]?.commitment ?? 'ff'.repeat(32),
+    payloadAt: (index) => leaves[index]?.payload ?? null,
     ours,
   };
 }
@@ -126,7 +131,6 @@ function chainOf(shape: ChainShape, leaves: readonly Leaf[]): SyncChain {
         leaves.slice(from, Math.min(to, leaves.length)).map((leaf, offset) => ({
           index: from + offset,
           commitment: leaf.commitment,
-          ciphertext: leaf.ciphertext,
           blockNumber: leaf.block,
           coinbaseSteps: leaf.coinbaseSteps,
         })),
@@ -135,33 +139,32 @@ function chainOf(shape: ChainShape, leaves: readonly Leaf[]): SyncChain {
   };
 }
 
-/**
- * What the worker answers for a ciphertext that opened.
- *
- * The AEAD decides whether the bytes open at all, and the commitment beside
- * them decides nothing about that: `decryptBatch` opens without one and
- * compares afterwards, so a note that opens to a different commitment comes
- * back with `moved` set. See `src/worker/core.ts` and `OpenedLeaf` in
- * `crates/qnero-wallet/src/wallet.rs`.
- */
-function openedAs(note: ScannedNote, commitment: string): ScannedNote {
-  const beside = commitment.replace(/^0x/i, '').toLowerCase();
-  return beside === note.commitment ? note : { ...note, moved: true };
+/** Whether two payloads are the same bytes. */
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
-/** A prover that opens exactly the leaves a test names. */
+/**
+ * A prover that opens the payloads the leaves a test names carry.
+ *
+ * It is handed bytes and nothing else, because that is all a body payload
+ * comes with. What it answers is a note carrying its own commitment, and where
+ * that note lands is decided by the commitment search in `runSync` against the
+ * leaves the block's own root folded.
+ */
 function cryptoOf(
   shape: ChainShape,
   options: { transfersAt?: ReadonlySet<number>; coinbaseAt?: ReadonlySet<number> } = {},
 ): SyncCrypto {
+  const opens = [...(options.transfersAt ?? [])]
+    .map((index) => shape.payloadAt?.(index) ?? null)
+    .filter((payload): payload is Uint8Array => payload !== null);
   return {
     ...cryptoParts(shape),
     decryptBatch: (items) =>
       Promise.resolve(
         items.map((item) =>
-          options.transfersAt?.has(item.index) === true
-            ? openedAs(MINE, item.commitment)
-            : null,
+          opens.some((payload) => sameBytes(payload, item.ciphertext)) ? MINE : null,
         ),
       ),
     // `mined` is what says this wallet's own coinbase rebuild opened the leaf.
@@ -184,20 +187,16 @@ const STRANGER_CT = new Uint8Array([4, 5, 6]);
 /**
  * A prover that opens `CT` and nothing else, which is what an AEAD does.
  *
- * The bytes decide whether the payload opens at all, and the commitment beside
- * them decides only `moved`. Keeping those two apart is the whole point of the
- * detector: a stranger's bytes do not open, and this wallet's bytes do open,
- * whatever commitment a node put next to them.
+ * The bytes decide, and nothing else is offered: a payload out of a block body
+ * arrives with no leaf and no commitment beside it, so a stranger's bytes do
+ * not open and this wallet's do, wherever in the block the node put the leaf
+ * they belong to.
  */
 function opener(shape: ChainShape): SyncCrypto {
   return {
     ...cryptoParts(shape),
     decryptBatch: (items) =>
-      Promise.resolve(
-        items.map((item) =>
-          item.ciphertext[0] === CT[0] ? openedAs(MINE, item.commitment) : null,
-        ),
-      ),
+      Promise.resolve(items.map((item) => (item.ciphertext[0] === CT[0] ? MINE : null))),
     // Nothing this wallet mined.
     coinbaseBatch: (items) => Promise.resolve(items.map(() => null)),
     entryRhoMatches: () => Promise.resolve(false),
@@ -208,9 +207,9 @@ describe('a leaf whose kind the headers decide', () => {
   /** The control: a payment on one leaf, this wallet's mined coinbase on another. */
   it('pays a transfer and a mined coinbase from an honest node', async () => {
     const leaves: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: MINED.commitment, block: 8, ciphertext: null, coinbaseSteps: 42n },
+      { commitment: 'a0'.repeat(32), block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: MINED.commitment, block: 8, payload: null, coinbaseSteps: 42n },
     ];
     const shape = shapeOf(9, leaves, new Set([8]));
     const result = await runSync(
@@ -231,11 +230,11 @@ describe('a leaf whose kind the headers decide', () => {
    */
   it('refuses a coinbase value below a block’s last leaf', async () => {
     const leaves: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: 1n },
+      { commitment: 'a0'.repeat(32), block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, payload: CT, coinbaseSteps: 1n },
       // Block 8's own coinbase, at the one index of the block that can hold
       // one, so the leaves below it are positions that cannot.
-      { commitment: 'a2'.repeat(32), block: 8, ciphertext: null, coinbaseSteps: 7n },
+      { commitment: 'a2'.repeat(32), block: 8, payload: null, coinbaseSteps: 7n },
     ];
     const shape = shapeOf(9, leaves);
     await expect(
@@ -266,8 +265,8 @@ describe('a leaf whose kind the headers decide', () => {
    */
   it('still pays a leaf an invented coinbase value sits on at a foreign coinbase position', async () => {
     const leaves: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: 1n },
+      { commitment: 'a0'.repeat(32), block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, payload: CT, coinbaseSteps: 1n },
     ];
     const shape = shapeOf(9, leaves);
     const result = await runSync(
@@ -301,7 +300,7 @@ describe('a leaf whose kind the headers decide', () => {
         {
           commitment: MINED.commitment,
           block: 7,
-          ciphertext: new Uint8Array([9, 9, 9]),
+          payload: new Uint8Array([9, 9, 9]),
           coinbaseSteps: null,
         },
       ];
@@ -318,7 +317,7 @@ describe('a leaf whose kind the headers decide', () => {
       if (first === undefined) {
         throw new Error('the fixture has a leaf');
       }
-      const honest = [{ ...first, ciphertext: null, coinbaseSteps: 42n }];
+      const honest = [{ ...first, payload: null, coinbaseSteps: 42n }];
       const result = await runSync(
         { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
         chainOf(shape, honest),
@@ -342,7 +341,7 @@ describe('a leaf whose kind the headers decide', () => {
    */
   it('finds this wallet’s own reward under a forged foreign label', async () => {
     const leaves: Leaf[] = [
-      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseSteps: 42n },
+      { commitment: MINED.commitment, block: 7, payload: null, coinbaseSteps: 42n },
     ];
     const shape = shapeOf(9, leaves, new Set<number>());
     const result = await runSync(
@@ -367,368 +366,261 @@ describe('a leaf whose kind the headers decide', () => {
   });
 
   /**
-   * The bound the per-leaf rules do not close, and the recovery that does.
+   * A payment the node moved to another position inside its own block.
    *
-   * `Shielded::Ciphertexts(i)` is the one per-leaf value nothing on chain
-   * binds to leaf `i`. The commitment the tree authenticates carries no
-   * ciphertext, and `ct_digest` binds the bytes only inside the settlement
-   * extrinsic at inclusion, which a storage-only reader never fetches. So a
-   * node with honest headers answers a stranger's bytes at an incoming
-   * payment, the AEAD does not open, the leaf reads as somebody else's, and
-   * the watermark goes above it. Every root, every position and every header
-   * still checks out, and the checkpoint fork walk finds nothing because the
-   * headers agree.
+   * This is the move that used to hide a payment and no longer can, and the
+   * body is the whole of why. `hash_node` sorts a node's four children at
+   * every level and mixes in no level tag, so a block's root pins that block's
+   * leaf multiset and each internal node's child multiset and nothing further:
+   * sibling swaps composed at any level put a commitment at any position the
+   * block's range allows. Under the old rule the payment's ciphertext sat
+   * beside a leaf, so the node moved the pair apart and the payment was read
+   * as somebody else's.
    *
-   * What the pass owes the operator is the sentence, and what recovers the
-   * payment is a rescan against a second node. `docs/WALLET.md` states the
-   * bound under "What a lying node can and cannot do" and `docs/DESIGN.md`
-   * records the closure as the next wallet milestone.
+   * The payload is in the block body now, which is rooted to the header's
+   * `extrinsicsRoot` as a whole, and the note that opens is placed at the leaf
+   * whose commitment it opens. Where inside the block the node put that leaf
+   * decides nothing. `a_ciphertext_moved_between_two_positions_in_one_body_
+   * still_finds_its_note` drives the same move against the command-line
+   * wallet.
    */
-  it('hides a payment behind a substituted ciphertext until a rescan reads the leaf again', async () => {
-    const SUBSTITUTED = new Uint8Array([9, 9, 9]);
-    const rowsWith = (ciphertext: Uint8Array): Leaf[] => [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: STRANGER_CT, coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext, coinbaseSteps: null },
-      { commitment: 'a2'.repeat(32), block: 8, ciphertext: null, coinbaseSteps: 7n },
-    ];
+  it('finds a payment the node moved to another position in its block', async () => {
+    const STRANGER = 'a0'.repeat(32);
+    const COINBASE = 'c0'.repeat(32);
 
-    const lying = rowsWith(SUBSTITUTED);
-    const lyingShape = shapeOf(9, lying);
-    const hidden = await runSync(
+    // The chain: leaf 1 is the payment, leaf 2 is block 8's coinbase. The
+    // body of block 8 carries a stranger's payload and this wallet's, in that
+    // order, and the same two whichever node serves it.
+    const honestRows: Leaf[] = [
+      { commitment: STRANGER, block: 8, payload: STRANGER_CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: COINBASE, block: 8, payload: null, coinbaseSteps: 7n },
+    ];
+    // The liar: the payment's commitment and the coinbase's exchanged.
+    const lyingRows: Leaf[] = [
+      { commitment: STRANGER, block: 8, payload: STRANGER_CT, coinbaseSteps: null },
+      { commitment: COINBASE, block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, payload: null, coinbaseSteps: 7n },
+    ];
+    const shapeFor = (rows: readonly Leaf[]): ChainShape => ({
+      ...shapeOf(9, rows),
+      rootRule: sortedRootOver,
+      // The body is one list per block whichever order the leaves are in, so
+      // both nodes serve the identical two payloads.
+      payloadAt: (index) => (index === 1 ? CT : index === 0 ? STRANGER_CT : null),
+    });
+    const honestShape = shapeFor(honestRows);
+    const lyingShape = shapeFor(lyingRows);
+    // The premise, at the layer it comes from: one group, two orderings, one
+    // root. Both nodes therefore serve one set of headers.
+    expect(sortedRootOver(leafBytes(lyingShape), 3)).toBe(
+      sortedRootOver(leafBytes(honestShape), 3),
+    );
+
+    const moved = await runSync(
       { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
-      chainOf(lyingShape, lying),
+      chainOf(lyingShape, lyingRows),
       opener(lyingShape),
     );
-    expect(hidden.report.received).toBe(0);
-    expect(hidden.meta.nextLeaf).toBe(3);
-    expect(hidden.notes).toHaveLength(0);
-    // On `hints` rather than on `warnings`: it fires on nearly every pass, so
-    // beside the rare coinbase-label warning it was the constant entry that
-    // made the list stop being read. The balance screen renders it under the
-    // warnings and at less weight.
-    //
-    // A consistency-only fixture still carries the routine provider-trust hint.
-    expect(hidden.report.warnings).toEqual([]);
-    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
+    expect(moved.report.received).toBe(1);
+    expect(moved.notes).toHaveLength(1);
+    // Where the node put the commitment, which is where the chain holds it as
+    // far as anything authenticated says.
+    expect(moved.notes[0]?.note.leafIndex).toBe(2);
+    // No warning at all. There is nothing left to disagree with: a payload has
+    // no leaf beside it, so the pass has nothing to report and nothing to
+    // relocate.
+    expect(moved.report.warnings).toEqual([]);
 
-    // An honest node serving the same headers recovers nothing on an ordinary
-    // pass: no checkpoint moves, so the scan starts above the leaf.
-    const honest = rowsWith(CT);
-    const honestShape = shapeOf(9, honest);
-    const ordinary = await runSync(
-      {
-        meta: metaAfter(hidden),
-        held: [],
-        rejected: [],
-        pending: [],
-        checkpoints: hidden.checkpoints,
-      },
-      chainOf(honestShape, honest),
+    const honest = await runSync(
+      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
+      chainOf(honestShape, honestRows),
       opener(honestShape),
     );
-    expect(ordinary.report.received).toBe(0);
-
-    // The recovery, end to end.
-    const rescanned = await runSync(
-      {
-        meta: metaAfter(ordinary),
-        held: [],
-        rejected: [],
-        pending: [],
-        checkpoints: ordinary.checkpoints,
-      },
-      chainOf(honestShape, honest),
-      opener(honestShape),
-      { rescan: true },
-    );
-    expect(rescanned.report.received).toBe(1);
-    expect(rescanned.notes).toHaveLength(1);
+    expect(honest.report.received).toBe(1);
+    expect(honest.notes[0]?.note.leafIndex).toBe(1);
   });
 
   /**
-   * The bound stated whole, and the one part of it a wallet catches on its own.
+   * A payment at the coinbase position, which is where it used to disappear.
+   *
+   * The coinbase position owed no ciphertext, so a node that moved a payment
+   * onto it handed this wallet nothing to open: the coinbase rebuild does not
+   * open somebody else's note, the leaf read as nobody's and the watermark
+   * committed above it. Every position rule, every root and every header still
+   * checked out.
+   *
+   * The body's payloads are tried against every position now, the coinbase one
+   * included, so a payload that opens a commitment there is taken.
+   * `a_payment_at_the_coinbase_position_is_found` is the same test against the
+   * command-line wallet.
+   */
+  it('finds a payment at the coinbase position', async () => {
+    const STRANGER = 'a0'.repeat(32);
+    const rows: Leaf[] = [
+      { commitment: STRANGER, block: 8, payload: STRANGER_CT, coinbaseSteps: null },
+      // The block's last leaf, so it is the one index a coinbase can occupy
+      // and the value is required there. It is this wallet's payment.
+      { commitment: MINE.commitment, block: 8, payload: CT, coinbaseSteps: 7n },
+    ];
+    const shape: ChainShape = { ...shapeOf(9, rows), rootRule: sortedRootOver };
+
+    const result = await runSync(
+      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
+      chainOf(shape, rows),
+      // Nothing this wallet mined: the rebuild opens no commitment here.
+      opener(shape),
+    );
+    expect(result.report.received).toBe(1);
+    expect(result.report.coinbaseReceived).toBe(0);
+    expect(result.notes).toHaveLength(1);
+    expect(result.notes[0]?.note.leafIndex).toBe(1);
+    expect(result.notes[0]?.note.origin).not.toBe('coinbase');
+  });
+
+  /**
+   * A payload of this wallet's whose commitment its own block holds nowhere:
+   * discarded, and in silence.
+   *
+   * This is the ordinary case rather than a fault. A settlement publishes the
+   * payload of every slot it carries, the segments the chain skipped included,
+   * so a block full of other people's settlements produces these by the
+   * hundred. The old per-leaf reading warned about it, because a payload sat
+   * beside a leaf and a mismatch there was a pair taken apart; a payload in a
+   * body sits beside nothing.
+   *
+   * The two readings nothing local tells apart are both in the bound: a sender
+   * who encrypted a payload opening a commitment the sender never published,
+   * and a node that reported the block's fold at the wrong height. The second
+   * is the bound the test below drives end to end.
+   * `a_skipped_segments_ciphertext_matches_no_commitment_and_is_discarded` is
+   * the same test against the command-line wallet.
+   */
+  it('discards a payload whose commitment its block holds nowhere, in silence', async () => {
+    const SKIPPED = new Uint8Array([8, 8, 8]);
+    /** A note of this wallet's that this block appended no commitment for. */
+    const ELSEWHERE: ScannedNote = {
+      value: 5n,
+      rho: '11'.repeat(32),
+      r: '12'.repeat(32),
+      commitment: '13'.repeat(32),
+      nullifier: '14'.repeat(32),
+      memo: '',
+    };
+    const rows: Leaf[] = [
+      { commitment: 'a0'.repeat(32), block: 8, payload: STRANGER_CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: 'a2'.repeat(32), block: 8, payload: null, coinbaseSteps: 7n },
+    ];
+    const shape: ChainShape = {
+      ...shapeOf(9, rows),
+      rootRule: sortedRootOver,
+      // The skipped segment's payload, riding in the same settlement.
+      strayPayloads: new Map([[8, [SKIPPED]]]),
+    };
+    const crypto: SyncCrypto = {
+      ...cryptoParts(shape),
+      decryptBatch: (items) =>
+        Promise.resolve(
+          items.map((item) => {
+            if (item.ciphertext[0] === CT[0]) {
+              return MINE;
+            }
+            return item.ciphertext[0] === SKIPPED[0] ? ELSEWHERE : null;
+          }),
+        ),
+      coinbaseBatch: (items) => Promise.resolve(items.map(() => null)),
+      entryRhoMatches: () => Promise.resolve(false),
+    };
+
+    const result = await runSync(
+      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
+      chainOf(shape, rows),
+      crypto,
+    );
+    // The payment arrives and the skipped segment's note does not, with
+    // nothing said about it: a sentence here would fire on nearly every block
+    // of a busy chain.
+    expect(result.report.received).toBe(1);
+    expect(result.notes).toHaveLength(1);
+    expect(result.notes[0]?.note.commitment).toBe(MINE.commitment);
+    expect(result.report.warnings).toEqual([]);
+    expect(result.report.hints).toEqual([]);
+  });
+
+  /**
+   * The premise the bound below rests on, at the layer it comes from.
    *
    * `hash_node` sorts a node's four children before hashing them, in the
    * circuit and in `pallet-zk-tree` alike, which is what lets a Merkle path
-   * carry siblings with no position. It sorts at **every** level and mixes in
-   * no level tag, so a block's root pins that block's leaf multiset and each
-   * internal node's child multiset and nothing further: sibling swaps composed
-   * at any level reach any position the block's range allows, the coinbase
-   * position included, and a shorter tree of internal node values served as
-   * leaves folds to the same root.
+   * carry siblings with no position beside them. It sorts at every level, so
+   * whole sibling subtrees can be exchanged too: two aligned groups of four
+   * swapped move a commitment six positions and no root at all.
    *
-   * This is the case the pass does catch. The node exchanges this wallet's
-   * payment with its block's coinbase and leaves every ciphertext where the
-   * chain published it, so at the payment's old leaf a ciphertext this
-   * wallet's own key opens sits beside a commitment that note does not open.
-   * Opening is authenticated, by ML-KEM decapsulation and an AEAD over this
-   * wallet's own `pk`, so the note is this wallet's and the pair was taken
-   * apart. The block's leaf range is already folded against the `zkTreeRoot`
-   * its header carries, so the pass searches that range, finds the opened
-   * note's commitment, records the note there and warns.
-   *
-   * Drop the `received.moved` branch in `src/wallet/sync.ts` and this fails at
-   * the first expectation: the payment is skipped and the watermark commits
-   * above it. `crates/qnero-wallet/tests/leaf_typing.rs` drives the same
-   * attack against the command-line wallet.
+   * It costs a node nothing now, because a payment is found by the commitment
+   * its body payload opens wherever the leaf sits. What the sort still leaves
+   * open is the height the fold is reported at, which the test after this one
+   * drives.
    */
-  it('records a moved leaf where the block holds it when the ciphertext stayed', async () => {
-    const STRANGER = 'a0'.repeat(32);
-    const COINBASE = 'c0'.repeat(32);
-
-    // The chain: leaf 1 is the payment, leaf 2 is block 8's coinbase.
-    const honestRows: Leaf[] = [
-      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseSteps: 7n },
-    ];
-    // The liar: the payment's commitment and the coinbase's exchanged, every
-    // ciphertext untouched, so `Shielded::Ciphertexts(1)` is still exactly the
-    // bytes the chain published.
-    const lyingRows: Leaf[] = [
-      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseSteps: null },
-      { commitment: COINBASE, block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseSteps: 7n },
-    ];
-    const shapeFor = (rows: readonly Leaf[]): ChainShape => ({
-      ...shapeOf(9, rows),
-      rootRule: sortedRootOver,
-    });
-    const honestShape = shapeFor(honestRows);
-    const lyingShape = shapeFor(lyingRows);
-    expect(sortedRootOver(leafBytes(lyingShape), 3)).toBe(
-      sortedRootOver(leafBytes(honestShape), 3),
-    );
-
-    const hit = await runSync(
-      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
-      chainOf(lyingShape, lyingRows),
-      opener(lyingShape),
-    );
-    expect(hit.report.received).toBe(1);
-    expect(hit.notes).toHaveLength(1);
-    expect(hit.notes[0]?.note.leafIndex).toBe(2);
-    const warning =
-      hit.report.warnings.find((entry) => entry.includes("this wallet's own key")) ?? '';
-    expect(warning).toContain('leaf 1');
-    expect(warning).toContain('leaf 2');
-    expect(warning).toContain('second node');
-    // A pass that received a note raises no hint at all.
-    expect(hit.report.hints).toEqual([]);
-
-    // What the warning names is what stays open: leaf 2 is where this node
-    // puts the commitment, and the chain holds it at leaf 1. A rescan against
-    // a second node moves it.
-    const moved = await runSync(
-      {
-        meta: metaAfter(hit),
-        held: hit.notes.map((entry) => ({ note: entry.note, secret: entry.secret })),
-        rejected: [],
-        pending: [],
-        checkpoints: hit.checkpoints,
-      },
-      chainOf(honestShape, honestRows),
-      opener(honestShape),
-      { rescan: true },
-    );
-    expect(moved.report.relocated).toBe(1);
-    expect(moved.notes[0]?.note.leafIndex).toBe(1);
-  });
-
-  /**
-   * The same swap with this wallet's ciphertext gone: nothing opens, and the
-   * bound stands.
-   *
-   * The detector above needs one thing the node controls: a ciphertext of this
-   * wallet's answered somewhere. A node that moves the commitment onto the
-   * coinbase position, where no ciphertext is owed, and answers a stranger's
-   * bytes at the leaf the payment came from, hands this wallet nothing that
-   * opens. Every root, every position rule and every header still check out.
-   * The checkpoint fork walk finds nothing, because the headers agree, and a
-   * rescan against a second node is the recovery, which this drives end to end.
-   */
-  it('hides a payment moved onto the coinbase position until a rescan reads the leaf again', async () => {
-    const STRANGER = 'a0'.repeat(32);
-    const COINBASE = 'c0'.repeat(32);
-    // Well-formed bytes for somebody else, which is what the node answers
-    // where the payment's ciphertext used to sit.
-    const DECOY_CT = new Uint8Array([7, 7, 7]);
-
-    const honestRows: Leaf[] = [
-      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseSteps: 7n },
-    ];
-    const lyingRows: Leaf[] = [
-      { commitment: STRANGER, block: 8, ciphertext: STRANGER_CT, coinbaseSteps: null },
-      { commitment: COINBASE, block: 8, ciphertext: DECOY_CT, coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseSteps: 7n },
-    ];
-    const shapeFor = (rows: readonly Leaf[]): ChainShape => ({
-      ...shapeOf(9, rows),
-      rootRule: sortedRootOver,
-    });
-    const honestShape = shapeFor(honestRows);
-    const lyingShape = shapeFor(lyingRows);
-
-    // The premise, at the layer it comes from: one group, two orderings, one
-    // root. Both nodes therefore serve one set of headers, which is what makes
-    // this bound A rather than a fork.
-    expect(sortedRootOver(leafBytes(lyingShape), 3)).toBe(
-      sortedRootOver(leafBytes(honestShape), 3),
-    );
-
-    const hidden = await runSync(
-      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
-      chainOf(lyingShape, lyingRows),
-      opener(lyingShape),
-    );
-    expect(hidden.report.received).toBe(0);
-    expect(hidden.notes).toHaveLength(0);
-    expect(hidden.report.warnings).toEqual([]);
-    expect(hidden.meta.nextLeaf).toBe(3);
-    // The routine hint explains the remaining provider trust.
-    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
-
-    // An honest node serving the same headers recovers nothing on an ordinary
-    // pass: no checkpoint moves, so the scan starts above the leaf.
-    const ordinary = await runSync(
-      {
-        meta: metaAfter(hidden),
-        held: [],
-        rejected: [],
-        pending: [],
-        checkpoints: hidden.checkpoints,
-      },
-      chainOf(honestShape, honestRows),
-      opener(honestShape),
-    );
-    expect(ordinary.report.received).toBe(0);
-
-    // The recovery, end to end.
-    const rescanned = await runSync(
-      {
-        meta: metaAfter(ordinary),
-        held: [],
-        rejected: [],
-        pending: [],
-        checkpoints: ordinary.checkpoints,
-      },
-      chainOf(honestShape, honestRows),
-      opener(honestShape),
-      { rescan: true },
-    );
-    expect(rescanned.report.received).toBe(1);
-    expect(rescanned.notes).toHaveLength(1);
-    expect(rescanned.notes[0]?.note.leafIndex).toBe(1);
-  });
-
-  /**
-   * A swap across two aligned groups of four, onto the coinbase position.
-   *
-   * The bound is the index inside the block's whole leaf range and never
-   * inside one group of four: the sort applies at every level, so exchanging
-   * the two groups and ordering the second one lands a payment six positions
-   * away, on the coinbase position, with every root and every header
-   * unchanged. The payment's own ciphertext is nowhere, because the position
-   * it landed on owes none, so the detector has nothing to open and the bound
-   * stands. `crates/qnero-wallet/tests/leaf_typing.rs` drives the same attack
-   * against the command-line wallet.
-   */
-  it('hides a payment swapped across two groups of four until a rescan', async () => {
+  it('moves no root when two aligned groups of four are exchanged', () => {
     const stranger = (n: number): string => `b${n}`.repeat(32).slice(0, 64);
-    const strangerCt = (n: number): Uint8Array => new Uint8Array([100 + n, 0, 0]);
     const COINBASE = 'c0'.repeat(32);
-
-    // The chain. Leaf 1 is the payment, leaf 7 is the coinbase: six leaves and
-    // a group boundary apart.
-    const honestRows: Leaf[] = [
-      { commitment: stranger(0), block: 8, ciphertext: strangerCt(0), coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: stranger(2), block: 8, ciphertext: strangerCt(2), coinbaseSteps: null },
-      { commitment: stranger(3), block: 8, ciphertext: strangerCt(3), coinbaseSteps: null },
-      { commitment: stranger(4), block: 8, ciphertext: strangerCt(4), coinbaseSteps: null },
-      { commitment: stranger(5), block: 8, ciphertext: strangerCt(5), coinbaseSteps: null },
-      { commitment: stranger(6), block: 8, ciphertext: strangerCt(6), coinbaseSteps: null },
-      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseSteps: 7n },
-    ];
-    // The two aligned groups exchanged, and inside the group that lands second
-    // the payment is put last. The coinbase commitment lands at leaf 3, where
-    // a ciphertext is owed, so the node invents one; it opens for nobody,
-    // which is the ordinary reading of almost every leaf.
-    const lyingRows: Leaf[] = [
-      { commitment: stranger(4), block: 8, ciphertext: strangerCt(4), coinbaseSteps: null },
-      { commitment: stranger(5), block: 8, ciphertext: strangerCt(5), coinbaseSteps: null },
-      { commitment: stranger(6), block: 8, ciphertext: strangerCt(6), coinbaseSteps: null },
-      { commitment: COINBASE, block: 8, ciphertext: new Uint8Array([9, 9, 9]), coinbaseSteps: null },
-      { commitment: stranger(0), block: 8, ciphertext: strangerCt(0), coinbaseSteps: null },
-      { commitment: stranger(2), block: 8, ciphertext: strangerCt(2), coinbaseSteps: null },
-      { commitment: stranger(3), block: 8, ciphertext: strangerCt(3), coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseSteps: 7n },
-    ];
+    const rowsOf = (commitments: readonly string[]): Leaf[] =>
+      commitments.map((commitment, index) => ({
+        commitment,
+        block: 8,
+        payload: index === commitments.length - 1 ? null : CT,
+        coinbaseSteps: index === commitments.length - 1 ? 7n : null,
+      }));
+    const honest = rowsOf([
+      stranger(0),
+      MINE.commitment,
+      stranger(2),
+      stranger(3),
+      stranger(4),
+      stranger(5),
+      stranger(6),
+      COINBASE,
+    ]);
+    const swapped = rowsOf([
+      stranger(4),
+      stranger(5),
+      stranger(6),
+      COINBASE,
+      stranger(0),
+      MINE.commitment,
+      stranger(2),
+      stranger(3),
+    ]);
     const shapeFor = (rows: readonly Leaf[]): ChainShape => ({
       ...shapeOf(9, rows),
       rootRule: sortedRootOver,
     });
-    const honestShape = shapeFor(honestRows);
-    const lyingShape = shapeFor(lyingRows);
-
-    // The premise, one level up: whole sibling subtrees can be exchanged too,
-    // so the payment moved six positions and no root moved at all.
-    expect(sortedRootOver(leafBytes(lyingShape), 8)).toBe(
-      sortedRootOver(leafBytes(honestShape), 8),
+    expect(sortedRootOver(leafBytes(shapeFor(swapped)), 8)).toBe(
+      sortedRootOver(leafBytes(shapeFor(honest)), 8),
     );
-
-    const hidden = await runSync(
-      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
-      chainOf(lyingShape, lyingRows),
-      opener(lyingShape),
-    );
-    expect(hidden.report.received).toBe(0);
-    expect(hidden.report.warnings).toEqual([]);
-    expect(hidden.meta.nextLeaf).toBe(8);
-    expect(hidden.report.hints).toContain(CIPHERTEXT_SUBSTITUTION_HINT);
-
-    const ordinary = await runSync(
-      {
-        meta: metaAfter(hidden),
-        held: [],
-        rejected: [],
-        pending: [],
-        checkpoints: hidden.checkpoints,
-      },
-      chainOf(honestShape, honestRows),
-      opener(honestShape),
-    );
-    expect(ordinary.report.received).toBe(0);
-
-    const rescanned = await runSync(
-      {
-        meta: metaAfter(ordinary),
-        held: [],
-        rejected: [],
-        pending: [],
-        checkpoints: ordinary.checkpoints,
-      },
-      chainOf(honestShape, honestRows),
-      opener(honestShape),
-      { rescan: true },
-    );
-    expect(rescanned.report.received).toBe(1);
-    expect(rescanned.notes[0]?.note.leafIndex).toBe(1);
   });
+
 
   /**
    * A shorter tree served as the whole of a block: eight leaves answered as
    * the two level-1 node values above them.
    *
-   * The fold carries no level tag, so the node hands over a leaf count of 2
-   * and the two node hashes, and the per-block root comparison passes against
-   * the header the honest chain published. The watermark then commits at 2
-   * with the payment at real leaf 1 behind it, and the checkpoint the pass
-   * records names a leaf count this chain never had. An honest node afterwards
-   * cannot even scan: the two leaves below that watermark fold to something
-   * else, so the pass refuses by name and a rescan is the way back.
+   * **This is the bound that is left**, and it is the only one. The fold
+   * carries no level tag, so the node hands over a leaf count of 2 and the two
+   * node hashes, and the per-block root comparison passes against the header
+   * the honest chain published. The body is the chain's own and the node
+   * serves it unchanged, because it is rooted to the header's
+   * `extrinsicsRoot`: the payment's payload is in there and it opens. What it
+   * opens to is a commitment none of the two node values is, so the note is
+   * discarded the way a skipped segment's is, in silence, and the watermark
+   * commits at 2 with the payment at real leaf 1 behind it.
+   *
+   * It presents identically to the ordinary case above, which is why neither
+   * warns. An honest node afterwards cannot even scan: the two leaves below
+   * that watermark fold to something else, so the pass refuses by name and a
+   * rescan is the way back. `crates/qnero-wallet/src/typing.rs` carries the
+   * same bound in prose.
    */
   it('hides a payment behind a shorter tree of node values until a rescan', async () => {
     const stranger = (n: number): string => `b${n}`.repeat(32).slice(0, 64);
@@ -736,14 +628,14 @@ describe('a leaf whose kind the headers decide', () => {
     const COINBASE = 'c0'.repeat(32);
 
     const honestRows: Leaf[] = [
-      { commitment: stranger(0), block: 8, ciphertext: strangerCt(0), coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: stranger(2), block: 8, ciphertext: strangerCt(2), coinbaseSteps: null },
-      { commitment: stranger(3), block: 8, ciphertext: strangerCt(3), coinbaseSteps: null },
-      { commitment: stranger(4), block: 8, ciphertext: strangerCt(4), coinbaseSteps: null },
-      { commitment: stranger(5), block: 8, ciphertext: strangerCt(5), coinbaseSteps: null },
-      { commitment: stranger(6), block: 8, ciphertext: strangerCt(6), coinbaseSteps: null },
-      { commitment: COINBASE, block: 8, ciphertext: null, coinbaseSteps: 7n },
+      { commitment: stranger(0), block: 8, payload: strangerCt(0), coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: stranger(2), block: 8, payload: strangerCt(2), coinbaseSteps: null },
+      { commitment: stranger(3), block: 8, payload: strangerCt(3), coinbaseSteps: null },
+      { commitment: stranger(4), block: 8, payload: strangerCt(4), coinbaseSteps: null },
+      { commitment: stranger(5), block: 8, payload: strangerCt(5), coinbaseSteps: null },
+      { commitment: stranger(6), block: 8, payload: strangerCt(6), coinbaseSteps: null },
+      { commitment: COINBASE, block: 8, payload: null, coinbaseSteps: 7n },
     ];
     const honestShape: ChainShape = { ...shapeOf(9, honestRows), rootRule: sortedRootOver };
     const honestBytes = leafBytes(honestShape);
@@ -754,10 +646,24 @@ describe('a leaf whose kind the headers decide', () => {
     const nodeOver = (from: number): string =>
       sortedRootOver(honestBytes.subarray(from * 32, from * 32 + 128), 4);
     const lyingRows: Leaf[] = [
-      { commitment: nodeOver(0), block: 8, ciphertext: new Uint8Array([9, 9, 9]), coinbaseSteps: null },
-      { commitment: nodeOver(4), block: 8, ciphertext: null, coinbaseSteps: 7n },
+      { commitment: nodeOver(0), block: 8, payload: null, coinbaseSteps: null },
+      { commitment: nodeOver(4), block: 8, payload: null, coinbaseSteps: 7n },
     ];
-    const lyingShape: ChainShape = { ...shapeOf(9, lyingRows), rootRule: sortedRootOver };
+    const lyingShape: ChainShape = {
+      ...shapeOf(9, lyingRows),
+      rootRule: sortedRootOver,
+      // The body is the chain's own and this node serves it unchanged: it is
+      // rooted to the header's `extrinsicsRoot`, so there is nothing in it for
+      // a node to change. The payment's payload is in there and it opens.
+      strayPayloads: new Map([
+        [
+          8,
+          honestRows
+            .map((leaf) => leaf.payload)
+            .filter((payload): payload is Uint8Array => payload !== null),
+        ],
+      ]),
+    };
 
     // The premise: with no level tag, two node values presented as two leaves
     // fold to the root of the eight leaves under them, so both nodes serve one
@@ -814,208 +720,10 @@ describe('a leaf whose kind the headers decide', () => {
     expect(rescanned.meta.nextLeaf).toBe(8);
   });
 
-  /**
-   * A ciphertext of this wallet's beside a commitment the block holds nowhere:
-   * warned, skipped, and the pass finishes.
-   *
-   * The detector's other arm, and it is a warning deliberately. Two things
-   * produce this reading and nothing local tells them apart: a node that moved
-   * a ciphertext across blocks, and a sender who encrypted a payload opening a
-   * commitment the sender never published. The circuit leaves `ct_digest`
-   * unconstrained (`docs/CIRCUIT.md` section 1), so no rule on chain ties a
-   * ciphertext's plaintext to the commitment beside it, and anyone holding
-   * this wallet's address can write such a leaf for the price of one
-   * transaction. Refusing the pass would hand that sender a permanent sync
-   * denial, because the leaf is read again on every later pass and on a rescan
-   * as well.
-   */
-  it('warns and keeps scanning when the block holds the opened commitment nowhere', async () => {
-    const rows: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: 'a1'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: 'a2'.repeat(32), block: 8, ciphertext: null, coinbaseSteps: 7n },
-    ];
-    const shape: ChainShape = { ...shapeOf(9, rows), rootRule: sortedRootOver };
-    // The bytes at leaf 0 open under this wallet's key, and the note they open
-    // is at no leaf of this block at all.
-    const crypto: SyncCrypto = {
-      ...cryptoParts(shape),
-      decryptBatch: (items) =>
-        Promise.resolve(items.map((item) => (item.index === 0 ? openedAs(MINE, item.commitment) : null))),
-      coinbaseBatch: (items) => Promise.resolve(items.map(() => null)),
-      entryRhoMatches: () => Promise.resolve(false),
-    };
-
-    const result = await runSync(
-      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
-      chainOf(shape, rows),
-      crypto,
-    );
-    expect(result.report.leavesScanned).toBe(3);
-    expect(result.report.received).toBe(0);
-    expect(result.notes).toHaveLength(0);
-    const warning =
-      result.report.warnings.find((entry) =>
-        entry.includes('at none of the leaves it appended'),
-      ) ?? '';
-    expect(warning).toContain('leaf 0');
-    expect(warning).toContain('second node');
-    // And it is the same answer on every later pass, which is the point of
-    // keeping it a warning: a sender cannot brick this wallet's sync.
-    const again = await runSync(
-      {
-        meta: metaAfter(result),
-        held: [],
-        rejected: [],
-        pending: [],
-        checkpoints: result.checkpoints,
-      },
-      chainOf(shape, rows),
-      crypto,
-      { rescan: true },
-    );
-    expect(again.report.received).toBe(0);
-    expect(
-      again.report.warnings.some((entry) => entry.includes('at none of the leaves it appended')),
-    ).toBe(true);
-  });
-
-  /**
-   * How many leaves a pass writes one sentence about is a node's choice, so
-   * the sentences are capped and the rest are counted.
-   *
-   * Both detector warnings are per leaf, and a node answers the leaves: it can
-   * put a commitment this wallet's payload does not open beside every
-   * ciphertext it serves. Uncapped that is one string per leaf on
-   * `report.warnings` and one `Notice` per leaf on the balance screen, out of
-   * an answer nothing has checked. Past `WARNED_LEAVES_PER_PASS` the pass
-   * counts instead and closes each kind with one sentence carrying the count,
-   * so the list is bounded at eighteen entries whatever a node answers.
-   *
-   * `crates/qnero-wallet/tests/leaf_typing.rs` drives the same two overflows
-   * against the command-line wallet.
-   */
-  it('caps the per-leaf detector warnings and counts the rest', async () => {
-    const OVERFLOW = 2;
-    const EACH = WARNED_LEAVES_PER_PASS + OVERFLOW;
-    /** A second note of this wallet's, whose commitment the block never holds. */
-    const ELSEWHERE: ScannedNote = {
-      value: 5n,
-      rho: '11'.repeat(32),
-      r: '12'.repeat(32),
-      commitment: '13'.repeat(32),
-      nullifier: '14'.repeat(32),
-      memo: '',
-    };
-    const OTHER_CT = new Uint8Array([7, 7, 7]);
-
-    // Leaves 0..EACH-1 carry this wallet's payment ciphertext beside a
-    // stranger's commitment, and the block holds the payment's own commitment
-    // at its coinbase position, so each of them is a move the pass recovers.
-    // The next EACH carry a ciphertext of this wallet's whose commitment the
-    // block holds nowhere, so each of those is skipped.
-    const rows: Leaf[] = [];
-    for (let leaf = 0; leaf < EACH; leaf += 1) {
-      rows.push({
-        commitment: `${leaf.toString(16).padStart(2, '0')}a0`.repeat(16),
-        block: 8,
-        ciphertext: CT,
-        coinbaseSteps: null,
-      });
-    }
-    for (let leaf = 0; leaf < EACH; leaf += 1) {
-      rows.push({
-        commitment: `${leaf.toString(16).padStart(2, '0')}b0`.repeat(16),
-        block: 8,
-        ciphertext: OTHER_CT,
-        coinbaseSteps: null,
-      });
-    }
-    rows.push({ commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseSteps: 7n });
-    const shape = shapeOf(9, rows);
-    const crypto: SyncCrypto = {
-      ...cryptoParts(shape),
-      decryptBatch: (items) =>
-        Promise.resolve(
-          items.map((item) => {
-            if (item.ciphertext[0] === CT[0]) {
-              return openedAs(MINE, item.commitment);
-            }
-            return item.ciphertext[0] === OTHER_CT[0] ? openedAs(ELSEWHERE, item.commitment) : null;
-          }),
-        ),
-      coinbaseBatch: (items) => Promise.resolve(items.map(() => null)),
-      entryRhoMatches: () => Promise.resolve(false),
-    };
-
-    const result = await runSync(
-      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
-      chainOf(shape, rows),
-      crypto,
-    );
-
-    // The payment still arrives, at the index inside the block that holds the
-    // commitment it opens. A cap on the sentences changes no decision.
-    expect(result.report.received).toBe(1);
-    expect(result.notes).toHaveLength(1);
-    expect(result.notes[0]?.note.leafIndex).toBe(EACH * 2);
-
-    const moved = result.report.warnings.filter((entry) =>
-      entry.includes('tree entry answered beside it'),
-    );
-    const skipped = result.report.warnings.filter((entry) =>
-      entry.includes('at none of the leaves it appended'),
-    );
-    expect(moved).toHaveLength(WARNED_LEAVES_PER_PASS);
-    expect(skipped).toHaveLength(WARNED_LEAVES_PER_PASS);
-    // The ones written out are the first of each kind, named by their leaf.
-    expect(moved[0]).toContain('leaf 0');
-    expect(skipped[0]).toContain(`leaf ${EACH}`);
-
-    // And each kind closes with one sentence carrying what the cap held back.
-    const movedMore = result.report.warnings.filter(
-      (entry) => entry.startsWith(`and ${OVERFLOW} more leaves`) && entry.includes('each recorded'),
-    );
-    const skippedMore = result.report.warnings.filter(
-      (entry) => entry.startsWith(`and ${OVERFLOW} more leaves`) && entry.includes('each skipped'),
-    );
-    expect(movedMore).toHaveLength(1);
-    expect(skippedMore).toHaveLength(1);
-    expect(movedMore[0]).toContain('second node');
-    expect(skippedMore[0]).toContain('second node');
-
-    // Eighteen, whatever a node answers: two kinds of eight plus one closing
-    // sentence each, and nothing else fired on this pass.
-    expect(result.report.warnings).toHaveLength(WARNED_LEAVES_PER_PASS * 2 + 2);
-  });
-
-  /** At the cap exactly, there is nothing left over to count. */
-  it('writes no overflow sentence when the cap is not passed', async () => {
-    const rows: Leaf[] = [];
-    for (let leaf = 0; leaf < WARNED_LEAVES_PER_PASS; leaf += 1) {
-      rows.push({
-        commitment: `${leaf.toString(16).padStart(2, '0')}a0`.repeat(16),
-        block: 8,
-        ciphertext: CT,
-        coinbaseSteps: null,
-      });
-    }
-    rows.push({ commitment: MINE.commitment, block: 8, ciphertext: null, coinbaseSteps: 7n });
-    const shape = shapeOf(9, rows);
-
-    const result = await runSync(
-      { meta: meta(), held: [], rejected: [], pending: [], checkpoints: [] },
-      chainOf(shape, rows),
-      opener(shape),
-    );
-    expect(result.report.warnings).toHaveLength(WARNED_LEAVES_PER_PASS);
-    expect(result.report.warnings.some((entry) => entry.startsWith('and '))).toBe(false);
-  });
-
   /** A value that does not rebuild this wallet's own coinbase commitment. */
   it('refuses a wrong coinbase value on this wallet’s own block', async () => {
     const leaves: Leaf[] = [
-      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseSteps: 1_000n },
+      { commitment: MINED.commitment, block: 7, payload: null, coinbaseSteps: 1_000n },
     ];
     const shape = shapeOf(9, leaves, new Set([7]));
     await expect(
@@ -1031,9 +739,9 @@ describe('a leaf whose kind the headers decide', () => {
   /** A node that moves a leaf from one block to another. */
   it('refuses a leaf dated to a block the headers do not put it in', async () => {
     const leaves: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 7, ciphertext: CT, coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: 'a2'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: 'a0'.repeat(32), block: 7, payload: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: 'a2'.repeat(32), block: 8, payload: CT, coinbaseSteps: null },
     ];
     const shape: ChainShape = { ...shapeOf(9, leaves), misdated: new Map([[1, 7]]) };
     await expect(
@@ -1048,7 +756,7 @@ describe('a leaf whose kind the headers decide', () => {
   /** A header that does not hash to the name it was asked for. */
   it('refuses a header that does not hash to its own name', async () => {
     const leaves: Leaf[] = [
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, payload: CT, coinbaseSteps: null },
     ];
     const shape: ChainShape = { ...shapeOf(9, leaves), lyingHeaders: new Set([5]) };
     await expect(
@@ -1063,9 +771,9 @@ describe('a leaf whose kind the headers decide', () => {
   /** A node that answers a leaf count its own headers do not carry. */
   it('refuses a leaf count the headers do not carry', async () => {
     const leaves: Leaf[] = [
-      { commitment: 'a0'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: MINE.commitment, block: 8, ciphertext: CT, coinbaseSteps: null },
-      { commitment: 'a2'.repeat(32), block: 8, ciphertext: CT, coinbaseSteps: null },
+      { commitment: 'a0'.repeat(32), block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: MINE.commitment, block: 8, payload: CT, coinbaseSteps: null },
+      { commitment: 'a2'.repeat(32), block: 8, payload: CT, coinbaseSteps: null },
     ];
     const shape = shapeOf(9, leaves);
     const chain: SyncChain = {
@@ -1161,8 +869,8 @@ describe('the checkpoint a pass records', () => {
   it('is recorded per chunk when the chain is three chunks ahead', async () => {
     const head = HEADER_WALK_LIMIT * 3;
     const leaves: Leaf[] = [
-      { commitment: MINE.commitment, block: head - 1, ciphertext: CT, coinbaseSteps: null },
-      { commitment: 'b2'.repeat(32), block: head - 1, ciphertext: null, coinbaseSteps: 9n },
+      { commitment: MINE.commitment, block: head - 1, payload: CT, coinbaseSteps: null },
+      { commitment: 'b2'.repeat(32), block: head - 1, payload: null, coinbaseSteps: 9n },
     ];
     const shape = shapeOf(head, leaves);
     // The progress the walk reports, so a multi-chunk sync can be held to a
@@ -1231,8 +939,8 @@ describe('a node that rebuilt the headers', () => {
     // coinbase for block 7 carries a value that rebuilds to nothing, under a
     // label that says another author's.
     const hiddenLeaves: Leaf[] = [
-      { commitment: MINE.commitment, block: 6, ciphertext: null, coinbaseSteps: 1n },
-      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseSteps: 999n },
+      { commitment: MINE.commitment, block: 6, payload: null, coinbaseSteps: 1n },
+      { commitment: MINED.commitment, block: 7, payload: null, coinbaseSteps: 999n },
     ];
     const rebuilt = shapeOf(9, hiddenLeaves, new Set<number>());
     const hidden = await runSync(
@@ -1254,8 +962,8 @@ describe('a node that rebuilt the headers', () => {
     // it. The payment carries its ciphertext, block 7 carries this wallet's own
     // label, and the coinbase value is the one the chain wrote.
     const honestLeaves: Leaf[] = [
-      { commitment: MINE.commitment, block: 6, ciphertext: CT, coinbaseSteps: 1n },
-      { commitment: MINED.commitment, block: 7, ciphertext: null, coinbaseSteps: 42n },
+      { commitment: MINE.commitment, block: 6, payload: CT, coinbaseSteps: 1n },
+      { commitment: MINED.commitment, block: 7, payload: null, coinbaseSteps: 42n },
     ];
     const honest: ChainShape = {
       ...shapeOf(9, honestLeaves, new Set([7])),
@@ -1364,42 +1072,6 @@ describe('the sentences both wallets print', () => {
   const CASES: { name: string; marker: string; values: Record<string, string>; browser: string }[] =
     [
       {
-        name: 'the warning for a leaf its own block holds elsewhere',
-        marker: 'fn moved_leaf_warning(',
-        values: { leaf: '7', block_number: '42', index: '3' },
-        browser: movedLeafWarning(7, 42, 3),
-      },
-      {
-        name: 'the warning for a leaf its own block holds nowhere',
-        marker: 'fn unplaceable_leaf_warning(',
-        values: { leaf: '7', block_number: '42' },
-        browser: unplaceableLeafWarning(7, 42),
-      },
-      {
-        name: 'the moved-leaf count past the cap',
-        marker: 'fn moved_overflow_warning(',
-        values: { more: '5', '': 'leaves' },
-        browser: movedOverflowWarning(5),
-      },
-      {
-        name: 'the moved-leaf count past the cap, at one leaf',
-        marker: 'fn moved_overflow_warning(',
-        values: { more: '1', '': 'leaf' },
-        browser: movedOverflowWarning(1),
-      },
-      {
-        name: 'the unplaceable-leaf count past the cap',
-        marker: 'fn unplaceable_overflow_warning(',
-        values: { more: '5', '': 'leaves' },
-        browser: unplaceableOverflowWarning(5),
-      },
-      {
-        name: 'the unplaceable-leaf count past the cap, at one leaf',
-        marker: 'fn unplaceable_overflow_warning(',
-        values: { more: '1', '': 'leaf' },
-        browser: unplaceableOverflowWarning(1),
-      },
-      {
         name: 'the wait a wallet with no birthday is quoted',
         marker: 'pub const FULL_SCAN_ESTIMATE: &str =',
         values: { blocks: '262980', spell: 'about 11 minutes' },
@@ -1449,12 +1121,32 @@ describe('the sentences both wallets print', () => {
     expect(Number(declared?.[1])).toBe(BIRTHDAY_EPOCH);
   });
 
-  it('caps the per-leaf warnings at the same count in both wallets', () => {
-    // The sentences above quote what this bound does, so a bound that moved on
-    // one side alone would leave both wallets printing a true sentence about
-    // two different lists.
-    const declared = /pub const WARNED_LEAVES_PER_PASS: u64 = (\d+);/.exec(RUST);
-    expect(declared).not.toBeNull();
-    expect(Number(declared?.[1])).toBe(WARNED_LEAVES_PER_PASS);
+  it('carries no per-leaf detector sentence on either side', () => {
+    // The detector went with the per-leaf ciphertext. A payload out of a block
+    // body has no leaf beside it to disagree with, so there is nothing to
+    // relocate and nothing to warn about, and a wallet that still wrote one of
+    // these sentences would be describing a reading it can no longer reach.
+    for (const gone of [
+      'moved_leaf_warning',
+      'unplaceable_leaf_warning',
+      'moved_overflow_warning',
+      'unplaceable_overflow_warning',
+      'WARNED_LEAVES_PER_PASS',
+    ]) {
+      expect(RUST, gone).not.toContain(gone);
+    }
+    const browser = readFileSync(
+      new URL('../src/wallet/sync.ts', import.meta.url),
+      'utf8',
+    );
+    for (const gone of [
+      'movedLeafWarning',
+      'unplaceableLeafWarning',
+      'movedOverflowWarning',
+      'unplaceableOverflowWarning',
+      'WARNED_LEAVES_PER_PASS',
+    ]) {
+      expect(browser, gone).not.toContain(gone);
+    }
   });
 });
