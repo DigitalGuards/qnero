@@ -430,34 +430,34 @@ impl ConsensusGenesis {
 ///
 /// Difficulty is expected hashes per block, so the number that matters is the
 /// hash rate the chain actually has, and the retarget's equilibrium is the
-/// *divisor* rather than the target: `divisor = target * 10 / 12` is 100 000 ms
-/// at a 120 s target, and the neutral band is one to two divisors wide
-/// (`pallets/qpow/src/lib.rs`). A chain settles at roughly `100 * H` to
-/// `200 * H` for a hash rate of `H` hashes a second.
+/// target itself: the divisor is `target * ln 2`, 83 177 ms at a 120 s target,
+/// which is the value that puts the stationary mean block time on the target
+/// (`pallets/qpow/src/lib.rs`). So a chain settles at about `target * H` for a
+/// hash rate of `H` hashes a second, inside a deterministic band of
+/// `83.2 * H` to `166.4 * H`.
 ///
 /// The hash rate this chain is certain of is its own node's: one in-process
 /// RandomX light-mode thread, measured at 32.9 H/s (`docs/BENCH.md`). That
-/// puts the neutral band at 3 300 to 6 600 and its middle at 5 000, which is
-/// one block every 152 seconds on the node alone, inside the band and needing
-/// no retarget at all. A rig is 450 H/s per thread in full mode, so the first
-/// one to point xmrig at the stratum port takes the chain far under the target
-/// until the retarget climbs.
+/// puts the band at 2 737 to 5 473 and the target itself at `120 * 32.9`, so
+/// 4 000 is one block every 122 seconds on the node alone, needing no retarget
+/// at all. A rig is 450 H/s per thread in full mode, so the first one to point
+/// xmrig at the stratum port takes the chain far under the target until the
+/// retarget climbs.
 ///
 /// **The asymmetry is the whole argument for choosing low.** The retarget is
 /// Homestead's, one 2048th of the difficulty per step, and it is slow in both
 /// directions: climbing is linear at `H / 2048` per second, and falling is
-/// exponential with a time constant of `100 * 2048` seconds, which is 57
-/// hours per e-fold whatever the numbers are. A difficulty set above the
-/// available hash rate is therefore days of a chain that looks dead, while one
-/// set below it is hours of fast blocks that fix themselves. Inheriting
-/// `QPoWInitialDifficulty` (1 000 000, sized for about 8 300 H/s) would be the
-/// first of those: 8.4 hours to the first block on the node alone, and a week
-/// to converge.
+/// exponential with a time constant of `2048 * divisor`, which is 47.3 hours
+/// per e-fold at the public target. A difficulty set above the available hash
+/// rate is therefore days of a chain that looks dead, while one set below it is
+/// hours of fast blocks that fix themselves. Inheriting `QPoWInitialDifficulty`
+/// (1 000 000, which is 8 333 H/s at a 120 s mean) would be the first of those:
+/// 8.4 hours to the first block on the node alone, and a week to converge.
 ///
 /// There is no floor field to set beside this. `get_min_difficulty()` is a
 /// hard-coded 128 (`pallets/qpow/src/lib.rs`); genesis validates against it
 /// and cannot move it.
-pub const QNERO_TESTNET_INITIAL_DIFFICULTY: u64 = 5_000;
+pub const QNERO_TESTNET_INITIAL_DIFFICULTY: u64 = 4_000;
 
 /// Target block time for the `dev` preset, in milliseconds.
 ///
@@ -1063,14 +1063,14 @@ mod tests {
 
 		// The public testnet sets its own, and the value is the one thing in
 		// its spec that cannot be corrected without a new genesis: the
-		// retarget moves by a 2048th of the difficulty per step, which is 57
+		// retarget moves by a 2048th of the difficulty per step, which is 47.3
 		// hours per e-fold downwards, so a number set above the hash rate that
 		// chain actually has is days of a chain that looks dead. It is pinned
 		// here by value, and below the inherited constant by an order of
 		// magnitude, because both halves are the point.
 		let testnet = difficulty_of(QNERO_TESTNET_RUNTIME_PRESET);
 		assert_eq!(testnet, U512::from(QNERO_TESTNET_INITIAL_DIFFICULTY));
-		assert_eq!(QNERO_TESTNET_INITIAL_DIFFICULTY, 5_000);
+		assert_eq!(QNERO_TESTNET_INITIAL_DIFFICULTY, 4_000);
 		assert!(
 			testnet < crate::configs::QPoWInitialDifficulty::get(),
 			"the public testnet must not inherit the mainnet-scale initial difficulty"
@@ -1429,7 +1429,7 @@ mod tests {
 
 		assert_eq!(config.q_po_w.target_block_time, crate::TARGET_BLOCK_TIME_MS);
 		assert_eq!(config.q_po_w.target_block_time, 120_000);
-		assert_eq!(config.q_po_w.initial_difficulty, U512::from(5_000u64));
+		assert_eq!(config.q_po_w.initial_difficulty, U512::from(4_000u64));
 
 		// It has to build, treasury-free genesis included.
 		config.build_storage().expect("the testnet genesis builds");
