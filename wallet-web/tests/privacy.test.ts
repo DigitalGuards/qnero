@@ -408,6 +408,41 @@ describe('the request stream a sync makes', () => {
     }
   });
 
+  it('reads each block body once and asks for no header beside it', async () => {
+    // `pallet-shielded` mints a coinbase leaf every block, so nearly every
+    // block of a scanned range has a body this pass reads. The body used to
+    // cost a `chain_getHeader` as well, to take the `extrinsicsRoot` it is
+    // rooted against off the header: two round trips per block, on a front end
+    // that answers `429 Too Many Requests` after about eighty requests in a
+    // window. The root comes out of the header walk now, which already fetched
+    // and rehashed that header, so the count per block is one and what
+    // authenticates the body is the same number.
+    const { calls } = await syncOnce();
+    const bodies = calls.filter((call) => call.method === 'chain_getBlock');
+    const blocks = bodies.map((call) => String(call.params[0]));
+    // One per block that appended a leaf: leaves 0 to 7, two per block, so
+    // blocks 1 to 4.
+    expect(blocks).toEqual([1, 2, 3, 4].map((block) => hashAt(block)));
+    expect(new Set(blocks).size).toBe(blocks.length);
+    // And exactly one header per block of the range, the walk's own: block 0
+    // is the anchor and the head is block 12, so 13 of them, and not one more
+    // for any block a body was read at.
+    const headers = calls.filter((call) => call.method === 'chain_getHeader');
+    for (const block of blocks) {
+      expect(headers.filter((call) => String(call.params[0]) === block)).toHaveLength(1);
+    }
+    for (let block = 0; block < HEAD_NUMBER; block += 1) {
+      expect(
+        headers.filter((call) => String(call.params[0]) === hashAt(block)),
+        `block ${block} was asked for more than the walk's own header`,
+      ).toHaveLength(1);
+    }
+    // The head is the one block asked about twice, and it is not the body
+    // pass: a state read is authenticated against that block's `stateRoot`,
+    // which is the other field of the same header.
+    expect(headers).toHaveLength(HEAD_NUMBER + 3);
+  });
+
   it('asks for the three chain-wide totals once, in one request', async () => {
     // They are read together because they are one answer: all three are chain
     // wide and the pass is pinned to one block. The counter used to have an

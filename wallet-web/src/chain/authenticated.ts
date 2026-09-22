@@ -156,37 +156,52 @@ export async function authenticatedPrefix(
  * header.
  *
  * Note ciphertexts are in block bodies and in no state map, so this is the
- * read that makes an incoming payment readable at all. Three steps, and the
- * order of them is the whole authentication:
+ * read that makes an incoming payment readable at all. Two steps here, and
+ * one the caller has already taken:
  *
- * 1. The header at `at` is fetched and rehashed from its own preimage. A
- *    header that does not hash to the name it was asked for carries nothing:
- *    its `extrinsicsRoot` is then a number a node chose.
- * 2. The body at `at` is fetched.
- * 3. The body is rooted by the module, which builds the construction
+ * 0. `extrinsicsRoot` comes from a header the caller fetched and rehashed
+ *    from its own preimage, and whose hash is `at`. That is the step this
+ *    function no longer takes for itself: a header that does not hash to the
+ *    name it was asked for carries nothing, so its `extrinsicsRoot` is a
+ *    number a node chose, and the walk that produced `at` refuses such a
+ *    header before any body is asked for.
+ * 1. The body at `at` is fetched.
+ * 2. The body is rooted by the module, which builds the construction
  *    `frame_system` makes while `system_version` is 1, and the answer is
- *    compared against the header's field.
+ *    compared against `extrinsicsRoot`.
  *
- * What that buys is completeness as well as integrity. A state read
+ * **Why the root is a parameter.** The scan's header walk already fetches and
+ * rehashes every header in the range, and it kept the hash while dropping the
+ * `extrinsicsRoot` beside it. Refetching the header here was a second
+ * `chain_getHeader` per block on top of the body, which is two round trips per
+ * block where one will do: the public node's front end answers `429 Too Many
+ * Requests` after about eighty requests in a window, so the count per block is
+ * what decides whether a scan finishes at all. What is trusted is unchanged,
+ * because the root now comes from the same rehashed header the old refetch was
+ * checking against, and is carried rather than asked for twice.
+ *
+ * What the root check buys is completeness as well as integrity. A state read
  * authenticates one key at a time and an absent answer has to be caught by a
  * rule about which keys a leaf owes; a body roots as a whole, so a node that
  * drops one extrinsic, reorders two, or appends one reaches a root no header
  * carries. There is no per-payload absence left to detect.
  *
- * `at` must be a hash this caller already trusts, which in a scan is a block
- * of the header walk. This selects no chain and verifies no proof of work.
+ * `at` must be a hash this caller already trusts and `extrinsicsRoot` the
+ * field of the header that hashes to it, which in a scan is a block of the
+ * header walk. This selects no chain and verifies no proof of work.
  * `Chain::authenticated_body` in `crates/qnero-wallet/src/chain.rs` is the
- * same three steps in the same order.
+ * same steps in the same order.
  */
-export async function authenticatedBody(context: ChainContext, at: string): Promise<string[]> {
+export async function authenticatedBody(
+  context: ChainContext, at: string, extrinsicsRoot: string,
+): Promise<string[]> {
   const verifier = verifierFor(context);
-  const key = normaliseHash(at);
-  const header = parseRawHeader(await context.send('chain_getHeader', [at]));
-  if (normaliseHash(await verifier.headerBlockHash(anchorFromHeader(header))) !== key) {
+  const wantedRoot = normaliseHash(extrinsicsRoot);
+  if (!/^[0-9a-f]{64}$/.test(wantedRoot)) {
     throw new Error(
-      `the header this node served for block ${at} hashes to another block. The preimage is ` +
-        'what authenticates the extrinsicsRoot a body is checked against, so a header that does ' +
-        'not hash to its own name authenticates no body. Nothing has been changed.',
+      `a body was asked for at block ${at} against ${extrinsicsRoot}, which is not a 32-byte ` +
+        'extrinsics root. The root is what authenticates the body, so there is nothing to check ' +
+        'it against. Nothing has been changed.',
     );
   }
 
@@ -217,10 +232,10 @@ export async function authenticatedBody(context: ChainContext, at: string): Prom
 
   const body = extrinsics as string[];
   const recomputed = normaliseHash(await verifier.extrinsicsRoot(body));
-  if (recomputed !== normaliseHash(header.extrinsicsRoot)) {
+  if (recomputed !== wantedRoot) {
     throw new Error(
       `the body this node served for block ${at} roots to 0x${recomputed} where the ` +
-        `extrinsicsRoot in the header it hashes to is ${header.extrinsicsRoot}. The body is ` +
+        `extrinsicsRoot in the header it hashes to is 0x${wantedRoot}. The body is ` +
         'what carries every note ciphertext, so a body the header does not carry is a node ' +
         'answering with extrinsics this chain did not include. Nothing has been changed.',
     );

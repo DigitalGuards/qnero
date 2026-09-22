@@ -107,11 +107,15 @@ export interface SyncChain {
    * Every note ciphertext one block's body carries, in body order.
    *
    * One method rather than two, because the fetch and the check are one read:
-   * the body is fetched, rooted against the `extrinsicsRoot` of a header that
-   * hashes to `at`, and walked down to the payloads its calls carry. A caller
-   * that could take the body without the root check would be a caller that
-   * could skip it. `chain/authenticated.ts` and `chain/body.ts` are the two
-   * halves.
+   * the body is fetched, rooted against `extrinsicsRoot`, and walked down to
+   * the payloads its calls carry. A caller that could take the body without
+   * the root check would be a caller that could skip it.
+   * `chain/authenticated.ts` and `chain/body.ts` are the two halves.
+   *
+   * `extrinsicsRoot` is the field of the header that hashes to `at`, carried
+   * out of the header walk that rehashed it. Passing it costs one round trip
+   * per block where refetching that header cost two, and authenticates the
+   * body against the same number either way.
    *
    * Which leaf each payload belongs to is decided nowhere in here. The scan
    * trial decrypts all of them and the note that comes out has to match a
@@ -121,7 +125,7 @@ export interface SyncChain {
    * `at` must be a hash the caller already trusts, which in a scan is a block
    * of the header walk.
    */
-  payloads(at: string): Promise<Uint8Array[]>;
+  payloads(at: string, extrinsicsRoot: string): Promise<Uint8Array[]>;
   usedNullifiers(at: string, onProgress?: (seen: number) => void): Promise<Set<string>>;
   /**
    * Every header from `anchor` up to `top`, verified as one chain and handed
@@ -502,7 +506,19 @@ export interface LeafTyping {
    * avoid holding.
    */
   blockHashes: Uint8Array;
-  /** The block `blockHashes` starts at. */
+  /**
+   * The `extrinsicsRoot` of every block the walk covered, `32 * n` bytes from
+   * `hashesFrom`, index aligned with `blockHashes`.
+   *
+   * It comes off the same header the walk rehashed, so it is authenticated by
+   * exactly what authenticates the hash beside it. Carrying it is what lets
+   * the body pass root a block body without asking for that header a second
+   * time: a body costs one `chain_getBlock` and no `chain_getHeader`, which
+   * against a rate-limited front end is what decides whether a scan finishes.
+   * See `authenticatedBody` in `chain/authenticated.ts`.
+   */
+  extrinsicsRoots: Uint8Array;
+  /** The block `blockHashes` and `extrinsicsRoots` start at. */
   hashesFrom: number;
   /**
    * One per chunk of the walk, ascending, each naming a block whose header
@@ -536,6 +552,25 @@ function strip0x(hex: string): string {
  * the two equal and `docs/BENCH.md` carries the per-block cost beside them.
  */
 export const HEADER_WALK_LIMIT = 1024;
+
+/**
+ * How many block bodies the scan has outstanding at once.
+ *
+ * `pallet-shielded` mints a coinbase note every block, so nearly every block
+ * of a scanned range appends a leaf and nearly every block's body is read. One
+ * at a time that is one round trip per block with nothing else in flight,
+ * which is the shape the header walk was pipelined out of: against a node
+ * behind a CDN the round trip is the whole cost, and the public node's front
+ * end answers `429 Too Many Requests` after about eighty requests in a window,
+ * so a sequential walk over a long range does not finish at all.
+ *
+ * Smaller than the read layer's `HEADERS_IN_FLIGHT` on purpose. A header is a
+ * few hundred bytes and a body is up to the 5 MiB `RuntimeBlockLength` lets a
+ * block carry, so this many bodies is the memory a node decides this page
+ * holds while a group is in flight, and eight of them is bounded where
+ * thirty-two is not.
+ */
+export const BODIES_IN_FLIGHT = 8;
 
 /**
  * Block headers a pipelined walk gets through in a second, measured.
@@ -652,6 +687,7 @@ export async function authenticateLeaves(
   // scans, so the array starts above it. See `LeafTyping.blockHashes`.
   const hashesFrom = trusted.number + 1;
   const blockHashes = new Uint8Array(Math.max(0, head.number - trusted.number) * 32);
+  const extrinsicsRoots = new Uint8Array(blockHashes.length);
   const checkpoints: SyncCheckpoint[] = [];
   const counts: number[] = [watermark];
   const roots: string[] = [];
@@ -771,8 +807,11 @@ export async function authenticateLeaves(
       const label = authorLabelFromHeader(header);
       const ours = label !== null && label.toLowerCase() === ownLabels[index - 1];
       // The hash this walk rehashed for this block, kept because the body pass
-      // has to ask by a hash this pass authenticated rather than by a height.
+      // has to ask by a hash this pass authenticated rather than by a height,
+      // and beside it the `extrinsicsRoot` out of that same rehashed header,
+      // which is what the body pass roots the block body against.
       blockHashes.set(hexToBytes(`0x${hashes[index] ?? ''}`), (block - hashesFrom) * 32);
+      extrinsicsRoots.set(hexToBytes(`0x${strip0x(header.extrinsicsRoot)}`), (block - hashesFrom) * 32);
       runs.push({ block, from, to: cursor, ours });
       counts.push(cursor);
       roots.push(strip0x(header.zkTreeRoot));
@@ -838,6 +877,7 @@ export async function authenticateLeaves(
     labelSaysOurs,
     commitments,
     blockHashes,
+    extrinsicsRoots,
     hashesFrom,
     checkpoints,
   };
@@ -897,7 +937,17 @@ function indexInBlock(
   block: number,
   commitment: Uint8Array,
 ): number | null {
-  for (let index = from; typing.blockOf.get(index) === block; index += 1) {
+  // The whole of the block's run, found by stepping down to its first leaf
+  // before stepping up. `from` is a leaf of this window and windows are cut by
+  // size, so a block whose leaves straddle a window boundary has leaves below
+  // `from` in it, and searching upward alone would read a payment landing
+  // there as nobody's. `index_chunk` in `crates/qnero-wallet/src/wallet.rs`
+  // maps the block's whole range for the same reason.
+  let first = from;
+  while (first > 0 && typing.blockOf.get(first - 1) === block) {
+    first -= 1;
+  }
+  for (let index = first; typing.blockOf.get(index) === block; index += 1) {
     const at = index * 32;
     let same = true;
     for (let byte = 0; byte < 32; byte += 1) {
@@ -926,6 +976,23 @@ function blockHashOf(typing: LeafTyping, block: number): string | null {
     return null;
   }
   return bytesToHex(typing.blockHashes.subarray(offset, offset + 32));
+}
+
+/**
+ * The `extrinsicsRoot` of one block of the walk, off the header this pass
+ * rehashed.
+ *
+ * `null` for a block outside the walked range, the same range `blockHashOf`
+ * answers for, and the two are read together: a body is asked for at a hash
+ * this pass authenticated and rooted against the field of the header that
+ * hashes to it.
+ */
+function extrinsicsRootOf(typing: LeafTyping, block: number): string | null {
+  const offset = (block - typing.hashesFrom) * 32;
+  if (offset < 0 || offset + 32 > typing.extrinsicsRoots.length) {
+    return null;
+  }
+  return bytesToHex(typing.extrinsicsRoots.subarray(offset, offset + 32));
 }
 
 /** The hash at a chunk's top, refused by name when this node has no block there. */
@@ -1464,6 +1531,14 @@ export async function runSync(
       //
       // A block with no leaf in this pass is not fetched at all, because a
       // block that appended nothing appended nothing of this wallet's either.
+      //
+      // Which blocks those are is decided first, for the whole window, and the
+      // bodies are then fetched with [`BODIES_IN_FLIGHT`] requests outstanding
+      // and read back in window order. The fetch is the round trip and the
+      // read is local, so a body at a time was one round trip per block of the
+      // scanned range with nothing else in flight, which is the shape the
+      // header walk was pipelined out of for the same reason.
+      const wanted: { block: number; at: string; root: string; from: number }[] = [];
       for (const record of records) {
         if (record.index >= shape.leafCount) {
           continue;
@@ -1474,46 +1549,65 @@ export async function runSync(
         }
         bodiesWalkedThrough = block;
         const at = blockHashOf(typing, block);
-        if (at === null) {
+        const root = extrinsicsRootOf(typing, block);
+        if (at === null || root === null) {
           throw new NodeRefusedError(
             `this pass dated leaf ${record.index} to block ${block}, which its own header walk ` +
               'did not cover, so there is no authenticated hash to read that block body at. ' +
               'Nothing has been changed.',
           );
         }
-        const payloads = await chain.payloads(at);
-        for (let start = 0; start < payloads.length; start += BATCH) {
-          const slice = payloads.slice(start, start + BATCH);
-          const answers = await crypto.decryptBatch(
-            slice.map((ciphertext) => ({ ciphertext })),
-          );
-          payloadsTried += slice.length;
-          progress('scan', `${payloadsTried} payments tried`);
-          for (const note of answers) {
-            if (note === null) {
-              continue;
+        wanted.push({ block, at, root, from: record.index });
+      }
+
+      for (let group = 0; group < wanted.length; group += BODIES_IN_FLIGHT) {
+        const inFlight = wanted.slice(group, group + BODIES_IN_FLIGHT);
+        // One refusal ends the pass, which is what a withheld or misrooted
+        // body did when the bodies were fetched one at a time: the receipts
+        // this loop has gathered are committed at the end of the pass and
+        // nowhere else, so a refusal here writes no watermark and no note
+        // whichever block in the group raised it.
+        const fetched = await Promise.all(
+          inFlight.map(async (body) => ({
+            body,
+            payloads: await chain.payloads(body.at, body.root),
+          })),
+        );
+        for (const { body, payloads } of fetched) {
+          const block = body.block;
+          for (let start = 0; start < payloads.length; start += BATCH) {
+            const slice = payloads.slice(start, start + BATCH);
+            const answers = await crypto.decryptBatch(
+              slice.map((ciphertext) => ({ ciphertext })),
+            );
+            payloadsTried += slice.length;
+            progress('scan', `${payloadsTried} payments tried`);
+            for (const note of answers) {
+              if (note === null) {
+                continue;
+              }
+              // A payload of this wallet's whose note the block holds at no
+              // leaf. Discarded, and deliberately in silence: the chain
+              // carries the payload of every slot of a settlement, including
+              // the segments it skipped, so an ordinary block full of other
+              // people's settlements produces these by the hundred and none of
+              // them is a fault. The two readings nothing local tells apart, a
+              // sender who encrypted a payload opening a commitment it never
+              // published and a node that reported the block's fold at the
+              // wrong height, are both in the bound on `LeafTyping`.
+              const opened = normaliseHash(note.commitment);
+              const leafIndex = indexInBlock(typing, body.from, block, hexToBytes(opened));
+              if (leafIndex === null) {
+                continue;
+              }
+              receipts.push({
+                leafIndex,
+                blockNumber: block,
+                commitment: opened,
+                note,
+                fromCoinbase: false,
+              });
             }
-            // A payload of this wallet's whose note the block holds at no
-            // leaf. Discarded, and deliberately in silence: the chain carries
-            // the payload of every slot of a settlement, including the
-            // segments it skipped, so an ordinary block full of other
-            // people's settlements produces these by the hundred and none of
-            // them is a fault. The two readings nothing local tells apart, a
-            // sender who encrypted a payload opening a commitment it never
-            // published and a node that reported the block's fold at the
-            // wrong height, are both in the bound on `LeafTyping`.
-            const opened = normaliseHash(note.commitment);
-            const leafIndex = indexInBlock(typing, record.index, block, hexToBytes(opened));
-            if (leafIndex === null) {
-              continue;
-            }
-            receipts.push({
-              leafIndex,
-              blockNumber: block,
-              commitment: opened,
-              note,
-              fromCoinbase: false,
-            });
           }
         }
       }
