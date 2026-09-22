@@ -116,44 +116,37 @@ digests. See [PROTOCOL-PROFILE.md](PROTOCOL-PROFILE.md). Mainnet presets also re
 independent cryptographic qualification, described in
 [CRYPTOGRAPHY.md](CRYPTOGRAPHY.md).
 
-## Ciphertext retention and wallet recovery
+## Ciphertext delivery and wallet recovery
 
-Current state keeps ordinary ciphertexts for 64 blocks, with at most 2048 new
-ciphertexts per block and at most 4096 cleanup steps per block. A FIFO queue
-tracks only stored ciphertexts, so unrelated commitment-tree leaves cannot make
-that queue grow. At the 2048-byte runtime payload cap, the steady-state payload
-bound is 256 MiB, plus queue, map and database overhead. That cap is still what
-bounds the entry path, so 256 MiB stays the number to plan against. What a
-settlement writes is now fixed rather than observed: an ordinary output is
-exactly 1792 bytes, because settlement requires the length the declared crypto
-suite fixes, so the settled share of the map is 224 MiB at the same block
-counts. This bound concerns the live ciphertext map.
+Note ciphertexts live in block bodies and are authenticated against the header's
+extrinsics root. The runtime writes none of them to state:
+`CiphertextRetentionBlocks` is 0, `integrity_test` asserts it, and storage
+version 3 removes the live ciphertext map, its FIFO queue and its cleanup
+cursor. There is no retention window, no per-block pruning budget and no
+migration backlog to drain. Commitments, nullifiers, creation heights and
+coinbase values keep their existing lifetime state behavior.
 
-The storage-version-2 migration records a finite legacy leaf-index range and
-delays cleanup by 64 blocks. It removes at most the unused portion of the cleanup
-budget per block. That old backlog can temporarily exceed the steady-state
-bound. Migration restarts preserve progress. Commitments, nullifiers, creation
-heights and coinbase values retain their existing lifetime state behavior.
+A block may create at most 2048 output notes. Settlement requires the exact
+serialized length the declared crypto suite fixes, 1792 bytes for suite 1, so
+the per-block payload is bounded by construction and the profile carries that
+length in bytes 92..94. See [PROTOCOL-PROFILE.md](PROTOCOL-PROFILE.md).
 
-Once a ciphertext expires from current state, a wallet authenticates its creation
-height and follows parent-linked headers to read a trie proof at the exact
-creation block. The node must retain and serve that historical state. Missing or
-invalid archive data aborts scanning before advancing the affected watermark.
+A wallet scans by reading block bodies over headers it has authenticated. The
+node must retain and serve the bodies for the range being scanned. Missing or
+invalid body data aborts scanning before advancing the affected watermark.
 Coinbase discovery uses its authenticated public value and the wallet's miner
 viewing key. [AUTHENTICATED_READS.md](AUTHENTICATED_READS.md) defines the read bounds
 and the separate provider/checkpoint trust assumption.
 
 Every node built with this policy retains archive state and block bodies. Total
-disk use still grows with history, including fork history. The body-only M14
-layout remains a future storage optimization requiring authenticated body
-extraction, index interpretation, migration and recovery qualification. The live
-cache does not claim constant disk size or constant scan time.
+disk use still grows with history, including fork history. Scanning cost grows
+with the range a wallet has to walk.
 
 ## Qualification and remaining limits
 
 The regression suites cover call-policy admission, state-proof membership and
-absence, prefix completeness, profile mismatch, ciphertext expiry and archive
-recovery, bounded migration, legacy database refusal and fork transport progress.
+absence, prefix completeness, profile mismatch, legacy database refusal and fork
+transport progress.
 [WASM-BUDGET.md](WASM-BUDGET.md) provides an offline runtime-executor measurement
 harness with valid private/public proof fixtures and explicit component gates.
 
@@ -161,7 +154,7 @@ A fresh RocksDB-backed dev rehearsal passed isolated mining, follower restart,
 reconnect, actual PoW imports, work-based convergence, former-branch archive
 reads and native wallet synchronization. Its shallow fork is detailed below.
 Activation still needs long-partition and deep-reorganization qualification,
-replay/recovery on the selected deployed database, full-retention-window wallet
+replay/recovery on the selected deployed database, deep-history wallet
 recovery, and reference-hardware full-block and admission-capacity measurements.
 The exact cryptographic composition remains subject to independent assessment.
 
@@ -227,4 +220,4 @@ are stopped in cleanup, and their ports must be closed and bindable.
 This smoke covers a shallow fork, normal PoW imports, restart, archive reads,
 and native wallet synchronization. Deep forks and shorter heavier candidates
 have separate transport unit tests. It does not qualify long partitions,
-ciphertext expiry over the full retention window, or reference-hardware capacity.
+deep-history wallet recovery, or reference-hardware capacity.

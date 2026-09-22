@@ -64,10 +64,11 @@
           <p class="lede">Qnero is maintained by DigitalGuards, and it is MIT licensed.</p>
           <p class="sub">
             There is no foundation, no token sale, no pre-sale and no advisory board.
-            <code>pallet-sudo</code> is removed from the runtime. One privileged origin remains in
-            the code, a ranked tech collective, and the public testnet seeds it with nobody, so on
-            that chain nothing can dispatch as Root; section 03 writes out what a seeded one could
-            do. There is a repository. Read it, build it, run it, and disagree with it in public.
+            <code>pallet-sudo</code> is removed from the runtime, and so is the governance it
+            inherited. The chain has no privileged origin at all: nothing in the runtime can
+            produce a Root dispatch, so the call filter is the whole rule for every dispatch the
+            chain can execute. Section 03 writes out what that costs. There is a repository. Read
+            it, build it, run it, and disagree with it in public.
           </p>
         </div>
       </section>
@@ -134,16 +135,19 @@
           <div class="prose">
             <ul>
               <li>
-                <strong>There is a privileged origin, and it is not a user.</strong>
-                <code>pallet-sudo</code> is removed. What is in the runtime is a ranked tech
-                collective with its own referenda instance and a treasury pallet. The public
-                testnet seeds that collective with no members and configures no treasury, so on
-                the chain that is running there is no one who can raise a referendum. On a chain
-                that does seed members, a tech referendum dispatches as Root, and Root bypasses
-                <code>BaseCallFilter</code>, the filter that keeps transparent transfers out of
-                ordinary use: such a collective could move transparent value and enact a runtime
-                upgrade. The filter binds users. Root is exempt from it by design, and it is
-                written down in <code>docs/DESIGN.md</code> as a decision.
+                <strong>There is no privileged origin, and that cuts both ways.</strong>
+                <code>pallet-sudo</code> is removed, and so are the ranked tech collective, its
+                referenda instance and the custom origin its fast-upgrade track dispatched. Every
+                <code>frame-system</code> call that could write <code>:code</code>,
+                <code>:heappages</code> or a raw storage key is deleted from the fork, and every
+                Root-gated config origin is <code>NeverEnsureOrigin</code>, so <code>Root</code>
+                survives as a type nothing in the runtime can produce.
+                <code>BaseCallFilter</code> is therefore the whole rule for every dispatch this
+                chain can execute, and <code>runtime/tests/no_admin_keys.rs</code> is what pins
+                it. The cost is the other half: there is no on-chain upgrade path, so a consensus
+                change ships as a node release with a new genesis, and a relaunch discards the
+                shielded pool, which no new genesis can re-mint. It is written down in
+                <code>docs/DESIGN.md</code> section 7.7 as a decision.
               </li>
               <li>
                 <strong>Neither wallet verifies proof of work, and neither will in v1.</strong> A

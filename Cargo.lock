@@ -1963,6 +1963,7 @@ dependencies = [
  "rand_core 0.9.5",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "subtle",
  "thiserror",
  "zeroize",
@@ -2032,6 +2033,8 @@ dependencies = [
 name = "qnero-state-proof"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "serde_json",
  "sp-core",
  "sp-trie",
 ]

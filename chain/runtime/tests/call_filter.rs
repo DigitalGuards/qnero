@@ -74,6 +74,38 @@ fn propose_to(multisig_address: AccountId, payload: Vec<u8>) -> RuntimeCall {
 	})
 }
 
+fn approve(payload: Vec<u8>) -> RuntimeCall {
+	approve_to(account(3), payload)
+}
+
+fn approve_to(multisig_address: AccountId, payload: Vec<u8>) -> RuntimeCall {
+	RuntimeCall::Multisig(pallet_multisig::Call::approve {
+		multisig_address,
+		proposal_id: 0,
+		call: payload.try_into().expect("the payload fits MaxCallSize"),
+	})
+}
+
+/// A settlement whose declared weight is above `MaxInnerCallWeight`.
+///
+/// A `ShieldedOutput` with two empty ciphertexts encodes in two bytes, so a
+/// payload that fits `MaxCallSize` still declares thousands of slots, and
+/// `settlement_weight` charges four storage reads per slot plus three per tree
+/// leaf. The call itself is one v1 allows, which is what makes it the isolated
+/// case for the weight check.
+fn an_over_weight_settlement() -> RuntimeCall {
+	RuntimeCall::Shielded(pallet_shielded::Call::submit_public_batch {
+		proof: Vec::new(),
+		outputs: vec![
+			pallet_shielded::ShieldedOutput::<Runtime> {
+				ct_1: Default::default(),
+				ct_2: Default::default(),
+			};
+			4_000
+		],
+	})
+}
+
 /// Every dispatch this milestone closes, refused by the one error that says so.
 #[test]
 fn a_transparent_transfer_is_refused_with_call_filtered() {
@@ -167,6 +199,98 @@ fn a_multisig_proposal_carrying_a_transfer_is_not_contained() {
 
 		// And a proposal of a call v1 allows is still a proposal v1 allows.
 		assert!(QneroCallFilter::contains(&propose(remark().encode())));
+	});
+}
+
+/// `Multisig::approve` carries the payload a second time, and the filter reads
+/// it the same way.
+///
+/// An approver resubmits the proposal's bytes so a cold signer can decode what
+/// it is signing. Those bytes ride in the extrinsic exactly as `propose`'s do,
+/// so an unfiltered approval is the same publication of a sender, a recipient
+/// and an amount.
+#[test]
+fn a_multisig_approval_carrying_a_transfer_is_not_contained() {
+	new_test_ext().execute_with(|| {
+		assert!(!QneroCallFilter::contains(&approve(transfer(10 * UNIT).encode())));
+
+		let batched = RuntimeCall::Utility(pallet_utility::Call::batch_all {
+			calls: vec![transfer(10 * UNIT)],
+		});
+		assert!(!QneroCallFilter::contains(&approve(batched.encode())));
+
+		// One level is unwrapped here too, so a payload carrying a proposal or
+		// an approval of its own is refused without a second decode.
+		assert!(!QneroCallFilter::contains(&approve(
+			propose(transfer(10 * UNIT).encode()).encode()
+		)));
+		assert!(!QneroCallFilter::contains(&approve(
+			approve(transfer(10 * UNIT).encode()).encode()
+		)));
+		assert!(!QneroCallFilter::contains(&propose(
+			approve(transfer(10 * UNIT).encode()).encode()
+		)));
+
+		// A payload that can never execute is refused for that reason alone.
+		assert!(!QneroCallFilter::contains(&approve(vec![0xff, 0xff, 0xff])));
+		let mut trailing = remark().encode();
+		trailing.push(0x00);
+		assert!(!QneroCallFilter::contains(&approve(trailing)));
+
+		// And an approval of a call v1 allows is still an approval v1 allows.
+		assert!(QneroCallFilter::contains(&approve(remark().encode())));
+	});
+}
+
+/// A payload whose declared weight is above `MaxInnerCallWeight` can never
+/// execute, so it is refused before it reaches a block.
+///
+/// `pallet-multisig`'s phase 3b charges the proposer for the decode and then
+/// refuses with `CallWeightExceedsLimit`, which leaves the payload's bytes in
+/// the block all the same. The filter's verdict has to agree, and it does so
+/// on both the propose and the approve arm.
+#[test]
+fn an_over_weight_payload_is_refused_by_the_filter_and_the_pallet() {
+	new_test_ext().execute_with(|| {
+		let heavy = an_over_weight_settlement();
+		assert!(
+			QneroCallFilter::contains(&heavy),
+			"the call itself is one v1 allows, so only its weight can be the reason"
+		);
+		assert!(
+			heavy
+				.get_dispatch_info()
+				.call_weight
+				.any_gt(qnero_runtime::configs::MaxInnerCallWeight::get()),
+			"the fixture has to be over the limit for this test to say anything"
+		);
+
+		let payload = heavy.encode();
+		assert!(!QneroCallFilter::contains(&propose(payload.clone())));
+		assert!(!QneroCallFilter::contains(&approve(payload.clone())));
+
+		let signers = vec![account(1), account(2)];
+		let multisig = pallet_multisig::Pallet::<Runtime>::derive_multisig_address(&signers, 2, 0);
+		RuntimeCall::Multisig(pallet_multisig::Call::create_multisig {
+			signers,
+			threshold: 2,
+			nonce: 0,
+		})
+		.dispatch(RuntimeOrigin::signed(account(1)))
+		.expect("creating a multisig is allowed under v1");
+
+		assert_eq!(
+			pallet_multisig::Pallet::<Runtime>::propose(
+				RuntimeOrigin::signed(account(1)),
+				multisig,
+				payload.try_into().expect("the payload fits MaxCallSize"),
+				100,
+			)
+			.unwrap_err()
+			.error,
+			DispatchError::from(pallet_multisig::Error::<Runtime>::CallWeightExceedsLimit),
+			"and the pallet refuses it for the same reason"
+		);
 	});
 }
 
@@ -496,8 +620,9 @@ fn a_new_balance_moving_call_is_matched_here() {
 			"execute",
 		],
 		"pallet-multisig grew a call; `execute` dispatches an inner call and \
-		 `propose` publishes one as opaque bytes, and `refused_under_v1` unwraps \
-		 both, so a new call carrying an inner call has to join them"
+		 `propose` and `approve` each publish one as opaque bytes, and \
+		 `refused_under_v1` unwraps all three, so a new call carrying an inner \
+		 call has to join them"
 	);
 
 	// The runtime's own pallet list. A pallet added to `construct_runtime` with

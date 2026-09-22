@@ -169,7 +169,7 @@ pub fn build_constraints(targets: &SpendTargets, builder: &mut CircuitBuilder<F,
 
     // 2. The tree depth is shared by both paths, and split into bits exactly
     // once. The split is what range-constrains `depth`; the same bits then
-    // bound it to MAX_DEPTH and derive the 16 level flags. Splitting a second
+    // bound it to MAX_DEPTH and derive the 20 level flags. Splitting a second
     // time for the bound would add a BaseSumGate and a second comparison chain
     // over a value the first split already determines.
     //

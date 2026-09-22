@@ -10,13 +10,13 @@
 
 Run this **before** tagging or publishing a `qnero-node` / runtime release.
 CI green is not enough. The last ship-blocker we missed was a binary that
-could not sync a live chain — a fresh node would have caught it immediately.
+could not sync a live chain: a fresh node would have caught it immediately.
 
 Do not skip the sync gate for "small" client changes.
 
 Related:
 
-- Runtime upgrade after the release exists: [`RUNTIME_UPDATE.md`](./RUNTIME_UPDATE.md)
+- Upstream's runtime-upgrade procedure, which this chain has no dispatch for: [`RUNTIME_UPDATE.md`](./RUNTIME_UPDATE.md)
 - Warp sync details: [`FAST_SYNC.md`](./FAST_SYNC.md)
 - CLI exercise suite: `quantus-cli` README, `quantus exercise`
 
@@ -30,7 +30,6 @@ Related:
 | 2 | Fresh node full-syncs a live chain | **yes** | Idle at tip, no import/panic errors |
 | 3 | `quantus exercise` on a local `--dev` node | **yes** | All default phases pass |
 | 4 | Warp sync (if this release touches sync / checkpoints) | if relevant | Reaches tip in minutes |
-| 5 | `try-runtime` against live (if runtime changed) | if runtime changed | `on-runtime-upgrade` succeeds |
 
 Ship only after 1–3 are green.
 
@@ -125,7 +124,7 @@ This is the transaction suite we already run: `quantus exercise` against
 a `--dev` node. `crystal_alice` is genesis-funded there, so every default
 phase can run.
 
-**Terminal 1 — fresh dev node**
+**Terminal 1: fresh dev node**
 
 ```sh
 rm -rf /tmp/qnero-preflight-dev
@@ -134,7 +133,7 @@ rm -rf /tmp/qnero-preflight-dev
 
 Wait until it is producing blocks (`ws://127.0.0.1:9944`).
 
-**Terminal 2 — full suite**
+**Terminal 2: full suite**
 
 ```sh
 # Build or use a CLI that matches this runtime
@@ -142,14 +141,14 @@ quantus exercise --fail-fast
 ```
 
 Default phases (all required): `reads`, `balances`, `utility`, `reversible`,
-`multisig`, `vesting`, `negative`, `fuzz`, `wormhole`.
+`multisig`, `vesting`, `negative`, `fuzz`.
 
-Do **not** `--skip` phases for a release candidate. `wormhole` is slow; still
-run it. The `governance`, `preimage` and `upgrade` phases do not apply to this
-chain: the collective and its referenda are gone, `Preimage`'s calls are
-disabled, and there is no runtime-upgrade dispatch to rehearse. A CLI that
-still offers them will fail them; skip those three explicitly and record that
-you did.
+Do **not** `--skip` phases for a release candidate. The `governance`,
+`preimage`, `upgrade` and `wormhole` phases do not apply to this chain: the
+collective and its referenda are gone, `Preimage`'s calls are disabled, there
+is no runtime-upgrade dispatch to rehearse, and `pallet-wormhole` is out of the
+runtime. A CLI that still offers them will fail them; skip those four
+explicitly and record that you did.
 
 ### Pass
 
@@ -160,7 +159,7 @@ you did.
 ### Fail
 
 - Any phase fails.
-- Timeouts / "node not ready" after the node is clearly up — usually a
+- Timeouts / "node not ready" after the node is clearly up, usually a
   CLI/runtime mismatch; fix and rerun, do not ship.
 
 Reproduce a fuzz failure with the printed `--seed`.
@@ -169,21 +168,12 @@ Reproduce a fuzz failure with the printed `--seed`.
 
 ## 4. Runtime-changing releases only
 
-If `spec_version` / storage / migrations changed:
-
-```sh
-cargo build --release --features try-runtime
-try-runtime \
-  --runtime target/release/wbuild/qnero-runtime/qnero_runtime.wasm \
-  on-runtime-upgrade --disable-spec-version-check --blocktime 10000 \
-  live --uri wss://a1-heisenberg.quantus.cat
-```
-
-Repeat against Planck if that network will get the same wasm.
-
-After the GitHub release exists, the live upgrade itself is
-[`RUNTIME_UPDATE.md`](./RUNTIME_UPDATE.md) — that is post-ship, not this
-checklist.
+This chain has no on-chain upgrade dispatch, so there is no live
+`on-runtime-upgrade` to rehearse and no wasm to authorize. A `spec_version`,
+storage or genesis change ships as a node release with a new chain
+specification, and the genesis it produces is the chain from the moment it is
+deployed. Regenerate the spec from the final tree and confirm the genesis hash
+before tagging.
 
 ---
 

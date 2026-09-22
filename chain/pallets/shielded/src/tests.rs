@@ -158,7 +158,8 @@ fn a_settled_slot_writes_no_ciphertext_to_state() {
 }
 
 /// The retention window is zero and the hook that drained it is gone, so
-/// `on_initialize` reserves the coinbase mint and nothing else, at any height.
+/// `on_initialize` reserves the coinbase mint plus its own two kills, at any
+/// height.
 ///
 /// The constant stays in the pallet's metadata at zero on purpose: it is how a
 /// wallet reading the metadata is told where the payload lives, and
@@ -171,9 +172,11 @@ fn the_retention_constant_is_zero_and_the_prune_is_gone() {
 		assert_eq!(CiphertextRetentionBlocks::get(), 0);
 		let db: frame_support::weights::RuntimeDbWeight =
 			<Test as frame_system::Config>::DbWeight::get();
+		// Two writes: the hook kills `PendingCoinbase` and
+		// `OutputsWrittenThisBlock`.
 		let reservation =
 			<() as crate::weights::WeightInfo>::mint_coinbase(MaxCiphertextBytes::get())
-				.saturating_add(db.writes(1));
+				.saturating_add(db.writes(2));
 		for height in [1u64, 2, 65, 1_000_000] {
 			System::set_block_number(height);
 			assert_eq!(<Shielded as Hooks<u64>>::on_initialize(height), reservation);
@@ -2703,6 +2706,19 @@ fn a_full_block_defers_a_settlement_instead_of_dropping_it() {
 			// `ExhaustsResources` keeps it in the pool for the next block.
 			assert_eq!(
 				<Shielded as ValidateUnsigned>::pre_dispatch(&call),
+				Err(InvalidTransaction::ExhaustsResources.into())
+			);
+
+			// `validate_unsigned` is the half a gossiping node runs, and it
+			// gives the same answer. Reporting `Call` here would have the pool
+			// drop a settlement whose only problem is that this block is full,
+			// and the deferral `pre_dispatch` performs would never be reached
+			// because the transaction would already be gone.
+			assert_eq!(
+				<Shielded as ValidateUnsigned>::validate_unsigned(
+					TransactionSource::External,
+					&call
+				),
 				Err(InvalidTransaction::ExhaustsResources.into())
 			);
 

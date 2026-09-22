@@ -38,7 +38,7 @@ SCALE vector length prefix. Offsets below are zero-based, with the end excluded.
 | 0..8 | ASCII `QNRPRF01` |
 | 8..10 | Profile format version, currently 1 |
 | 10..20 | Five u16 versions: spend protocol, note codec, ciphertext codec, verifier artifact codec, header codec |
-| 20..22 | Maximum circuit tree depth |
+| 20..22 | Maximum circuit tree depth, 20 |
 | 22..27 | Tree arity, input count, output count, value range bits, QNR decimal places |
 | 27..32 | Five suite IDs: note/tree hash, proof hash, note KEM, note AEAD, child ordering |
 | 32..40 | Planck per pool step |
@@ -48,13 +48,14 @@ SCALE vector length prefix. Offsets below are zero-based, with the end excluded.
 | 52..60 | Four u16 parameters: leaf degree bits, private-batch wire count, routed wire count, extension degree |
 | 60..64 | Two u16 dimensions: leaves per private batch, private batches per public batch |
 | 64..76 | Three u32 public-input lengths: leaf, private batch, public batch |
-| 76 | Ciphertext storage mode: 1, live cache with archive-state recovery |
+| 76 | Ciphertext payload location: 2, block bodies under the header's extrinsics root |
 | 77 | Experimental proof-system flag: 1 |
 | 78..80 | Reserved, zero |
-| 80..84 | Live ciphertext retention, 64 blocks |
-| 84..88 | Maximum ciphertext writes per block, 2048 |
-| 88..92 | Maximum ciphertext prunes per block, 4096 |
-| 92..96 | Reserved, zero |
+| 80..84 | Ciphertext retention in state, 0 blocks |
+| 84..88 | Maximum output notes per block, 2048 |
+| 88..92 | Reserved, zero |
+| 92..94 | Serialized suite-1 note ciphertext length, 1792 bytes |
+| 94..96 | Reserved, zero |
 | 96..128 | Leaf verifier artifact digest |
 | 128..160 | Private-batch verifier artifact digest |
 | 160..192 | Public-batch verifier artifact digest |
@@ -65,10 +66,13 @@ ML-KEM-1024 for note delivery; ChaCha20-Poly1305 for note encryption; sorted
 quaternary children for the commitment tree. The declared proof target remains
 100 bits and is separate from the security level of the note KEM.
 
-The ciphertext mode bounds current-state payload retention. Historical wallet
-recovery needs an archive node that can serve creation-block state proofs.
-Node operators must preserve that history; this profile does not make pruned
-payloads recoverable from an ordinary current-state node.
+The payload-location byte reads 2: note ciphertexts ride in block bodies and a
+wallet authenticates them against the header's extrinsics root. The chain keeps
+no copy in state, which is why the retention field is zero. Wallet recovery
+needs a node that retains and serves block bodies for the range being scanned.
+Bytes 92..94 carry the exact serialized length settlement requires of every
+suite-1 note ciphertext, so a wallet reads that consensus rule out of the
+profile it already authenticates.
 
 ## Reproducible artifacts
 

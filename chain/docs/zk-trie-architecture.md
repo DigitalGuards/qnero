@@ -2,6 +2,12 @@
 
 A 4-ary Poseidon Merkle tree that provides ZK-friendly commitment to all transfers on the Quantus chain.
 
+> Carried in with the subtree. The tree itself is Qnero's and `pallet-shielded`
+> appends to it, but every part of this document that describes `pallet-wormhole`,
+> `WormholeProofRecorderExtension`, the transparent exit or the wormhole leaf
+> encoding describes a removed path: the pallet left the runtime at M6. The depth
+> constants are current and cited to their source lines below.
+
 ## Why a Separate Tree?
 
 Substrate's storage trie uses Blake2b hashing. Blake2b is fast for native execution but extremely expensive inside ZK circuits (~100x more constraints than Poseidon). A user wanting to prove "I received 500 QTU" would need to verify Blake2b Merkle paths inside a SNARK -- this would make proofs impractically slow and large.
@@ -63,16 +69,19 @@ Depth 3 (capacity: 64 leaves)
 | 2     | 16            | Grows automatically      |
 | 3     | 64            |                          |
 | ...   | ...           |                          |
-| 16    | ~4.3 × 10^9   | Max depth the **circuits** accept (see below) |
+| 20    | ~1.1 × 10^12  | Max depth the **circuits** accept (see below) |
 | 32    | ~1.8 × 10^19  | Max depth the on-chain tree may grow to |
 
 The tree grows dynamically -- when the 5th leaf arrives, depth increases from 1 to 2. The old root becomes child[0] of a new root node.
 
 ### Circuit depth limit (known, accepted limitation)
 
-The on-chain tree may grow up to depth 32 (`MAX_TREE_DEPTH` in `pallets/zk-tree`), but the
-wormhole circuits only accept Merkle paths up to depth 20 (`MAX_DEPTH` in
-`qp-zk-circuits-common/src/zk_merkle.rs`). The circuit pads every proof's witness to the
+The on-chain tree may grow up to depth 32 (`MAX_TREE_DEPTH`, `chain/pallets/zk-tree/src/lib.rs:72`),
+but the spend circuit only accepts Merkle paths up to depth 20
+(`MAX_TREE_DEPTH`, `crates/qnero-circuit/src/chain.rs:74`, aliased there as
+`crate::merkle::MAX_DEPTH`). The pallet carries the same number as
+`CIRCUIT_MAX_TREE_DEPTH` (`chain/pallets/zk-tree/src/lib.rs:84`), and `pallet-shielded`
+const-asserts the two equal. The circuit pads every proof's witness to the
 full `MAX_DEPTH` levels, so **every leaf proof pays the proving cost of a depth-20 path
 regardless of the tree's actual depth** -- that is why the circuit constant is kept as
 small as safely possible instead of matching the on-chain cap.
@@ -80,7 +89,7 @@ small as safely possible instead of matching the on-chain cap.
 **What happens at the limit:** once leaf 4^20 + 1 (~1.1 trillion) is inserted, the tree
 grows to depth 21, all Merkle proofs gain a 21st sibling level, and the prover and
 on-chain verifier reject them. Existing funds are never lost and nullifier state is
-untouched -- wormhole proof *generation* simply halts until the circuit is updated.
+untouched: proof *generation* simply halts until the circuit is updated.
 
 **The plan is to do a circuit update when (long before) that happens.** Rough timeline
 to exhaustion at the 120 s target (the block-count row scales with the target, the
@@ -96,14 +105,14 @@ rate rows do not):
 circuit depth quadruples capacity. The relaunch bundle spent one such step, 16 → 20,
 for ~256× the runway; `docs/BENCH.md` measured what it cost the leaf circuit.
 
-**What the update involves:** bump `MAX_DEPTH` in `qp-zk-circuits-common`, release the
-circuit crates, rebuild -- `pallets/wormhole/build.rs` regenerates and embeds the new
-verifier binaries automatically -- regenerate the proof test fixtures
-(`regenerate_*_fixture` tests), re-benchmark weights, and ship a normal runtime upgrade.
-The code change is a one-line constant; the end-to-end effort is on the order of days of
-engineering inside a standard release cycle. Proofs built against the old circuit become
-invalid at the upgrade (wallets/provers must update in step), but spent nullifiers
-persist, so nothing can double-spend across the transition.
+**What the update involves:** bump `MAX_TREE_DEPTH` in `crates/qnero-circuit/src/chain.rs`
+and `CIRCUIT_MAX_TREE_DEPTH` in `chain/pallets/zk-tree/src/lib.rs` together, release the
+circuit crates, rebuild so `chain/pallets/shielded/build.rs` regenerates and embeds the new
+verifier binaries, refresh the three release digests in `crates/qnero-circuit/src/profile.rs`,
+regenerate the proof test fixtures, and re-benchmark weights. The code change is two
+constants; the end-to-end effort is on the order of days of engineering. This chain has no
+on-chain upgrade dispatch, so the depth move ships as a node release with a new genesis, and
+every wallet and prover moves with it.
 
 ### Hashing Strategy
 
@@ -212,8 +221,8 @@ Every balance transfer on the chain is automatically captured and recorded into 
 Root recomputation is deliberately **batched per block**: a per-insert path update
 costs `depth` Poseidon hashes and `3·depth` sibling reads for every transfer, while
 the batched pass costs roughly `n/4 + n/16 + … + depth` hashes for a block with `n`
-transfers. Nothing on-chain needs the root mid-block — exit proofs verify against
-historical block headers — so during block execution `Root` is simply the root as of
+transfers. Nothing on-chain needs the root mid-block, since exit proofs verify against
+historical block headers, so during block execution `Root` is simply the root as of
 the end of the previous block.
 
 ### 2. Generating a ZK Proof

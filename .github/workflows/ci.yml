@@ -1,0 +1,121 @@
+---
+# The repository's CI.
+#
+# GitHub reads workflows from `.github/` at the repository root and nowhere
+# else, so `chain/.github/workflows/` is inert: it arrived with the upstream
+# subtree and describes upstream's self-hosted runners. This file is what
+# actually runs, and it covers both workspaces, because `chain` is excluded
+# from the root workspace and has its own lock file and its own pinned rustfmt.
+#
+# The `chain-spec` job is the expensive one and the reason it exists is that
+# `chain/node/tests/testnet_spec.rs` skips itself when the binary carries a stub
+# runtime. Every other job sets `SKIP_WASM_BUILD=1`, so without this job the
+# committed chain spec would be compared against nothing and the skip would be
+# the only thing anyone ever saw. It builds the node with the real runtime wasm
+# and sets `QNERO_REQUIRE_WASM=1`, which turns that skip into a failure.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: format
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: format, the root workspace
+        run: cargo fmt --all -- --check
+      - name: format, the chain workspace
+        working-directory: chain
+        # The wrapper installs and pins the nightly rustfmt the tree is
+        # formatted with; rustfmt output drifts between nightlies.
+        run: ./scripts/fmt.sh --all -- --check
+
+  root:
+    name: root workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-build-deps
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: root
+      - name: clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # Release, because the proving and verification tests are minutes in
+      # release and hours unoptimized.
+      - name: test
+        run: cargo test --locked --workspace --release
+
+  chain:
+    name: chain workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SKIP_WASM_BUILD: 1
+    defaults:
+      run:
+        working-directory: chain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-build-deps
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: chain
+          workspaces: chain
+      # No `--all-targets` here, unlike the root workspace. The vendored
+      # `client/litep2p` carries upstream's own lint policy and its test
+      # targets do not pass clippy's defaults, so this matches what the chain
+      # tree has always linted: library targets, denied on warning.
+      - name: clippy
+        run: cargo clippy --locked --workspace -- -D warnings
+      - name: check the feature gates
+        run: cargo check --locked --workspace --features runtime-benchmarks,try-runtime
+      - name: test
+        run: cargo test --locked --workspace
+
+  chain-spec:
+    name: chain spec, against a real runtime wasm
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: chain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-build-deps
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: chain-spec
+          workspaces: chain
+      # No SKIP_WASM_BUILD anywhere in this job, and QNERO_REQUIRE_WASM makes
+      # the tests refuse to skip, so a binary that somehow carried a stub fails
+      # here instead of reporting a pass nobody read.
+      #
+      # `--release` is required, not a speed choice. `substrate-wasm-builder`
+      # writes to `target/<outer profile>/wbuild`, and a dev-profile build
+      # leaves the blob uncompacted and uncompressed, so its exported `:code`
+      # is not the committed spec's. The committed spec comes from the release
+      # binary the runbook ships, and this is the profile that reproduces it.
+      - name: the committed spec is what this tree exports
+        env:
+          QNERO_REQUIRE_WASM: 1
+        run: cargo test --locked --release -p qnero-node --test testnet_spec
+      - name: every chain id this node accepts is a qnero chain
+        env:
+          QNERO_REQUIRE_WASM: 1
+        run: cargo test --locked --release -p qnero-node --test naming_guard

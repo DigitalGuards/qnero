@@ -34,20 +34,23 @@ frame_benchmarking::define_benchmarks!(
 	[pallet_treasury, TreasuryPallet]
 	[pallet_multisig, Multisig]
 	[pallet_utility, Utility]
+	[pallet_vesting, Vesting]
 	[pallet_scheduler, Scheduler]
 	[pallet_qpow, QPoW]
 );
 
-// Four suites left this list with the governance removal.
+// Three suites left this list with the governance removal.
 //
 // `pallet_ranked_collective` and `pallet_referenda` went with their pallets.
-// `pallet_preimage` and `pallet_vesting` went because their benchmarks call
-// `try_successful_origin()` on an origin that is now `NeverEnsureOrigin`:
-// preimage panics on the `expect`, vesting maps the failure to
-// `BenchmarkError::Stop`. `pallet_scheduler` stays because its own benchmarks
-// answer `BenchmarkError::Weightless` for exactly that case.
+// `pallet_preimage` went because its benchmarks call `try_successful_origin()`
+// on an origin that is now `NeverEnsureOrigin` and panic on the `expect`.
+// `pallet_scheduler` stays because its own benchmarks answer
+// `BenchmarkError::Weightless` for exactly that case, and `pallet_vesting` is
+// back for the same reason: `Vesting::claim` is a user call, the one vesting
+// call v1 allows, so it is measured here, and the three administered calls
+// report `Weightless` because `AdminOrigin` is `NeverEnsureOrigin` and nothing
+// can dispatch them.
 //
-// The relaunch does not regenerate weights, so both pallets keep their
-// `SubstrateWeight` figures. That is acceptable for calls no origin can
-// dispatch: `Preimage` is `#[runtime::disable_call]` and every vesting admin
-// call is refused by the filter and by its origin.
+// The relaunch does not regenerate weights, so `Preimage` keeps its
+// `SubstrateWeight` figures. That is acceptable for a pallet that is
+// `#[runtime::disable_call]`.

@@ -28,6 +28,7 @@ use crate::MILLI_UNIT;
 use codec::{Decode, DecodeLimit, Encode, MaxEncodedLen};
 use frame_support::{
 	derive_impl,
+	dispatch::GetDispatchInfo,
 	pallet_prelude::TypeInfo,
 	parameter_types,
 	traits::{
@@ -221,23 +222,40 @@ fn refused_under_v1(call: &RuntimeCall) -> bool {
 		// here and held to the same rule as any other call.
 		RuntimeCall::Multisig(pallet_multisig::Call::propose { call, .. }) =>
 			the_proposal_is_refused(call),
+		// `approve` carries the proposal's payload a second time. The approver
+		// resubmits the bytes so a cold signer can decode what it is signing,
+		// and the pallet holds the approval to `call == proposal.call`. Those
+		// bytes ride in the extrinsic exactly as `propose`'s do, so an approval
+		// left unfiltered would publish the sender, the recipient and the
+		// amount that `propose` was refused for. The same rule applies to it.
+		RuntimeCall::Multisig(pallet_multisig::Call::approve { call, .. }) =>
+			the_proposal_is_refused(call),
 		_ => moves_transparent_value(call) || enrols_in_a_feature_v1_refuses(call),
 	}
 }
 
-/// Whether a `Multisig::propose` payload is refused.
+/// Whether a `Multisig::propose` or `Multisig::approve` payload is refused.
 ///
-/// Three ways it is, and the two that are not about the payload's contents
-/// mirror the pallet's own phase-3 checks
-/// (`chain/pallets/multisig/src/lib.rs`, the `decode_with_depth_limit` and the
-/// canonical re-encode): bytes that do not decode at
-/// [`pallet_multisig::MAX_MULTISIG_CALL_DEPTH`], and bytes that decode but are
-/// not the decoded call's own canonical encoding, can never execute. The
-/// pallet refuses both with `InvalidCall` after taking a fee, and a payload
-/// that can never execute has no reason to enter a block at all, so this layer
-/// refuses them first and the two layers give the same verdict.
+/// Four ways it is, and three of them mirror the pallet's own phase-3 checks
+/// (`chain/pallets/multisig/src/lib.rs`): bytes that do not decode at
+/// [`pallet_multisig::MAX_MULTISIG_CALL_DEPTH`], bytes that decode but are not
+/// the decoded call's own canonical encoding, and a decoded call whose
+/// dispatch weight is above [`MaxInnerCallWeight`]. None of the three can ever
+/// execute. The pallet refuses the first two with `InvalidCall` and the third
+/// with `CallWeightExceedsLimit`, in each case after taking a fee, and a
+/// payload that can never execute has no reason to enter a block at all, so
+/// this layer refuses them first and the two layers give the same verdict.
 ///
-/// The third is the point of the arm: a payload that decodes to a call v1
+/// The pallet's fourth phase-3 check, `CallNotAllowedForHighSecurityMultisig`,
+/// is not mirrored here. Its verdict depends on whether the multisig address
+/// is enrolled in high security, which is a storage read, and this filter runs
+/// on a call alone with no state to consult. It only ever tightens the pallet's
+/// answer: `is_call_allowed_given` admits every call for an account that is not
+/// high security, and under v1 no account can become one, because
+/// [`enrols_in_a_feature_v1_refuses`] refuses `set_high_security`. So the
+/// filter being silent there leaves the pallet strictly stricter.
+///
+/// The fourth way is the point of the arm: a payload that decodes to a call v1
 /// refuses is refused here too.
 ///
 /// One level is unwrapped. A payload that itself carries a proposal, directly
@@ -251,18 +269,25 @@ fn the_proposal_is_refused(payload: &[u8]) -> bool {
 	) else {
 		return true;
 	};
-	decoded.encode() != payload || carries_a_proposal(&decoded) || refused_under_v1(&decoded)
+	if decoded.encode() != payload {
+		return true;
+	}
+	if decoded.get_dispatch_info().call_weight.any_gt(MaxInnerCallWeight::get()) {
+		return true;
+	}
+	carries_a_proposal(&decoded) || refused_under_v1(&decoded)
 }
 
-/// Whether a call is a `Multisig::propose`, or carries one in a wrapper
-/// [`refused_under_v1`] would unwrap.
+/// Whether a call is a `Multisig::propose` or `Multisig::approve`, or carries
+/// one in a wrapper [`refused_under_v1`] would unwrap.
 ///
-/// Walks typed calls only and decodes nothing, which is what makes the
-/// one-level rule in [`the_proposal_is_refused`] a bound rather than a
-/// preference.
+/// Both of those carry a payload that would need a decode of its own, so both
+/// stop the walk here. It walks typed calls only and decodes nothing, which is
+/// what bounds the one-level rule in [`the_proposal_is_refused`].
 fn carries_a_proposal(call: &RuntimeCall) -> bool {
 	match call {
-		RuntimeCall::Multisig(pallet_multisig::Call::propose { .. }) => true,
+		RuntimeCall::Multisig(pallet_multisig::Call::propose { .. }) |
+		RuntimeCall::Multisig(pallet_multisig::Call::approve { .. }) => true,
 		RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) =>
 			calls.iter().any(carries_a_proposal),
 		RuntimeCall::Multisig(pallet_multisig::Call::execute { call, .. }) =>
@@ -963,9 +988,10 @@ impl pallet_vesting::Config for Runtime {
 	type AdminOrigin = NeverEnsureOrigin<AccountId>;
 	type TreasuryAccount = TreasuryAccountOption;
 	type AssetId = AssetId;
-	// Nothing to record: a vesting payout is a transparent transfer, the call
-	// filter refuses `claim` and `create_schedule` under v1, and there is no
-	// exit path a leaf could feed. The pallet rolls a payout back when the
+	// Nothing to record: a vesting payout pays a beneficiary fixed at genesis
+	// an amount fixed at genesis, the call filter refuses `create_schedule` so
+	// no new schedule can appear, and there is no exit path a leaf could feed.
+	// The pallet rolls a payout back when the
 	// recorder reports a dropped credit, so this one reports success; see
 	// [`NoTransferProofNeeded`].
 	type ProofRecorder = NoTransferProofNeeded;

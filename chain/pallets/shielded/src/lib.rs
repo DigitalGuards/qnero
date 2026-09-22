@@ -881,20 +881,21 @@ pub mod pallet {
 		/// Clear the previous block's coinbase payload and reserve what minting
 		/// this block's costs.
 		///
-		/// The kill is what makes [`PendingCoinbase`]'s presence mean "this
-		/// block already has one": a payload that survived its block would
-		/// refuse the next block's inherent, and a mandatory dispatch that
-		/// fails is a dead block. The reservation covers the work
-		/// `deposit_coinbase` does in `pallet-mining-rewards`' `on_finalize`,
-		/// which is one tree append, two map writes and the pool update, at
-		/// the largest ciphertext this runtime accepts. The hook does nothing
-		/// else: the payload lives in block bodies, so there is no retention
-		/// window to expire and no pruning budget to reserve.
+		/// The first kill is what makes [`PendingCoinbase`]'s presence mean
+		/// "this block already has one": a payload that survived its block
+		/// would refuse the next block's inherent, and a mandatory dispatch
+		/// that fails is a dead block. The second resets this block's output
+		/// budget. The reservation covers the work `deposit_coinbase` does in
+		/// `pallet-mining-rewards`' `on_finalize`, which is one tree append,
+		/// two map writes and the pool update, at the largest ciphertext this
+		/// runtime accepts, plus the two writes the two kills are. The hook
+		/// does nothing else: the payload lives in block bodies, so there is no
+		/// retention window to expire and no pruning budget to reserve.
 		fn on_initialize(_block_number: BlockNumberFor<T>) -> Weight {
 			PendingCoinbase::<T>::kill();
 			OutputsWrittenThisBlock::<T>::kill();
 			T::WeightInfo::mint_coinbase(T::MaxCiphertextBytes::get())
-				.saturating_add(<T as frame_system::Config>::DbWeight::get().writes(1))
+				.saturating_add(<T as frame_system::Config>::DbWeight::get().writes(2))
 		}
 
 		/// Both embedded verifier artifacts have to load.
@@ -1209,6 +1210,28 @@ pub mod pallet {
 		}
 	}
 
+	/// How a `plan_settlement` failure reads to the pool and to the block
+	/// builder.
+	///
+	/// `TooManyOutputsInBlock` is the one failure that says nothing about the
+	/// submission itself: the block already holds
+	/// [`Config::MaxOutputsPerBlock`] outputs, and the same bytes plan cleanly
+	/// against the next block. `ExhaustsResources` is what defers a
+	/// transaction, so the builder skips it and keeps it, and the pool keeps it
+	/// too. Mapping it to `Call` would drop it as permanently invalid and lose
+	/// a settlement that nothing was wrong with. Every other planning failure
+	/// is about the submission and stays `Call`.
+	///
+	/// Both [`ValidateUnsigned::validate_unsigned`] and
+	/// [`ValidateUnsigned::pre_dispatch`] go through here, so the two cannot
+	/// give the same submission different verdicts.
+	fn settlement_plan_error<T: Config>(error: Error<T>) -> InvalidTransaction {
+		match error {
+			Error::<T>::TooManyOutputsInBlock => InvalidTransaction::ExhaustsResources,
+			_ => InvalidTransaction::Call,
+		}
+	}
+
 	#[pallet::validate_unsigned]
 	impl<T: Config> ValidateUnsigned for Pallet<T> {
 		type Call = Call<T>;
@@ -1262,8 +1285,7 @@ pub mod pallet {
 				Call::submit_private_batch { proof, outputs } => {
 					let parsed = Self::pre_validate_private_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
-					Self::plan_settlement(&parsed, outputs)
-						.map_err(|_| InvalidTransaction::Call)?;
+					Self::plan_settlement(&parsed, outputs).map_err(settlement_plan_error)?;
 					let verified = Self::validate_private_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
 					Self::bind_payload(&verified, outputs).map_err(|_| InvalidTransaction::Call)?;
@@ -1272,8 +1294,7 @@ pub mod pallet {
 				Call::submit_public_batch { proof, outputs } => {
 					let parsed = Self::pre_validate_public_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
-					Self::plan_settlement(&parsed, outputs)
-						.map_err(|_| InvalidTransaction::Call)?;
+					Self::plan_settlement(&parsed, outputs).map_err(settlement_plan_error)?;
 					let verified =
 						Self::validate_public_batch(proof).map_err(|_| InvalidTransaction::Call)?;
 					Self::bind_payload(&verified, outputs).map_err(|_| InvalidTransaction::Call)?;
@@ -1342,10 +1363,7 @@ pub mod pallet {
 				Call::submit_private_batch { proof, outputs } => {
 					let parsed = Self::pre_validate_private_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
-					Self::plan_settlement(&parsed, outputs).map_err(|e| match e {
-						Error::<T>::TooManyOutputsInBlock => InvalidTransaction::ExhaustsResources,
-						_ => InvalidTransaction::Call,
-					})?;
+					Self::plan_settlement(&parsed, outputs).map_err(settlement_plan_error)?;
 					let bundle = Self::validate_private_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
 					Self::check_settlement(&bundle, outputs)
@@ -1355,10 +1373,7 @@ pub mod pallet {
 				Call::submit_public_batch { proof, outputs } => {
 					let parsed = Self::pre_validate_public_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
-					Self::plan_settlement(&parsed, outputs).map_err(|e| match e {
-						Error::<T>::TooManyOutputsInBlock => InvalidTransaction::ExhaustsResources,
-						_ => InvalidTransaction::Call,
-					})?;
+					Self::plan_settlement(&parsed, outputs).map_err(settlement_plan_error)?;
 					let bundle =
 						Self::validate_public_batch(proof).map_err(|_| InvalidTransaction::Call)?;
 					Self::check_settlement(&bundle, outputs)
