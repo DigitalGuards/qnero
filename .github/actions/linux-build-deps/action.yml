@@ -1,0 +1,37 @@
+---
+name: linux build dependencies
+description: >
+  The system packages and rust targets a qnero build needs on an ubuntu runner.
+  The toolchain itself comes from rust-toolchain.toml, which rustup reads on the
+  first cargo invocation, so nothing here pins a channel.
+
+runs:
+  using: composite
+  steps:
+    - name: system packages
+      shell: bash
+      run: |
+        sudo apt-get update -yqq
+        sudo apt-get install -yqq --no-install-recommends \
+          clang libclang-dev protobuf-compiler
+    - name: libclang, for bindgen and rocksdb
+      shell: bash
+      run: |
+        # clang-sys finds libclang through this. The runner ships several llvm
+        # versions and may point at one that has no libclang in it.
+        for version in 18 17 16 15 14; do
+          directory="/usr/lib/llvm-$version/lib"
+          if ls "$directory"/libclang*.so* >/dev/null 2>&1; then
+            echo "LIBCLANG_PATH=$directory" >> "$GITHUB_ENV"
+            break
+          fi
+        done
+    - name: rust targets and components
+      shell: bash
+      run: |
+        # wasm32v1-none builds the runtime and wasm32-unknown-unknown the
+        # browser prover. rust-toolchain.toml asks for both at the root; the
+        # chain workspace has no toolchain file of its own, so they are added
+        # here for the jobs that run there.
+        rustup target add wasm32v1-none wasm32-unknown-unknown
+        rustup component add clippy rust-src

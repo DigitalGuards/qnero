@@ -125,15 +125,24 @@ fn no_subcommand_help_says_quantus() {
 /// every preset builder returns its own "wasm not available" and there is no
 /// spec to read. That one case is a skip, and only when the variable is
 /// actually set, so a missing wasm for any other reason is still a failure.
+/// `QNERO_REQUIRE_WASM=1` closes the skip, which is how CI runs this test; see
+/// `testnet_spec.rs` for the same rule.
 fn chain_spec(id: &str) -> Option<serde_json::Value> {
 	let output = node(&["build-spec", "--chain", id, "--disable-default-bootnode"]);
 	if !output.ok {
 		let skipped_the_wasm = std::env::var_os("SKIP_WASM_BUILD").is_some() &&
 			output.stderr.contains("wasm not available");
 		if skipped_the_wasm {
+			assert!(
+				std::env::var_os("QNERO_REQUIRE_WASM").is_none(),
+				"QNERO_REQUIRE_WASM is set, so the chain spec half of the rename guard has to \
+				 run against a real runtime wasm. This binary was built with SKIP_WASM_BUILD \
+				 set and carries a stub. Rebuild qnero-node without it."
+			);
 			eprintln!(
 				"SKIP_WASM_BUILD is set and this binary carries no runtime wasm; \
-				 skipping the chain spec half of the rename guard for --chain {id}"
+				 skipping the chain spec half of the rename guard for --chain {id}. Set \
+				 QNERO_REQUIRE_WASM=1 to make this a failure."
 			);
 			return None;
 		}
