@@ -130,7 +130,10 @@ export function Reveals(): ReactNode {
           leaf slots settled with them, and the fee those slots paid. A segment the chain skipped,
           for a nullifier another submission spent first or for an anchor it could no longer
           resolve, is in neither count. Each settled slot publishes its two nullifiers, the two
-          commitments it appended, both leaf indices and both ciphertexts.
+          commitments it appended, both leaf indices and the size of each output's note
+          ciphertext. The ciphertexts themselves are in the block body, inside the submission
+          that appended the leaves, and in no chain state: what the event carries is the two
+          lengths.
         </p>
         <p>
           A slot has two input positions, and a settled nullifier marks one position consumed. A
