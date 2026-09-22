@@ -13,11 +13,9 @@
  * during M4, and a wallet holding a copy would have been wrong with nothing on
  * chain to catch it.
  *
- * This mirrors `crates/qnero-wallet/src/fee.rs` rule for rule, including which
- * of the two bounds on the memo pad is a refusal and which is a warning.
+ * This mirrors `crates/qnero-wallet/src/fee.rs` rule for rule.
  */
 
-import { formatStepsAsQnr } from '../lib/units';
 import type { ShieldedConstants } from '../chain/api';
 
 /** The divisor, clamped the way the pallet clamps it. A zero would divide by zero. */
@@ -83,10 +81,19 @@ export function ensureCiphertextFits(
 /**
  * The memo pad against the runtime's cap: a refusal.
  *
- * The looser of the two bounds on the pad, and the only one that stops a
- * spend. A runtime that lowered `MaxCiphertextBytes` below a padded ciphertext
- * would fail every send, memoless ones included, and the only message an
- * operator saw would be about a size no memo of theirs controls.
+ * The only bound on the pad that stops a spend, and now the only bound left. A
+ * runtime that lowered `MaxCiphertextBytes` below a padded ciphertext would
+ * fail every send, memoless ones included, and the only message an operator
+ * saw would be about a size no memo of theirs controls.
+ *
+ * The pad used to be decided by a second, tighter bound as well: it had to
+ * keep an honest pair a fee bucket below a pair padded to the cap, because the
+ * chain did not parse these bytes and nothing held a submission to a real
+ * ciphertext shape. Settlement now requires the exact length the declared
+ * crypto suite fixes, so the padded pair is refused outright and the
+ * separation priced a state nobody can reach. What holds the pad instead is
+ * the protocol profile: it carries the length, and the wallet refuses a chain
+ * whose profile is not the one it was built for.
  */
 export function ensureMemoPadFits(
   constants: ShieldedConstants,
@@ -105,76 +112,3 @@ export function ensureMemoPadFits(
   }
 }
 
-/**
- * The memo pad against the runtime's divisor: a warning, printed once.
- *
- * The tighter of the two bounds. `CiphertextBytesPerFeeQuantum` is sized so an
- * honest pair and a pair padded to the cap land in different fee buckets; the
- * chain never parses these bytes and `Shielded::Ciphertexts` is never pruned,
- * so once the buckets merge a settler pads both outputs to the cap, writes the
- * extra permanent state and pays what an honest spend pays.
- *
- * It is not a refusal, and that is the whole point of this function. The
- * property is chain wide: a settler pads to the cap whatever this wallet does,
- * so refusing would stop every send this wallet makes and fix nothing. The
- * operator cannot change the divisor, and a wallet shrinking its own pad below
- * everyone else's would publish its own ciphertext length, which is the leak
- * the pad exists to close.
- */
-export function memoPadSeparationWarning(
-  constants: ShieldedConstants,
-  paddedCiphertextBytes: number,
-  memoBytes: number,
-  fixedBytes: number,
-): string | null {
-  const cap = constants.maxCiphertextBytes;
-  const sent = slotFeeFloor(constants, paddedCiphertextBytes, paddedCiphertextBytes);
-  const capped = slotFeeFloor(constants, cap, cap);
-  if (sent < capped) {
-    return null;
-  }
-  const pad = largestSeparatingPad(constants, fixedBytes);
-  const advice =
-    pad === null
-      ? `no pad restores it under this runtime: even an unpadded pair of ${fixedBytes} bytes ` +
-        'each pays what a pair padded to the cap pays, so the divisor is what has to come down'
-      : `a coordinated move of the memo pad down to ${pad} bytes would restore it, and every ` +
-        'wallet on the chain has to make it together';
-  return (
-    "this runtime's payload fee prices nothing. This wallet pads every memo to " +
-    `${memoBytes} bytes, so the pair of ciphertexts a spend publishes is ` +
-    `${2 * paddedCiphertextBytes} bytes and pays ${formatStepsAsQnr(sent)} of payload fee, and ` +
-    `a pair padded to this runtime's cap of ${cap} bytes each pays ${formatStepsAsQnr(capped)}. ` +
-    `A settler can pad both outputs to the cap and write ` +
-    `${2 * Math.max(0, cap - paddedCiphertextBytes)} bytes of permanent state per slot for what ` +
-    'an honest spend pays. It is a property of the chain and not of this spend, so the spend ' +
-    `goes ahead. This runtime charges 0.01 QNR per ` +
-    `${constants.ciphertextBytesPerFeeQuantum} ciphertext bytes; ${advice}.`
-  );
-}
-
-/**
- * The largest memo pad that keeps this wallet's pair a fee bucket below a pair
- * padded to the cap, or null when no pad does.
- *
- * A pair of `total` bytes pays `ceil(total / q)`. The cap's pair pays
- * `ceil(2 * cap / q)`, so the largest total strictly below that bucket is
- * `(ceil(2 * cap / q) - 1) * q`, and half of it less the fixed part of a
- * ciphertext is the pad. At 512 and 2048 that is 61, which is where the pad
- * comes from.
- */
-export function largestSeparatingPad(
-  constants: ShieldedConstants,
-  fixedBytes: number,
-): number | null {
-  const quantum = bytesPerQuantum(constants);
-  const cap = BigInt(constants.maxCiphertextBytes);
-  const capBucket = divCeil(cap * 2n, quantum);
-  if (capBucket === 0n) {
-    return null;
-  }
-  const largestTotal = (capBucket - 1n) * quantum;
-  const each = Number(largestTotal / 2n);
-  const pad = each - fixedBytes;
-  return pad < 0 ? null : pad;
-}

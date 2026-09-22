@@ -19,7 +19,10 @@ export const POOL_STEP_PLANCK = 10n ** 10n;
 
 export const TOKEN_SYMBOL = 'QNR';
 
-/** The size the reference wallet pads every note ciphertext to. Anything else was written by something else. */
+/** The size every note ciphertext is. On a settlement leaf the chain requires it of every
+ * suite-1 ciphertext, so anything else there is unreachable and a size that is not this one is
+ * an invariant violation. On a shield entry note it is still the reference wallet's pad, and a
+ * different size there was written by something else. */
 export const REFERENCE_CIPHERTEXT_BYTES = 1792;
 
 export function stepsToPlanck(steps: bigint): bigint {

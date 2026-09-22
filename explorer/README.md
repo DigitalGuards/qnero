@@ -222,9 +222,12 @@ Each of these is a decision.
   a read that failed, a state the node no longer keeps, a request that carries
   the reader's own value to a node. Reasoning goes in prose, behind a
   disclosure, or on the reveals page.
-- **It does not sort by ciphertext size or by anchor gap.** Both are documented
-  open leaks. The size is shown per leaf, and a size other than 1792 bytes is
-  marked, because that is worth knowing; neither is a sortable column.
+- **It does not sort by ciphertext size or by anchor gap.** The anchor gap is a
+  documented open leak. The size is one on a shield entry note, where the pad is
+  a convention, and closed on a settlement, where the chain requires exactly
+  1792 bytes per output. The size is shown per leaf either way: on an entry note
+  a different size is marked as non-reference, and on a settlement output it is
+  marked as an invariant violation. Neither is a sortable column.
 - **It does not decode a settlement's anchor height.** The anchor is a public
   input inside the proof. The settlement page states the window the chain
   enforced, which is what the site can establish from chain state alone.

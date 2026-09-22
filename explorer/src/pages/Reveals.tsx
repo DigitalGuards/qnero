@@ -222,9 +222,11 @@ export function Reveals(): ReactNode {
         <p>
           Both are real and neither is this site&rsquo;s to close. The gap between a spend&rsquo;s
           anchor block and the block it settles in is a per-wallet marker that tracks the
-          prover&rsquo;s speed, and both numbers are public. A note ciphertext of any size other
-          than {formatCount(REFERENCE_CIPHERTEXT_BYTES)} bytes was written by something other than
-          the reference wallet and is itself a fingerprint.
+          prover&rsquo;s speed, and both numbers are public. A shield entry note of any size
+          other than {formatCount(REFERENCE_CIPHERTEXT_BYTES)} bytes was written by something
+          other than the reference wallet and is itself a fingerprint. On a settlement the chain
+          now requires that exact size, so the size leak is closed there and a different one is
+          an invariant violation rather than a fingerprint.
         </p>
         <p>
           This site shows a ciphertext size where it matters and marks a non-reference one, and it
