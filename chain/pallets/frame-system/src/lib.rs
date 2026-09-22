@@ -57,7 +57,7 @@
 //! the origin on it is called. The enforcement is structural: the function that
 //! writes the code key does not exist, so no origin, no threshold of keys and no
 //! filter relaxation can reach it. A consensus change ships as a node release
-//! with a new genesis. `docs/DESIGN.md` section 7.6 carries the decision and its
+//! with a new genesis. `docs/DESIGN.md` section 7.7 carries the decision and its
 //! cost, and `runtime/tests/no_admin_keys.rs` is the proof.
 //!
 //! `Config::OnSetCode` and `Config::AuthorizeUpgradeOrigin` stay in the trait,

@@ -57,7 +57,7 @@ and nothing that says why.
 The chain: 120 second blocks, RandomX proof of work, an initial difficulty of
 5 000, one endowed account at genesis (the faucet's), no treasury, no vesting
 and no privileged origin of any kind. `chain/runtime/src/genesis_config_presets/mod.rs`
-carries the reasoning for the genesis; `docs/DESIGN.md` section 7.6 carries the
+carries the reasoning for the genesis; `docs/DESIGN.md` section 7.7 carries the
 reasoning for the last of those. The short version is in section 4.
 
 ## 2. Prerequisites
@@ -180,7 +180,7 @@ What is in it, and what is deliberately not:
   binary, and with them every `frame-system` dispatchable that could write `:code`,
   `:heappages` or a raw storage key. No chain this binary launches has an origin that can
   change its own rules, so **there is no runtime upgrade on this chain** and the recovery
-  for a runtime bug is a relaunch. `docs/DESIGN.md` section 7.6 carries the decision and
+  for a runtime bug is a relaunch. `docs/DESIGN.md` section 7.7 carries the decision and
   its cost; on a testnet it is the cheaper side of the trade.
 - **No sudo.** There is no sudo pallet in this runtime.
 - **A 120 000 ms target block time**, written into `pallet_qpow::TargetBlockTimeMs` at

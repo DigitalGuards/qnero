@@ -618,7 +618,7 @@ fn qnero_testnet_faucet_account() -> AccountId {
 /// - **No collective exists to seed.** The tech collective, its referenda instance and the
 ///   fast-upgrade origin were removed from the runtime itself, so this is a property of the binary
 ///   rather than of the preset. No chain this binary launches has an origin that can change its own
-///   rules; the recovery for a consensus bug is a relaunch. `docs/DESIGN.md` section 7.6 carries
+///   rules; the recovery for a consensus bug is a relaunch. `docs/DESIGN.md` section 7.7 carries
 ///   the decision.
 /// - **No sudo.** There is no sudo pallet in this runtime and nothing should add one back.
 ///

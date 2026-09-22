@@ -10,7 +10,7 @@ tech collective, its referenda instance and the `FastUpgrade` origin were
 removed from the runtime, and the nine `frame-system` dispatchables that could
 write `:code`, `:heappages` or a raw storage key were deleted from the fork. No
 origin can replace the code, because the function that writes the code key does
-not exist. `docs/DESIGN.md` section 7.6 carries the decision and its cost;
+not exist. `docs/DESIGN.md` section 7.7 carries the decision and its cost;
 `runtime/tests/no_admin_keys.rs` carries the proof.
 
 What follows is what replaces it.

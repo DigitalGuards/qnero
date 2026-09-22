@@ -6,7 +6,7 @@ How to produce a committed, raw JSON chain spec for a network profile
 build is not what goes in.
 
 The genesis runtime is also the runtime for that chain's whole life. No
-dispatchable can replace `:code` (`docs/DESIGN.md` section 7.6), so the file
+dispatchable can replace `:code` (`docs/DESIGN.md` section 7.7), so the file
 this procedure produces is the last word on what the chain executes, and the
 hash it is published with is what an operator checks before joining.
 
