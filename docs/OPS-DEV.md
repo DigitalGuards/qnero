@@ -5835,9 +5835,11 @@ release binaries, which is the rule the runbook states and the reason nothing
 after the regeneration touches a consensus constant. `build-testnet-spec.sh`
 ran with `QNERO_BOOTNODES` unset, so the committed bootnode list was preserved
 and is still the seed node's single entry, and `--check` then printed that the
-committed spec matches what this binary exports. The new genesis hash is
+committed spec matches what this binary exports. The genesis hash that regeneration produced is
 `0x58464dd7a6823f4bd8d17d7badd6778054562153eee085b3e80d5e6c94fa3df9`, read off
-a 40-second dry start of the committed file. Against the spec it replaces,
+a 40-second dry start of the committed file. It is superseded: the relaunch
+review's runtime fixes moved it again, and the entry below carries the hash the
+committed spec produces now. Against the spec it replaces,
 genesis moved in five keys and lost three, and nowhere else: `:code`, which is
 132 KB smaller than the runtime 105 blob; `System::LastRuntimeUpgrade`, now 106;
 `pallet-shielded`'s storage version, now 3; the 192-byte protocol profile, now
@@ -5909,3 +5911,69 @@ write it into the monitor's expected-genesis value, clear the monitor's
 remembered height and alert state, reset the watchdog's height, and start the
 faucet. Balances belong to the genesis they were mined under, and the
 announcement says so in both wallets' wording.
+
+## The relaunch review's fixes, and the spec regenerated on top of them, 2026-09-22
+
+Nothing of the bundle was deployed, so the review's runtime findings were fixed
+in place and the spec was regenerated from the fixed tree. The genesis hash
+moved with it, to
+`0x4dd537e588961989767628c781844aaa819b9a996872a5d97d14818a252c2414`, read off a
+dry start of the committed file. `build-testnet-spec.sh` ran with
+`QNERO_BOOTNODES` unset, so the seed node's entry is still the one field the
+deployment wrote, and it sits outside genesis. The file grew by 1 002 bytes,
+all of it `:code`.
+
+Three runtime changes are what moved it. The call filter gained an arm for
+`Multisig::approve`, which carries a proposal's payload a second time and was
+publishing the sender, recipient and amount that `propose` was refused for; the
+payload check now also mirrors the pallet's phase 3b weight limit, and its doc
+comment says which of the pallet's four phase-3 checks it mirrors and why the
+high-security one is left to the pallet, that verdict needing a storage read
+this filter has no state to make. `pallet-shielded`'s `validate_unsigned` was
+reporting a full block as `InvalidTransaction::Call`, which the pool reads as
+permanently invalid and drops, while `pre_dispatch` already answered
+`ExhaustsResources`; both halves go through one helper now, so a gossiping node
+cannot destroy the settlement the block builder would have kept. And
+`on_initialize` kills two storage items while reserving one write.
+
+Outside the runtime: `pallet_vesting` is back in `define_benchmarks!`, because
+`Vesting::claim` is a user call and the three administered calls answer
+`BenchmarkError::Weightless` under `NeverEnsureOrigin`, which lets the run
+continue. `scripts/check-native-upgrade.py` pins the profile's tree depth at 20
+and its settlement ciphertext length at 1792. And CI exists at last:
+`chain/.github/workflows/` has never run, because GitHub reads `.github/` from
+the repository root, so there is a root workflow now. Its `chain-spec` job is
+the one that matters here. `testnet_spec.rs` and `naming_guard.rs` skip
+themselves when the binary carries a stub runtime, and every other job sets
+`SKIP_WASM_BUILD=1`, so that job builds the node with its real wasm and sets
+`QNERO_REQUIRE_WASM=1`, which turns the skip into a failure.
+
+### Gates
+
+```
+# the repository root
+cargo fmt --all -- --check                                        0
+scripts/build-testnet-spec.sh                                     wrote 1 239 814 bytes
+
+# the chain workspace
+chain/scripts/fmt.sh --all -- --check                             0
+cargo check -p qnero-runtime -p pallet-shielded -p pallet-vesting
+  --all-targets (SKIP_WASM_BUILD=1)                               0
+cargo test -p qnero-runtime --test call_filter --test no_admin_keys
+                                                                  13 + 5 passed
+cargo test -p pallet-shielded -p pallet-multisig -p pallet-vesting
+                                                                  91 + 62 + 73 passed, 1 ignored
+cargo build --release -p qnero-node                               20m 29s, wasm built
+QNERO_REQUIRE_WASM=1 cargo test -p qnero-node
+  --test testnet_spec --test naming_guard                         see below
+```
+
+The workstation is shared, so every cargo invocation ran at `nice -n 19` with
+six build jobs or fewer. Benchmarks were not run, and weights were not
+regenerated: the three administered vesting calls no origin can dispatch keep
+their `SubstrateWeight` figures, which is what the note in
+`runtime/src/benchmarks.rs` says.
+
+What is left is the host, and none of it was touched here. The runbook's
+"On the host" list is still the order, and the expected-genesis value it writes
+into the monitor is the hash above.
