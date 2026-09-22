@@ -375,10 +375,10 @@
                 the payment's output slot per spend.
               </li>
               <li>
-                <strong>A refused transparent transfer still enters a block.</strong> The call
-                filter is checked at dispatch, so the extrinsic pays its fee and then fails, and its
-                arguments stay in the body forever. One mistaken attempt publishes exactly the
-                sender, recipient and amount triple the policy exists to deny.
+                <strong>A refused transparent transfer publishes nothing.</strong> The call filter
+                runs when an extrinsic is checked, before the pool admits it, so no block carries
+                the transfer, no fee is paid and no event names it. Its sender, recipient and
+                amount reach the chain nowhere.
               </li>
             </ul>
             <p>

@@ -444,41 +444,45 @@ export function Block({ id }: { id: string }): ReactNode {
 }
 
 /**
- * The calls this block refused, and the ones that failed for another reason.
+ * The calls this block admitted and that then failed.
+ *
+ * A call the runtime's filter refuses is invalid at validation, so it reaches
+ * no block and appears here never. The `CallFiltered` rendering below is kept
+ * for the one layer the filter still guards at dispatch, an internally
+ * dispatched call, which is the only way that error can still reach an event.
  *
  * The panel is dropped only when a state read answered and held no failure. A
  * failure is an event, and an unread event log decodes to none, so dropping the
- * panel over one reported "nothing was refused in this block" by absence, on
- * the panel a reader opens to find out whether anything was.
+ * panel over one reported "nothing failed in this block" by absence, on the
+ * panel a reader opens to find out whether anything did.
  */
 function RefusedCalls({ block }: { block: BlockDetail }): ReactNode {
-  const filtered = block.failures.filter((failure) => failure.filtered);
   if (block.stateError === null && block.failures.length === 0) {
     return null;
   }
   return (
-    <Panel title={`Refused and failed calls ${panelCount(block.failures, block.stateError)}`}>
+    <Panel title={`Failed calls ${panelCount(block.failures, block.stateError)}`}>
       {block.stateError === null ? null : (
-        <NotRead what="the refused and failed calls" error={block.stateError} />
+        <NotRead what="the failed calls" error={block.stateError} />
       )}
-      {filtered.length === 0 ? null : (
+      {block.failures.length === 0 ? null : (
         <>
           <p>
-            A refused call is still a valid extrinsic, and its arguments stay in the block body.
+            A call that failed is still a valid extrinsic, and its arguments stay in the block body.
           </p>
           <Why summary="Why this page names the call and not the arguments">
             <p>
-              The filter is checked at dispatch, so the call entered this block, paid its fee, and
-              then failed. Its full arguments are in the body forever, and a mistaken transparent
-              transfer publishes exactly the sender, recipient and amount the chain&rsquo;s policy
-              exists to deny. Reprinting them here would publish them a second time in a form built
-              for reading.
+              A call the runtime&rsquo;s filter refuses never gets this far: it is invalid at
+              validation, so it enters no block and publishes nothing. What reaches a block is a
+              call that was admitted and then failed on its own terms, and its full arguments are in
+              the body forever. Reprinting them here would publish them a second time in a form
+              built for reading.
             </p>
           </Why>
         </>
       )}
       {block.failures.length === 0 ? null : (
-        <TableWrap label="Refused and failed calls in this block">
+        <TableWrap label="Failed calls in this block">
           <table>
             <thead>
               <tr>

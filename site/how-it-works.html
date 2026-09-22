@@ -359,12 +359,12 @@
               the payment's output slot per spend.
             </p>
             <p>
-              <strong>A refused transparent transfer publishes everything.</strong> The call filter
-              is checked at dispatch, so a transparent transfer is a valid extrinsic that enters a
-              block, pays its fee and then fails. Its arguments are in the block body and its
-              failure is in the events, permanently. One mistaken attempt publishes exactly the
-              sender, recipient and amount triple the policy exists to deny. A wallet should refuse
-              these calls client-side.
+              <strong>A refused transparent transfer publishes nothing.</strong> The call filter
+              runs when an extrinsic is checked, before the pool admits it and before the block
+              body records it. A transparent transfer therefore enters no block, pays no fee and
+              leaves no event, and its sender, recipient and amount reach the chain nowhere. The
+              filter unwraps the wrappers in the same place, a multisig proposal's opaque payload
+              included.
             </p>
             <p>
               Two smaller leaks are recorded and open: a padding slot publishes zero commitments, so
