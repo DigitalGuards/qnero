@@ -836,7 +836,7 @@ impl Wallet {
                     if !appended.contains(&block.number) {
                         continue;
                     }
-                    let body = chain.authenticated_body(&block.hash)?;
+                    let body = chain.authenticated_body(block)?;
                     for payload in chain.block_payloads(metadata, &body)? {
                         let Ok(parsed) = NoteCiphertext::from_bytes(&payload) else {
                             continue;
