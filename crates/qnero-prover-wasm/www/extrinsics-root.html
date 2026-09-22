@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Qnero extrinsics root: the browser acceptance</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 24px;
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      h1 { font-size: 16px; margin: 0 0 4px; }
+      p.note { margin: 0 0 20px; max-width: 72ch; opacity: 0.75; }
+      #status { margin: 0 0 16px; font-weight: 600; }
+      pre {
+        margin: 0;
+        padding: 12px;
+        overflow-x: auto;
+        border: 1px solid currentColor;
+        border-radius: 4px;
+        opacity: 0.9;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Qnero extrinsics root: the browser acceptance</h1>
+    <p class="note">
+      Load a built prover module in a real browser, initialise it, and ask it
+      for the extrinsics root of both known-answer bodies. The Rust side
+      already asserts these two roots; what this page adds is that the module
+      as built and optimised answers them inside a browser, which is the one
+      thing no Rust test can say. A module optimised by a binaryen too old to
+      know this target fails at <code>init</code> with
+      <code>WebAssembly.Table.grow(): failed to grow table</code> and never
+      reaches the first call.
+    </p>
+    <p id="status">waiting for the runner</p>
+    <pre id="result">no run yet</pre>
+    <script type="module">
+      // The runner hands the vectors in rather than the page fetching them:
+      // the fixtures are the repository's, outside the directory this server
+      // serves, and a copy of a known answer beside the page is a second
+      // answer that can be edited to agree with a module that moved.
+      const status = document.getElementById("status");
+      const result = document.getElementById("result");
+
+      globalThis.__qneroExtrinsicsRoot = async ({ pkgUrl, vectors }) => {
+        const report = { pkgUrl, init: null, initMillis: null, vectors: [] };
+        status.textContent = `loading ${pkgUrl}`;
+        const module = await import(pkgUrl);
+        const started = performance.now();
+        try {
+          await module.default();
+        } catch (error) {
+          report.init = `failed: ${error?.message ?? String(error)}`;
+          status.textContent = report.init;
+          result.textContent = JSON.stringify(report, null, 2);
+          return report;
+        }
+        report.initMillis = Math.round(performance.now() - started);
+        report.init = "ok";
+        report.crossOriginIsolated = globalThis.crossOriginIsolated === true;
+
+        for (const vector of vectors) {
+          status.textContent = `rooting ${vector.name}`;
+          const row = { name: vector.name, expected: vector.root };
+          try {
+            row.answered = module.extrinsicsRoot(
+              JSON.stringify({ extrinsics: vector.extrinsics }),
+            );
+          } catch (error) {
+            row.answered = `threw: ${error?.message ?? String(error)}`;
+          }
+          row.matches = row.answered === vector.root;
+          report.vectors.push(row);
+        }
+        status.textContent = report.vectors.every((row) => row.matches)
+          ? "both roots match"
+          : "a root does not match";
+        result.textContent = JSON.stringify(report, null, 2);
+        return report;
+      };
+
+      status.textContent = "ready";
+    </script>
+  </body>
+</html>
