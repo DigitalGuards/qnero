@@ -5969,6 +5969,7 @@ scripts/build-testnet-spec.sh                                     wrote 1 239 81
 chain/scripts/fmt.sh --all -- --check                             0
 cargo check -p qnero-runtime -p pallet-shielded -p pallet-vesting
   --all-targets (SKIP_WASM_BUILD=1)                               0
+cargo clippy --locked --workspace -- -D warnings                  0
 cargo test -p qnero-runtime --test call_filter --test no_admin_keys
                                                                   13 + 5 passed
 cargo test -p pallet-shielded -p pallet-multisig -p pallet-vesting
@@ -5977,6 +5978,13 @@ cargo build --release -p qnero-node                               20m 29s, wasm 
 QNERO_REQUIRE_WASM=1 cargo test --release -p qnero-node
   --test testnet_spec --test naming_guard                         4 + 6 passed
 ```
+
+Chain clippy runs without `--all-targets`, which is what the tree has always
+linted and what the root workflow now pins. Adding it fails in the vendored
+`client/litep2p`, whose test targets carry upstream's own lint policy: five
+errors, an unused `ParseError` import and four unhandled read or write amounts,
+none of them this tree's code. The root workspace has no such member and does
+get `--all-targets`.
 
 The workstation is shared, so every cargo invocation ran at `nice -n 19` with
 six build jobs or fewer. Benchmarks were not run, and weights were not

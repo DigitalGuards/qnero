@@ -77,8 +77,12 @@ jobs:
         with:
           shared-key: chain
           workspaces: chain
+      # No `--all-targets` here, unlike the root workspace. The vendored
+      # `client/litep2p` carries upstream's own lint policy and its test
+      # targets do not pass clippy's defaults, so this matches what the chain
+      # tree has always linted: library targets, denied on warning.
       - name: clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace -- -D warnings
       - name: check the feature gates
         run: cargo check --locked --workspace --features runtime-benchmarks,try-runtime
       - name: test
