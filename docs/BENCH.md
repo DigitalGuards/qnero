@@ -1282,3 +1282,740 @@ measurements. Full successful settlement, block import,
 disk costs, admission under legitimate congestion and minimum-hardware capacity
 remain unqualified. Production runtimes omit the measurement exports; changes to
 the execution logic or build configuration require fresh measurements.
+
+# M16: measurements before the relaunch bundle (2026-09-21)
+
+## ML-KEM-1024 decapsulation, and what one ciphertext costs a scan (2026-09-22)
+
+`docs/BENCH.md` has named the decapsulation unmeasured twice, under M8 and
+under M10, and every wallet-scan figure in `docs/DESIGN.md` 12.6 is parametric
+on it. This section measures it on both sides of the wasm boundary, and
+measures the scan step the wallet actually calls around it.
+
+### The machine
+
+A GCP `c3-highcpu-22` bench VM: Intel Xeon Platinum 8481C at 2.70 GHz, 22
+vCPU, 43 GB, Ubuntu 24.04, Rust 1.93.0, nothing else running on the box. Every
+section above this one was measured on the dev workstation (AMD Ryzen AI 9 365,
+WSL2), so a row here and a row there are two machines and their ratio is not
+like for like. Ratios *within* this section are like for like: both columns ran
+on this VM, minutes apart.
+
+Every row is one thread. The native invocations set `RAYON_NUM_THREADS=1` and
+nothing in these paths uses rayon; `-j 20` is build parallelism. The browser
+rows are the single-threaded module in one dedicated Worker.
+
+### The invocations
+
+Native, from the repository root:
+
+```
+RAYON_NUM_THREADS=1 cargo test --release -j 20 -p qnero-pqcrypto \
+  --test m16_ml_kem_bench -- --ignored --nocapture --test-threads 1
+RAYON_NUM_THREADS=1 cargo test --release -j 20 -p qnero-prover-wasm \
+  --test m16_scan_bench -- --ignored --nocapture --test-threads 1
+```
+
+Both are `#[ignore]`d tests added for M16, in the house style of
+`tests/native_bench.rs`. The second one also writes the two fixture
+ciphertexts the browser harness loops over, into the gitignored
+`www/results/`.
+
+Browser, from `crates/qnero-prover-wasm/www`:
+
+```
+node run-scan.mjs --n 2000 --derive 500 --pkg ./results/pkg-m16/qnero_prover_wasm.js
+```
+
+`run-scan.mjs`, `scan.html`, `scan-harness.js` and `scan-worker.js` are the M16
+browser harness, beside M8's `run.mjs` rather than inside it, so a flag here
+cannot move which invocation an M8 row came from. They share `server.mjs`, the
+Chromium discovery and nothing else. Chrome for Testing 143.0.7499.4 from the
+Playwright cache, `--js-flags=--wasm-max-mem-pages=32768`, served over
+`http://localhost` with COOP and COEP, so the page is cross-origin isolated and
+`performance.now` is coarsened to five microseconds rather than a hundred.
+
+Each row reports both clocks: per-call samples, and the whole loop timed once
+and divided by the call count. The ratios below use the second, which carries
+no per-sample clock cost. The two agree everywhere here to under one percent.
+
+### The module the browser rows ran against
+
+The `www/pkg` already built on the VM fails at module init in this Chromium
+with `WebAssembly.Table.grow(): failed to grow table by 4`. It fails the same
+way under the repository's own `run.mjs`, so it is the module rather than the
+new harness: binaryen on that box is `wasm-opt version 108`, old enough to pin
+a maximum on the externref table that wasm-bindgen 0.2.128 then cannot grow.
+
+So the browser column ran against a module rebuilt on the VM from the same
+commit, through `cargo build --target wasm32-unknown-unknown --lib` and
+`wasm-bindgen --target web`, with no `wasm-opt` pass. That is the same shape of
+module M8 measured, and it is not the optimised module the wallet ships, which
+is a reason to treat the browser rows as a ceiling on module quality rather
+than a statement about the shipped bundle.
+
+### What each row is
+
+The note channel is ML-KEM-1024 encapsulation to the recipient's `ek` plus
+ChaCha20-Poly1305 over the payload and the memo. A wallet scanning the chain
+decapsulates once per ciphertext, whoever it was addressed to: a ciphertext
+addressed elsewhere still produces a shared secret, and what refuses it is the
+note AEAD's tag. That path never reaches the memo, which is why the two browser
+rows differ at all.
+
+Two shapes of scan call are timed because the wallet and the browser take
+different arguments. `qnero-wallet`'s per-leaf step (`wallet.rs::try_transfer`)
+takes an incoming viewing key it derived once for the whole scan. The browser's
+`decryptNote` takes a seed, so it rebuilds the key tree, and with it one
+ML-KEM key generation, on every ciphertext. `deriveAccount` is timed beside
+them because it is that same derivation plus the encapsulation key and the
+address, so the two halves of `decryptNote` can be read apart.
+
+### Native, one thread
+
+Medians, and the loop average that the rates come from, in microseconds.
+
+| | median | mean | p95 | loop total/n | per second |
+|---|---:|---:|---:|---:|---:|
+| **decapsulate, crate API** | **92.23** | 92.86 | 97.25 | **92.92** | **10762** |
+| decapsulate, `ml-kem` 0.3.2 directly, key parsed once | 83.69 | 84.12 | 88.63 | 84.17 | 11881 |
+| encapsulate, crate API | 78.14 | 78.77 | 83.12 | 78.84 | 12685 |
+| key generation, crate API | 82.40 | 82.93 | 87.49 | 84.11 | 11889 |
+
+Five thousand iterations per row, one thousand for key generation. A rerun
+minutes later reproduced every row, and both logs are kept.
+
+The second row is the same lattice work with the decapsulation key parsed once
+outside the clock. `MlKemSecretKey::decapsulate` parses the expanded key on
+every call, and the gap between those two rows is what that parse costs.
+
+The scan rows, from the same VM, five thousand iterations each and two thousand
+for the two derivation rows.
+
+| | median | mean | p95 | loop total/n | per second |
+|---|---:|---:|---:|---:|---:|
+| wallet per-leaf step, ciphertext addressed to this wallet | 100.36 | 101.16 | 106.04 | 101.22 | 9879 |
+| wallet per-leaf step, ciphertext addressed elsewhere | 95.69 | 96.27 | 101.05 | 96.33 | 10381 |
+| `decrypt_note_json`, the `decryptNote` body, ours | 194.37 | 195.10 | 200.60 | 195.18 | 5124 |
+| `decrypt_note_json`, the `decryptNote` body, elsewhere | 186.09 | 186.76 | 192.20 | 186.81 | 5353 |
+| `derive_account_json`, the `deriveAccount` body | 135.93 | 137.11 | 142.20 | 137.19 | 7289 |
+| incoming viewing key from a seed | 86.98 | 87.62 | 92.40 | 88.85 | 11255 |
+
+Each ciphertext is one output of a synthetic 2-in / 2-out transfer, and its
+bytes are mostly the KEM's.
+
+| one output ciphertext | bytes |
+|---|---:|
+| ML-KEM-1024 ciphertext | 1568 |
+| header, note payload, padded memo | 224 |
+| total | 1792 |
+
+### The browser, one thread
+
+Two thousand ciphertexts per shape, five hundred derivations, in milliseconds.
+
+| | median | mean | p95 | loop total/n | per second |
+|---|---:|---:|---:|---:|---:|
+| `decryptNote`, ciphertext addressed to this wallet | 0.470 | 0.4735 | 0.490 | 0.4740 | 2110 |
+| `decryptNote`, ciphertext addressed elsewhere | 0.455 | 0.4536 | 0.460 | 0.4540 | 2203 |
+| `deriveAccount` | 0.355 | 0.3591 | 0.385 | 0.3595 | 2782 |
+
+A scan holds one ciphertext at a time, and the module's high-water mark says
+so: after four and a half thousand of them, linear memory is the module at rest
+plus one page.
+
+| | |
+|---|---:|
+| module fetch, compile and instantiate, one sample | 18.3 ms |
+| linear memory after init | 8.2 MiB |
+| peak linear memory over the whole run | 8.3 MiB |
+
+Three invocations were run, two against the rebuilt module in one out-dir and
+one after it was moved. The published row is the third. The two `decryptNote`
+rows agree across all three to three significant figures, 0.473 and 0.473 and
+0.474 ms for ours and 0.455 and 0.455 and 0.454 ms for the stranger's.
+`deriveAccount` does not: the first two invocations put it at 0.343 ms and the
+published third at 0.3595 ms, a spread of about 5 percent, so its 2.62x ratio
+below is the slowest of the three and reads as a ceiling.
+
+### The wasm penalty, and the scan rate
+
+Loop averages, browser against native, on the same box.
+
+| call | native | browser | ratio |
+|---|---:|---:|---:|
+| `decryptNote`, ciphertext addressed to this wallet | 195.2 us | 474.0 us | 2.43x |
+| `decryptNote`, ciphertext addressed elsewhere | 186.8 us | 454.0 us | 2.43x |
+| `deriveAccount` | 137.2 us | 359.5 us | 2.62x |
+
+That is a tighter penalty than M8's proving stages carried. Those ran on a
+different machine and on a different workload, so read this as this workload's
+ratio on this box rather than as a revision of M8's.
+
+The rate `docs/DESIGN.md` 12.6 wants, per second per thread:
+
+| path | native | browser |
+|---|---:|---:|
+| per ciphertext, key derived per call, which is the exported API today | 5353 | 2203 |
+| per ciphertext, key derived once per scan | 10381 | about 4000, estimated |
+
+The browser estimate is the native per-leaf step carried across at the measured
+ratio. There is no export that takes a viewing key, so that figure is an
+inference, and it is flagged again below.
+
+### What these numbers decide
+
+**A browser scan is a decapsulation loop.** Almost every microsecond of the
+per-leaf step is the KEM, whichever wallet the ciphertext was addressed to.
+
+| the per-leaf step, ciphertext addressed elsewhere | us |
+|---|---:|
+| ML-KEM-1024 decapsulation | 92.8 |
+| parse, the failed note AEAD, everything else | 3.5 |
+| total | 96.3 |
+
+So any plan to make a scan faster is a plan about ML-KEM, or about running it
+fewer times.
+
+**What a first sync costs in a tab, at the rate as it stands:**
+
+| ciphertexts on the chain | browser, exported API | browser, key derived once, estimated | native CLI wallet |
+|---:|---:|---:|---:|
+| 100000 | 45 s | 25 s | 10 s |
+| 1000000 | 7.6 min | 4.2 min | 1.6 min |
+
+A million ciphertexts is minutes of flat-out single-core wasm in a tab, before
+any of the fetching, tree folding or header walking that M10 measured around
+it. The phone factor M8 states, 2 to 4 and a floor, multiplies the browser
+column directly.
+
+**Two cheap wins are now priced.** The wallet's seed-taking `decryptNote` spends
+more of its time deriving keys than opening ciphertexts, and an export that
+took a viewing key once per scan would roughly halve the per-ciphertext cost.
+Below that, the crate's decapsulation re-parses the expanded secret key on
+every call, and the two decapsulation rows above price that parse. A scan holds
+one key for its whole life.
+
+**The threaded module is the other lever.** M10 measured 3.36x from four wasm
+threads on the prover. A scan is embarrassingly parallel over ciphertexts, so
+the same pool should apply, and that is unmeasured here.
+
+### What this leaves unmeasured
+
+- **The browser scan with a reused viewing key.** The 4000 per second is an
+  inference from the native row at the measured ratio. Measuring it needs an
+  export that holds a key across calls, which is a change to the crate's public
+  surface rather than to a harness.
+- **Threads.** Every row here is one thread. No scan was run on the threaded
+  module.
+- **The shipped module.** The browser rows ran against a module with no
+  `wasm-opt` pass, because the optimised one on the bench VM cannot initialise
+  under that box's binaryen. What the shipped module scans at is unmeasured.
+- **A phone.** Still no device. The M8 factor is the only bridge.
+- **A chain walk.** These rows price one ciphertext. A sync also fetches, folds
+  64-leaf windows, pages the nullifier set and walks every header, which is
+  M10's territory, and none of it is in these rows.
+- **Wrong-length and malformed ciphertexts.** Every ciphertext here parses. A
+  node serving garbage would be refused before the decapsulation, which is
+  cheaper, and no row bounds that path.
+
+## The leaf circuit at tree depth 20 (2026-09-22)
+
+`docs/DESIGN.md` 12.5 decides to raise `MAX_TREE_DEPTH` from 16 to 20 before
+genesis, gated on one build: keep 16 if depth 20 moves the leaf circuit off
+`degree_bits = 9`. This section is that build, plus the two things that would
+have to move with it, the private batch that recursively verifies the leaf and
+the artifact set a runtime embeds.
+
+### The machine
+
+The same GCP `c3-highcpu-22` bench VM as the section above: Intel Xeon Platinum
+8481C at 2.70 GHz, 22 vCPU, 43 GB, Ubuntu 24.04, cargo and rustc 1.93.0.
+Nothing else ran on the box. Every section above M16 was measured on the dev
+workstation, so a row here against a row there is two machines and the ratio is
+not like for like. The depth-16 and depth-20 columns below are like for like:
+the same box, the same toolchain, minutes apart, one constant different.
+
+Every measured number is single threaded. plonky2's `parallel` feature is off
+in all three invocations, which the logs print as `parallel : false`, and
+`RAYON_NUM_THREADS=1` was exported anyway. The `-j 20` in each command line is
+rustc build parallelism and touches no prover thread.
+
+### The invocations
+
+From the repository root, once with the tree as it stands and once with
+`crates/qnero-circuit/src/chain.rs` `MAX_TREE_DEPTH` set to 20 and nothing else
+changed:
+
+```
+RAYON_NUM_THREADS=1 cargo test --release -j 20 -p qnero-prover \
+  --test spend -- --ignored --nocapture --test-threads 1
+RAYON_NUM_THREADS=1 cargo test --release -j 20 -p qnero-aggregator \
+  --test bench -- --ignored --nocapture --test-threads 1
+cargo run --release -j 20 -p qnero-circuit-builder -- \
+  --output /tmp/m16-artifacts-<depth> --skip-padding-batch
+```
+
+The first two are the existing `#[ignore]`d tests, `leaf_gate_count` and
+`private_batch_cost_at_the_chain_default`. No harness was added for this
+section. The third is the generator `chain/pallets/shielded/build.rs` calls,
+driven through the builder's own CLI at the same dimensions the build script
+passes, 6 leaf slots and 53 private batches per public batch, so the chain
+workspace and `pallet-zk-tree`'s mirrored `CIRCUIT_MAX_TREE_DEPTH` stayed
+untouched at 16 throughout.
+
+One reading trap in the raw logs: the leaf test's banner line hardcodes the
+string `MAX_DEPTH=16` and prints it at either depth. The constant actually
+compiled in is the one each log's header greps out of `chain.rs`.
+
+### The leaf circuit
+
+| | depth 16 | depth 20 |
+|---|---:|---:|
+| gates before padding | 320 | 387 |
+| `degree_bits` | 9 | 9 |
+| padded rows | 512 | 512 |
+| public inputs | 26 | 26 |
+| proof bytes | 105500 | 105500 |
+| build | 103 ms | 105 ms |
+| prove, mean of 9 | 294 ms | 281 ms |
+| prove, min / median / max | 226 / 306 / 380 ms | 229 / 254 / 436 ms |
+| verify | 3.96 ms | 3.97 ms |
+
+Four extra tree levels are 67 gates, and the circuit had 192 rows of headroom
+before it would need a tenth degree bit. The 12.5 estimate was 344 to 416
+gates, and the measurement lands inside it.
+
+Proving time does not move, and the spread says why: at 512 rows the 16 FRI
+grinding bits dominate a leaf proof, the grind is a geometric random variable
+seeded by the transcript, and its spread here is wider than the difference
+between the two columns. Both columns are a mean over nine proofs and the
+depth-20 mean is the lower of the two, which is grinding luck.
+
+### The private batch that verifies the leaf
+
+Every figure is identical at both depths, to the gate and to the byte:
+
+| | depth 16 | depth 20 |
+|---|---:|---:|
+| leaf `degree_bits` | 9 | 9 |
+| gates before padding | 24530 | 24530 |
+| `degree_bits` | 16 | 16 |
+| padded gates | 65536 | 65536 |
+| public inputs | 152 | 152 |
+| proof bytes | 157476 | 157476 |
+| build | 12.7 s | 12.5 s |
+| prove, mean of 3 | 33.08 s | 32.91 s |
+| verify | 7.23 ms | 7.20 ms |
+| peak RSS of the run | 1.82 GiB | 1.82 GiB |
+
+This is the `N = 7` shape the aggregator's bench test pins, the one M3 measured
+at 24530 gates, so the depth-16 column also reproduces that M3 row on this box.
+The shipped chain default is `N = 6`.
+
+A recursive verifier's size is set by the inner circuit's `degree_bits`, its
+FRI parameters and its public-input count. Depth 20 moves none of the three, so
+the batch does not notice the deeper tree. `docs/CIRCUIT.md` section 9.1 puts
+the ceiling for `degree_bits = 15` at about 23700 gates and seven recursive
+verifiers at 24324: depth 20 adds nothing to that 24324, so the batch's
+`degree_bits` stays where it was and the `N = 6` against `N = 7` argument is
+unchanged by this decision.
+
+### The artifact set a runtime embeds
+
+Generated at the release dimensions, single threaded:
+
+| | depth 16 | depth 20 |
+|---|---:|---:|
+| wall clock, generation only | 68.1 s | 75.2 s to the pin check |
+| peak RSS | 5.15 GiB | 5.15 GiB |
+| `leaf_verifier.bin` | 1609 B | 1609 B |
+| `private_batch_verifier.bin` | 1749 B | 1749 B |
+| `public_batch_verifier.bin` | 1905 B | not written |
+| `padding_leaf_proof.bin` | 105500 B | 105500 B |
+
+The depth-16 run reproduces the M4 sizes exactly. The depth-20 run builds the
+whole set and then exits 1:
+
+```
+Error: regenerated release artifacts differ from the release pin: incompatible
+Qnero protocol profile; update the wallet or select a compatible chain before
+building circuits
+```
+
+That is `generate_all_artifacts` calling `profile::ensure_supported` at the
+release dimensions, against the digests pinned in
+`crates/qnero-circuit/src/profile.rs`. It is the expected failure and nothing
+was regenerated for it. The profile encodes `MAX_TREE_DEPTH` in its own bytes
+at offset 20 and pins a blake2b-256 digest of each verifier file, so both the
+depth field and all three artifact digests change together.
+
+Re-running the generator at non-release dimensions (`--no-public-batch`) skips
+that check and writes the files, which is where the depth-20 sizes above come
+from. Both verifier files keep their exact byte length at depth 20 and change
+content: the leaf verifier's digest moves from `f55f252d...` to `8938aadf...`
+and the private batch verifier's from `67826803...` to `adc53f02...`, blake2b
+over the whole file. A deeper tree is a new circuit, so a regenerated set and a
+refreshed pin travel with it, which is the cost 12.5 already lists.
+
+`cargo test --release -j 20 -p qnero-circuit --lib` at depth 20 passes all 46
+tests, the profile tests included: they check the encoding against the
+compiled constant, so they follow the constant wherever it goes. The release pin in the
+artifact generator is the only thing this change turns red.
+
+### What these numbers decide
+
+**The 12.5 rule points to 20.** Its condition was that the leaf stay at
+`degree_bits = 9`, and it does: 387 gates in the same 512 padded rows, the same
+26 public inputs, the same 105500-byte proof, proving time inside the grinding
+noise. Depth 20 raises the 4-ary tree's capacity from 4.29e9 leaves to 1.10e12
+and every prover pays 67 gates for it, none of which cross a degree boundary.
+
+**Nothing downstream of the leaf moves.** The private batch is identical at
+both depths, so the recursion budget the `N = 6` choice was made against is
+untouched, and no proof anywhere in the stack changes size.
+
+**The bundle carries a regenerated artifact set and a refreshed pin.** That was
+already in 12.5's cost line. This section makes it concrete: three pinned
+digests in `profile.rs`, the two verifier files whose content changed, and the
+profile bytes themselves. Both verifier files keep their length, so no size
+gate or storage width moves with them.
+
+### What this leaves unmeasured
+
+- **`pallet-zk-tree` at depth 20.** `CIRCUIT_MAX_TREE_DEPTH` was deliberately
+  left at 16, so the chain workspace was never built at depth 20 and the
+  const-assert that ties the two constants was never exercised against the new
+  value. The pallet's own `MAX_TREE_DEPTH` is 32 already.
+- **The frontier and finalize costs 12.5 forecasts.**
+  `FINALIZE_BASE_POSEIDON_EVALS` 19 to 23 and 48 to 60 frontier digests are the
+  pallet's side of the change, and this section touched no pallet.
+- **The public batch verifier at depth 20.** The generator refused before
+  writing it. Its size follows the private batch's shape, which did not move,
+  so it is expected to hold at 1905 bytes, and expected is not measured.
+- **A wallet proving at depth 20.** The leaf here proves a witness the test
+  builds. No end-to-end wallet run, no wasm prover, and no browser proof was
+  produced at depth 20.
+- **Threads.** Every row is one thread. Nothing here says what four wasm
+  threads or a saturated 22-vCPU pool would do to either column, and the
+  earlier M8 and M10 sections are the only guide.
+
+## Real state, RocksDB and `state_getReadProof` at a page (2026-09-22)
+
+`docs/DESIGN.md` 12.3 quotes 4.1 to 4.3 KB of raw state per transfer with
+ciphertexts in state, quotes 600 to 750 B for the layout that moves them into
+block bodies, and says in the same paragraph that the disk multiplier is
+unmeasured. 12.7 Step 0 item 3 asks for the real number. This section measures
+both sides of that: what a settled 2-in/2-out transfer writes into state and
+onto disk, and what the authenticated read a wallet scan makes around it costs
+in bytes and in verify time.
+
+### The machine
+
+The same GCP `c3-highcpu-22` bench VM as the two sections above: Intel Xeon
+Platinum 8481C at 2.70 GHz, 22 vCPU, 43 GB, Ubuntu 24.04, Rust 1.93.0, Node
+22.23.2, Chrome for Testing 143.0.7499.4 from the Playwright cache. Nothing
+else ran on the box. Every section above M16 was measured on the dev
+workstation, so a row here against a row there is two machines and the ratio is
+not like for like. Every row inside this section is like for like: one chain,
+one box, one hour.
+
+Thread counts. The node authored with `--mining-threads 1`. The CLI wallet
+proves single threaded, because plonky2's `parallel` feature is off in the
+shipped binary. The native verify rows ran with `RAYON_NUM_THREADS=1` and
+`--test-threads 1`. The browser rows are the single-threaded wasm module on
+one page's main thread, one Chromium at a time. The disk rows measure bytes,
+so no thread count enters them.
+
+### The chain
+
+```
+qnero-node --dev --tmp --database rocksdb --mining-threads 1 \
+  --rpc-port 9944 --port 30333 --rewards-miner-key qnm1…
+```
+
+`--database rocksdb` is explicit because the shipped default is `auto`, which
+creates ParityDb on a fresh path. The question asked about RocksDB. Dev genesis
+sets a 12 s target block time and initial difficulty 80, and the node mined a
+coinbase leaf into every block, so the tree grows by one leaf per block with no
+traffic at all. The miner key came from `qnero-wallet keygen` plus
+`qnero-wallet miner-address` against an unreachable node, and the seed and its
+note store were shredded at the end. `--tmp` removed the base path on shutdown.
+
+### The invocations
+
+The driver script, which is the sequence the numbers below come from: eleven
+`du -sb` snapshots one block apart with no traffic, then `shield` of 50 QNR
+from the `alice` dev account, then ten `send` calls of 1 QNR to the wallet's
+own address, each one a 2-in/2-out private batch proved locally and waited on
+until its settlement block. One `du -sb` of the RocksDB directory and one
+`qnero-wallet status` bracket every transfer.
+
+The read-proof and body measurements are one `#[ignore]`d test added for M16,
+in the house style of `docs/CIRCUIT.md` section 6:
+
+```
+QNERO_NODE=http://127.0.0.1:9944 \
+QNERO_M16_OUT=…/www/results/m16-readproof RAYON_NUM_THREADS=1 \
+  cargo test -p qnero-wallet --release --test m16_read_proof_bench -- \
+  --ignored --nocapture --test-threads 1
+```
+
+`m16_read_proof_pages` asks the node for `state_getReadProof` over three
+windows of leaf indices, times `qnero_state_proof::read_values` over each
+answer fifty times, and writes each answer out as the JSON request
+`readStateProof` takes. `m16_settlement_state_and_body` reads the stored value
+length of every map at each of the last 24 leaves, reads the settled nullifier
+map, and walks every block body from genesis to head.
+
+The browser twin, from `crates/qnero-prover-wasm/www`:
+
+```
+node run-readproof.mjs --n 50 --pkg ./results/pkg-m16/qnero_prover_wasm.js
+```
+
+`run-readproof.mjs`, `readproof.html` and `readproof-harness.js` are the M16
+read-proof harness, beside `run-scan.mjs` and M8's `run.mjs` rather than inside
+either, so a flag here cannot move which invocation another row came from. The
+`--pkg` is the module the scan section rebuilt on this VM, for the reason that
+section gives.
+
+### What a block costs when nothing happens
+
+Eleven snapshots, one per block, on an idle chain. Every block still appends
+one coinbase leaf, so this baseline already carries a leaf write.
+
+| Quantity | Value |
+|---|---|
+| Blocks sampled | 10 |
+| RocksDB directory at height 35 | 1 205 000 B |
+| RocksDB directory at height 45 | 1 285 641 B |
+| Growth per idle block | 8 064 B |
+| Block body per idle block | 48 B |
+
+### What one settled transfer costs
+
+Each row brackets one `send`. `blocks` is how many blocks passed while the
+wallet built circuits, proved and waited; `leaves` is blocks plus the two
+settlement outputs. The baseline column is 8 064 B times `blocks`, and the
+settlement column is what is left after subtracting it.
+
+| # | blocks | leaves | RocksDB growth | idle-block share | settlement share | settlement minus body |
+|---|---|---|---|---|---|---|
+| 1 | 8 | 10 | 230 399 B | 64 513 B | 165 886 B | 11 378 B |
+| 2 | 9 | 11 | 243 097 B | 72 577 B | 170 520 B | 16 012 B |
+| 3 | 5 | 7 | 208 081 B | 40 320 B | 167 760 B | 13 252 B |
+| 4 | 3 | 5 | 191 629 B | 24 192 B | 167 437 B | 12 929 B |
+| 5 | 5 | 7 | 207 612 B | 40 320 B | 167 292 B | 12 784 B |
+| 6 | 5 | 7 | 210 524 B | 40 320 B | 170 204 B | 15 696 B |
+| 7 | 9 | 11 | 246 916 B | 72 577 B | 174 339 B | 19 831 B |
+| 8 | 8 | 10 | 240 944 B | 64 513 B | 176 431 B | 21 923 B |
+| 9 | 5 | 7 | 211 976 B | 40 320 B | 171 656 B | 17 148 B |
+| 10 | 5 | 7 | 215 537 B | 40 320 B | 175 216 B | 20 708 B |
+| all ten | 62 | 82 | 2 206 715 B | 499 974 B | 170 674 B each | 16 166 B each |
+
+The last column trends upward across the run, from 11 378 B to 20 708 B, as the
+trie deepens under a tree that grew from 47 to 129 leaves. Ten transfers is a
+small sample of that curve.
+
+### One settlement on the wire
+
+Every block body from genesis to head, read with `chain_getBlock` and measured
+as hex length over two.
+
+| Block shape | Extrinsics | Body bytes | Largest extrinsic |
+|---|---|---|---|
+| Idle | 2 | 48 | 37 |
+| The `shield` | 3 | 9 152 | 9 104 |
+| A settlement | 3 | 154 556 | 154 508 |
+
+The settlement extrinsic is the 150 908-byte private-batch proof the wallet
+printed, plus two 1 794-byte ciphertexts, plus 12 bytes of envelope. It is
+99.97 percent of the block it lands in.
+
+### Raw state per transfer
+
+Stored value lengths read one key at a time at the head block, with the key
+lengths that `sp-trie` stores beside them. `Leaves`, `Ciphertexts` and
+`LeafBlocks` are `Identity`-hashed maps, so their key is a 32-byte pallet and
+item prefix plus the 8-byte little-endian index. `UsedNullifiers` is
+`Blake2_128Concat`, so its key is that prefix plus 16 bytes of hash plus the
+32-byte nullifier, and its value is the unit type.
+
+| Item | Writes per transfer | Key bytes | Value bytes | Total |
+|---|---|---|---|---|
+| `ZkTree::Leaves` | 2 | 40 | 32 | 144 B |
+| `Shielded::Ciphertexts` | 2 | 40 | 1 794 | 3 668 B |
+| `Shielded::LeafBlocks` | 2 | 40 | 4 | 88 B |
+| `Shielded::UsedNullifiers` | 2 | 80 | 0 | 160 B |
+| **All four** | 8 | | | **4 060 B** |
+| The same without ciphertexts | 6 | | | 392 B |
+
+A coinbase leaf writes `Leaves`, `LeafBlocks` and an 8-byte `CoinbaseValues`
+and leaves the ciphertext slot empty, which is 164 B with its keys. The
+`shield` writes one leaf with a ciphertext.
+
+### The disk multiplier
+
+| Ratio | Value |
+|---|---|
+| RocksDB growth per transfer, state only, against 4 060 B of raw state | 3.98x |
+| RocksDB growth per transfer, everything, against 4 060 B of raw state | 42.0x |
+| RocksDB growth per transfer against raw state plus the on-wire body | 1.08x |
+| DESIGN 12.3's raw-state band, against the 4 060 B measured | 4.1 to 4.3 KB quoted |
+| DESIGN 12.3's bodies-layout band, against the 392 B measured | 600 to 750 B quoted |
+
+### Where the bytes live
+
+`du` during the run measures the write-ahead log, because RocksDB had flushed
+nothing: at shutdown the directory held one 3 883 189-byte `000008.log` and
+zero SST files. Reopening the database flushed it. The per-column figures below
+are the `data_size` each SST reported in RocksDB's own `LOG`, at chain height
+155 with 175 leaves and eleven settlements on the chain.
+
+| Column | `sc-client-db` name | SST data bytes |
+|---|---|---|
+| col5 | `BODY` | 1 723 402 |
+| col1 | `STATE` | 1 435 704 |
+| col4 | `HEADER` | 31 076 |
+| col3 | `KEY_LOOKUP` | 10 565 |
+| col8 | `AUX` | 7 614 |
+| col0 | `META` | 7 322 |
+| col2 | `STATE_META` | 35 |
+| | whole directory | 3 551 578 |
+
+The column number alone leaves the mapping open, so arithmetic settles it: the
+same chain's block bodies sum to 1 716 132 B on the wire, which is 0.4 percent
+under what col5 holds. A block body therefore costs its wire size on disk and
+nothing more, and the state trie is the other 1.4 MB.
+
+`qnero-node chain-info` prints the head, genesis and finalized hashes and no
+column sizes, so it answers none of this.
+
+### `state_getReadProof` at a page of 64 and a page of 16
+
+One block hash, state root `0xc5391fe1…`, leaf count 175. `head` is leaf 0
+upward, which on this chain is coinbase leaves whose ciphertext slot was never
+written. `settled` ends on leaf 172, the newest leaf whose ciphertext is still
+inside the runtime's `CIPHERTEXT_RETENTION_BLOCKS` window of 64 blocks. `tail`
+is the last indices in the tree. Proof bytes are the sum of the returned node
+hex strings over two.
+
+| Map | Window | Page | First leaf | Nodes | Proof bytes | Bytes per key | Values present |
+|---|---|---|---|---|---|---|---|
+| `ZkTree::Leaves` | head | 64 | 0 | 72 | 5 683 | 88.8 | 64 |
+| `ZkTree::Leaves` | head | 16 | 0 | 21 | 2 122 | 132.6 | 16 |
+| `ZkTree::Leaves` | settled | 64 | 109 | 73 | 6 181 | 96.6 | 64 |
+| `ZkTree::Leaves` | settled | 16 | 157 | 22 | 2 620 | 163.8 | 16 |
+| `ZkTree::Leaves` | tail | 64 | 111 | 73 | 6 181 | 96.6 | 64 |
+| `ZkTree::Leaves` | tail | 16 | 159 | 22 | 2 620 | 163.8 | 16 |
+| `Shielded::Ciphertexts` | head | 64 | 0 | 4 | 811 | 12.7 | 0 |
+| `Shielded::Ciphertexts` | head | 16 | 0 | 4 | 811 | 50.7 | 0 |
+| `Shielded::Ciphertexts` | settled | 64 | 109 | 23 | 15 822 | 247.2 | 8 |
+| `Shielded::Ciphertexts` | settled | 16 | 157 | 9 | 4 548 | 284.2 | 2 |
+| `Shielded::Ciphertexts` | tail | 64 | 111 | 23 | 15 822 | 247.2 | 8 |
+| `Shielded::Ciphertexts` | tail | 16 | 159 | 9 | 4 548 | 284.2 | 2 |
+
+A ciphertext page is dominated by the values it carries: the 64-key settled
+page returns 14 352 B of ciphertext inside 15 822 B of proof, so 1 470 B is
+trie structure for 64 keys. A page of 64 commitments costs 5 683 to 6 181 B for
+2 048 B of value, which is where the per-key figure sits three to four times
+higher. JSON transport doubles every figure above, because the node answers in
+hex.
+
+### Verify time
+
+Fifty samples per row, medians. Native is `qnero_state_proof::read_values`
+through `cargo test --release`, one thread. Browser is `readStateProof` in the
+single-threaded wasm module in Chrome for Testing 143, same proofs, same keys.
+`performance.now` in that page is not cross-origin isolated here, so the
+browser column is quantized to five microseconds.
+
+| Map | Window | Page | Native median | Browser median | Browser over native |
+|---|---|---|---|---|---|
+| `ZkTree::Leaves` | head | 64 | 0.091 ms | 0.347 ms | 3.8x |
+| `ZkTree::Leaves` | head | 16 | 0.024 ms | 0.090 ms | 3.8x |
+| `ZkTree::Leaves` | settled | 64 | 0.092 ms | 0.305 ms | 3.3x |
+| `ZkTree::Leaves` | settled | 16 | 0.025 ms | 0.095 ms | 3.8x |
+| `ZkTree::Leaves` | tail | 64 | 0.092 ms | 0.320 ms | 3.5x |
+| `ZkTree::Leaves` | tail | 16 | 0.025 ms | 0.095 ms | 3.8x |
+| `Shielded::Ciphertexts` | head | 64 | 0.042 ms | 0.110 ms | 2.6x |
+| `Shielded::Ciphertexts` | head | 16 | 0.012 ms | 0.040 ms | 3.3x |
+| `Shielded::Ciphertexts` | settled | 64 | 0.074 ms | 0.515 ms | 7.0x |
+| `Shielded::Ciphertexts` | settled | 16 | 0.021 ms | 0.140 ms | 6.7x |
+| `Shielded::Ciphertexts` | tail | 64 | 0.074 ms | 0.520 ms | 7.0x |
+| `Shielded::Ciphertexts` | tail | 16 | 0.021 ms | 0.140 ms | 6.7x |
+
+Module init in the browser was 26.4 ms and linear memory settled at 8 781 824 B
+for the whole set.
+
+### What these numbers decide
+
+**12.3's raw-state figure holds, a little low.** The measured 4 060 B per
+transfer sits just under the quoted 4.1 to 4.3 KB. The quote is safe to keep
+and the measurement is now the number behind it.
+
+**12.3's bodies-layout figure is conservative by 1.6x.** What state keeps once
+ciphertexts leave it is 392 B per transfer against the quoted 600 to 750 B. The
+8 to 9x ratio 12.3 argues from becomes 10.4x on measured values, so the case
+for Q3 is stronger than the paragraph claims, with the same shape.
+
+**The disk multiplier on state is about 4x.** The RocksDB write-ahead log grows
+16 166 B per transfer for 4 060 B of raw state. That is the trie paying for
+itself: eight changed keys, each rewriting its branch path, plus the two 1 794-
+byte ciphertexts inlined into their leaf nodes.
+
+**The multiplier on block bodies is 1.0x.** A body costs its wire size on disk,
+confirmed by col5 landing 0.4 percent over the summed `chain_getBlock` hex. So
+Q3 moves the ciphertexts out of the column that charges 4x and into the column
+that charges 1x, and the block itself grows by nothing at all, because the
+ciphertexts already ride in the settlement extrinsic.
+
+| What Q3 moves, per transfer | Bytes |
+|---|---|
+| Ciphertext raw state today | 3 668 |
+| Its disk cost at the measured state multiplier | about 14 600 |
+| Its disk cost as body | 3 588 |
+| Projected saving | about 11 000 |
+
+That table is arithmetic over the two measured columns. No run here ships the
+layout, so the saving is a projection.
+
+**A page of 64 is the right width for the authenticated read.** The widest page
+measured is 15 822 B of proof and 0.52 ms of browser verify, against the
+`MAX_PROOF_BYTES` budget of 64 MiB. What bounds a scan at this width is the
+1 794 B per ciphertext the node has to ship and the wallet has to decrypt,
+which the M16 scan section above prices. Half a millisecond of trie work per
+page sits well under that.
+
+**Today's runtime already prunes ciphertexts.**
+`CIPHERTEXT_RETENTION_BLOCKS` is 64, and the head page of 64 leaves returned
+zero ciphertexts against a proof of four nodes, because they had expired out of
+state. So 12.3's "about 1.7 TB, unprunable" describes a layout this build does
+not ship, and Q3's real gain is against the live window plus whatever the
+history an archive node keeps costs, which is the next thing to measure.
+
+### What this leaves unmeasured
+
+- **A chain long enough for the trie to settle.** 175 leaves is a shallow trie.
+  The per-transfer state share climbed 82 percent across ten transfers and the
+  curve had not flattened. Every state figure here is a floor.
+- **ParityDb.** The shipped default is `auto`, which picks ParityDb on a fresh
+  path. Every disk figure here is RocksDB with `--database rocksdb` passed
+  explicitly, and nothing says the two agree.
+- **Compaction over time.** The per-transfer rows are write-ahead log growth.
+  One flush reduced a 4 180 506-byte directory to 3 551 578 B, which is 85
+  percent, and that is one flush on one small chain rather than a steady state.
+- **What the ciphertext prune actually reclaims.** The retention window
+  expires an entry and leaves a tombstone until compaction, and the old trie
+  nodes survive until state pruning removes them. Neither was measured.
+- **Historical state proofs.** Every proof here was taken at the head. The
+  archive path `docs/AUTHENTICATED_READS.md` describes, where a wallet reads a
+  ciphertext at its creation block's state root, was never exercised.
+- **The nullifier map at scale.** 20 entries, 80 bytes of key each, no value.
+  The complete-prefix traversal the wallets do over it was not timed, and it is
+  the read whose cost grows forever.
+- **A wallet scanning through this.** No `readStateProof` row here is a whole
+  page cycle: no JSON parse, no hex decode, no worker message, and no RPC
+  round trip. The M16 scan section above measures the decryption side of the
+  same loop, and nothing measures the two together.
