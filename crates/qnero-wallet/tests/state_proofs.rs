@@ -9,8 +9,10 @@ use support::{FakeNode, NodeState};
 
 #[test]
 fn authenticated_values_and_absence_use_one_selected_header() {
-    let mut state = NodeState::default();
-    state.head_number = 2;
+    let mut state = NodeState {
+        head_number: 2,
+        ..Default::default()
+    };
     let key = storage_prefix("Shielded", "EntryCount");
     state.put_storage(&key, &7u64.to_le_bytes());
     let node = FakeNode::start(state);
@@ -29,9 +31,11 @@ fn authenticated_values_and_absence_use_one_selected_header() {
 
 #[test]
 fn missing_proof_nodes_refuse_without_unproven_fallback() {
-    let mut state = NodeState::default();
-    state.head_number = 1;
-    state.missing_proof_nodes = true;
+    let state = NodeState {
+        head_number: 1,
+        missing_proof_nodes: true,
+        ..Default::default()
+    };
     let node = FakeNode::start(state);
     let rpc = RpcClient::new(&node.url);
     let at = Chain::new(&rpc).head().unwrap().hash;
@@ -41,8 +45,10 @@ fn missing_proof_nodes_refuse_without_unproven_fallback() {
 
 #[test]
 fn public_nullifier_enumeration_cannot_silently_omit_an_entry() {
-    let mut state = NodeState::default();
-    state.head_number = 1;
+    let mut state = NodeState {
+        head_number: 1,
+        ..Default::default()
+    };
     let mut expected = std::collections::BTreeSet::new();
     for value in 0u8..32 {
         let nullifier = [value; 32];
