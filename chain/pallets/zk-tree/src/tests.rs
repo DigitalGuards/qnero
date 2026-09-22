@@ -865,6 +865,13 @@ fn insert_commitment_refuses_an_append_past_the_depth_the_circuit_can_prove() {
 /// the circuit can prove, where `MAX_TREE_DEPTH` is the storage cap and would
 /// let the tree outgrow every path already issued.
 #[test]
+// The overflow raises `defensive!`, which panics where debug assertions are on
+// and logs where they are off. Both builds still have to clamp: a release run
+// checks the depth below, a debug run checks that the operator signal fires.
+#[cfg_attr(
+	debug_assertions,
+	should_panic(expected = "ZK tree exceeded the depth the circuit can prove")
+)]
 fn process_pending_leaves_clamps_at_the_circuit_depth() {
 	new_test_ext().execute_with(|| {
 		// A state only a bug could produce: more leaves than the circuit depth
