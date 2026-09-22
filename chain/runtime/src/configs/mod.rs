@@ -1121,58 +1121,46 @@ parameter_types! {
 	pub const ShieldedMinLeafFee: u64 = 1;
 	/// Bytes of note ciphertext one step of fee buys: 512 bytes.
 	///
-	/// Superseded in part: the exact-length settlement rule makes the padded
-	/// pair the only reachable settlement payload, so the separation argument
-	/// below prices a state nobody can reach. The doc is rewritten once, with
-	/// `ShieldedMaxCiphertextBytes` below it, when ciphertexts move into
-	/// extrinsic bodies.
+	/// Two rules landed on top of this term in the pre-genesis bundle and
+	/// between them they replaced its whole argument. Q1 fixed the settlement
+	/// payload at one length per crypto suite, so the padding grind the divisor
+	/// was sized against is refused rather than priced. Q3 moved the payload
+	/// out of the state trie, so what a carried byte costs the chain is block
+	/// bandwidth and the block body an archive node keeps, rather than a trie
+	/// entry every full node carries.
 	///
-	/// A real slot carries two ciphertexts whose fixed part is 1731 bytes
-	/// each, plus whatever memo pad the wallet writing them uses; the v0
-	/// wallet pads to 61, so the pair it publishes is 3584 bytes and pays
-	/// seven steps of payload on top of `ShieldedMinLeafFee`. A slot padded
-	/// to the cap (two ciphertexts of `ShieldedMaxCiphertextBytes`, 4096 bytes
-	/// in total) pays eight. The flat floor alone would price either at one
-	/// step. The chain never parses these bytes and `Ciphertexts` is never
-	/// pruned, so the whole cap is usable by a settler and the payload is what
-	/// has to be priced.
+	/// What the term still does is price those bytes, linearly, and that is
+	/// worth keeping for three reasons. It prices the `shield` entry note,
+	/// which the exact-length rule does not reach. It prices a skipped
+	/// position's carried bytes, which no settling slot's own floor covers. And
+	/// a second crypto suite would publish a second length, at which point a
+	/// flat per-slot floor would price the shorter suite and the longer one
+	/// alike.
 	///
-	/// The divisor has to sit below the slack between the real ciphertext size
-	/// and the cap, or the term prices nothing it was added to price: at one
-	/// kilobyte both 3584 and 4096 bytes round to four steps, so a settler
-	/// could pad both ciphertexts to the cap and add 512 bytes of permanent,
-	/// never-pruned, never-parsed state for no extra fee.
-	/// `a_slot_pays_for_the_ciphertext_bytes_it_publishes` in the pallet's
-	/// tests pins the two endpoints apart, and the real endpoint it pins is
-	/// the padded pair a wallet actually sends. The memo pad eats the same
-	/// slack: a pad of 256 would put a real pair at 3974 bytes,
-	/// in the cap's own bucket, and the separation would be gone for every
-	/// spend on the chain while both test suites stayed green.
+	/// The one reachable settlement payload is a pair of 1792-byte
+	/// ciphertexts, 3584 bytes, which is seven steps on top of
+	/// `ShieldedMinLeafFee`. `a_slot_pays_for_the_ciphertext_bytes_it_publishes`
+	/// in the pallet's tests pins that point, and
+	/// `a_pair_padded_to_the_cap_is_refused_not_priced` pins that the grind the
+	/// divisor used to separate is now refused outright.
 	///
 	/// It prices the submission as well as the slot. A segment the chain skips,
 	/// because a nullifier it publishes is already spent or because its block
-	/// anchor no longer resolves, pays no fee of its own: it writes no
-	/// permanent state, and charging it the fee it paid when it first settled
-	/// would drift `PoolValue` from the sum of the notes behind it. Its
-	/// ciphertexts are in the block all the same and every node sponges them
-	/// into a `ct_digest`, so the settling slots of a submission owe
-	/// `(settling slots + skipped slots) * ShieldedMinLeafFee` plus one step
-	/// per started 512 bytes the submission carries, a skipped segment's bytes
-	/// included. A skipped position may instead be emptied, which is what a
-	/// griefed aggregator resubmits: that removes the position from the payload
-	/// term, and the slot behind it is still charged the flat minimum, because
-	/// the walk and the weight it costs a block do not depend on its bytes.
+	/// anchor no longer resolves, pays no fee of its own: it settles nothing,
+	/// and charging it the fee it paid when it first settled would drift
+	/// `PoolValue` from the sum of the notes behind it. Its ciphertexts are in
+	/// the block all the same, every node sponges them into a `ct_digest`, and
+	/// every archive node keeps the body that carries them, so the settling
+	/// slots of a submission owe `(settling slots + skipped slots) *
+	/// ShieldedMinLeafFee` plus one step per started 512 bytes the submission
+	/// carries, a skipped segment's bytes included. A skipped position may
+	/// instead be emptied, which is what a griefed aggregator resubmits: that
+	/// removes the position from the payload term, and the slot behind it is
+	/// still charged the flat minimum, because the walk and the weight it costs
+	/// a block do not depend on its bytes.
 	pub const ShieldedCiphertextBytesPerFeeQuantum: u32 = 512;
-	/// Half of a settled fee is burned, half becomes part of the block's
-	/// coinbase note. The same split the wormhole applied to its volume fee.
 	pub const ShieldedFeeBurnRate: Permill = Permill::from_percent(50);
 	/// Size cap on one note ciphertext: 2048 bytes.
-	///
-	/// Superseded in part: on the settlement path the exact-length rule makes
-	/// this cap unreachable, and what it still bounds is the `shield` entry
-	/// note and the encoded length. Rewritten once, with
-	/// `ShieldedCiphertextBytesPerFeeQuantum` above it, when ciphertexts move
-	/// into extrinsic bodies.
 	///
 	/// A `NoteCiphertext` at the chain's parameter set serializes to 1731 bytes
 	/// with an empty memo: 19 bytes of framing (a version byte, a two-byte
@@ -1180,18 +1168,32 @@ parameter_types! {
 	/// each of the three payloads), an ML-KEM-1024 encapsulation (1568), the
 	/// 112-byte note payload under a ChaCha20-Poly1305 tag (128), and the
 	/// memo's own tag (16). `an_empty_memo_ciphertext_serializes_to_1731_bytes`
-	/// in `qnero-pqcrypto` pins that total against the serializer. The cap
-	/// leaves 317 bytes of memo.
+	/// in `qnero-pqcrypto` pins that total against the serializer, and the
+	/// memo pad that fills the rest of the consensus length is 61 bytes, so a
+	/// settlement ciphertext is 1792 and the cap leaves 256 bytes of slack.
 	///
-	/// The slack is deliberately small, and the whole cap is what a settler can
-	/// use: the chain never parses these bytes, so nothing holds a submission
-	/// to a real `NoteCiphertext` shape, and `Ciphertexts` has bounded live retention.
-	/// `ShieldedCiphertextBytesPerFeeQuantum` is what prices the payload; this
-	/// cap is what bounds one slot's worst case. A wallet reads this bound from
-	/// the pallet's metadata, where a hardcoded copy would drift: exceeding it
-	/// fails the extrinsic's SCALE decode after the proof that committed to
-	/// those exact bytes has already been built.
+	/// On the settlement path that slack is unreachable: Q1's exact-length rule
+	/// refuses any length but the one the declared suite fixes, so what this
+	/// cap bounds there is the `MaxEncodedLen` of `ShieldedOutput`, which is a
+	/// metadata-visible type width and the reason the cap does not move in a
+	/// bundle that also moves the settlement rules.
+	///
+	/// Where it is the whole bound is `shield`. An entry note's payload is
+	/// checked against this cap and against nothing else, because the entry
+	/// path has no declared suite to fix a length and a zero-length entry
+	/// ciphertext stays legal. A wallet reads the bound from the pallet's
+	/// metadata, where a hardcoded copy would drift: exceeding it fails the
+	/// call after the proof that committed to those exact bytes has already
+	/// been built.
 	pub const ShieldedMaxCiphertextBytes: u32 = 2048;
+	/// Blocks of note ciphertext this runtime keeps in state: none.
+	///
+	/// Nothing in the runtime reads it. It sits in the pallet's metadata so
+	/// that a wallet is told where the payload lives rather than inferring it
+	/// from a storage item that is not there, and `integrity_test` refuses any
+	/// other value. The payload rides in the extrinsic that created its note
+	/// and a wallet authenticates it against the header's `extrinsics_root`.
+	/// `docs/DESIGN.md` 12.9 is the decision as built.
 	pub const ShieldedCiphertextRetentionBlocks: u32 = pallet_shielded::CIPHERTEXT_RETENTION_BLOCKS;
 	pub const ShieldedMaxOutputsPerBlock: u32 = pallet_shielded::MAX_OUTPUTS_PER_BLOCK;
 }
