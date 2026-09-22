@@ -14,7 +14,9 @@
 //! extrinsic this chain carries is longer than 32 bytes, so a bump of
 //! `system_version` to 2 changes every extrinsics root on the chain, with no
 //! other signal anywhere, and every wallet's recomputation stops matching. That
-//! is what the first assertion here exists to refuse.
+//! is what the first assertion here exists to refuse, and
+//! `runtime_identity.rs::the_extrinsics_root_construction_is_pinned` refuses
+//! it a second time beside the runtime's other identity fields.
 //!
 //! The vector this test checks is `tests/fixtures/extrinsics_root_kat.json`:
 //! the encoded extrinsics of one small body and the root over them.

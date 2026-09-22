@@ -2,7 +2,6 @@
 use std::{borrow::Cow, error::Error, path::PathBuf, time::Instant};
 
 use codec::{Decode, Encode};
-use frame_support::traits::Get;
 use qnero_runtime::{shielded_budget::*, Runtime};
 use sc_executor::WasmExecutor;
 use serde_json::{json, Value};

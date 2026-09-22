@@ -395,8 +395,7 @@ pub mod pallet {
 		fn record_outputs(count: u32) {
 			let now = frame_system::Pallet::<T>::block_number();
 			OutputsWrittenThisBlock::<T>::mutate(|(block, written)| {
-				*written =
-					if *block == now { written.saturating_add(count) } else { count };
+				*written = if *block == now { written.saturating_add(count) } else { count };
 				*block = now;
 			});
 		}
@@ -1344,8 +1343,7 @@ pub mod pallet {
 					let parsed = Self::pre_validate_private_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
 					Self::plan_settlement(&parsed, outputs).map_err(|e| match e {
-						Error::<T>::TooManyOutputsInBlock =>
-							InvalidTransaction::ExhaustsResources,
+						Error::<T>::TooManyOutputsInBlock => InvalidTransaction::ExhaustsResources,
 						_ => InvalidTransaction::Call,
 					})?;
 					let bundle = Self::validate_private_batch(proof)
@@ -1358,8 +1356,7 @@ pub mod pallet {
 					let parsed = Self::pre_validate_public_batch(proof)
 						.map_err(|_| InvalidTransaction::Call)?;
 					Self::plan_settlement(&parsed, outputs).map_err(|e| match e {
-						Error::<T>::TooManyOutputsInBlock =>
-							InvalidTransaction::ExhaustsResources,
+						Error::<T>::TooManyOutputsInBlock => InvalidTransaction::ExhaustsResources,
 						_ => InvalidTransaction::Call,
 					})?;
 					let bundle =
@@ -2083,10 +2080,7 @@ pub mod pallet {
 						nullifiers: slot.nullifiers,
 						commitments: slot.commitments,
 						leaf_indices: (first, second),
-						ciphertext_bytes: (
-							output.ct_1.len() as u32,
-							output.ct_2.len() as u32,
-						),
+						ciphertext_bytes: (output.ct_1.len() as u32, output.ct_2.len() as u32),
 					});
 				}
 			}

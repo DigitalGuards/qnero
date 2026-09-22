@@ -1272,8 +1272,12 @@ proofs: six leaf slots and 53 private batches.
 | Payload binding, two checks, 318 maximum-size slots | 337.790 | 340.211 | 824.620 |
 | Full bounded ciphertext-retention hook | 10.372 | 10.842 | 927.376 |
 
-All measured component gates passed. This single-host sample does not justify
-reducing weights. This closes the absence of runtime-executor component
+All measured component gates passed. The last row measures a hook the relaunch
+bundle removed: the retention pass went with the state copy of the ciphertexts
+(`docs/DESIGN.md` 12.9), so the harness no longer carries that operation and a
+re-run of this table produces eight rows. Its 927.376 ms declared budget is the
+reservation `on_initialize` no longer makes. This single-host sample does not
+justify reducing weights. This closes the absence of runtime-executor component
 measurements. Full successful settlement, block import,
 disk costs, admission under legitimate congestion and minimum-hardware capacity
 remain unqualified. Production runtimes omit the measurement exports; changes to

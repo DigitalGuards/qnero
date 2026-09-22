@@ -1373,6 +1373,11 @@ median floor, 175 B of public inputs.
 length limit and 3.16 s of the 4.5 s weight budget, so any capacity change is a two-constant
 change.
 
+**Recomputed after the bundle.** Q3 gives back two state writes and a queue update per slot,
+and the depth-20 leaf circuit spends none of it back, because it kept `degree_bits = 9`. The
+weight ceiling moves to 940 to 945 settlements per block and the length ceiling does not move,
+so length is now the one that binds. 12.9 carries the arithmetic.
+
 ### 12.1 Q1, the change output
 
 **Decision: keep two full-length ML-KEM-1024 ciphertexts per transfer. Reject the
@@ -1774,3 +1779,40 @@ input for every node whether or not anything stores them.
 `transaction_version` is untouched, because `submit_private_batch`, `submit_public_batch` and
 `shield` keep their signatures and their encodings byte for byte. What moves is storage layout,
 metadata and the profile, all of which the bundle's one coordinated wallet release covers.
+
+**The 12.0 weight ceiling, recomputed once with the depth decision in hand.** Every figure
+below is the declaration the code makes, at `RocksDbWeight`, for a full public batch of 318
+real slots carrying the one reachable payload of 3584 bytes each.
+
+| Term, full public batch | Before Q3 | After Q3 |
+|---|---|---|
+| Verify and parse, both charged twice | 0.3169 s | 0.3169 s |
+| Storage | 0.5255 s | 0.4619 s |
+| Ciphertext queue bookkeeping | 0.2393 s | gone |
+| `ct_digest` sponge, charged twice | 0.7229 s | 0.7229 s |
+| Tree hashing | 0.0127 s | 0.0127 s |
+| **Total** | **1.8173 s** | **1.5144 s** |
+
+12.0's 1.578 s is that column without the queue term, which is where its 893 to 907 came
+from. Against the 4.5 s normal-class budget, and counting the fixed per-extrinsic verify
+separately from the per-slot marginal cost the way 12.0 did, three public batches now fit 940
+settlements where they fit 893 on 12.0's own basis and 751 against what the code actually
+declared. The flat ratio 4.5 / 1.5144 x 318 gives 945 where it gave 907.
+
+**So length binds first now.** The length ceiling is unchanged at about 908 settlements per
+block, because Q3 moves no byte onto the wire: the ciphertexts already rode in the settlement
+extrinsic. A capacity change is a one-constant change again, and the constant is
+`RuntimeBlockLength`.
+
+**Q5 spends none of it back.** The depth-20 build kept the leaf circuit at `degree_bits = 9`
+(`crates/qnero-circuit/src/params.rs`), so the leaf proof did not grow, the `MAX_PROOF_BYTES`
+margin did not shrink, and the body does not grow on the axis Q3 makes load bearing. What
+depth 20 does move is `pallet-zk-tree`'s once-per-block fold, `FINALIZE_BASE_DB_OPS` from
+(56, 22) to (68, 26) and `FINALIZE_BASE_POSEIDON_EVALS` from 19 to 23, which is about 0.74 ms
+in the Mandatory class and does not touch the normal budget settlements are drawn from.
+
+**And the block's mandatory reservation drops by 0.927 s.** `on_initialize` reserved the whole
+bounded pruning pass, 4096 prunes at 2048 bytes, which `docs/BENCH.md` records as a declared
+927.376 ms against a measured 10.372 ms. That reservation is gone with the prune. It never
+bound settlements, which are drawn from the normal class, and it was most of the distance
+between the block's mandatory floor and its 6 s ceiling.

@@ -2,7 +2,6 @@
 //! Enabled only by `shielded-budget-bench`; no production RPC is registered.
 
 use crate::Runtime;
-use frame_support::traits::Get;
 use alloc::{format, vec::Vec};
 use pallet_shielded::weights;
 
