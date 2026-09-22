@@ -7386,6 +7386,7 @@ dependencies = [
  "sp-session",
  "sp-storage",
  "sp-transaction-pool",
+ "sp-trie",
  "sp-version",
  "substrate-wasm-builder",
 ]
