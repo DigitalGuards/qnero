@@ -295,6 +295,17 @@ class Smoke:
         # zero now. A non-zero there is a runtime that kept a prune path.
         check(int.from_bytes(profile[88:92], "little") == 0,
               "byte 88..92 of the profile is reserved zero since the prune path was deleted")
+        # 20..22 is the tree depth, which the relaunch moved from 16 to 20, and
+        # 92..94 is the exact length every settlement ciphertext has to carry.
+        # Both are dimensions a wallet reads out of the profile before it builds
+        # anything, so a node serving the wrong one produces proofs the chain
+        # refuses, and it is worth saying which number was wrong.
+        depth = int.from_bytes(profile[20:22], "little")
+        check(depth == 20, f"profile tree depth is {depth}, and this runtime is depth 20")
+        settlement_ciphertext = int.from_bytes(profile[92:94], "little")
+        check(settlement_ciphertext == 1792,
+              f"profile settlement ciphertext length is {settlement_ciphertext}, "
+              "and this runtime requires exactly 1792 bytes")
         proof = self.rpc(name, "state_getReadProof", [[PROFILE_KEY], block_hash])
         check(proof["at"] == block_hash and bool(proof["proof"]), "missing pinned state proof")
         return {"header": header, "runtime": version, "profile": value, "read_proof": proof}
