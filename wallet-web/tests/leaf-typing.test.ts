@@ -1086,7 +1086,7 @@ describe('the sentences both wallets print', () => {
   it('keeps the current trust boundary in the copy and documentation', () => {
     const rust = rustLiteral('pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =');
     const doc = readFileSync(new URL('../../docs/WALLET.md', import.meta.url), 'utf8');
-    expect(rust).toContain('Storage reads are authenticated to the selected headers');
+    expect(rust).toContain('Payments and storage values are authenticated to the selected headers');
     expect(rust).toContain('trusts the configured node for chain selection');
     expect(rust).toContain('does not verify proof of work');
     expect(doc).toMatch(/state-trie proof/);
