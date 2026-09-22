@@ -478,7 +478,7 @@ pub mod pallet {
 	/// ciphertext plus two AEAD payloads. On the settlement path the chain reads
 	/// three header bytes, the version byte and the two-byte `crypto_suite` id,
 	/// and nothing else: the suite fixes the exact length the pair must have
-	/// (see [`Pallet::plan_settlement`]) and a blob of that length behind a
+	/// (see `plan_settlement`) and a blob of that length behind a
 	/// valid header still settles whatever it contains.
 	#[derive(
 		Encode,
@@ -564,7 +564,7 @@ pub mod pallet {
 		///
 		/// Two floors read it, and they answer two questions. The per-slot
 		/// floor asks whether a settling slot pays for the permanent state it
-		/// writes. The submission floor in [`Pallet::plan_settlement`] asks
+		/// writes. The submission floor in `plan_settlement` asks
 		/// whether the settling fees of the whole submission cover every real
 		/// leaf slot it carries and every byte it carries, its skipped
 		/// segments included: a skipped slot writes nothing permanent and it
@@ -1433,7 +1433,7 @@ pub mod pallet {
 		/// They settle nothing and pay no fee of their own, and they still hold
 		/// their positions in `outputs`. Such a position may be emptied, and
 		/// then it carries no bytes at all; one that still carries its
-		/// ciphertexts is bound by [`Pallet::bind_payload`] and its bytes are
+		/// ciphertexts is bound by `bind_payload` and its bytes are
 		/// priced through [`PlannedSettlement::carried_bytes`].
 		///
 		/// The slot itself is priced either way. It costs every node the
