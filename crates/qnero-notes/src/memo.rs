@@ -3,7 +3,7 @@
 //! A note ciphertext is a fixed [`CIPHERTEXT_FIXED_BYTES`] plus its memo, byte
 //! for byte (`qnero_pqcrypto::note_encryption`: the memo rides in its own AEAD
 //! payload and `to_bytes` length-prefixes it). The chain publishes those bytes
-//! in full, in `Shielded::Ciphertexts` and in the `SlotSettled` event, so an
+//! in full, in the block body that carried them, so an
 //! unpadded memo publishes its own exact length to every chain reader. Two
 //! things follow, and both are why every memo is padded to one size:
 //!

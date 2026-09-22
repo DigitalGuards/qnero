@@ -728,11 +728,13 @@ impl Wallet {
                 // refuses the same pair one layer down, and `wallet-web`
                 // refuses it in `chain/reads.ts` and again in `runSync`.
                 //
-                // The third key, `Shielded::Ciphertexts`, is not a flat
-                // requirement: whether a leaf owes one is decided by where the
-                // headers put it, in `crate::typing`, which is also what
-                // refuses an invented `Shielded::CoinbaseValues` and what
-                // requires one at every coinbase position.
+                // No note ciphertext is owed per leaf: the payloads are in the
+                // block bodies below, the body roots as a whole, and which
+                // leaf a payload belongs to is decided by the commitment it
+                // opens. `Shielded::CoinbaseValues` is the one key decided per
+                // position, in `crate::typing`, which refuses an invented one
+                // below a block's last leaf and requires one at every coinbase
+                // position.
                 for record in &records {
                     if record.commitment.is_none() {
                         return Err(withheld_key(
