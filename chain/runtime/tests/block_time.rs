@@ -144,8 +144,8 @@ fn the_storage_target_does_not_reach_the_day_denominated_windows() {
 /// 2048 blocks is 245 760 000 ms, 2.84 days, Monero's own rotation interval.
 /// 128 blocks is 15 360 000 ms, 4.3 hours, the distance between the block that
 /// supplies a seed and the first block that hashes under it, and the notice a
-/// full-mode rig gets on its next dataset build. `docs/DESIGN.md` 7.6 carries
-/// the decision.
+/// full-mode rig gets on its next dataset build. `docs/DESIGN.md` 7.4 and
+/// open question 3 carry the decision.
 #[test]
 fn the_seed_schedule_is_the_one_the_chain_ships() {
 	let epoch = u64::from(<qnero_runtime::Runtime as pallet_qpow::Config>::SeedEpochBlocks::get());

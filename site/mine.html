@@ -257,15 +257,16 @@ export QNERO_MINER_KEY=$(
             <div class="prose">
               <h3>The seed rotates the way Monero's does</h3>
               <p>
-                Every 2048 blocks, lagged 64 blocks, resolved along the block's own ancestry. Both
+                Every 2048 blocks, lagged 128 blocks, resolved along the block's own ancestry. Both
                 constants are runtime constants and are read by the node.
               </p>
               <p>
                 At the 120-second target, 2048 blocks is 2.84 days, which is Monero's own rotation
                 cadence to the hour. The block count and the wall clock both match, so a rig pays
-                the same dataset rebuild here as it pays there and no more often. The lag of 64
-                blocks is 2.1 hours. Whether to raise it above the maximum reorg depth is the one
-                part of the schedule still open.
+                the same dataset rebuild here as it pays there and no more often. The lag is 128
+                blocks, 4.3 hours, and that is how long before the turn every job already carries
+                the coming seed: a full-mode rig has that long to build its next 2 GiB dataset in
+                the background.
               </p>
             </div>
             <div class="prose">
