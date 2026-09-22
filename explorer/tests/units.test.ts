@@ -60,8 +60,9 @@ describe('units', () => {
   it('names a span in the unit that leaves a readable number', () => {
     expect(formatSpan(90_000)).toBe('90 s');
     expect(formatSpan(30 * 120_000)).toBe('60 min');
-    // 64 blocks of seed lag on the public chain.
-    expect(formatSpan(64 * 120_000)).toBe('2.1 h');
+    // 128 blocks of seed lag on the public chain: 15 360 000 ms is 4.267 h,
+    // and a span below 48 h prints one decimal.
+    expect(formatSpan(128 * 120_000)).toBe('4.3 h');
     // 256 blocks of shielded anchor validity, the same chain.
     expect(formatSpan(256 * 120_000)).toBe('8.5 h');
     // 2048 blocks of seed epoch: Monero's rotation, to the hour.

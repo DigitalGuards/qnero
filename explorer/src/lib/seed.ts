@@ -13,13 +13,13 @@
  * The masked form only holds for a power-of-two epoch, so this is the
  * truncating-division form the node uses, which agrees with the mask at every
  * power of two. The folk version `h - (h % epoch) - lag` is a different
- * function: at h = 2113 with the default constants it gives 1984 where the
- * real rule gives 2048, and a one-block disagreement about the seed is a chain
- * split.
+ * function: at h = 2177 with the default constants it gives
+ * 2177 - 129 - 128 = 1920 where the real rule gives 2048, and a one-block
+ * disagreement about the seed is a chain split.
  */
 
 export const DEFAULT_SEED_EPOCH_BLOCKS = 2048;
-export const DEFAULT_SEED_EPOCH_LAG = 64;
+export const DEFAULT_SEED_EPOCH_LAG = 128;
 
 export function seedHeight(height: number, epochBlocks: number, lag: number): number {
   const epoch = Math.max(epochBlocks, 1);
