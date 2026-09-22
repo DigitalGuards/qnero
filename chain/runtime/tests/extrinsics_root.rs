@@ -76,12 +76,15 @@ fn suite_length_ciphertext(
 /// One small body in the shape a real block has: the timestamp inherent, the
 /// coinbase inherent, and one bare settlement carrying a full-size output pair.
 fn body() -> Vec<UncheckedExtrinsic> {
-	let timestamp = UncheckedExtrinsic::new_bare(RuntimeCall::Timestamp(
-		pallet_timestamp::Call::set { now: 1_764_547_200_000 },
-	));
-	let coinbase = UncheckedExtrinsic::new_bare(RuntimeCall::Shielded(
-		pallet_shielded::Call::coinbase { inner: [7u8; 32], ciphertext: Vec::new() },
-	));
+	let timestamp =
+		UncheckedExtrinsic::new_bare(RuntimeCall::Timestamp(pallet_timestamp::Call::set {
+			now: 1_764_547_200_000,
+		}));
+	let coinbase =
+		UncheckedExtrinsic::new_bare(RuntimeCall::Shielded(pallet_shielded::Call::coinbase {
+			inner: [7u8; 32],
+			ciphertext: Vec::new(),
+		}));
 	let settlement = UncheckedExtrinsic::new_bare(RuntimeCall::Shielded(
 		pallet_shielded::Call::submit_private_batch {
 			proof: (0..512u32).map(|index| (index % 256) as u8).collect(),
