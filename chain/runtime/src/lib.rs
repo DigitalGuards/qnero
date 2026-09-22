@@ -42,10 +42,7 @@ pub use sp_runtime::BuildStorage;
 
 pub mod extrinsic;
 pub mod genesis_config_presets;
-pub mod governance;
 pub mod transaction_extensions;
-
-pub use governance::origins::pallet_custom_origins;
 
 /// Opaque types. These are used by the CLI to instantiate machinery that don't need to know
 /// the specifics of the runtime. They can then be made to be agnostic over specific formats
@@ -121,10 +118,21 @@ impl_opaque_keys! {
 // 105 adds early privacy-policy validity checks, an authenticated protocol
 // profile, and bounded ciphertext retention. Storage and transaction acceptance
 // change; signed extrinsic encoding remains at transaction_version 7.
-// 106 moves the ciphertext capacity check ahead of the ZK verify in
-// `pre_dispatch` and answers `ExhaustsResources` instead of `Call` for a full
-// block, so the block builder defers the settlement and keeps it in the pool.
-// No storage, call, event or metadata change; the signed extrinsic encoding is
+// 106 is the pre-genesis relaunch bundle, one bump for every item in it
+// because the chain it ships on has no predecessor to upgrade from.
+// - The ciphertext capacity check moves ahead of the ZK verify in `pre_dispatch`
+//   and answers `ExhaustsResources` instead of `Call` for a full block, so the
+//   block builder defers the settlement and keeps it in the pool.
+// - The inherited governance is removed. `TechCollective` (13), `TechReferenda`
+//   (14) and `Origins` (23) leave the pallet table, `Preimage` and
+//   `TreasuryPallet` lose their call enums to `#[runtime::disable_call]`,
+//   `frame-system` loses the nine dispatchables that could write `:code`,
+//   `:heappages` or a raw storage key, and every referenda and collective
+//   constant leaves the constant tables. Root survives as a type and nothing in
+//   the runtime can produce it. `docs/DESIGN.md` section 7.6 carries the
+//   decision; `tests/no_admin_keys.rs` carries the proof.
+// That is a long metadata move and no signed-payload move: `TxExtension`
+// (`lib.rs` below) keeps its eleven members and the payload layout is
 // untouched, so `transaction_version` stays at 7.
 // `the_runtime_identity_is_pinned` in `tests/call_filter.rs` is the tripwire.
 //
@@ -164,9 +172,10 @@ pub const TARGET_BLOCK_TIME_MS: u64 = 120_000;
 /// Each is derived from milliseconds rather than chained off the one above it.
 /// Chaining works only while a block is shorter than a minute: at a 120 s target
 /// `60_000 / TARGET_BLOCK_TIME_MS` is zero, and `MINUTES * 60` would then make
-/// `HOURS` and `DAYS` zero too, which silently zeroes every governance period
-/// denominated in them. Deriving each unit on its own keeps `HOURS` one hour
-/// (30 blocks) and `DAYS` one day (720 blocks).
+/// `HOURS` and `DAYS` zero too, which silently zeroes every window denominated
+/// in them: a reversal delay, a high-security quota window, a scheduler
+/// horizon. Deriving each unit on its own keeps `HOURS` one hour (30 blocks)
+/// and `DAYS` one day (720 blocks).
 ///
 /// `MINUTES` is floored at one block, so at a 120 s target it means two minutes:
 /// one block is the shortest wait a block-denominated period can express. Read
@@ -176,8 +185,8 @@ pub const TARGET_BLOCK_TIME_MS: u64 = 120_000;
 /// and never from the chain's genesis-configured
 /// `pallet_qpow::TargetBlockTimeMs`. So `DAYS` is 720 blocks on every chain this
 /// binary runs, and on the 12 s `dev` chain those 720 blocks come to 2.4 hours:
-/// a governance period, a reversal delay and a quota window each mean a tenth of
-/// what their names say there. That is deliberate. These
+/// a reversal delay and a quota window each mean a tenth of what their names say
+/// there. That is deliberate. These
 /// feed `#[pallet::constant]` items whose whole purpose is to be readable out of
 /// metadata, and a window that changed with a storage read is a window no
 /// metadata could state. `docs/DESIGN.md` 7.4 lists what the storage target does
@@ -194,8 +203,8 @@ pub const HOURS: BlockNumber = (3_600_000u64 / TARGET_BLOCK_TIME_MS) as BlockNum
 pub const DAYS: BlockNumber = (86_400_000u64 / TARGET_BLOCK_TIME_MS) as BlockNumber;
 
 // A target longer than an hour would zero `HOURS`, and one longer than a day
-// would zero `DAYS`. Either would turn a governance period into "the next
-// block" with nothing to say so.
+// would zero `DAYS`. Either would turn a reversal delay or a quota window into
+// "the next block" with nothing to say so.
 const _: () = assert!(MINUTES >= 1 && HOURS >= 1 && DAYS >= 1);
 const _: () = assert!(TARGET_BLOCK_TIME_MS > 0);
 
@@ -313,12 +322,14 @@ pub use extrinsic::QneroUncheckedExtrinsic as UncheckedExtrinsic;
 pub type SignedPayload = generic::SignedPayload<RuntimeCall, TxExtension>;
 
 /// All storage migrations to run on runtime upgrade.
-pub type Migrations = (
-	// v0 -> v1: no-op version bump (TreasuryPortion is no longer written).
-	pallet_treasury::migrations::MigrateV0ToV1<Runtime>,
-	// v1 -> v2: kill leftover TreasuryPortion; treasury is not paid from emission.
-	pallet_treasury::migrations::MigrateV1ToV2<Runtime>,
-);
+///
+/// Empty, and it stays empty. A migration exists to carry state from one
+/// runtime to its successor on the same chain, and this chain has no such
+/// successor: no dispatchable can replace `:code`, so the only way its rules
+/// change is a new genesis, which starts from a preset rather than from
+/// migrated state. The two `pallet_treasury` migrations that lived here were
+/// written for an upgrade path that no longer exists.
+pub type Migrations = ();
 
 /// Executive: handles dispatch to the various modules.
 pub type Executive = frame_executive::Executive<
@@ -367,12 +378,20 @@ mod runtime {
 	#[runtime::pallet_index(6)]
 	pub type MiningRewards = pallet_mining_rewards;
 
+	// Its extrinsics are disabled: they existed for referenda submitters, and the
+	// referenda are gone. The pallet stays because `Scheduler` and
+	// `ReversibleTransfers` store bounded calls through it, which is a Rust call
+	// rather than a dispatch.
 	#[runtime::pallet_index(7)]
+	#[runtime::disable_call]
 	pub type Preimage = pallet_preimage;
 
-	// The scheduler is used internally for reversible transfers and governance via the
-	// `Scheduler`/`ScheduleNamed` trait. Its extrinsics are disabled so users cannot place
-	// arbitrary transactions onto the scheduler.
+	// The scheduler is used internally for reversible transfers, through the
+	// `ScheduleNamed` trait. Its extrinsics are disabled so users cannot place
+	// arbitrary transactions onto the scheduler, and its `ScheduleOrigin` is
+	// `NeverEnsureOrigin`, so the only tasks it ever holds are the ones a pallet
+	// puts there in Rust. It dispatches a due task with the origin that task
+	// carries, which on this chain is only ever a signed one.
 	#[runtime::pallet_index(8)]
 	#[runtime::disable_call]
 	pub type Scheduler = pallet_scheduler;
@@ -388,13 +407,17 @@ mod runtime {
 
 	// Index 12 was `ConvictionVoting` (removed with the community lane). Kept vacant.
 
-	#[runtime::pallet_index(13)]
-	pub type TechCollective = pallet_ranked_collective;
+	// Index 13 was `TechCollective` (`pallet-ranked-collective`) and index 14 its
+	// `TechReferenda` instance (`pallet-referenda`). Both were removed with the
+	// inherited governance lane: this chain has no origin that can change its own
+	// rules. Kept vacant so downstream pallet indices stay stable.
 
-	#[runtime::pallet_index(14)]
-	pub type TechReferenda = pallet_referenda::Pallet<Runtime, Instance1>;
-
+	// The treasury's calls are disabled: its one extrinsic is `ensure_root`
+	// inside the pallet, and no origin here can produce Root. The storage stays
+	// because `pallet-vesting` reads the account when a schedule ends, and the
+	// account itself is fixed at genesis.
 	#[runtime::pallet_index(15)]
+	#[runtime::disable_call]
 	pub type TreasuryPallet = pallet_treasury;
 
 	// Index 16 was `pallet_recovery` (removed). Kept vacant so downstream pallet indices stay
@@ -418,10 +441,11 @@ mod runtime {
 	#[runtime::pallet_index(22)]
 	pub type Vesting = pallet_vesting;
 
-	// Custom governance origins (no calls, no storage): dispatch origins for the
-	// non-Root tech-referenda tracks, e.g. `FastUpgrade`.
-	#[runtime::pallet_index(23)]
-	pub type Origins = pallet_custom_origins;
+	// Index 23 was `Origins` (`pallet_custom_origins`), whose only variant
+	// `FastUpgrade` existed to be dispatched by the fast-upgrade referenda track.
+	// Removed with the lane, which leaves `OriginCaller` at `system` and `Void`:
+	// no pallet in this runtime can mint a privileged origin. Kept vacant so
+	// downstream pallet indices stay stable.
 
 	// The Qnero shielded pool, and at M6 the only place value is created. It
 	// appends to the `ZkTree` instance the whole chain shares, because the leaf

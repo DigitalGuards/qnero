@@ -338,14 +338,14 @@ impl_runtime_apis! {
 	}
 
 	impl sp_genesis_builder::GenesisBuilder<Block> for Runtime {
+		// Back to the plain helper. It used to strip a chain-spec-only
+		// `tech_collective_seed_members` field before deserializing and seed the
+		// collective afterwards; the collective is gone, and `RuntimeGenesisConfig`
+		// carries `#[serde(deny_unknown_fields)]`, so a stale spec still carrying
+		// that field is now refused at deserialization instead of ignored. That is
+		// the failure an operator wants.
 		fn build_state(config: Vec<u8>) -> sp_genesis_builder::Result {
-			let (config, tech_collective_members) =
-				crate::genesis_config_presets::prepare_genesis_build_input(config)?;
-			build_state::<RuntimeGenesisConfig>(config)?;
-			if let Some(members) = tech_collective_members {
-				crate::genesis_config_presets::seed_tech_collective(&members)?;
-			}
-			Ok(())
+			build_state::<RuntimeGenesisConfig>(config)
 		}
 
 		fn get_preset(id: &Option<sp_genesis_builder::PresetId>) -> Option<Vec<u8>> {
