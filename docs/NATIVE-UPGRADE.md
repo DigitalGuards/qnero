@@ -89,9 +89,11 @@ Use a separate database and explicit network identity. Existing balances and
 wallet scan checkpoints belong to the previous genesis. Generating that candidate
 specification in a development branch does not reset the active testnet.
 
-The raw `chain/node/chain-specs/qnero-testnet.json` in this branch is regenerated
-from runtime 105 and has an empty bootnode list. It is a candidate for a new
-genesis. Keep the deployed network's original specification for an upgrade or
+The raw `chain/node/chain-specs/qnero-testnet.json` in this branch was
+regenerated from runtime 106 at the close of the relaunch bundle, and it carries
+the seed node's bootnode, `/dns/node.qnero.io/tcp/30333/p2p/QmfXuYvCz21mBHhPCuaQkchwN9tR5fS9VjKcLEeLiQpYzv`.
+That list sits outside genesis, so it did not move the genesis hash. It is a
+candidate for a new genesis. Keep the deployed network's original specification for an upgrade or
 replay of its existing history; choose a separate network identity before
 activating this candidate.
 
