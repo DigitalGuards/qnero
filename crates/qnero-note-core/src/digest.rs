@@ -109,7 +109,7 @@ pub mod domain {
     /// Inside a spend the circuit derives `rho_out_j = H(RHO, nf_1, nf_2, j)`
     /// from the nullifiers the leaf publishes, so a sender has no choice to
     /// abuse. An entry has no spent nullifier to derive from, so it takes a
-    /// tag of its own over a unique on-chain identifier; [`super::entry_rho`]
+    /// tag of its own over a unique on-chain identifier; [`crate::entry_rho`]
     /// is the rule. It must not reuse `NF_BATCH_PADDING`, which is the value
     /// immediately below it: that would put a padding slot's emitted
     /// nullifier and an entry note's `rho` in one image.
@@ -124,7 +124,7 @@ pub mod domain {
     /// and a coinbase hashes the block number alone, since a block mints
     /// exactly one coinbase; sharing the tag would put a coinbase of block
     /// `n` and a shield of block `n` at entry index `0` on one preimage, and
-    /// [`super::coinbase_rho`] is the rule.
+    /// [`crate::coinbase_rho`] is the rule.
     pub const RHO_COINBASE: Felt = Felt::new(0x716e_000a);
     /// `r` of a coinbase note: the commitment randomness the block author's
     /// node derives from its coinbase viewing key, the chain it is on and the
@@ -138,7 +138,7 @@ pub mod domain {
     /// in the preimage because the derivation is bound to one chain: without
     /// it, one miner key run on a testnet and on mainnet mints byte-identical
     /// `inner` values at equal heights on both, and 32 bytes carry an
-    /// identification from one chain to the other. [`super::coinbase_r`] is the
+    /// identification from one chain to the other. [`crate::coinbase_r`] is the
     /// rule and carries the full argument.
     ///
     /// This tag is separate from [`RHO_COINBASE`], which hashes the same block

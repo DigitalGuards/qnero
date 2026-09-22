@@ -112,6 +112,29 @@ before running.
 
 Run a single stage with an argument: `deploy-testnet.sh wallet`.
 
+**Staging prover modules built somewhere else.** The `wallet` stage rebuilds
+both wasm prover modules before it stages them, because a module older than the
+crate's surface is a wallet whose screens die on an export that is not there
+and nothing in the bundle can catch it: the module is fetched at runtime, never
+imported, never typed. On a machine that is not allowed to build wasm, build
+the two modules elsewhere, copy them into `crates/qnero-prover-wasm/www/pkg`
+and `www/pkg-threaded`, and set the flag:
+
+```bash
+QNERO_WASM_PREBUILT=1 QNERO_HOST=<user>@<host> QNERO_DOMAIN=<domain> \
+  ./scripts/deploy-testnet.sh wallet
+```
+
+It skips `build-wasm.sh` and `build-threaded-wasm.sh` and stages what is
+already in those two directories. It does not skip `stage-wasm.sh`'s export
+check, which reads every `js_name` the crate declares and refuses a module that
+is missing one, so the flag trades a build for a copy and not for a weaker
+deploy. Build the modules with binaryen 116 or newer on `PATH`: the version
+some distributions package, 108, emits a module that fails to initialise in
+current Chromium with `WebAssembly.Table.grow(): failed to grow table`, and
+nothing before the browser says so. `cargo install wasm-opt --locked` is the
+version-pinned way to get one.
+
 **Deploying the faucet on its own.** `node` builds, copies and restarts both
 binaries, so a change to the faucet page used to arrive by restarting the
 chain. There is a stage for the faucet alone, and it is the one to use for

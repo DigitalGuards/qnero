@@ -10,7 +10,7 @@
 //!
 //! # What this module deliberately does not accept
 //!
-//! `kem_randomness`. [`encrypt_note`] takes it from the caller and enforces
+//! `kem_randomness`. `qnero_notes::encrypt_note` takes it from the caller and enforces
 //! nothing about it: two outputs encrypted under one seed share a
 //! ChaCha20-Poly1305 key and nonce, which publishes the XOR of the two
 //! plaintexts and the authentication key. A browser that drew it once and

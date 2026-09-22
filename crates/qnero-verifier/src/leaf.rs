@@ -101,8 +101,8 @@ impl QneroVerifier {
     ///
     /// It also refuses an artifact whose index structure does not describe its
     /// own gate list, which is what keeps a corrupted selector range from
-    /// turning verification into an unbounded loop; see
-    /// [`crate::ensure_common_data_is_structurally_sound`].
+    /// turning verification into an unbounded loop; that check is
+    /// `ensure_common_data_is_structurally_sound` in this crate's root.
     pub fn new(circuit_data: VerifierCircuitData<F, C, D>) -> Result<Self> {
         ensure!(
             circuit_data.common.num_public_inputs == PUBLIC_INPUT_LEN,

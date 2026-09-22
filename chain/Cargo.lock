@@ -3328,7 +3328,10 @@ dependencies = [
  "parity-scale-codec",
  "scale-info",
  "sp-core",
+ "sp-externalities",
+ "sp-io",
  "sp-runtime",
+ "sp-version",
 ]
 
 [[package]]
@@ -5798,24 +5801,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pallet-collective"
-version = "45.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a6ab7b91882b9cceeda0efd67259ff18cac710272b21df801e014d15bbe0fe3"
-dependencies = [
- "docify",
- "frame-benchmarking",
- "frame-support",
- "frame-system",
- "log",
- "parity-scale-codec",
- "scale-info",
- "sp-core",
- "sp-io",
- "sp-runtime",
-]
-
-[[package]]
 name = "pallet-mining-rewards"
 version = "0.1.0"
 dependencies = [
@@ -6066,7 +6051,6 @@ dependencies = [
  "frame-support",
  "frame-system",
  "pallet-balances",
- "pallet-collective",
  "pallet-root-testing",
  "pallet-timestamp",
  "parity-scale-codec",
@@ -7386,6 +7370,7 @@ dependencies = [
  "sp-session",
  "sp-storage",
  "sp-transaction-pool",
+ "sp-trie",
  "sp-version",
  "substrate-wasm-builder",
 ]

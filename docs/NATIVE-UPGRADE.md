@@ -1,4 +1,4 @@
-# Native architecture changes: runtime 105
+# Native architecture changes: runtime 106
 
 This change set requires coordinated node and wallet releases. Preparing a build
 or a new chain specification does not activate a network upgrade. Preserve the
@@ -97,7 +97,7 @@ activating this candidate.
 
 ## Transaction and artifact compatibility
 
-Runtime `spec_version` is 105; `transaction_version` remains 7. The signed SCALE
+Runtime `spec_version` is 106; `transaction_version` remains 7. The signed SCALE
 encoding and extension tuple are unchanged. Unsupported transparent calls become
 invalid at extrinsic checking, before inclusion, fees, nonce updates or body
 recording. That now covers a `Multisig::propose` payload: the check decodes the
@@ -208,7 +208,7 @@ It mines distinct ordinary forks, restarts both nodes as followers, connects
 their reserved peers, and requires convergence to B's strictly greater
 configured chain work. It checks genesis-only finalization, retrieval of the
 former A block body and historical profile proof on A after its reorganization,
-runtime 105, the 192-byte profile, and native wallet discovery of B's positive
+runtime 106, the 192-byte profile, and native wallet discovery of B's positive
 coinbase notes.
 The result also records whether B learned the losing A branch during reconnect;
 that depends on ordinary peer timing and is optional.

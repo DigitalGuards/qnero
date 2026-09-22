@@ -29,7 +29,7 @@ const SAMPLES: usize = 50;
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let middle = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[middle - 1] + values[middle]) / 2.0
     } else {
         values[middle]
@@ -62,8 +62,8 @@ fn m16_read_proof_pages() {
         let raw: Option<String> = rpc
             .call_as("state_getStorage", json!([hex_0x(&key), head]))
             .expect("leaf count");
-        let bytes = hex::decode(raw.expect("leaf count present").trim_start_matches("0x"))
-            .expect("hex");
+        let bytes =
+            hex::decode(raw.expect("leaf count present").trim_start_matches("0x")).expect("hex");
         u64::from_le_bytes(bytes[..8].try_into().unwrap_or([0u8; 8]))
     };
     println!("leaf count    : {leaf_count}");
@@ -124,8 +124,8 @@ fn m16_read_proof_pages() {
                 .collect();
             let bytes: usize = nodes.iter().map(|node| node.len()).sum();
 
-            let values = qnero_state_proof::read_values(root, nodes.clone(), &keys)
-                .expect("proof verifies");
+            let values =
+                qnero_state_proof::read_values(root, nodes.clone(), &keys).expect("proof verifies");
             let present = values.iter().filter(|value| value.is_some()).count();
             let value_bytes: usize = values
                 .iter()
@@ -267,7 +267,9 @@ fn m16_settlement_state_and_body() {
         struct Header {
             number: String,
         }
-        let header: Header = rpc.call_as("chain_getHeader", json!([head])).expect("header");
+        let header: Header = rpc
+            .call_as("chain_getHeader", json!([head]))
+            .expect("header");
         u64::from_str_radix(header.number.trim_start_matches("0x"), 16).expect("height")
     };
     for height in 0..=head_number {

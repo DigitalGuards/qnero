@@ -653,8 +653,7 @@ async fn every_font_the_stylesheet_names_is_routed() {
     let mut found = 0;
     for piece in sheet.split("url('./").skip(1) {
         let path = piece.split('\'').next().expect("a closing quote");
-        let (status, _, _) =
-            request("GET", format!("{}/{path}", harness.base), None, None).await;
+        let (status, _, _) = request("GET", format!("{}/{path}", harness.base), None, None).await;
         assert_eq!(status, 200, "brand-fonts.css names /{path}, which 404s");
         found += 1;
     }

@@ -177,7 +177,7 @@ impl WalletProver {
 
     /// Prove one transfer.
     ///
-    /// The witness is built from `qnero-notes` types: a [`Note`] and the keys
+    /// The witness is built from `qnero-notes` types: a `Note` and the keys
     /// that spend it, a Merkle path from the chain, and the recipient's `pk`.
     /// See `qnero_circuit::witness::InputNote::real`.
     ///
@@ -193,8 +193,6 @@ impl WalletProver {
     /// anything outside the wallet publishes the structure of the notes it
     /// spends. Callers that do not need the two steps apart should use
     /// [`Self::prove_submission`], which keeps them inside one call.
-    ///
-    /// [`Note`]: qnero_notes::Note
     pub fn prove_leaf(&self, witness: &SpendWitness) -> Result<Proof> {
         witness.validate()?;
         let mut pw = PartialWitness::<F>::new();

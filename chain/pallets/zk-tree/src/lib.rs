@@ -60,8 +60,8 @@ mod tests;
 ///   And the ceiling is both, because it is a per-block ceiling read as a rate: `docs/DESIGN.md`
 ///   7.4 puts permanently saturated blocks at 318 settlements each, which is ~2.6/sec at 120 s
 ///   where it was ~26/sec at 12 s, so saturation gives ~13,000 years where the 12 s figure was
-///   ~1,300. Each +1 of circuit depth quadruples capacity, and the depth-16 numbers this
-///   paragraph carried before the relaunch were these divided by 256.
+///   ~1,300. Each +1 of circuit depth quadruples capacity, and the depth-16 numbers this paragraph
+///   carried before the relaunch were these divided by 256.
 /// - Observability: `LeafCount` is public storage, so exhaustion is visible years in advance; alert
 ///   well before 4^20 leaves.
 /// - The update itself: bump `MAX_DEPTH` in `qp-zk-circuits-common`, release the circuit crates,
