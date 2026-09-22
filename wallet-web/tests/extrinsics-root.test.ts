@@ -39,8 +39,9 @@
  * `crates/qnero-prover-wasm/www/run-extrinsics-root.mjs`: it loads the module
  * as built, wasm-bindgen'd and optimised into headless Chromium, initialises
  * it and asks it for both roots, handing in the vectors from the same two
- * files rather than keeping a copy beside the page. This file stubs the module
- * out on purpose, because what it covers is the wiring around it.
+ * files, because a copy of a known answer beside the page is a second answer
+ * that can be edited to agree with a module that moved. This file stubs the
+ * module out on purpose, because what it covers is the wiring around it.
  */
 
 import { readFileSync } from 'node:fs';

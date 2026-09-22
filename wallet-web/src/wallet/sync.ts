@@ -807,9 +807,9 @@ export async function authenticateLeaves(
       const label = authorLabelFromHeader(header);
       const ours = label !== null && label.toLowerCase() === ownLabels[index - 1];
       // The hash this walk rehashed for this block, kept because the body pass
-      // has to ask by a hash this pass authenticated rather than by a height,
-      // and beside it the `extrinsicsRoot` out of that same rehashed header,
-      // which is what the body pass roots the block body against.
+      // has to ask by a hash this pass authenticated: a height is a node's own
+      // choice of chain at that height. Beside it the `extrinsicsRoot` out of
+      // that same rehashed header, which the body pass roots the body against.
       blockHashes.set(hexToBytes(`0x${hashes[index] ?? ''}`), (block - hashesFrom) * 32);
       extrinsicsRoots.set(hexToBytes(`0x${strip0x(header.extrinsicsRoot)}`), (block - hashesFrom) * 32);
       runs.push({ block, from, to: cursor, ours });

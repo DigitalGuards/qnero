@@ -178,7 +178,7 @@ export async function authenticatedPrefix(
  * Requests` after about eighty requests in a window, so the count per block is
  * what decides whether a scan finishes at all. What is trusted is unchanged,
  * because the root now comes from the same rehashed header the old refetch was
- * checking against, and is carried rather than asked for twice.
+ * checking against, and one fetch of that header carries it.
  *
  * What the root check buys is completeness as well as integrity. A state read
  * authenticates one key at a time and an absent answer has to be caught by a

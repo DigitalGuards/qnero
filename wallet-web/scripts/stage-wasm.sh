@@ -120,7 +120,7 @@ if [[ "${prebuilt}" == "1" ]]; then
 QNERO_WASM_PREBUILT=1 and no threaded module at
 ${crate_dir}/www/pkg-threaded
 
-Under this flag the modules are copied in rather than built, so a missing
+Under this flag the modules are copied in and neither is built, so a missing
 threaded package is a copy that did not finish, and staging it as a
 single-threaded deploy would silently ship a wallet proving a payment in 37.6 s
 where it takes 11.2 s. Copy it in, or build here without the flag. Nothing has

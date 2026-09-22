@@ -282,8 +282,8 @@ if has_stage wallet; then
     # export and other bytes in it also passes, and the glue is text. So
     # stage-wasm.sh pins both `.wasm` files against a SHA-256 manifest under
     # this flag and refuses a manifest that is missing or disagrees, and it
-    # refuses a missing threaded package rather than shipping a wallet that
-    # proves a payment in 37.6 s where it takes 11.2 s. Write the manifest on
+    # refuses a missing threaded package, which would otherwise ship a wallet
+    # that proves a payment in 37.6 s where it takes 11.2 s. Write the manifest on
     # the machine that built the modules and bring it with them; point
     # QNERO_WASM_SHA256 at it, or put it at wallet-web/wasm-prebuilt.sha256.
     if [ "${QNERO_WASM_PREBUILT:-0}" = "1" ]; then
