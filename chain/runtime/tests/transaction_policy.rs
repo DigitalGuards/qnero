@@ -228,7 +228,7 @@ fn unsigned_settlements_continue_to_their_own_validity_checks() {
 ///
 /// The two answers mean opposite things to a block builder. `ExhaustsResources`
 /// is "block full": the transaction is skipped and offered again for the next
-/// block. `Call` is "invalid": it is dropped. The ciphertext-cap deferral added
+/// block. `Call` is "invalid": it is dropped. The output-budget deferral added
 /// the only `ExhaustsResources` arm this pallet has, for the one condition that
 /// really is temporary, and `CiphertextLengthMismatch` and `UnknownCryptoSuite`
 /// must not join it: a permanent failure answered as a full block would be

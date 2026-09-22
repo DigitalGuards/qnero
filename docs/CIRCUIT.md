@@ -1044,10 +1044,10 @@ prices them is the submission floor in 9.7: the settling slots of a submission
 pay one pool step per started `CiphertextBytesPerFeeQuantum` bytes the submission
 carries, a skipped segment's bytes included, on top of `MinLeafFee` for every
 real slot it carries. Without the byte term, one settling segment beside
-fifty-two skipped ones carries up to 1.27 MB of payload into a block body
-every archive node keeps forever, for the fee of six leaf slots; without the slot term, emptying those positions hands the
-same 318 real slots of admission walk and declared weight to every node for one
-pool step.
+fifty-two skipped ones carries up to 1.27 MB of payload into a block body every
+archive node keeps forever, for the fee of six leaf slots; without the slot
+term, emptying those positions hands the same 318 real slots of admission walk
+and declared weight to every node for one pool step.
 
 **One shape at a skipped position is exempt: a pair of zero-length
 ciphertexts.** It carries no bytes, so there is nothing there to bind and
@@ -1659,12 +1659,14 @@ Three things about them are worth carrying into M5:
   more than an order of magnitude. And an included settlement runs the parse,
   the verify and the settlement check twice, once in `pre_dispatch` and once in
   the dispatch body, so all three are charged twice.
-- **`shield` carries its ciphertext in `proof_size`.** It publishes one ciphertext in its own
-  extrinsic, the way a settled slot publishes two, and `settlement_weight` puts that payload in
-  its `proof_size` term, so `shield` does the same. The bytes are validation input for every
-  node whether or not anything stores them. The runtime sets `proof_size` to `u64::MAX` today, so nothing
-  is metered against either term; the declaration is an upper bound for the day
-  a concrete limit lands, which `configs/mod.rs` carries as a planned change.
+- **`shield` carries its ciphertext in `proof_size`.** It publishes one
+  ciphertext in its own extrinsic, the way a settled slot publishes two, and
+  `settlement_weight` puts that payload in its `proof_size` term, so `shield`
+  does the same. The bytes are validation input for every node whether or not
+  anything stores them. The runtime sets `proof_size` to `u64::MAX` today, so
+  nothing is metered against either term; the declaration is an upper bound for
+  the day a concrete limit lands, which `configs/mod.rs` carries as a planned
+  change.
 - **The parse has two terms.** The blob round trip does not scale with the
   public inputs and the layout walk does: `private_batch_pi_len(6)` is 131 felts
   against `public_batch_pi_len(53, 6)` at 6947, and the parse allocates a slot
@@ -1734,10 +1736,10 @@ The event is `CoinbaseMinted { block_number, leaf_index, inner, value,
 has_ciphertext }`. It publishes `inner`, which the storage does not, so a wallet
 that watches events can check a note without rebuilding the commitment from the
 leaf. The payload is a flag rather than the bytes: the bytes are already in the
-block's own coinbase inherent, and republishing them in an event would put
-every author's payload into the `System::Events` state value an archive node
-keeps forever. Under v1 the flag is false on every
-block, because the inherent refuses a non-empty payload (section 10.4).
+block's own coinbase inherent, and republishing them in an event would put every
+author's payload into the `System::Events` state value an archive node keeps
+forever. Under v1 the flag is false on every block, because the inherent refuses
+a non-empty payload (section 10.4).
 
 No event and no storage item names the block's author. The header's
 `PreRuntime` item, which the runtime hashes into the account it calls the
@@ -1816,8 +1818,8 @@ refuses one until something does and its bytes are priced (section 10.3).
   be the one place on the chain where archived block body is free. The settlement path charges
   `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)` for the same bytes, and an author
   writing `MaxCiphertextBytes` of anything on every block it won would pay nothing for bytes
-  every archive node keeps forever. A non-empty payload would also mark its own leaf, since a derived
-  coinbase publishes none. When the third-party path lands (section 10.6), the field's bytes get
+  every archive node keeps forever. A non-empty payload would also mark its own leaf, since a
+  derived coinbase publishes none. When the third-party path lands (section 10.6), the field's bytes get
   priced against the author's own credit and the refusal is lifted.
 
 ### 10.4 What the chain does not check

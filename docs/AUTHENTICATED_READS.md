@@ -16,8 +16,8 @@ There is no unproven storage fallback.
 The scan proves the tree count and depth, commitments at their exact storage
 indices, leaf creation blocks, coinbase values, entry counter, and the complete
 settled-nullifier map. Note ciphertexts are not among them: the runtime keeps
-none in state, so what authenticates a payload is the header's
-`extrinsics_root` over the block body that carried it. The spending path uses the same
+none in state, so what authenticates a payload is the header's `extrinsics_root`
+over the block body that carried it. The spending path uses the same
 read methods. The runtime's active protocol profile is authenticated before
 building or using circuits. Header and commitment-tree consistency checks
 remain additional checks.

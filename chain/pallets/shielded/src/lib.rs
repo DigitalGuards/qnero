@@ -542,19 +542,22 @@ pub mod pallet {
 		/// Bytes of note ciphertext one step of fee buys, on top of
 		/// [`Config::MinLeafFee`].
 		///
-		/// A flat per-slot floor prices a slot's permanent state at whatever
-		/// the ciphertext cap allows. The chain never parses these bytes, so a
+		/// A flat per-slot floor prices a slot's payload at whatever the
+		/// ciphertext cap allows. The chain never parses these bytes, so a
 		/// settler is not held to a real `NoteCiphertext`: it commits its proof
-		/// to two fields of arbitrary bytes up to
-		/// [`Config::MaxCiphertextBytes`]. This makes the floor linear in the
+		/// to two fields of arbitrary bytes. This makes the floor linear in the
 		/// payload, so the block bandwidth and the archived block body a
 		/// settlement adds are paid for in proportion.
 		///
-		/// A runtime owes one property when it picks a value: the divisor has
-		/// to sit below the slack between a real `NoteCiphertext` and
-		/// [`Config::MaxCiphertextBytes`], or both round to the same number of
-		/// steps and padding to the cap is free, which is the whole of what
-		/// this term exists to price.
+		/// Two rules replaced the argument this divisor was sized against. The
+		/// exact-length settlement rule refuses the padding grind rather than
+		/// pricing it, so there is one reachable settlement payload and one
+		/// point on the line. And the payload is no longer state, so what a
+		/// carried byte costs is bandwidth and the body an archive node keeps.
+		/// What the term still prices, and why it stays linear: a `shield`
+		/// entry note, which the length rule does not reach; a skipped
+		/// position's carried bytes, which no settling slot's own floor
+		/// covers; and a second crypto suite's second length.
 		///
 		/// The same divisor prices the submission as a whole. The settling fees
 		/// must cover `ceil(carried bytes / CiphertextBytesPerFeeQuantum)` over

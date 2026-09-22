@@ -23,6 +23,15 @@
 //! it deliberately, with `QNERO_UPDATE_EXTRINSICS_ROOT_KAT=1`, and never to
 //! make a red test green: a changed root is the chain telling a wallet it can
 //! no longer read a block body.
+//!
+//! One thing the vector shows that a body walker has to know: the bare
+//! preamble in it is `0x05`. `UncheckedExtrinsic::new_bare` takes
+//! `sp_runtime`'s current `EXTRINSIC_FORMAT_VERSION`, which is 5, so every
+//! inherent a node builds carries `0x05`, while the command-line wallet signs
+//! and submits at the legacy version 4 and its settlements carry `0x04`
+//! (`crates/qnero-wallet/src/extrinsic.rs`). `Preamble::decode` takes both, so
+//! a real block body is a mixture and a walk that pins one byte reads half of
+//! it as malformed.
 
 use codec::Encode;
 use frame_support::BoundedVec;

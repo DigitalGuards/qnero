@@ -211,8 +211,9 @@ fn a_second_submission_in_a_full_block_still_returns_too_many_outputs_in_block()
 			assert_noop!(check(&second, &outputs), Error::<Test>::TooManyOutputsInBlock);
 
 			// The counter is stamped with its block, so the next block admits
-			// the same submission with no hook run in between.
-			System::set_block_number(11);
+			// the same submission with no hook run in between. `anchor` leaves
+			// the chain at block 11, so 12 is the next one.
+			System::set_block_number(12);
 			assert_ok!(plan(&second, &outputs));
 		});
 	});

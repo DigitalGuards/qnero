@@ -204,7 +204,7 @@ pub trait WeightInfo {
 /// `PendingCoinbase`, `PendingCoinbaseFee` and `PoolValue`; writes of
 /// `PendingCoinbase` (taken), `PendingCoinbaseFee`, `PoolValue`, `LeafBlocks`
 /// and `CoinbaseValues`.
-pub const MINT_COINBASE_DB_OPS: (u64, u64) = (3, 5);
+const MINT_COINBASE_DB_OPS: (u64, u64) = (3, 5);
 
 /// Weight of minting one coinbase note, shared by both `WeightInfo` impls
 /// because the work does not depend on the runtime's own storage weights
