@@ -472,8 +472,18 @@ impl pallet_qpow::Config for Runtime {
 	// The seed is resolved along each candidate's own ancestry. A deep fork
 	// can change an epoch seed; its work must be verified against that branch's
 	// seed even when it differs from the current best chain.
+	//
+	// The lag is 128 blocks, above Monero's 64. At the 120 s target that is
+	// 15 360 s, 4.3 hours, between the block that supplies a seed and the
+	// first block that hashes under it. `MaxReorgDepth` above is
+	// `ConstU32<{ u32::MAX }>`, so no depth floor refuses a reorg that crosses
+	// an epoch boundary and re-keys work already started; what bounds a side
+	// branch is the client admission budget of `docs/DESIGN.md` 7.5. A 128
+	// block lag puts the seed block further behind first use than a reorg on
+	// this network reaches, and it doubles the notice a full-mode rig gets on
+	// its next 2 GiB dataset build, from 2.1 hours to 4.3.
 	type SeedEpochBlocks = ConstU32<2_048>;
-	type SeedEpochLag = ConstU32<64>;
+	type SeedEpochLag = ConstU32<128>;
 	type WeightInfo = pallet_qpow::weights::SubstrateWeight<Runtime>;
 }
 

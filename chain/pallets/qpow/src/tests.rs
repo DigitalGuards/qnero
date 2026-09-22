@@ -476,7 +476,7 @@ fn test_genesis_rejects_zero_target_block_time() {
 fn the_seed_schedule_is_readable_from_the_runtime() {
 	new_test_ext().execute_with(|| {
 		assert_eq!(QPow::get_seed_epoch_blocks(), 2048);
-		assert_eq!(QPow::get_seed_epoch_lag(), 64);
+		assert_eq!(QPow::get_seed_epoch_lag(), 128);
 	});
 }
 
