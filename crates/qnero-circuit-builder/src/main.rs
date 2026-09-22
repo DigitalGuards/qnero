@@ -149,8 +149,9 @@ fn main() -> Result<()> {
 
     if args.pins == PinPolicy::Report {
         println!(
-            "--report-pins: the release pin is measured and printed, not enforced. Paste the \
-             digests into crates/qnero-circuit/src/profile.rs and rebuild without this flag."
+            "--report-pins: this run measures and prints the release pin instead of holding \
+             the set to it. Paste the digests into crates/qnero-circuit/src/profile.rs and \
+             rebuild with no flag."
         );
     }
 
