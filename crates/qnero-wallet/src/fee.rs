@@ -7,8 +7,6 @@
 //! arithmetic first and proves second, or it pays for a proof the chain
 //! refuses with `PayloadUnderpaid`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use crate::metadata::ChainMetadata;
 
 /// The per-slot floor: `MinLeafFee + ceil(ciphertext bytes / the byte bucket)`.
@@ -81,8 +79,8 @@ pub fn ensure_ciphertext_fits(
 /// `crate::metadata` states the rule this closes: no chain value gets a
 /// compiled-in copy, because a pinned constant is a wallet that builds a proof
 /// against the wrong rule and finds out after paying for it. `MEMO_BYTES` is a
-/// derivative of `MaxCiphertextBytes` and it is pinned at compile time, so the
-/// two are compared here, once per command, beside
+/// derivative of the chain's own ciphertext length and it is pinned at compile
+/// time, so the two are compared here, once per command, beside
 /// `ChainMetadata::ensure_known_storage`.
 ///
 /// Without the comparison a runtime that lowered `ShieldedMaxCiphertextBytes`
@@ -92,26 +90,16 @@ pub fn ensure_ciphertext_fits(
 /// `ensure_ciphertext_fits` telling them about a size no memo of theirs
 /// controls.
 ///
-/// The cap is the looser of the two bounds, and it is the only one that is a
-/// refusal. The tighter one is the fee, and it is a warning: see
-/// [`memo_pad_separation_warning`].
-///
-/// `memo::MEMO_BYTES` is decided by two bounds and the tighter one wins. The
-/// tighter one is the fee. A slot's payload term is
-/// `ceil((len(ct_1) + len(ct_2)) / CiphertextBytesPerFeeQuantum)`, and the
-/// runtime sizes that divisor so an honest pair and a pair padded to
-/// `MaxCiphertextBytes` land in different buckets. The chain never parses
-/// these bytes and `Shielded::Ciphertexts` is never pruned, so once the two
-/// buckets merge a settler pads both ciphertexts to the cap, writes the extra
-/// bytes of permanent state and pays exactly what an honest spend pays.
-///
-/// Checking only the cap left that open. A runtime that widened the divisor,
-/// with the cap untouched, passed the guard while the separation the pad was
-/// chosen for was gone, and neither this wallet's own fee test nor the
-/// pallet's byte-floor test would have said so: each builds its own fixture
-/// and pins 61 against that, so both stay green against any runtime at all.
-/// Both values reach `ChainMetadata` from `state_getMetadata`, so the
-/// comparison is against the runtime the wallet is actually talking to.
+/// The cap is what this checks, and it is all that is left to check. The pad
+/// used to be decided by a second, tighter bound: it had to keep an honest
+/// pair a fee bucket below a pair padded to `MaxCiphertextBytes`, because the
+/// chain did not parse these bytes and nothing held a submission to a real
+/// ciphertext shape. The exact-length settlement rule refuses that shape
+/// outright, so the separation priced a state nobody can reach and the
+/// machinery that reasoned about it is gone. What holds `MEMO_BYTES` now is
+/// `qnero_circuit::profile::ensure_supported`, which the spend path runs
+/// before anything else: a runtime carrying a different ciphertext length
+/// carries a different profile, and strict equality refuses it there.
 pub fn ensure_memo_pad_fits(metadata: &ChainMetadata) -> anyhow::Result<()> {
     let padded = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
     let cap = metadata.max_ciphertext_bytes as usize;
@@ -126,91 +114,7 @@ pub fn ensure_memo_pad_fits(metadata: &ChainMetadata) -> anyhow::Result<()> {
             cap.saturating_sub(crate::memo::CIPHERTEXT_FIXED_BYTES)
         );
     }
-    if let Some(warning) = memo_pad_separation_warning(metadata) {
-        warn_once(&warning);
-    }
     Ok(())
-}
-
-/// Printed at most once per process.
-///
-/// The warning is a property of the runtime, so it is the same sentence on
-/// every command; repeating it per send would train an operator to skip it.
-static SEPARATION_WARNED: AtomicBool = AtomicBool::new(false);
-
-fn warn_once(warning: &str) {
-    if !SEPARATION_WARNED.swap(true, Ordering::Relaxed) {
-        eprintln!("warning: {warning}");
-    }
-}
-
-/// The fee-separation complaint, or `None` when this runtime separates the two
-/// buckets.
-///
-/// A warning and not a refusal, which is the whole of this function. The
-/// property is chain wide: the payload term prices nothing for *anyone* on a
-/// runtime whose divisor swallowed the gap, and a settler who wants the free
-/// permanent state pads to the cap whatever this wallet does. Refusing here
-/// fixed none of that and stopped every send and every shield this wallet
-/// makes, which is the one outcome that helps nobody: the operator cannot
-/// change `CiphertextBytesPerFeeQuantum`, and the wallet shrinking its own pad
-/// below what every other wallet on the chain uses would publish its own
-/// ciphertext length, which is the leak the pad exists to close.
-///
-/// So the wallet says what the runtime did, keeps the pad every other wallet
-/// on the chain uses, and sends.
-pub fn memo_pad_separation_warning(metadata: &ChainMetadata) -> Option<String> {
-    let padded = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
-    let cap = metadata.max_ciphertext_bytes as usize;
-    if slot_fee_floor(metadata, padded, padded) < slot_fee_floor(metadata, cap, cap) {
-        return None;
-    }
-    let advice = match largest_separating_pad(metadata) {
-        Some(pad) => format!(
-            "a coordinated move of memo::MEMO_BYTES down to {pad} would restore it, and every \
-             wallet on the chain has to make it together"
-        ),
-        None => format!(
-            "no pad restores it under this runtime: even an unpadded pair of {} bytes each pays \
-             what a pair padded to the cap pays, so the divisor is what has to come down",
-            crate::memo::CIPHERTEXT_FIXED_BYTES
-        ),
-    };
-    Some(format!(
-        "this runtime's payload fee prices nothing. This wallet pads every memo to \
-         memo::MEMO_BYTES ({}), so the pair of ciphertexts a spend publishes is {} bytes and \
-         pays {} QNR of payload fee, and a pair padded to this runtime's cap of {cap} bytes \
-         each pays {}. A settler can pad both outputs to the cap and write {} bytes of permanent \
-         state per slot for what an honest spend pays. It is a property of the chain and not of \
-         this spend, so the spend goes ahead. This runtime charges 0.01 QNR per {} ciphertext \
-         bytes; {advice}.",
-        crate::memo::MEMO_BYTES,
-        2 * padded,
-        crate::units::qnr(slot_fee_floor(metadata, padded, padded)),
-        crate::units::qnr(slot_fee_floor(metadata, cap, cap)),
-        2 * cap.saturating_sub(padded),
-        bytes_per_fee_quantum(metadata)
-    ))
-}
-
-/// The largest memo pad that keeps this wallet's own pair a fee bucket below a
-/// pair padded to the runtime's cap, or `None` when no pad does.
-///
-/// A pair of `total` bytes pays `ceil(total / q)`. The cap's pair pays
-/// `ceil(2 * cap / q)`, so the largest total strictly below that bucket is
-/// `(ceil(2 * cap / q) - 1) * q`, and half of it less the fixed part of a
-/// ciphertext is the pad. At the M4 runtime's 512 and 2048 that is
-/// `(8 - 1) * 512 / 2 - 1731 = 61`, which is where `memo::MEMO_BYTES` comes
-/// from.
-pub fn largest_separating_pad(metadata: &ChainMetadata) -> Option<usize> {
-    let quantum = bytes_per_fee_quantum(metadata);
-    let cap = metadata.max_ciphertext_bytes as u64;
-    let cap_bucket = cap.checked_mul(2)?.div_ceil(quantum);
-    let largest_total = cap_bucket.checked_sub(1)?.checked_mul(quantum)?;
-    let each = largest_total / 2;
-    usize::try_from(each)
-        .ok()?
-        .checked_sub(crate::memo::CIPHERTEXT_FIXED_BYTES)
 }
 
 #[cfg(test)]
@@ -234,47 +138,21 @@ mod tests {
         }
     }
 
-    /// The two figures `docs/CIRCUIT.md` section 9.7 pins: two real
-    /// ciphertexts (3462 bytes) pay eight steps of fee, two padded to the cap (4096)
-    /// pay nine.
-    #[test]
-    fn the_slot_floor_matches_the_documented_endpoints() {
-        assert_eq!(
-            slot_fee_floor(
-                &runtime(),
-                crate::memo::CIPHERTEXT_FIXED_BYTES,
-                crate::memo::CIPHERTEXT_FIXED_BYTES
-            ),
-            8
-        );
-        assert_eq!(slot_fee_floor(&runtime(), 2048, 2048), 9);
-    }
-
-    /// The regression: the memo pad is chosen against the cap, and it has to
-    /// be chosen against the divisor too.
+    /// The figure `docs/CIRCUIT.md` section 9.7 pins: the padded pair a
+    /// settlement may carry, 3584 bytes, pays eight steps of fee, one flat plus
+    /// seven of payload.
     ///
-    /// `ShieldedCiphertextBytesPerFeeQuantum` is sized so that a real pair and
-    /// a pair padded to `MaxCiphertextBytes` fall in different buckets. The
-    /// chain never parses these bytes and `Shielded::Ciphertexts` is never
-    /// pruned, so if the two buckets merge a settler pads both ciphertexts to
-    /// the cap, writes the extra bytes of permanent state and pays exactly
-    /// what an honest spend pays. A 256-byte pad put this wallet's own pair at
-    /// 3974 bytes, which shares a bucket with 4096, so every real spend on the
-    /// chain sat at the merged endpoint while both trees stayed green: the
-    /// pallet pins 1731 against the cap and 1731 is a size this wallet no
-    /// longer sends.
+    /// The second endpoint this used to pin, a pair padded to the cap at nine
+    /// steps, is not a price any more. The exact-length settlement rule refuses
+    /// that pair, and `a_pair_padded_to_the_cap_is_refused_not_priced` in the
+    /// pallet is where it now lands. The arithmetic below is still the general
+    /// floor, because the payload term still prices a skipped position's
+    /// carried bytes.
     #[test]
-    fn the_wallets_own_pair_stays_a_bucket_below_a_padded_one() {
-        let metadata = runtime();
+    fn the_slot_floor_matches_the_documented_endpoint() {
         let sent = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
-        let cap = metadata.max_ciphertext_bytes as usize;
-        assert!(
-            slot_fee_floor(&metadata, sent, sent) < slot_fee_floor(&metadata, cap, cap),
-            "a pair this wallet sends ({sent} bytes each) pays {} and a pair padded to the cap \
-             ({cap} bytes each) pays {}: the payload term prices nothing",
-            slot_fee_floor(&metadata, sent, sent),
-            slot_fee_floor(&metadata, cap, cap)
-        );
+        assert_eq!(sent, qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES);
+        assert_eq!(slot_fee_floor(&runtime(), sent, sent), 8);
     }
 
     /// `MEMO_BYTES` is a compiled-in derivative of a metadata value, so the
@@ -297,105 +175,6 @@ mod tests {
         // The advice is the pad, because no memo length reaches this.
         assert!(!message.contains("Shorten"), "{message}");
     }
-    /// The regression, and the correction on top of it.
-    ///
-    /// `memo.rs` states that two bounds decide `MEMO_BYTES` and the tighter
-    /// one wins, and the tighter one is the fee: `2 * (1731 + 61) = 3584` has
-    /// to sit a bucket below `2 * 2048 = 4096`. The guard compared
-    /// `1731 + 61` against `MaxCiphertextBytes` and nothing else, so a runtime
-    /// that widened `CiphertextBytesPerFeeQuantum` with the cap untouched
-    /// passed it while the separation was gone, and a settler could again pad
-    /// both outputs to the cap, write 512 bytes of permanent state per slot
-    /// and pay what an honest spend pays.
-    ///
-    /// The correction is that it is a warning. The property is chain wide: a
-    /// settler pads to the cap whatever this wallet does, so refusing stopped
-    /// every send and every shield this wallet makes and fixed nothing. The
-    /// wallet says what the runtime did and sends.
-    ///
-    /// Neither existing gate sees the merge: this module's own separation test
-    /// and the pallet's byte-floor test each build a fixture and pin 61
-    /// against that fixture, so both stay green against any runtime at all.
-    /// This one is against `ChainMetadata`, which is what `state_getMetadata`
-    /// fills in.
-    #[test]
-    fn a_runtime_whose_divisor_merges_the_fee_buckets_warns_and_still_sends() {
-        let sent = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
-
-        // The runtime the pad was tuned against: both bounds hold and there is
-        // nothing to say.
-        assert!(ensure_memo_pad_fits(&runtime()).is_ok());
-        assert_eq!(memo_pad_separation_warning(&runtime()), None);
-
-        // The divisor doubled, nothing else changed. The cap check still
-        // passes, because 1792 is under 2048.
-        let mut widened = runtime();
-        widened.ciphertext_bytes_per_fee_quantum = 1_024;
-        let cap = widened.max_ciphertext_bytes as usize;
-        assert!(
-            sent <= cap,
-            "the cap check is not what is supposed to catch this"
-        );
-        assert_eq!(
-            slot_fee_floor(&widened, sent, sent),
-            slot_fee_floor(&widened, cap, cap),
-            "the fixture has to be one where the buckets actually merge"
-        );
-        let message =
-            memo_pad_separation_warning(&widened).expect("the merged buckets are reported");
-        assert!(message.contains("prices nothing"), "{message}");
-        assert!(message.contains("1024"), "{message}");
-        // At 1024 bytes to the bucket against a 2048-byte cap, no pad at all
-        // restores the separation: an unpadded pair is 3462 bytes and a capped
-        // one 4096, and both are the fourth bucket.
-        assert_eq!(largest_separating_pad(&widened), None);
-        assert!(
-            message.contains("the divisor is what has to come down"),
-            "{message}"
-        );
-        // The spend goes ahead. A wallet that refused here could not send at
-        // all on a chain whose runtime it does not control.
-        assert!(
-            ensure_memo_pad_fits(&widened).is_ok(),
-            "a chain-wide property is not this spend's refusal"
-        );
-
-        // A runtime that widened the divisor by less still separates the two,
-        // at a smaller pad, and the message names that pad rather than sending
-        // an operator to guess. At 1160 bytes to the bucket a pair may reach
-        // 3480 bytes, so each ciphertext may reach 1740 and the pad is 9.
-        let mut slightly = runtime();
-        slightly.ciphertext_bytes_per_fee_quantum = 1_160;
-        assert_eq!(largest_separating_pad(&slightly), Some(9));
-        let message = memo_pad_separation_warning(&slightly)
-            .expect("61 does not separate under that divisor");
-        assert!(message.contains("down to 9"), "{message}");
-        assert!(ensure_memo_pad_fits(&slightly).is_ok());
-    }
-
-    /// Where `memo::MEMO_BYTES` comes from, computed rather than asserted.
-    ///
-    /// The pad is the largest that keeps this wallet's pair a fee bucket below
-    /// a pair padded to the cap, and at the M4 runtime's 512-byte bucket and
-    /// 2048-byte cap that is exactly 61.
-    #[test]
-    fn the_pad_is_the_largest_one_the_m4_runtime_separates() {
-        assert_eq!(
-            largest_separating_pad(&runtime()),
-            Some(crate::memo::MEMO_BYTES)
-        );
-        let metadata = runtime();
-        let sent = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
-        let cap = metadata.max_ciphertext_bytes as usize;
-        assert!(slot_fee_floor(&metadata, sent, sent) < slot_fee_floor(&metadata, cap, cap));
-        // One byte more and the separation is gone, which is what "largest"
-        // means.
-        assert_eq!(
-            slot_fee_floor(&metadata, sent + 1, sent + 1),
-            slot_fee_floor(&metadata, cap, cap)
-        );
-    }
-
     /// A started bucket is a whole bucket.
     #[test]
     fn a_partial_bucket_of_payload_rounds_up() {

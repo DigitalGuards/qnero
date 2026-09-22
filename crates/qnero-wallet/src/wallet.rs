@@ -1852,10 +1852,22 @@ impl Wallet {
         } else {
             (change_ct, payment_ct)
         };
-        if ct_1.len() != probe_payment || ct_2.len() != probe_change {
+        // Both the fee this wallet computed and the length consensus requires.
+        // The chain refuses anything but `SUITE_1_CIPHERTEXT_BYTES` at a
+        // settling position, and it refuses it with a bare
+        // `Invalid Transaction: Call` that names no pallet error, after this
+        // wallet has already paid for the proof. So the comparison is worth
+        // making here, where the bytes are in hand and nothing has been spent.
+        let required = qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES;
+        if ct_1.len() != probe_payment
+            || ct_2.len() != probe_change
+            || ct_1.len() != required
+            || ct_2.len() != required
+        {
             bail!(
                 "the ciphertexts came out at {} and {} bytes where the fee was computed for {} \
-                 and {}",
+                 and {}, and where this chain settles only {required}-byte suite-1 ciphertexts \
+                 and answers anything else with a bare pool rejection that names nothing",
                 ct_1.len(),
                 ct_2.len(),
                 probe_payment,

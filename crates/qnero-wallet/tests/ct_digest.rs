@@ -61,8 +61,11 @@ fn ciphertext(seed: u8, value: u64, memo: &[u8]) -> Vec<u8> {
 /// the digest the witness carried is the digest the chain will recompute.
 #[test]
 fn the_digest_a_witness_carries_is_the_one_the_pallet_recomputes() {
-    let ct_1 = ciphertext(1, 600, b"a memo");
-    let ct_2 = ciphertext(2, 392, b"");
+    // Through `pad_memo`, which is what a real spend does and what the exact
+    // length settlement requires: an unpadded pair is a pair the chain refuses
+    // before it ever recomputes a digest.
+    let ct_1 = ciphertext(1, 600, &pad_memo("a memo").expect("it fits"));
+    let ct_2 = ciphertext(2, 392, &pad_memo("").expect("it fits"));
     let output = ShieldedOutput {
         ct_1: ct_1.clone(),
         ct_2: ct_2.clone(),
@@ -78,6 +81,17 @@ fn the_digest_a_witness_carries_is_the_one_the_pallet_recomputes() {
 
     let recomputed = ct_digest(&[&decoded[0].0, &decoded[0].1]);
     assert_eq!(carried.to_bytes(), recomputed);
+
+    // The length the chain settles on, asserted on the bytes that came back
+    // out of the encoder rather than on the bytes that went in.
+    assert_eq!(
+        decoded[0].0.len(),
+        qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES
+    );
+    assert_eq!(
+        decoded[0].1.len(),
+        qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES
+    );
 }
 
 /// `ct_1` belongs to `cm_out_1`. A wallet that submits the pair the other way
@@ -100,16 +114,19 @@ fn the_digest_binds_the_output_order() {
     assert_ne!(forward, reversed);
 }
 
-/// Two sizes, and the wallet pays for the second.
+/// Three sizes, and only the third is one consensus accepts.
 ///
 /// The fixed part of a `NoteCiphertext` is 1731 bytes: that is the constant
 /// `memo::CIPHERTEXT_FIXED_BYTES` pins, and both the memo pad and the fee are
-/// derived from it. What this wallet actually sends is
+/// derived from it. 1731 and 1738 stay here as serializer facts, because they
+/// are what `CIPHERTEXT_FIXED_BYTES` means and what a drift in the framing or
+/// the AEAD would move. What this wallet actually sends is
 /// `CIPHERTEXT_FIXED_BYTES + memo::MEMO_BYTES` for every output, because every
 /// memo is padded, so the pair it publishes is twice that and its slot floor
-/// is `MinLeafFee + ceil(2 * (1731 + MEMO_BYTES) / 512)`. The wallet sizes its
+/// is `MinLeafFee + ceil(2 * 1792 / 512)`, eight steps. The wallet sizes its
 /// fee from the bytes it is about to send, so a drift in either number is a
-/// fee that no longer clears the floor.
+/// fee that no longer clears the floor, and now also a length settlement
+/// refuses outright.
 #[test]
 fn an_empty_memo_ciphertext_is_the_documented_size() {
     assert_eq!(ciphertext(5, 1, b"").len(), CIPHERTEXT_FIXED_BYTES);
@@ -117,10 +134,15 @@ fn an_empty_memo_ciphertext_is_the_documented_size() {
         ciphertext(5, 1, b"seven!!").len(),
         CIPHERTEXT_FIXED_BYTES + 7
     );
-    // The size that reaches the chain, and the one the fee is computed over.
+    // The size that reaches the chain, the one the fee is computed over, and
+    // the only one a settlement may publish.
     assert_eq!(
         ciphertext(5, 1, &pad_memo("a memo").expect("it fits")).len(),
         CIPHERTEXT_FIXED_BYTES + MEMO_BYTES
+    );
+    assert_eq!(
+        CIPHERTEXT_FIXED_BYTES + MEMO_BYTES,
+        qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES
     );
 }
 

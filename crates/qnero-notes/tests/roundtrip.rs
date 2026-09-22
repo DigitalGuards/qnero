@@ -221,3 +221,75 @@ fn received_note_debug_does_not_leak_the_note_or_the_memo() {
         "got: {dump}"
     );
 }
+
+/// The consensus length table is held to the code that produces the bytes.
+///
+/// `qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES` is a literal in the crate
+/// a runtime links, because that crate compiles without the note primitives
+/// and cannot call them. This is the test that keeps it honest: if the AEAD,
+/// the framing or the memo pad ever moves, the serializer moves with it and
+/// the table does not, and settlement would then refuse every ciphertext both
+/// wallets produce.
+#[test]
+fn the_suite_table_matches_the_serializer() {
+    let mut rng = StdRng::seed_from_u64(7);
+    let addr = sk(11).address();
+    let note = Note::random(&mut rng, addr.pk, 1_000).unwrap();
+
+    let padded = qnero_notes::pad_memo("").expect("an empty memo fits the pad");
+    let ct = encrypt_note(&addr.ek, &note, &padded, &[3u8; 32]).unwrap();
+    let bytes = ct.to_bytes();
+    let suite = qnero_circuit::chain::declared_crypto_suite(&bytes).expect("a header");
+    assert_eq!(
+        bytes.len(),
+        qnero_circuit::chain::ciphertext_len(suite).expect("a suite the table knows")
+    );
+    assert_eq!(bytes.len(), qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES);
+
+    // Every memo the pad accepts produces the same length, which is the whole
+    // point of padding and is also what makes one table row enough.
+    for memo in ["", "x", "payment to B", &"m".repeat(qnero_notes::MEMO_BYTES)] {
+        let padded = qnero_notes::pad_memo(memo).expect("it fits");
+        let ct = encrypt_note(&addr.ek, &note, &padded, &[4u8; 32]).unwrap();
+        assert_eq!(
+            ct.to_bytes().len(),
+            qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES,
+            "{memo}"
+        );
+    }
+}
+
+/// The three bytes the chain reads name the same suite the full parser reads.
+///
+/// `pallet-shielded` deliberately does not run `NoteCiphertext::from_bytes`:
+/// it reads a version byte, a two-byte suite id, and nothing else. This holds
+/// that shortcut to the parser it does not run, for a real ciphertext and for
+/// a hand-built suite-2 header the table has no row for.
+#[test]
+fn the_declared_suite_is_read_from_the_serialized_header() {
+    let mut rng = StdRng::seed_from_u64(8);
+    let addr = sk(12).address();
+    let note = Note::random(&mut rng, addr.pk, 7).unwrap();
+    let padded = qnero_notes::pad_memo("a memo").expect("it fits");
+    let ct = encrypt_note(&addr.ek, &note, &padded, &[5u8; 32]).unwrap();
+    let bytes = ct.to_bytes();
+
+    let parsed = NoteCiphertext::from_bytes(&bytes).expect("a real ciphertext parses");
+    assert_eq!(
+        qnero_circuit::chain::declared_crypto_suite(&bytes),
+        Some(parsed.crypto_suite)
+    );
+    // The id this crate writes is the id the table is keyed on, which is the
+    // other half of the cross-check: one number, two crates.
+    assert_eq!(
+        parsed.crypto_suite,
+        qnero_circuit::chain::CRYPTO_SUITE_ML_KEM_1024
+    );
+
+    // A wallet one suite ahead: the header parses, and the table has no length
+    // for it, which is the refusal such a wallet is owed.
+    let mut ahead = bytes.clone();
+    ahead[1..3].copy_from_slice(&2u16.to_le_bytes());
+    assert_eq!(qnero_circuit::chain::declared_crypto_suite(&ahead), Some(2));
+    assert_eq!(qnero_circuit::chain::ciphertext_len(2), None);
+}
