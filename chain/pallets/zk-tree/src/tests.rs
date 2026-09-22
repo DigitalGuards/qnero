@@ -846,7 +846,7 @@ fn insert_commitment_refuses_a_non_canonical_limb() {
 fn insert_commitment_refuses_an_append_past_the_depth_the_circuit_can_prove() {
 	new_test_ext().execute_with(|| {
 		let capacity = tree::capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH);
-		// Jump the counter; inserting 4^16 leaves is not a test.
+		// Jump the counter; inserting 4^20 leaves is not a test.
 		crate::LeafCount::<Test>::put(capacity - 1);
 		assert_eq!(ZkTree::remaining_capacity(), 1);
 

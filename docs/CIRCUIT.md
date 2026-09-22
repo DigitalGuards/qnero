@@ -81,7 +81,7 @@ Per input note, twice:
 
 - `ask` (4 felts), `nk` (4 felts): the spend credential.
 - `value` (1), `rho` (4), `r` (4): the note.
-- a Merkle path: 16 levels of 3 sibling digests plus a position hint per level.
+- a Merkle path: 20 levels of 3 sibling digests plus a position hint per level.
 - `is_dummy` (1 bit).
 
 Per output note, twice: `pk` (4), `value` (1), `r` (4). Its `rho` is derived
@@ -276,7 +276,7 @@ accident. The asymmetry the fork did not close is the
 capacity check: `insert_commitment` refuses an append past
 `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)` and `insert_leaf` cannot, because
 its caller's signature is infallible. Reaching that bound through wormhole
-transfers alone needs 4^16 of them, and `process_pending_leaves` reports the
+transfers alone needs 4^20 of them, and `process_pending_leaves` reports the
 condition through `defensive!` if it ever happens.
 
 Item 8 landed in two places, which is what the item asks for. The growth loop
@@ -461,7 +461,7 @@ attack on Poseidon2.
    `rho`, and the header can be any real block, whose preimage is public chain
    data. That leaf would still publish two nullifiers and two output
    commitments, which the chain writes into permanent state: two entries in the
-   nullifier set and two slots of a depth-16 tree sized for the life of the
+   nullifier set and two slots of a depth-20 tree sized for the life of the
    chain. Settlement extrinsics are unsigned and fee-free in the pallet this
    forks, so the leaf's own `fee` public input is the only cost, and an
    all-dummy leaf sets it to zero.
@@ -522,6 +522,15 @@ verify               : 2.2 ms
 proof bytes          : 105500
 ```
 
+Those numbers are the depth-16 circuit. The relaunch moved `MAX_TREE_DEPTH` to
+20, which is four more Merkle levels per input and 387 gates before padding.
+`docs/BENCH.md`, "The leaf circuit at tree depth 20", carries both columns
+side by side on one bench machine: the same `degree_bits = 9`, the same 512
+padded rows, the same 26 public inputs and the same 105500 proof bytes, with
+proving time inside the grinding spread. The block above is left as it was
+measured, because its timings came off the development workstation and a row
+from one machine against a row from another is not a comparison.
+
 M3 added one gate: the padding sentinel is a four-limb comparison against a
 constant and a single multiplication, and at 60 routed wires an arithmetic gate
 packs fifteen of those operations.
@@ -535,7 +544,7 @@ a public input the circuit does not constrain, and they range from 138 ms to
 381 ms. Comparing one warm number against another across a circuit change
 measures grinding luck. Compare means, over the same sample count.
 
-The gate count is dominated by the two Merkle paths: 16 levels each, evaluated
+The gate count is dominated by the two Merkle paths: 20 levels each, evaluated
 unconditionally so the cost does not leak the tree's real depth, at three
 Poseidon2 permutations per level. Proof size is a property of the FRI config, so it
 barely moves with this circuit's size, and it is the number the private batch
@@ -1035,10 +1044,10 @@ prices them is the submission floor in 9.7: the settling slots of a submission
 pay one pool step per started `CiphertextBytesPerFeeQuantum` bytes the submission
 carries, a skipped segment's bytes included, on top of `MinLeafFee` for every
 real slot it carries. Without the byte term, one settling segment beside
-fifty-two skipped ones carries up to 1.27 MB of never-pruned payload for the fee
-of six leaf slots; without the slot term, emptying those positions hands the
-same 318 real slots of admission walk and declared weight to every node for one
-pool step.
+fifty-two skipped ones carries up to 1.27 MB of payload into a block body every
+archive node keeps forever, for the fee of six leaf slots; without the slot
+term, emptying those positions hands the same 318 real slots of admission walk
+and declared weight to every node for one pool step.
 
 **One shape at a skipped position is exempt: a pair of zero-length
 ciphertexts.** It carries no bytes, so there is nothing there to bind and
@@ -1047,10 +1056,14 @@ itself stays, because the mapping from real slot to position cannot depend on
 which segments someone else settled in the meantime, and the count rule is what
 keeps that mapping the only reading of `outputs`. A **settling** position may
 not be emptied: it is refused with `EmptyCiphertext`. A settling slot appends
-two commitments and stores two ciphertexts, so an empty field there would write
-an output note its recipient can never find, behind a digest nothing evaluated.
-A real `NoteCiphertext` is 1731 bytes, so the refusal costs nothing
-legitimate.
+two commitments and publishes two ciphertexts, so an empty field there would
+write an output note its recipient can never find, behind a digest nothing
+evaluated. The chain keeps no copy of the payload, so the block body is the
+only place that note's recipient could ever have read it.
+A real `NoteCiphertext` is 1792 bytes at the wallet's pad, so the refusal costs
+nothing legitimate. Under the exact-length rule below, a half-emptied position
+is refused one step earlier, by length, because the zero-length exemption is a
+whole pair or nothing.
 
 **Each ciphertext is capped at `MaxCiphertextBytes`, 2048 bytes in the
 runtime.** A `NoteCiphertext` serializes to 1731 bytes at the chain's parameter
@@ -1062,16 +1075,47 @@ payload under a ChaCha20-Poly1305 tag, and the memo's own tag.
 that total against the serializer, so a wallet sizing a memo from these parts
 cannot be misled by prose that drifted. The cap leaves 317 bytes of memo.
 
-A settler can use the whole cap, and the 317 bytes of memo slack is the wrong
-figure to reason from: the chain never parses these bytes, so nothing holds a
-submission to a real `NoteCiphertext` shape, and `Ciphertexts` is never pruned
-and takes no storage deposit. Two mechanisms price that: the fee floor is
-linear in the payload (section 9.7), and the declared weight carries a per-byte
-term, because the per-slot `ct_digest` is a byte sponge over kilobytes. A
-wallet reads the bound from the pallet's metadata; a hardcoded copy drifts.
-Exceeding it fails the extrinsic's SCALE decode, after the proof that committed
-to those exact bytes has already been built, so a wallet checks before it
-proves.
+**On the settlement path the cap is unreachable, because the length is exact.**
+Every ciphertext a settlement carries is exactly the serialized length its
+declared `crypto_suite` id fixes, or is one half of a fully emptied position.
+One suite exists and its length is 1792 bytes, which is the 1731-byte fixed
+part plus the 61-byte memo pad, so the pair a slot publishes is 3584 bytes and
+that is the only payload a carried position can have. The table lives in
+`qnero_circuit::chain` beside `ct_digest`, and the chain applies it by reading
+three header bytes: the version byte, then the two-byte little-endian suite id
+at offsets 1..3. It parses nothing else, and the version byte is deliberately
+not checked, because it is an address version and the length is fixed by the
+suite alone.
+
+A blob of the exact length behind a valid header still settles whatever it
+contains. The rule fixes how many bytes a settlement may publish; `ct_digest`
+fixes which bytes they are. Neither authenticates a note. What the rule
+forecloses is the grind: the chain used to hold no submission to a real
+`NoteCiphertext` shape, so a settler could fill both fields to the cap and buy
+permanent, never-parsed state for whatever fee bucket the divisor reached. A
+wrong length is refused with `CiphertextLengthMismatch`, and a length behind a
+suite id this release has no row for with `UnknownCryptoSuite`, which is what a
+wallet one release ahead of the runtime is owed. Both are permanent and both
+answer `InvalidTransaction::Call`.
+
+The rule is enforced in one flat pass at the head of `plan_settlement`, after
+the `NothingToSettle` guard and ahead of the segment walk, so it covers pool
+admission, block inclusion and the dispatch body at once. It reads no storage
+and hashes nothing, which is why it belongs in front of the two
+`UsedNullifiers` probes per slot rather than behind them.
+
+**The cap still binds the entry path and the encoded length.** `shield` carries
+an arbitrary ciphertext up to `MaxCiphertextBytes`, zero included, and the
+exact-length rule is scoped to settlement. The 317 bytes of memo slack is
+therefore the figure to reason from for an entry note and no figure at all for
+a settlement output. Two mechanisms still price the settlement payload: the fee
+floor is linear in the payload (section 9.7), and the declared weight carries a
+per-byte term, because the per-slot `ct_digest` is a byte sponge over kilobytes
+and the weight is computed from the submitted vector before the length rule
+refuses it. A wallet reads the bound from the pallet's metadata; a hardcoded
+copy drifts. Exceeding it fails the extrinsic's SCALE decode, after the proof
+that committed to those exact bytes has already been built, so a wallet checks
+before it proves.
 
 ### 9.4 Padding
 
@@ -1240,22 +1284,26 @@ MinLeafFee + ceil(ciphertext_bytes / CiphertextBytesPerFeeQuantum)
 steps, where `ciphertext_bytes` is the two ciphertexts that slot publishes, and
 both of them have to carry bytes: an emptied position in a segment that settles
 is refused with `EmptyCiphertext` (section 9.3). The runtime sets
-`MinLeafFee = 1` and `CiphertextBytesPerFeeQuantum = 512`, so a
-slot carrying two real `NoteCiphertext`s (3462 bytes) pays eight steps and a
-slot padded to the cap (two ciphertexts of `MaxCiphertextBytes`, 4096 bytes)
-pays nine. This floor and the submission floor below it are the anti-spam
-mechanism, and they are the only one, for the reason section 8.6 gives.
+`MinLeafFee = 1` and `CiphertextBytesPerFeeQuantum = 512`, and the exact-length
+rule leaves one reachable payload per carried position, 3584 bytes, so a
+settling slot's floor is a flat eight steps: one flat, seven of payload, with
+nothing left over because 3584 divides by 512. This floor and the submission
+floor below it are the anti-spam mechanism, and they are the only one, for the
+reason section 8.6 gives.
 
 The payload term exists because the flat floor alone prices permanent state at
-whatever the ciphertext cap allows: one step, 0.01 QNR, would buy 4096 bytes
-of state that is never pruned and never parsed, and half of every fee comes back
-to a settler that is also the block author. The divisor has to sit below the
-slack between the real ciphertext size and the cap, or the term prices none of
-that slack: at one kilobyte, 3462 and 4096 bytes both round to four steps, so
-padding both ciphertexts to the cap buys 634 bytes of permanent state for
-nothing, which is the case the term exists to close.
-`a_slot_pays_for_the_ciphertext_bytes_it_publishes` pins the two endpoints
-apart. The floor is computable before proving, because the fee is a public input
+whatever a settler cares to publish: one step, 0.01 QNR, would buy 4096 bytes
+of state that is never parsed, and half of every fee comes back to a settler
+that is also the block author. The divisor was sized against that grind
+directly: it had to sit below the slack between the real ciphertext size and
+the cap, or the term priced none of that slack, and at one kilobyte 3462 and
+4096 bytes both round to four steps. The exact-length rule refuses the padded
+pair outright, so the separation the divisor was tuned for now prices a state
+nobody can reach, and `a_pair_padded_to_the_cap_is_refused_not_priced` is where
+that endpoint went. The term stays linear and the divisor keeps its value,
+because it also prices a skipped position's carried bytes and because a second
+suite would publish a second length. The floor is computable before proving,
+because the fee is a public input
 and the ciphertext sizes are known by then, so a wallet owes the arithmetic
 above at witness-building time. A slot this submission skips is exempt: a
 skipped segment writes no nullifier, appends no leaf and stores no ciphertext,
@@ -1309,8 +1357,8 @@ pair, is 318 slots of walk and declared weight for the price of one.
 Pricing the slots alone leaves the first free, because the payload per slot is
 the submitter's to choose on each side independently and slot counts and bytes
 are not proportional: three skipped slots padded to `MaxCiphertextBytes` beside
-one settling slot carrying ten bytes is 12288 bytes of never-pruned payload
-inside a slot ratio of four.
+one settling slot carrying ten bytes is 12288 bytes of archived body inside a
+slot ratio of four.
 `a_submission_pays_for_every_byte_it_carries` is that one. Both terms are in
 the floor because each closes what the other leaves open, and the earlier bound
 that counted real leaf slots and allowed four carried per settled priced neither
@@ -1611,12 +1659,14 @@ Three things about them are worth carrying into M5:
   more than an order of magnitude. And an included settlement runs the parse,
   the verify and the settlement check twice, once in `pre_dispatch` and once in
   the dispatch body, so all three are charged twice.
-- **`shield` carries its ciphertext in `proof_size`.** It writes one ciphertext
-  into the same never-pruned `Ciphertexts` map a settled slot writes two of, and
+- **`shield` carries its ciphertext in `proof_size`.** It publishes one
+  ciphertext in its own extrinsic, the way a settled slot publishes two, and
   `settlement_weight` puts that payload in its `proof_size` term, so `shield`
-  does the same. The runtime sets `proof_size` to `u64::MAX` today, so nothing
-  is metered against either term; the declaration is an upper bound for the day
-  a concrete limit lands, which `configs/mod.rs` carries as a planned change.
+  does the same. The bytes are validation input for every node whether or not
+  anything stores them. The runtime sets `proof_size` to `u64::MAX` today, so
+  nothing is metered against either term; the declaration is an upper bound for
+  the day a concrete limit lands, which `configs/mod.rs` carries as a planned
+  change.
 - **The parse has two terms.** The blob round trip does not scale with the
   public inputs and the layout walk does: `private_batch_pi_len(6)` is 131 felts
   against `public_batch_pi_len(53, 6)` at 6947, and the parse allocates a slot
@@ -1660,11 +1710,12 @@ shielded leaf already uses.
 | `ZkTree::Leaves` | leaf index | `cm` | the append, like every other note |
 | `Shielded::LeafBlocks` | leaf index | block number | the mint |
 | `Shielded::CoinbaseValues` | leaf index | value in pool steps | the mint |
-| `Shielded::Ciphertexts` | leaf index | the payload, when there is one | the mint |
 
 `CoinbaseValues` is the only new one, and presence in it is what marks a leaf a
-coinbase. A wallet reads it in the same batch as the other three, so a coinbase
-costs one extra storage key per leaf on a sync and no extra round trip.
+coinbase. A wallet reads it in the same batch as the other two, so a coinbase
+costs one extra storage key per leaf on a sync and no extra round trip. A
+coinbase note carries no ciphertext under v1, so there is nothing of it in a
+block body either.
 
 Two more items are per block rather than per leaf. `PendingCoinbase` is the
 payload the inherent recorded, killed at the start of every block and taken by
@@ -1684,10 +1735,11 @@ that mints no note at all leaves the whole share sitting in it.
 The event is `CoinbaseMinted { block_number, leaf_index, inner, value,
 has_ciphertext }`. It publishes `inner`, which the storage does not, so a wallet
 that watches events can check a note without rebuilding the commitment from the
-leaf. The payload is a flag rather than the bytes: the bytes are already in
-`Ciphertexts` under the leaf index, and republishing them would put every
-author's payload in two places forever. Under v1 the flag is false on every
-block, because the inherent refuses a non-empty payload (section 10.4).
+leaf. The payload is a flag rather than the bytes: the bytes are already in the
+block's own coinbase inherent, and republishing them in an event would put every
+author's payload into the `System::Events` state value an archive node keeps
+forever. Under v1 the flag is false on every block, because the inherent refuses
+a non-empty payload (section 10.4).
 
 No event and no storage item names the block's author. The header's
 `PreRuntime` item, which the runtime hashes into the account it calls the
@@ -1763,11 +1815,11 @@ refuses one until something does and its bytes are priced (section 10.3).
 - A block with no coinbase inherent at all is refused on import, because the inherent is required.
 - The ciphertext field is empty. Nothing builds an encrypted coinbase payload yet, an inherent pays
   no fee, and a mandatory dispatch does not compete for block weight, so an accepted payload would
-  be the one place on the chain where permanent state is free. The settlement path charges
-  `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)` for the same `Ciphertexts` map, and an
-  author writing `MaxCiphertextBytes` of anything on every block it won would pay nothing for bytes
-  every full node keeps forever. A non-empty payload would also mark its own leaf, since a derived
-  coinbase publishes none. When the third-party path lands (section 10.6), the field's bytes get
+  be the one place on the chain where archived block body is free. The settlement path charges
+  `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)` for the same bytes, and an author
+  writing `MaxCiphertextBytes` of anything on every block it won would pay nothing for bytes
+  every archive node keeps forever. A non-empty payload would also mark its own leaf, since a
+  derived coinbase publishes none. When the third-party path lands (section 10.6), the field's bytes get
   priced against the author's own credit and the refusal is lifted.
 
 ### 10.4 What the chain does not check
@@ -1847,17 +1899,16 @@ find it.
 | Each settled slot's two nullifiers, its two commitments, both leaf indices and both ciphertexts | `Event::SlotSettled` | the two notes one spend created, at consecutive leaf indices, publicly siblings and publicly tied to the two nullifiers spent alongside them |
 | A vesting payout's beneficiary and amount | `Event::Claimed { schedule_id, beneficiary, amount }` | a genesis-fixed allocation, the account it went to, and when |
 | A burn's account and amount | `Event::Burned { who, amount }` | value leaving circulation, and the account it left from |
-| A refused call's own arguments | the block body and `System::ExtrinsicFailed` | who tried to send what to whom, though nothing moved |
 
-The last row is the one a reader is least likely to expect. `QneroCallFilter`
-is a `BaseCallFilter`, checked at dispatch, so a transparent transfer is a
-valid extrinsic that enters a block, pays its fee and then fails with
-`CallFiltered`. Its arguments are in the block body and its failure is in the
-events, permanently, even though no value moved. One mistaken attempt therefore
-publishes exactly the sender, recipient and amount triple the policy exists to
-deny. A wallet should refuse these calls client-side rather than let a node
-publish them; `docs/DESIGN.md` section 7.2 carries the option of moving the
-refusal to validation, where a refused call never reaches a block.
+One row a reader might expect is absent, and the reason is worth stating.
+`QneroCallFilter` runs in `Checkable::check`, so a transparent transfer is
+refused with `InvalidTransaction::Call` before pool admission and before
+`note_extrinsic`: it reaches no block, pays no fee and leaves no event, and its
+arguments are published nowhere. The wrappers are unwrapped in the extrinsic
+too, `Multisig::propose` and its opaque payload included. What still publishes
+its own arguments is a call that was admitted and then failed on its own terms,
+which is any call on the allowed list above. `docs/DESIGN.md` section 7.2 is
+the rule.
 
 `SlotSettled` is the strongest linkage a settlement publishes, and it is what
 makes the nullifier row above weaker than it reads: the set alone says only

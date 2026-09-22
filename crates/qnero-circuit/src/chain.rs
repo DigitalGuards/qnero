@@ -5,12 +5,16 @@
 //! stack, the note primitives or plonky2. [`padding`](crate::padding) carries
 //! the padding sentinel for the same reason.
 //!
-//! Two rules live here, and both are rules the circuit deliberately does not
-//! enforce:
+//! Three rules live here, and all three are rules the circuit deliberately does
+//! not enforce:
 //!
 //! - [`ct_digest`], which binds a leaf's output ciphertexts to its proof. The
 //!   circuit treats `ct_digest` as a free public input, so the comparison the
 //!   chain makes is the whole binding.
+//! - The per-suite ciphertext length table, [`ciphertext_len`] over the suite
+//!   id [`declared_crypto_suite`] reads out of the wire header. `ct_digest`
+//!   fixes which bytes a settlement publishes; the table fixes how many. The
+//!   chain reads three header bytes to apply it and parses nothing else.
 //! - [`commitment`], the outer half of the note commitment. A note created
 //!   outside a spend proof, a shield at M4 and a coinbase at M6, has no
 //!   circuit to compute its `cm`, so the chain computes it from a public value
@@ -51,18 +55,23 @@ pub mod domain {
 
 /// Maximum commitment-tree depth the spend circuit can prove.
 ///
-/// A depth-16 4-ary tree holds 4^16, about 4.3 billion, commitments. The
-/// circuit pays for all sixteen levels on every proof regardless of the tree's
+/// A depth-20 4-ary tree holds 4^20, about 1.1 trillion, commitments. The
+/// circuit pays for all twenty levels on every proof regardless of the tree's
 /// real depth, so raising it costs every prover, and changing it at all is a
 /// coordinated release of new circuit crates plus a runtime upgrade carrying
 /// the regenerated verifier.
+///
+/// It was 16 through the pre-relaunch runtimes. `docs/BENCH.md` measured the
+/// leaf at 20 before the move: 387 gates against 320, the same 512 padded
+/// rows, the same `degree_bits = 9`, the same 26 public inputs and the same
+/// proof size, which is the condition `docs/DESIGN.md` 12.5 set for taking it.
 ///
 /// It lives here, in the layout-only surface, because it is a value the chain
 /// has to agree on and `pallet-zk-tree` links no prover stack:
 /// `CIRCUIT_MAX_TREE_DEPTH` there must equal this, and `pallet-shielded`
 /// const-asserts the two. [`crate::merkle::MAX_DEPTH`] is this same constant
 /// under the name the circuit code uses.
-pub const MAX_TREE_DEPTH: usize = 16;
+pub const MAX_TREE_DEPTH: usize = 20;
 
 /// Bits a note value is range checked to.
 ///
@@ -76,6 +85,72 @@ pub const VALUE_BITS: u32 = 62;
 
 /// Largest value a note may carry.
 pub const MAX_VALUE: u64 = (1u64 << VALUE_BITS) - 1;
+
+/// The crypto suite every v1 note ciphertext declares: ML-KEM-1024
+/// encapsulation with ChaCha20-Poly1305 over the note payload and the memo.
+///
+/// The id is the submitter's own claim, read out of the serialized header. It
+/// picks a row of [`ciphertext_len`] and decides nothing else. The chain does
+/// not parse the payload, so a blob of the right length behind a valid header
+/// still settles whatever it contains.
+pub const CRYPTO_SUITE_ML_KEM_1024: u16 = 1;
+
+/// Serialized length of a suite-1 note ciphertext, in bytes.
+///
+/// `19 + 1568 + 128 + 77 = 1792`:
+///
+/// - 19 bytes of framing: a version byte, the two-byte suite id, a four-byte diversifier index,
+///   and a `u32` length before each of the three payloads.
+/// - 1568 bytes of ML-KEM-1024 encapsulation.
+/// - 128 bytes of note payload: 112 plaintext bytes under a 16-byte ChaCha20-Poly1305 tag.
+/// - 77 bytes of memo payload: a 61-byte memo pad under its own 16-byte tag.
+///
+/// Every wallet on this chain pads to this size, so the published length says
+/// nothing about what a note carries, and settlement now requires it: see
+/// `Pallet::plan_settlement` in `pallet-shielded`.
+///
+/// `the_suite_table_matches_the_serializer` in `qnero-notes` holds the number
+/// to the bytes `NoteCiphertext::to_bytes` actually produces. That test is what
+/// keeps it honest if the AEAD, the framing or the memo pad ever moves, because
+/// this module compiles without the note primitives and cannot call them.
+pub const SUITE_1_CIPHERTEXT_BYTES: usize = 1792;
+
+/// Offset of the two-byte little-endian suite id in a serialized note
+/// ciphertext, immediately after the version byte.
+pub const CT_SUITE_OFFSET: usize = 1;
+
+/// Bytes a note ciphertext must carry before its suite id can be read: the
+/// version byte and the two-byte suite id.
+pub const CT_HEADER_LEN: usize = 3;
+
+/// The `crypto_suite` a serialized note ciphertext declares, or `None` when it
+/// is too short to carry a header at all.
+///
+/// This is the whole of what the chain parses out of a ciphertext. The version
+/// byte at offset 0 is an address version rather than a framing version, so it
+/// is deliberately left unchecked: the length is fixed by the suite alone.
+pub fn declared_crypto_suite(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < CT_HEADER_LEN {
+        return None;
+    }
+    Some(u16::from_le_bytes([
+        bytes[CT_SUITE_OFFSET],
+        bytes[CT_SUITE_OFFSET + 1],
+    ]))
+}
+
+/// The exact serialized length a suite fixes, or `None` for a suite this
+/// release has no length for.
+///
+/// A second suite would publish a second length, which splits the anonymity set
+/// by wallet. That is why the decision to pad a shorter future suite up to this
+/// one belongs before the suite is added.
+pub const fn ciphertext_len(suite: u16) -> Option<usize> {
+    match suite {
+        CRYPTO_SUITE_ML_KEM_1024 => Some(SUITE_1_CIPHERTEXT_BYTES),
+        _ => None,
+    }
+}
 
 /// Domain prefix of the ciphertext digest.
 ///
@@ -162,6 +237,57 @@ mod tests {
         // The length prefixes stop a boundary from moving. Without them these
         // two share a preimage.
         assert_ne!(ct_digest(&[b"ab", b"c"]), ct_digest(&[b"a", b"bc"]));
+    }
+
+    /// The `None` arm is the one path where a length rule keyed on a header
+    /// can panic if it is written with a slice index, so it is pinned at every
+    /// length below the header and at the first length above it.
+    #[test]
+    fn a_ciphertext_shorter_than_its_header_declares_no_suite() {
+        assert_eq!(declared_crypto_suite(&[]), None);
+        assert_eq!(declared_crypto_suite(&[0]), None);
+        assert_eq!(declared_crypto_suite(&[0, 1]), None);
+        assert_eq!(
+            declared_crypto_suite(&[0, 1, 0]),
+            Some(CRYPTO_SUITE_ML_KEM_1024)
+        );
+    }
+
+    /// The suite id is little endian at bytes 1..3, and the version byte in
+    /// front of it is not part of it.
+    #[test]
+    fn the_declared_suite_is_the_little_endian_pair_after_the_version_byte() {
+        assert_eq!(declared_crypto_suite(&[7, 0x01, 0x02]), Some(0x0201));
+        assert_eq!(declared_crypto_suite(&[0xFF, 0x01, 0x00, 0x99]), Some(1));
+    }
+
+    /// One suite has a length. A wallet a release ahead of the chain declares
+    /// an id the table has no row for, and the table says so rather than
+    /// answering with the one length it knows.
+    #[test]
+    fn the_table_answers_only_for_the_suite_this_release_ships() {
+        assert_eq!(
+            ciphertext_len(CRYPTO_SUITE_ML_KEM_1024),
+            Some(SUITE_1_CIPHERTEXT_BYTES)
+        );
+        assert_eq!(ciphertext_len(0), None);
+        assert_eq!(ciphertext_len(2), None);
+        assert_eq!(ciphertext_len(u16::MAX), None);
+    }
+
+    /// The derivation in the constant's doc, restated as arithmetic so an edit
+    /// to one without the other fails here.
+    #[test]
+    fn the_suite_1_length_is_its_framing_plus_its_three_payloads() {
+        const FRAMING: usize = 1 + 2 + 4 + 4 + 4 + 4;
+        const ML_KEM_1024_CIPHERTEXT: usize = 1568;
+        const NOTE_PAYLOAD: usize = 112 + 16;
+        const MEMO_PAYLOAD: usize = 61 + 16;
+        assert_eq!(FRAMING, 19);
+        assert_eq!(
+            FRAMING + ML_KEM_1024_CIPHERTEXT + NOTE_PAYLOAD + MEMO_PAYLOAD,
+            SUITE_1_CIPHERTEXT_BYTES
+        );
     }
 
     #[test]

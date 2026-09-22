@@ -18,7 +18,7 @@
 //! [`crate::request`] fill the second with a randomized dummy, on a three-leaf
 //! tree, one level deep at arity 4. The proving cost is the same as a genuine
 //! two-note spend against a full tree: both input slots are always present in
-//! the circuit, `merkle_root_from_path` evaluates all `MAX_DEPTH = 16` levels
+//! the circuit, `merkle_root_from_path` evaluates all `MAX_DEPTH = 20` levels
 //! for each of them whatever the witness says (`qnero-circuit/src/merkle.rs`),
 //! and the witness fills every level for the dummy too. A dummy costs what a
 //! real note costs, which is the point: a leaf that proved faster with one

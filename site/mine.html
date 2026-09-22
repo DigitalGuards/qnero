@@ -257,32 +257,36 @@ export QNERO_MINER_KEY=$(
             <div class="prose">
               <h3>The seed rotates the way Monero's does</h3>
               <p>
-                Every 2048 blocks, lagged 64 blocks, resolved along the block's own ancestry. Both
+                Every 2048 blocks, lagged 128 blocks, resolved along the block's own ancestry. Both
                 constants are runtime constants and are read by the node.
               </p>
               <p>
                 At the 120-second target, 2048 blocks is 2.84 days, which is Monero's own rotation
                 cadence to the hour. The block count and the wall clock both match, so a rig pays
-                the same dataset rebuild here as it pays there and no more often. The lag of 64
-                blocks is 2.1 hours. Whether to raise it above the maximum reorg depth is the one
-                part of the schedule still open.
+                the same dataset rebuild here as it pays there and no more often. The lag is 128
+                blocks, 4.3 hours, and that is how long before the turn every job already carries
+                the coming seed: a full-mode rig has that long to build its next 2 GiB dataset in
+                the background.
               </p>
             </div>
             <div class="prose">
               <h3>Difficulty adjusts per block</h3>
               <p>
-                The adjustment is Homestead's and its buckets scale with the target, so at 120
-                seconds the neutral band is 100 to 200 seconds: an honest block leaves difficulty
-                flat, a faster one raises it by 1/2048 and a much slower one lowers it by up to
-                99/2048. The floor is 128, so a chain at the floor can climb.
+                The adjustment is Homestead's and its bucket is the target times the natural
+                logarithm of 2, so at 120 seconds the neutral band is 83 to 166 seconds: an honest
+                block leaves difficulty flat, a faster one raises it by 1/2048 and a much slower one
+                lowers it by up to 99/2048. That divisor is what makes the average land on the
+                target: block arrival is Poisson, so a chain settles at the divisor over ln 2, which
+                is the 120 seconds the chain declares. The floor is 128, so a chain at the floor can
+                climb.
               </p>
               <p>
-                A chain climbing from the floor to a live difficulty costs about 13 600 blocks and
-                about 2.4 days for one 900 H/s rig. The band is dead in both directions and a chain
-                settles at whichever edge it arrives from: climbing, it stops at the bottom and sits
-                at about 100-second blocks; falling, it stops at the top and sits at about 200. A
-                network that has lost its miners runs at double the target until hash rate comes
-                back.
+                A chain climbing from the floor to a live difficulty costs about 13 250 blocks and
+                about 2.0 days for one 3 500 H/s rig. The band is dead in both directions and a
+                chain settles at whichever edge it arrives from: climbing, it stops at the bottom
+                and sits at about 83-second blocks; falling, it stops at the top and sits at about
+                166. A network that has lost its miners runs at 1.39 times the target until hash
+                rate comes back.
               </p>
             </div>
           </div>
@@ -360,10 +364,12 @@ export QNERO_MINER_KEY=$(
           <h2>Where to point a rig</h2>
           <div class="prose">
             <p>
-              The public testnet came up on 2026-09-15: a chain spec and a genesis both wallets
-              bind to, a seed node, a public RPC endpoint, a faucet, a stratum port, and Qloak and
-              silQ Road pointed at it through the one runtime JSON each already reads. The software
-              behind it is pre-alpha and the chain may be reset without notice.
+              The public testnet came up on 2026-09-15 and was relaunched on 2026-09-22 at a
+              fresh genesis: a chain spec and a genesis both wallets bind to, a seed node, a public
+              RPC endpoint, a faucet, a stratum port, and Qloak and silQ Road pointed at it through
+              the one runtime JSON each already reads. Balances belong to the genesis they were
+              mined under and did not carry over. The software behind it is pre-alpha and the chain
+              may be reset without notice.
             </p>
           </div>
           <div class="cards">

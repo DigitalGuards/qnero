@@ -20,7 +20,7 @@
 //! or a dropped connection as "this node does not take arrays" would turn the
 //! next chunk into a thousand single requests into the endpoint that had just
 //! refused one. Those come back as errors with the batching question still
-//! open; see [`try_batch`](RpcClient::try_batch).
+//! open; see `RpcClient::try_batch`.
 
 use std::time::Duration;
 

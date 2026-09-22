@@ -130,7 +130,10 @@ export function Reveals(): ReactNode {
           leaf slots settled with them, and the fee those slots paid. A segment the chain skipped,
           for a nullifier another submission spent first or for an anchor it could no longer
           resolve, is in neither count. Each settled slot publishes its two nullifiers, the two
-          commitments it appended, both leaf indices and both ciphertexts.
+          commitments it appended, both leaf indices and the size of each output's note
+          ciphertext. The ciphertexts themselves are in the block body, inside the submission
+          that appended the leaves, and in no chain state: what the event carries is the two
+          lengths.
         </p>
         <p>
           A slot has two input positions, and a settled nullifier marks one position consumed. A
@@ -166,11 +169,12 @@ export function Reveals(): ReactNode {
 
         <Section title="Refused calls" />
         <p>
-          The runtime&rsquo;s call filter is checked at dispatch, so a transparent transfer is a
-          valid extrinsic: it enters a block, pays its fee, and then fails. Its arguments stay in
-          the block body forever, so one mistaken attempt publishes exactly the sender, recipient
-          and amount the policy exists to deny. This site names the call and leaves the arguments
-          where the chain put them.
+          A refused call publishes nothing. The runtime&rsquo;s call filter runs when an extrinsic
+          is checked, before the pool admits it, so a transparent transfer enters no block, pays no
+          fee and leaves no event, and its sender, recipient and amount are published nowhere. A
+          call that was admitted and then failed on its own terms does carry its arguments in the
+          block body forever, and this site names that call and leaves the arguments where the
+          chain put them.
         </p>
 
         <Section title="Totals" />
@@ -222,9 +226,11 @@ export function Reveals(): ReactNode {
         <p>
           Both are real and neither is this site&rsquo;s to close. The gap between a spend&rsquo;s
           anchor block and the block it settles in is a per-wallet marker that tracks the
-          prover&rsquo;s speed, and both numbers are public. A note ciphertext of any size other
-          than {formatCount(REFERENCE_CIPHERTEXT_BYTES)} bytes was written by something other than
-          the reference wallet and is itself a fingerprint.
+          prover&rsquo;s speed, and both numbers are public. A shield entry note of any size
+          other than {formatCount(REFERENCE_CIPHERTEXT_BYTES)} bytes was written by something
+          other than the reference wallet and is itself a fingerprint. On a settlement the chain
+          now requires that exact size, so the size leak is closed there and a different one is
+          an invariant violation rather than a fingerprint.
         </p>
         <p>
           This site shows a ciphertext size where it matters and marks a non-reference one, and it

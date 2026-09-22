@@ -82,9 +82,14 @@ The supported profile uses six leaf slots and 53 private batches per public batc
 
 | Artifact | Blake2b-256 |
 | --- | --- |
-| `leaf_verifier.bin` | `c112dffe8f7ce4b83c7fea4bca1751f8c1de7ad4090c72faaf037fe3869368dc` |
-| `private_batch_verifier.bin` | `2ffd9f4bea8079f757c48936b0cd6aba62242ee1abb2167b32bd4329ad4f9c52` |
-| `public_batch_verifier.bin` | `8ea527ca522426e5d18109ba12cdf85079f2b4bbc8aaaf49d92dfed35d564ec2` |
+| `leaf_verifier.bin` | `c6a2c91f8bb6090d57745bafb2622602ffc2a9ed50aba0847dad53ec94c4f536` |
+| `private_batch_verifier.bin` | `f0e736d14a206824bfcc32b27e6702814cbaf29ecac0dddaccbc558edd0f7784` |
+| `public_batch_verifier.bin` | `a482c6721f8d713f09b266cb18feaff2678b344b270a71bf64d18b9007802585` |
+
+Those three are the depth-20 set. The relaunch bundle raised the commitment
+tree from depth 16 to depth 20, so the leaf circuit changed and both batch
+verifiers, which are built over it, changed with it. All three files kept their
+byte lengths: 1609, 1749 and 1905.
 
 Default artifact generation must reproduce those pins or fail before publishing
 the set. Experimental dimensions still generate an accurate profile; the release
@@ -93,3 +98,17 @@ update, regenerated artifacts, matching wallet releases, and an explicit chain
 upgrade or reset decision. Publish the generated manifest with native, runtime,
 browser and aggregator releases, together with their source revision and binary
 checksums.
+
+### Refreshing the pins for a circuit change
+
+A release that moves the circuit on purpose cannot get its new digests out of
+an enforcing run: the check fires before the profile is committed, and a failed
+run removes its whole staging directory, so the operator is left with the
+refusal and no digests. `qnero-circuit-builder --report-pins` is the route for
+that one case. It builds and publishes the same set, reads every file back
+through its own loader as usual, and prints the three digests with a line
+saying whether the dimensions were the release ones. Paste them into
+`crates/qnero-circuit/src/profile.rs`, then rebuild with no flag and confirm
+the builder is quiet: that second run is the check, and until it passes the pin
+has not been refreshed. The flag defaults off, and every automatic caller,
+`chain/pallets/shielded/build.rs` included, always enforces.

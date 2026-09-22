@@ -32,7 +32,7 @@ import { deriveKey, newSalt, bytesToHex } from '../src/wallet/crypto';
 import { BIRTHDAY_EPOCH, birthdayEpochOf, STORE_VERSION } from '../src/wallet/model';
 import { createStore, openDatabase, DB_NAME, type WalletStore } from '../src/wallet/store';
 
-const MAX_TREE_DEPTH = 16;
+const MAX_TREE_DEPTH = 20;
 
 /** A storage entry whose keys this test can read back. See `privacy.test.ts`. */
 function entry(prefix: string): unknown {

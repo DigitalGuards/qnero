@@ -1,9 +1,24 @@
 # Creating a Chain Spec (JSON)
 
 How to produce a committed, raw JSON chain spec for a network profile
-(`heisenberg`, `planck`, `mainnet`). The genesis runtime in the JSON is
-the **published release artifact**, not a local build — anyone can reproduce
-and verify it.
+(`heisenberg`, `planck`, `mainnet`). The genesis runtime in the JSON is the
+**published release artifact**, so anyone can reproduce and verify it. A local
+build is not what goes in.
+
+The genesis runtime is also the runtime for that chain's whole life. No
+dispatchable can replace `:code` (`docs/DESIGN.md` section 7.7), so the file
+this procedure produces is the last word on what the chain executes, and the
+hash it is published with is what an operator checks before joining.
+
+Two consequences for whoever edits a spec by hand. A genesis JSON carrying a
+field `RuntimeGenesisConfig` does not know is refused at deserialization rather
+than ignored, `#[serde(deny_unknown_fields)]` being the reason, so an old spec
+carrying `tech_collective_seed_members` fails the build instead of quietly
+launching without it. And `codeSubstitutes` stays `{}`: it is honoured by the
+client, so an entry there makes one node execute code other than the runtime in
+its own genesis, and
+`node/tests/testnet_spec.rs::the_shipped_spec_carries_no_code_substitute` keeps
+the committed file empty.
 
 ## Naming convention
 

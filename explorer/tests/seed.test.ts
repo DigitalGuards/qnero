@@ -25,14 +25,16 @@ describe('seed height', () => {
     expect(seedHeight(EPOCH + LAG + 1, EPOCH, LAG)).toBe(EPOCH);
   });
 
-  it('disagrees with the folk formula at 2113, which is a chain split', () => {
-    expect(seedHeight(2113, EPOCH, LAG)).toBe(2048);
-    expect(folkFormula(2113, EPOCH, LAG)).toBe(1984);
+  it('disagrees with the folk formula at 2177, which is a chain split', () => {
+    // 2177 - (2177 % 2048) - 128 = 2177 - 129 - 128.
+    expect(seedHeight(2177, EPOCH, LAG)).toBe(2048);
+    expect(folkFormula(2177, EPOCH, LAG)).toBe(1920);
   });
 
   it('steps on the anchor crossing an epoch boundary', () => {
-    expect(seedHeight(4160, EPOCH, LAG)).toBe(2048);
-    expect(seedHeight(4161, EPOCH, LAG)).toBe(4096);
+    // The anchor is h - lag - 1, so the step is at 2 * 2048 + 128 + 1 = 4225.
+    expect(seedHeight(4224, EPOCH, LAG)).toBe(2048);
+    expect(seedHeight(4225, EPOCH, LAG)).toBe(4096);
   });
 
   it('holds across a whole epoch', () => {
@@ -71,6 +73,20 @@ describe('seed height', () => {
     expect(announcedSeedHeight(4160, EPOCH, LAG)).toBe(4096);
   });
 
+  it('opens the announcement window exactly one lag before the rotation', () => {
+    // The whole point of the lag: the window is `LAG` blocks wide and opens on
+    // the block `LAG` below the rotation, so it is the lag alone that decides
+    // how much notice a rig gets before the turn.
+    const rotateAt = 2 * EPOCH + LAG + 1;
+    expect(seedHeight(rotateAt - 1, EPOCH, LAG)).toBe(EPOCH);
+    expect(seedHeight(rotateAt, EPOCH, LAG)).toBe(2 * EPOCH);
+    expect(announcedSeedHeight(rotateAt - LAG - 1, EPOCH, LAG)).toBe(EPOCH);
+    expect(announcedSeedHeight(rotateAt - LAG, EPOCH, LAG)).toBe(2 * EPOCH);
+    for (let ahead = 0; ahead < LAG; ahead += 1) {
+      expect(announcedSeedHeight(rotateAt - LAG + ahead, EPOCH, LAG)).toBe(2 * EPOCH);
+    }
+  });
+
   it('counts the blocks left before the seed changes', () => {
     for (const height of [0, 1, 2112, 2113, 4160, 4161, 9999]) {
       const left = blocksToNextSeed(height, EPOCH, LAG);
@@ -81,6 +97,8 @@ describe('seed height', () => {
   });
 
   it('never divides by zero on a degenerate epoch', () => {
-    expect(seedHeight(100, 0, LAG)).toBe(35);
+    // The epoch clamps to 1, so the height has to sit above `1 + LAG` for the
+    // anchor branch to be the one under test: 200 - 128 - 1 = 71.
+    expect(seedHeight(200, 0, LAG)).toBe(71);
   });
 });

@@ -24,21 +24,15 @@
 // For more information, please refer to <http://unlicense.org>
 
 // Substrate and Polkadot dependencies
-use crate::{
-	governance::{
-		definitions::{
-			EnsureRootRemoveKeepsMemberFloor, GlobalMaxMembers, MinRankOfClassConverter,
-			PreimageDeposit, RootOrMemberForTechReferendaOrigin, TechCollectiveTracksInfo,
-		},
-		origins::FastUpgrade,
-	},
-	pallet_custom_origins, MILLI_UNIT,
-};
+use crate::MILLI_UNIT;
+use codec::{Decode, DecodeLimit, Encode, MaxEncodedLen};
 use frame_support::{
-	derive_impl, parameter_types,
+	derive_impl,
+	pallet_prelude::TypeInfo,
+	parameter_types,
 	traits::{
-		ConstU128, ConstU16, ConstU32, ConstU8, EitherOfDiverse, EnsureOrigin, Get,
-		NeverEnsureOrigin, VariantCountOf,
+		Consideration, ConstU128, ConstU32, ConstU8, Footprint, Get, NeverEnsureOrigin,
+		ReservableCurrency, VariantCountOf,
 	},
 	weights::{
 		constants::{RocksDbWeight, WEIGHT_REF_TIME_PER_SECOND},
@@ -46,11 +40,7 @@ use frame_support::{
 	},
 	PalletId,
 };
-use frame_system::{
-	limits::{BlockLength, BlockWeights},
-	EnsureRoot, EnsureRootWithSuccess,
-};
-use pallet_ranked_collective::Linear;
+use frame_system::limits::{BlockLength, BlockWeights};
 use pallet_transaction_payment::{ConstFeeMultiplier, Multiplier};
 use smallvec::smallvec;
 
@@ -187,13 +177,17 @@ impl qp_wormhole::TransferProofRecorder<AccountId, AssetId, Balance> for NoTrans
 /// - It does not stop a fee. `ChargeTransactionPayment` is a transaction extension and never
 ///   reaches a `Contains` check, which is what lets a filtered runtime still charge for the calls
 ///   it allows.
-/// - It does not reach a Root dispatch. `frame_system`'s `filter_call` exempts the Root origin and
-///   nothing else, so a tech referendum enacting a call under Root can still move transparent
-///   value, and that is a governance decision rather than an oversight: the calls exist, the
-///   collective can enact them, and the filter is what keeps them out of ordinary use. The
-///   scheduler is not an exemption. It dispatches a due task with the origin the task carries, and
-///   every origin but Root meets this filter, which is why a reversible transfer's own enactment is
-///   refused (`runtime/tests/transactions/reversible_integration.rs`).
+/// - It does not reach a Root dispatch, and on this chain there is no Root dispatch to reach.
+///   `frame_system`'s `filter_call` exempts the Root origin and nothing else, and no pallet here
+///   can produce one: `OriginCaller` has `system` and nothing else, the nine `frame-system` calls
+///   that could rewrite the chain are deleted, and every Root-gated config origin is
+///   `NeverEnsureOrigin`. So this filter is the whole rule for every dispatch this chain can
+///   execute. `UnfilteredDispatchable::dispatch_bypass_filter` keeps two callers,
+///   `pallet_utility::batch_all` under a Root origin nothing can produce and the benchmarking
+///   harness, and `runtime/tests/no_admin_keys.rs` is what pins that. The scheduler is not an
+///   exemption either. It dispatches a due task with the origin the task carries, and every origin
+///   but Root meets this filter, which is why a reversible transfer's own enactment is refused
+///   (`runtime/tests/transactions/reversible_integration.rs`).
 pub struct QneroCallFilter;
 
 impl frame_support::traits::Contains<RuntimeCall> for QneroCallFilter {
@@ -216,11 +210,64 @@ fn refused_under_v1(call: &RuntimeCall) -> bool {
 			calls.iter().any(refused_under_v1),
 		// `execute` is the one that dispatches, and the executor resubmits the
 		// stored call there, verified byte-equal, so the inner call is in the
-		// extrinsic. `propose` carries its call as opaque bytes and dispatches
-		// nothing, so there is nothing to decode and nothing to stop.
+		// extrinsic.
 		RuntimeCall::Multisig(pallet_multisig::Call::execute { call, .. }) =>
 			refused_under_v1(call),
+		// `propose` dispatches nothing, and its payload is in the extrinsic
+		// all the same: opaque `BoundedVec<u8, MaxCallSize>` bytes that a
+		// block would carry forever. A proposal carrying a transparent
+		// transfer publishes the sender, the recipient and the amount, which
+		// is the triple the policy exists to deny, so the payload is decoded
+		// here and held to the same rule as any other call.
+		RuntimeCall::Multisig(pallet_multisig::Call::propose { call, .. }) =>
+			the_proposal_is_refused(call),
 		_ => moves_transparent_value(call) || enrols_in_a_feature_v1_refuses(call),
+	}
+}
+
+/// Whether a `Multisig::propose` payload is refused.
+///
+/// Three ways it is, and the two that are not about the payload's contents
+/// mirror the pallet's own phase-3 checks
+/// (`chain/pallets/multisig/src/lib.rs`, the `decode_with_depth_limit` and the
+/// canonical re-encode): bytes that do not decode at
+/// [`pallet_multisig::MAX_MULTISIG_CALL_DEPTH`], and bytes that decode but are
+/// not the decoded call's own canonical encoding, can never execute. The
+/// pallet refuses both with `InvalidCall` after taking a fee, and a payload
+/// that can never execute has no reason to enter a block at all, so this layer
+/// refuses them first and the two layers give the same verdict.
+///
+/// The third is the point of the arm: a payload that decodes to a call v1
+/// refuses is refused here too.
+///
+/// One level is unwrapped. A payload that itself carries a proposal, directly
+/// or inside a wrapper, is refused without a second decode, which keeps the
+/// work this does bounded by `MaxCallSize` in a check that runs ahead of the
+/// extrinsic's own signature verification.
+fn the_proposal_is_refused(payload: &[u8]) -> bool {
+	let Ok(decoded) = RuntimeCall::decode_with_depth_limit(
+		pallet_multisig::MAX_MULTISIG_CALL_DEPTH,
+		&mut &payload[..],
+	) else {
+		return true;
+	};
+	decoded.encode() != payload || carries_a_proposal(&decoded) || refused_under_v1(&decoded)
+}
+
+/// Whether a call is a `Multisig::propose`, or carries one in a wrapper
+/// [`refused_under_v1`] would unwrap.
+///
+/// Walks typed calls only and decodes nothing, which is what makes the
+/// one-level rule in [`the_proposal_is_refused`] a bound rather than a
+/// preference.
+fn carries_a_proposal(call: &RuntimeCall) -> bool {
+	match call {
+		RuntimeCall::Multisig(pallet_multisig::Call::propose { .. }) => true,
+		RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) =>
+			calls.iter().any(carries_a_proposal),
+		RuntimeCall::Multisig(pallet_multisig::Call::execute { call, .. }) =>
+			carries_a_proposal(call),
+		_ => false,
 	}
 }
 
@@ -335,13 +382,10 @@ impl frame_system::Config for Runtime {
 	/// This is used as an identifier of the chain. 42 is the generic substrate prefix.
 	type SS58Prefix = SS58Prefix;
 	type MaxConsumers = ConstU32<16>;
-	/// `authorize_upgrade` accepts Root (the normal tech-referenda track) or the
-	/// fast-upgrade track's `FastUpgrade` origin. `set_code` and
-	/// `authorize_upgrade_without_checks` remain Root-only.
-	type AuthorizeUpgradeOrigin = EitherOfDiverse<EnsureRoot<AccountId>, FastUpgrade>;
+	// `OnSetCode` and `AuthorizeUpgradeOrigin` are left at the prelude defaults,
+	// `()` and `NeverEnsureOrigin`. Both items are vestigial: the fork deletes
+	// every dispatchable that could reach them.
 }
-
-impl pallet_custom_origins::Config for Runtime {}
 
 parameter_types! {
 	pub const MiningUnit: Balance = UNIT;
@@ -400,10 +444,13 @@ parameter_types! {
 	/// CPUs actually has. Difficulty is expected hashes per block, so it scales
 	/// with the target: 100 000 was about a minute of one modern core in full
 	/// mode against the old 12 s target, and 1 000 000 is the same network
-	/// against a 120 s one. The retarget takes it from there. The old value
-	/// here was 10^11, which was calibrated for Poseidon over a 512-bit space
-	/// and would be days per block on RandomX. The `dev` preset overrides this
-	/// with the pallet's floor.
+	/// against a 120 s one. Since the retarget's divisor became `target * ln 2`
+	/// the chain's stationary mean block time *is* its target, so that sentence
+	/// is now arithmetic rather than an approximation: 1 000 000 expected hashes
+	/// a block at a 120 s mean is exactly 8 333 H/s. The retarget takes it from
+	/// there. The old value here was 10^11, which was calibrated for Poseidon
+	/// over a 512-bit space and would be days per block on RandomX. The `dev`
+	/// preset overrides this with the pallet's floor.
 	pub const QPoWInitialDifficulty: U512 = U512([1_000_000, 0, 0, 0, 0, 0, 0, 0]);
 }
 
@@ -472,8 +519,18 @@ impl pallet_qpow::Config for Runtime {
 	// The seed is resolved along each candidate's own ancestry. A deep fork
 	// can change an epoch seed; its work must be verified against that branch's
 	// seed even when it differs from the current best chain.
+	//
+	// The lag is 128 blocks, above Monero's 64. At the 120 s target that is
+	// 15 360 s, 4.3 hours, between the block that supplies a seed and the
+	// first block that hashes under it. `MaxReorgDepth` above is
+	// `ConstU32<{ u32::MAX }>`, so no depth floor refuses a reorg that crosses
+	// an epoch boundary and re-keys work already started; what bounds a side
+	// branch is the client admission budget of `docs/DESIGN.md` 7.5. A 128
+	// block lag puts the seed block further behind first use than a reorg on
+	// this network reaches, and it doubles the notice a full-mode rig gets on
+	// its next 2 GiB dataset build, from 2.1 hours to 4.3.
 	type SeedEpochBlocks = ConstU32<2_048>;
-	type SeedEpochLag = ConstU32<64>;
+	type SeedEpochLag = ConstU32<128>;
 	type WeightInfo = pallet_qpow::weights::SubstrateWeight<Runtime>;
 }
 
@@ -520,130 +577,68 @@ impl pallet_balances::Config for Runtime {
 	type DoneSlashHandler = ();
 }
 
+/// The deposit a noted preimage holds, reserved from the noter.
+///
+/// It came in from `runtime/src/governance/definitions.rs` when that directory
+/// was deleted: it is the one thing in there that was never governance. The
+/// pallet's own extrinsics are disabled, so nothing dispatches a note today;
+/// the deposit stays priced because `Scheduler` and `ReversibleTransfers` bind
+/// calls through the same pallet.
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug)]
+pub struct PreimageDeposit {
+	amount: Balance,
+}
+
+/// Fee model: 0.1 UNIT base + 0.0001 UNIT/byte, scaled by `FEE_SCALE`.
+pub fn preimage_amount(footprint: Footprint) -> Balance {
+	let base = scale_fee(UNIT / 10);
+	let per_byte = scale_fee(UNIT / 10_000);
+	let size = (footprint.size as u128).saturating_add(footprint.count as u128);
+	base.saturating_add(per_byte.saturating_mul(size))
+}
+
+impl Consideration<AccountId, Footprint> for PreimageDeposit {
+	fn new(who: &AccountId, footprint: Footprint) -> Result<Self, sp_runtime::DispatchError> {
+		let amount = preimage_amount(footprint);
+		Balances::reserve(who, amount)?;
+		Ok(Self { amount })
+	}
+
+	fn update(
+		self,
+		who: &AccountId,
+		new_footprint: Footprint,
+	) -> Result<Self, sp_runtime::DispatchError> {
+		let new_amount = preimage_amount(new_footprint);
+		Balances::unreserve(who, self.amount);
+		Balances::reserve(who, new_amount)?;
+		Ok(Self { amount: new_amount })
+	}
+
+	fn drop(self, who: &AccountId) -> Result<(), sp_runtime::DispatchError> {
+		Balances::unreserve(who, self.amount);
+		Ok(())
+	}
+
+	#[cfg(feature = "runtime-benchmarks")]
+	fn ensure_successful(who: &AccountId, footprint: Footprint) {
+		use frame_support::traits::Currency;
+		let amount = preimage_amount(footprint);
+		if Balances::free_balance(who) < amount {
+			Balances::make_free_balance_be(who, amount.saturating_mul(2));
+		}
+	}
+}
+
 impl pallet_preimage::Config for Runtime {
 	type WeightInfo = pallet_preimage::weights::SubstrateWeight<Runtime>;
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
-	type ManagerOrigin = EnsureRoot<AccountId>;
+	// No origin manages preimages, because no origin dispatches one. The pallet
+	// is reached only as a `StorePreimage`/`QueryPreimage` binder from
+	// `Scheduler` and `ReversibleTransfers`, which is a Rust call.
+	type ManagerOrigin = NeverEnsureOrigin<()>;
 	type Consideration = PreimageDeposit;
-}
-
-parameter_types! {
-	// Maximum number of referenda queued for deciding on a single track (`MaxQueued`).
-	pub const ReferendumMaxProposals: u32 = 100;
-	// Global cap on `Ongoing` referenda, enforced at submission. `MaxQueued` only bounds the
-	// per-track deciding queue: without this cap, submissions that never receive a decision
-	// deposit would accumulate without limit until the 45-day undeciding timeout, each one
-	// consuming referendum storage and a scheduler agenda slot for its timeout alarm. Must be
-	// at least `MaxQueued` + total `max_deciding` + 1 (checked by the pallet's
-	// `integrity_test`; benchmarks fill a track's queue and deciding slots completely).
-	pub const MaxActiveReferenda: u32 = 128;
-	// Per-account bound on ongoing referenda. `MaxActiveReferenda` is a shared resource and
-	// `SubmitOrigin` is members-only, so without this cap a single member could fill all
-	// 128 slots with refundable-deposit referenda and freeze the chain's only governance
-	// lane : including the referendum needed to remove them : for the 45-day
-	// `UndecidingTimeout`, renewably. With at most `MaxMemberCount` (13) members at 8 slots
-	// each (104 < 128), the global bound is unreachable even if every member colludes, and
-	// 8 concurrent proposals per member is ample headroom for real use.
-	pub const MaxActiveReferendaPerAccount: u32 = 8;
-	// Max encoded length of a Lookup proposal. `submit` requests the preimage so `unnote`
-	// cannot delete it before enactment : which also lets the noter reclaim the preimage
-	// deposit while the bytes stay pinned. Cap the blob so that (a) `MaxActive` × size
-	// cannot approach hundreds of MiB of deposit-free state, and (b) the preimage deposit
-	// for a max-sized blob (0.1 UNIT + 0.0001 UNIT/byte ≈ 0.51 UNIT) stays under the
-	// 1 UNIT submission deposit, so the held bytes remain collateralized even after
-	// `unnote`. 4 KiB is ample for any tech-collective call (a runtime-upgrade
-	// authorization is a few dozen bytes); together with the decision deposit it keeps a
-	// tech referendum affordable from the 3 UNIT mainnet genesis seed.
-	pub const MaxReferendaProposalSize: u32 = 4 * 1024;
-	// Submission deposit for referenda
-	pub const ReferendumSubmissionDeposit: Balance = scale_fee(UNIT);
-	// Undeciding timeout (45 days): a submitted referendum that is NOT in the track queue :
-	// e.g. one that never received a decision deposit : is rejected as TimedOut after this
-	// long. Referenda that ARE queued for deciding are exempt: the timeout check
-	// (pallets/referenda/src/lib.rs, `service_referendum`) is gated on `!status.in_queue`,
-	// so a queued referendum that simply never gets a free deciding slot is NOT timed out.
-	pub const UndecidingTimeout: BlockNumber = 45 * DAYS;
-	pub const AlarmInterval: BlockNumber = 1;
-}
-
-parameter_types! {
-	pub const MinRankOfClassDelta: u16 = 0;
-	pub const MaxMemberCount: u32 = 13;
-}
-impl pallet_ranked_collective::Config for Runtime {
-	type WeightInfo = pallet_ranked_collective::weights::SubstrateWeight<Runtime>;
-	type RuntimeEvent = RuntimeEvent;
-	// #91267: membership changes go through Root only (i.e. a passed TechReferenda vote), so no
-	// single member can unilaterally add/remove others or stuff the collective. Root operates at
-	// rank 0, matching the flat collective. Removals are additionally gated on the
-	// MIN_TECH_COLLECTIVE_MEMBERS floor: shrinking below it would collapse the tech-referenda
-	// vote thresholds or (at zero members) deadlock the lane entirely.
-	type AddOrigin = EnsureRootWithSuccess<AccountId, ConstU16<0>>;
-	type RemoveOrigin = EnsureRootRemoveKeepsMemberFloor;
-	type PromoteOrigin = NeverEnsureOrigin<u16>;
-	type DemoteOrigin = NeverEnsureOrigin<u16>;
-	type ExchangeOrigin = NeverEnsureOrigin<u16>;
-	type Polls = pallet_referenda::Pallet<Runtime, TechReferendaInstance>;
-	type MinRankOfClass = MinRankOfClassConverter<MinRankOfClassDelta>;
-	type MemberSwappedHandler = ();
-	type VoteWeight = Linear;
-	type MaxMemberCount = GlobalMaxMembers<MaxMemberCount>;
-
-	#[cfg(feature = "runtime-benchmarks")]
-	type BenchmarkSetup = ();
-}
-
-pub type TechReferendaInstance = pallet_referenda::Instance1;
-
-impl pallet_referenda::Config<TechReferendaInstance> for Runtime {
-	/// The type of call dispatched by referenda upon approval and execution.
-	type RuntimeCall = RuntimeCall;
-	type RuntimeEvent = RuntimeEvent;
-	/// Provides weights for the pallet operations to properly charge transaction fees.
-	type WeightInfo = pallet_referenda::weights::SubstrateWeight<Runtime>;
-	/// The scheduler pallet used to delay execution of successful referenda.
-	type Scheduler = Scheduler;
-	/// The currency mechanism used for handling deposits and voting.
-	type Currency = Balances;
-	/// The origin allowed to submit referenda - in this case any signed account.
-	type SubmitOrigin = RootOrMemberForTechReferendaOrigin;
-	/// The privileged origin allowed to cancel an ongoing referendum - only root can do this.
-	type CancelOrigin = EnsureRoot<AccountId>;
-	/// The privileged origin allowed to kill a referendum that's not passing - only root can do
-	/// this.
-	type KillOrigin = EnsureRoot<AccountId>;
-	/// Destination for slashed deposits when a referendum is cancelled or killed.
-	/// Leaving () here, will burn all slashed deposits. It's possible to use here the same idea
-	/// as we have for TransactionFees (OnUnbalanced) - with this it should be possible to
-	/// do something more sophisticated with this.
-	type Slash = (); // Will discard any slashed deposits
-	/// The voting mechanism used to collect votes and determine how they're counted.
-	/// Connected to the conviction voting pallet to allow conviction-weighted votes.
-	type Votes = pallet_ranked_collective::Votes;
-	/// The method to tally votes and determine referendum outcome.
-	/// Uses conviction voting's tally system with a maximum turnout threshold.
-	type Tally = pallet_ranked_collective::TallyOf<Runtime>;
-	/// The deposit required to submit a referendum proposal.
-	type SubmissionDeposit = ReferendumSubmissionDeposit;
-	/// Maximum number of referenda that can be queued for deciding on the track.
-	type MaxQueued = ReferendumMaxProposals;
-	/// Global admission bound on `Ongoing` referenda, enforced in `submit`.
-	type MaxActive = MaxActiveReferenda;
-	/// Per-submitter admission bound, so no member coalition can exhaust `MaxActive`.
-	type MaxActivePerAccount = MaxActiveReferendaPerAccount;
-	/// Max Lookup proposal size; keeps requested-but-unnoted preimages collateralized.
-	type MaxProposalSize = MaxReferendaProposalSize;
-	/// Time period after which an undecided referendum will be automatically rejected.
-	type UndecidingTimeout = UndecidingTimeout;
-	/// The frequency at which the pallet checks for expired or ready-to-timeout referenda.
-	type AlarmInterval = AlarmInterval;
-	/// Defines the different referendum tracks (categories with distinct parameters).
-	type Tracks = TechCollectiveTracksInfo;
-	/// The pallet used to store preimages (detailed proposal content) for referenda.
-	type Preimages = Preimage;
-	/// Blocknumber provider
-	type BlockNumberProvider = System;
 }
 
 parameter_types! {
@@ -658,7 +653,11 @@ impl pallet_scheduler::Config for Runtime {
 	type PalletsOrigin = OriginCaller;
 	type RuntimeCall = RuntimeCall;
 	type MaximumWeight = MaximumSchedulerWeight;
-	type ScheduleOrigin = EnsureRoot<AccountId>;
+	// Nothing schedules a task by extrinsic: the calls are disabled, and this
+	// origin refuses every caller including Root. `ReversibleTransfers` places
+	// its tasks through `ScheduleNamed::schedule_named`, a Rust call that does
+	// not consult this item.
+	type ScheduleOrigin = NeverEnsureOrigin<()>;
 	type MaxScheduledPerBlock = MaxScheduledPerBlock;
 	type WeightInfo = pallet_scheduler::weights::SubstrateWeight<Runtime>;
 	type OriginPrivilegeCmp = frame_support::traits::EqualPrivilegeOnly;
@@ -697,7 +696,7 @@ impl pallet_scheduler::Config for Runtime {
 //
 // Spam Prevention:
 // - Existential deposit: 0.001 UNIT
-// - Various pallet-specific deposits (multisig, governance, etc.)
+// - Various pallet-specific deposits (multisig, preimage)
 // - Miners can reject transactions below their minimum fee threshold
 //
 // ============================================================================
@@ -952,34 +951,16 @@ impl Get<Option<AccountId>> for TreasuryAccountOption {
 	}
 }
 
-/// `Signed(who)` where `who` is the configured treasury account.
-///
-/// The treasury is a multisig in real deployments; the multisig pallet dispatches
-/// approved proposals as `RawOrigin::Signed(multisig_address)`, so a plain
-/// signed-origin check covers it.
-pub struct EnsureTreasury;
-impl EnsureOrigin<RuntimeOrigin> for EnsureTreasury {
-	type Success = AccountId;
-	fn try_origin(o: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
-		match (o.clone().into(), pallet_treasury::Pallet::<Runtime>::treasury_account()) {
-			(Ok(frame_system::RawOrigin::Signed(who)), Some(treasury)) if who == treasury =>
-				Ok(who),
-			_ => Err(o),
-		}
-	}
-	#[cfg(feature = "runtime-benchmarks")]
-	fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
-		pallet_treasury::Pallet::<Runtime>::treasury_account()
-			.map(RuntimeOrigin::signed)
-			.ok_or(())
-	}
-}
-
 impl pallet_vesting::Config for Runtime {
 	type Currency = Balances;
 	type TimeProvider = Timestamp;
 	type PalletId = VestingPalletId;
-	type AdminOrigin = EitherOfDiverse<EnsureRoot<AccountId>, EnsureTreasury>;
+	// No origin administers a vesting schedule. `create_schedule`, `end_schedule`
+	// and `retarget_schedule` are unreachable twice over: the call filter refuses
+	// all three, and this origin refuses every caller including Root, which
+	// nothing on this chain can produce anyway. The genesis table is the whole
+	// set of schedules the chain will ever hold, and `claim` is what pays them.
+	type AdminOrigin = NeverEnsureOrigin<AccountId>;
 	type TreasuryAccount = TreasuryAccountOption;
 	type AssetId = AssetId;
 	// Nothing to record: a vesting payout is a transparent transfer, the call
@@ -1193,44 +1174,44 @@ parameter_types! {
 	pub const ShieldedMinLeafFee: u64 = 1;
 	/// Bytes of note ciphertext one step of fee buys: 512 bytes.
 	///
-	/// A real slot carries two ciphertexts whose fixed part is 1731 bytes
-	/// each, plus whatever memo pad the wallet writing them uses; the v0
-	/// wallet pads to 61, so the pair it publishes is 3584 bytes and pays
-	/// seven steps of payload on top of `ShieldedMinLeafFee`. A slot padded
-	/// to the cap (two ciphertexts of `ShieldedMaxCiphertextBytes`, 4096 bytes
-	/// in total) pays eight. The flat floor alone would price either at one
-	/// step. The chain never parses these bytes and `Ciphertexts` is never
-	/// pruned, so the whole cap is usable by a settler and the payload is what
-	/// has to be priced.
+	/// Two rules landed on top of this term in the pre-genesis bundle and
+	/// between them they replaced its whole argument. Q1 fixed the settlement
+	/// payload at one length per crypto suite, so the padding grind the divisor
+	/// was sized against is refused rather than priced. Q3 moved the payload
+	/// out of the state trie, so what a carried byte costs the chain is block
+	/// bandwidth and the block body an archive node keeps, rather than a trie
+	/// entry every full node carries.
 	///
-	/// The divisor has to sit below the slack between the real ciphertext size
-	/// and the cap, or the term prices nothing it was added to price: at one
-	/// kilobyte both 3584 and 4096 bytes round to four steps, so a settler
-	/// could pad both ciphertexts to the cap and add 512 bytes of permanent,
-	/// never-pruned, never-parsed state for no extra fee.
-	/// `a_slot_pays_for_the_ciphertext_bytes_it_publishes` in the pallet's
-	/// tests pins the two endpoints apart, and the real endpoint it pins is
-	/// the padded pair a wallet actually sends. The memo pad eats the same
-	/// slack: a pad of 256 would put a real pair at 3974 bytes,
-	/// in the cap's own bucket, and the separation would be gone for every
-	/// spend on the chain while both test suites stayed green.
+	/// What the term still does is price those bytes, linearly, and that is
+	/// worth keeping for three reasons. It prices the `shield` entry note,
+	/// which the exact-length rule does not reach. It prices a skipped
+	/// position's carried bytes, which no settling slot's own floor covers. And
+	/// a second crypto suite would publish a second length, at which point a
+	/// flat per-slot floor would price the shorter suite and the longer one
+	/// alike.
+	///
+	/// The one reachable settlement payload is a pair of 1792-byte
+	/// ciphertexts, 3584 bytes, which is seven steps on top of
+	/// `ShieldedMinLeafFee`. `a_slot_pays_for_the_ciphertext_bytes_it_publishes`
+	/// in the pallet's tests pins that point, and
+	/// `a_pair_padded_to_the_cap_is_refused_not_priced` pins that the grind the
+	/// divisor used to separate is now refused outright.
 	///
 	/// It prices the submission as well as the slot. A segment the chain skips,
 	/// because a nullifier it publishes is already spent or because its block
-	/// anchor no longer resolves, pays no fee of its own: it writes no
-	/// permanent state, and charging it the fee it paid when it first settled
-	/// would drift `PoolValue` from the sum of the notes behind it. Its
-	/// ciphertexts are in the block all the same and every node sponges them
-	/// into a `ct_digest`, so the settling slots of a submission owe
-	/// `(settling slots + skipped slots) * ShieldedMinLeafFee` plus one step
-	/// per started 512 bytes the submission carries, a skipped segment's bytes
-	/// included. A skipped position may instead be emptied, which is what a
-	/// griefed aggregator resubmits: that removes the position from the payload
-	/// term, and the slot behind it is still charged the flat minimum, because
-	/// the walk and the weight it costs a block do not depend on its bytes.
+	/// anchor no longer resolves, pays no fee of its own: it settles nothing,
+	/// and charging it the fee it paid when it first settled would drift
+	/// `PoolValue` from the sum of the notes behind it. Its ciphertexts are in
+	/// the block all the same, every node sponges them into a `ct_digest`, and
+	/// every archive node keeps the body that carries them, so the settling
+	/// slots of a submission owe `(settling slots + skipped slots) *
+	/// ShieldedMinLeafFee` plus one step per started 512 bytes the submission
+	/// carries, a skipped segment's bytes included. A skipped position may
+	/// instead be emptied, which is what a griefed aggregator resubmits: that
+	/// removes the position from the payload term, and the slot behind it is
+	/// still charged the flat minimum, because the walk and the weight it costs
+	/// a block do not depend on its bytes.
 	pub const ShieldedCiphertextBytesPerFeeQuantum: u32 = 512;
-	/// Half of a settled fee is burned, half becomes part of the block's
-	/// coinbase note. The same split the wormhole applied to its volume fee.
 	pub const ShieldedFeeBurnRate: Permill = Permill::from_percent(50);
 	/// Size cap on one note ciphertext: 2048 bytes.
 	///
@@ -1240,21 +1221,34 @@ parameter_types! {
 	/// each of the three payloads), an ML-KEM-1024 encapsulation (1568), the
 	/// 112-byte note payload under a ChaCha20-Poly1305 tag (128), and the
 	/// memo's own tag (16). `an_empty_memo_ciphertext_serializes_to_1731_bytes`
-	/// in `qnero-pqcrypto` pins that total against the serializer. The cap
-	/// leaves 317 bytes of memo.
+	/// in `qnero-pqcrypto` pins that total against the serializer, and the
+	/// memo pad that fills the rest of the consensus length is 61 bytes, so a
+	/// settlement ciphertext is 1792 and the cap leaves 256 bytes of slack.
 	///
-	/// The slack is deliberately small, and the whole cap is what a settler can
-	/// use: the chain never parses these bytes, so nothing holds a submission
-	/// to a real `NoteCiphertext` shape, and `Ciphertexts` has bounded live retention.
-	/// `ShieldedCiphertextBytesPerFeeQuantum` is what prices the payload; this
-	/// cap is what bounds one slot's worst case. A wallet reads this bound from
-	/// the pallet's metadata, where a hardcoded copy would drift: exceeding it
-	/// fails the extrinsic's SCALE decode after the proof that committed to
-	/// those exact bytes has already been built.
+	/// On the settlement path that slack is unreachable: Q1's exact-length rule
+	/// refuses any length but the one the declared suite fixes, so what this
+	/// cap bounds there is the `MaxEncodedLen` of `ShieldedOutput`, which is a
+	/// metadata-visible type width and the reason the cap does not move in a
+	/// bundle that also moves the settlement rules.
+	///
+	/// Where it is the whole bound is `shield`. An entry note's payload is
+	/// checked against this cap and against nothing else, because the entry
+	/// path has no declared suite to fix a length and a zero-length entry
+	/// ciphertext stays legal. A wallet reads the bound from the pallet's
+	/// metadata, where a hardcoded copy would drift: exceeding it fails the
+	/// call after the proof that committed to those exact bytes has already
+	/// been built.
 	pub const ShieldedMaxCiphertextBytes: u32 = 2048;
+	/// Blocks of note ciphertext this runtime keeps in state: none.
+	///
+	/// Nothing in the runtime reads it. It sits in the pallet's metadata so
+	/// that a wallet is told where the payload lives rather than inferring it
+	/// from a storage item that is not there, and `integrity_test` refuses any
+	/// other value. The payload rides in the extrinsic that created its note
+	/// and a wallet authenticates it against the header's `extrinsics_root`.
+	/// `docs/DESIGN.md` 12.9 is the decision as built.
 	pub const ShieldedCiphertextRetentionBlocks: u32 = pallet_shielded::CIPHERTEXT_RETENTION_BLOCKS;
-	pub const ShieldedMaxCiphertextsPerBlock: u32 = pallet_shielded::MAX_CIPHERTEXTS_PER_BLOCK;
-	pub const ShieldedMaxCiphertextPrunesPerBlock: u32 = pallet_shielded::MAX_CIPHERTEXT_PRUNES_PER_BLOCK;
+	pub const ShieldedMaxOutputsPerBlock: u32 = pallet_shielded::MAX_OUTPUTS_PER_BLOCK;
 }
 
 impl pallet_shielded::Config for Runtime {
@@ -1274,7 +1268,6 @@ impl pallet_shielded::Config for Runtime {
 	type FeeBurnRate = ShieldedFeeBurnRate;
 	type MaxCiphertextBytes = ShieldedMaxCiphertextBytes;
 	type CiphertextRetentionBlocks = ShieldedCiphertextRetentionBlocks;
-	type MaxCiphertextsPerBlock = ShieldedMaxCiphertextsPerBlock;
-	type MaxCiphertextPrunesPerBlock = ShieldedMaxCiphertextPrunesPerBlock;
+	type MaxOutputsPerBlock = ShieldedMaxOutputsPerBlock;
 	type WeightInfo = pallet_shielded::weights::SubstrateWeight<Runtime>;
 }

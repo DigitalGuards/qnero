@@ -122,8 +122,8 @@ fn bench<T>(runs: usize, mut body: impl FnMut(usize) -> T) -> (Vec<f64>, f64) {
 /// `sender` builds. `outputs[0]` is the recipient's; `outputs[1]` is the
 /// change note back to the sender.
 fn ciphertext_to(sender: &str, recipient: &str) -> Vec<u8> {
-    let json = synthetic_transfer_request(&seed(sender), &seed(recipient), 2)
-        .expect("the fixture builds");
+    let json =
+        synthetic_transfer_request(&seed(sender), &seed(recipient), 2).expect("the fixture builds");
     let request: TransferRequest = serde_json::from_str(&json).expect("the fixture parses");
     let prepared = request.prepare().expect("the request prepares");
     let outputs = prepared.encrypt_outputs().expect("the outputs encrypt");

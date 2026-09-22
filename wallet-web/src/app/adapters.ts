@@ -9,6 +9,8 @@
  */
 
 import type { ChainContext } from '../chain/api';
+import { authenticatedBody } from '../chain/authenticated';
+import { blockPayloads } from '../chain/body';
 import {
   blockHashAt,
   fetchHead,
@@ -47,6 +49,11 @@ export function chainAdapter(context: ChainContext, limits: ProverLimits): SyncC
     treeShape: (at) => fetchTreeTotals(context, at, limits.max_tree_depth),
     leaves: (from, to, at, leafCount, onProgress) =>
       fetchLeaves(context, from, to, at, leafCount, onProgress),
+    // The body is fetched, rooted against the `extrinsicsRoot` of a header
+    // that hashes to `at`, and walked down to the payloads its calls carry.
+    // Composed here rather than in either half, so nothing can take a body
+    // without the root check that authenticates it.
+    payloads: async (at) => blockPayloads(context.bodyLayout, await authenticatedBody(context, at)),
     usedNullifiers: (at, onProgress) => fetchUsedNullifiers(context, at, undefined, onProgress),
     headers: (anchor, top, onHeader, onProgress) =>
       fetchHeaderRange(context, anchor, top, onHeader, onProgress),
@@ -62,11 +69,7 @@ export function cryptoAdapter(prover: ProverClient): SyncCrypto {
   return {
     decryptBatch: async (items) => {
       const answers = await prover.decryptBatch(
-        items.map((item) => ({
-          index: item.index,
-          ciphertext: item.ciphertext,
-          commitment: item.commitment,
-        })),
+        items.map((item) => ({ ciphertext: item.ciphertext })),
       );
       return answers.map((answer) =>
         answer === null
@@ -89,7 +92,6 @@ export function cryptoAdapter(prover: ProverClient): SyncCrypto {
           value: item.value.toString(),
           genesisHash: item.genesisHash,
           commitment: item.commitment,
-          ciphertext: item.ciphertext,
         })),
       );
       return answers.map((answer) =>

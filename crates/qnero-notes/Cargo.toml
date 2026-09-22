@@ -22,6 +22,10 @@ hex = { workspace = true }
 # test that covers it needs real `NoteCiphertext` values, which live here.
 qnero-circuit = { path = "../qnero-circuit", default-features = false }
 rand = { workspace = true }
+# For the known-answer ciphertext hash. The wire object the KAT pins is not a
+# Poseidon input anywhere, so it is hashed with the same SHA-256 the note
+# encryption already carries through `qnero-pqcrypto`.
+sha2 = { version = "0.10", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 qp-plonky2 = { workspace = true }

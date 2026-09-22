@@ -21,6 +21,7 @@
 
 mod support;
 
+use qnero_circuit::chain::MAX_TREE_DEPTH;
 use qnero_notes::Digest;
 use qnero_wallet::chain::Chain;
 use qnero_wallet::rpc::RpcClient;
@@ -29,7 +30,11 @@ use support::{encode_u64, FakeNode, NodeState};
 
 /// `4 ** MAX_TREE_DEPTH`, which is what `pallet-zk-tree::capacity_at_depth`
 /// answers at `CIRCUIT_MAX_TREE_DEPTH` and what the tree can hold.
-const TREE_CAPACITY: u64 = 4u64.pow(16);
+///
+/// Read from the constant rather than written out: the depth moves with a
+/// circuit release, and a literal here would keep asserting the old bound
+/// while the code under test used the new one.
+const TREE_CAPACITY: u64 = 4u64.pow(MAX_TREE_DEPTH as u32);
 
 fn node_with(state: NodeState) -> FakeNode {
     FakeNode::start(state)
@@ -87,7 +92,10 @@ fn a_leaf_count_above_the_trees_capacity_is_refused() {
         .leaf_count_at(&chain.head().expect("selected head").hash)
         .expect_err("a count above the tree's capacity is refused");
     let message = format!("{refused:#}");
-    assert!(message.contains("4 ** 16"), "{message}");
+    assert!(
+        message.contains(&format!("4 ** {MAX_TREE_DEPTH}")),
+        "{message}"
+    );
     assert!(
         message.contains(&TREE_CAPACITY.to_string()),
         "the refusal names the capacity: {message}"

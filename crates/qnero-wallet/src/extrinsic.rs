@@ -1,8 +1,8 @@
-//! Extrinsic encoding.
+//! Extrinsic encoding, and the walk back out of one.
 //!
 //! Two shapes. A settlement is bare: no signature, no nonce, no tip, admitted
 //! by `ValidateUnsigned` and free. A `shield` is signed with ML-DSA-87 under
-//! the FIPS 204 context `QUANTUS_EXTRINSIC`, with the runtime's twelve
+//! the FIPS 204 context `QUANTUS_EXTRINSIC`, with the runtime's eleven
 //! transaction extensions laid out by hand.
 //!
 //! The layout is checked against the runtime's own metadata before anything is
@@ -10,13 +10,28 @@
 //! every extension contributes explicit bytes to the extrinsic and implicit
 //! bytes to the payload the signature covers, so an unknown one shifts both
 //! and the node reports only `Transaction has a bad signature`.
+//!
+//! # The read direction
+//!
+//! Note ciphertexts live in block bodies and nowhere else, so a scan walks
+//! each extrinsic of a block back to its call and takes the payloads out of
+//! the arguments ([`extrinsic_payloads`]). It is the same layout read the
+//! other way, and the same extension check guards it: an extension this wallet
+//! does not know shifts the call index as surely as it shifts a signature, and
+//! a call index read off by one is a payload silently not found.
+//!
+//! A generic Substrate client cannot do this walk. The ML-DSA-87 signature is
+//! a fixed 7219-byte array and polkadot-js refuses a fixed array above 2048,
+//! so `chain_getBlock` through a typed API throws on every block carrying a
+//! signed extrinsic. `explorer/src/lib/extrinsics.ts` walks the same envelope
+//! by hand and is the reference this follows.
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use codec::{Compact, Encode};
 
-use crate::dev_account::TransparentKey;
+use crate::dev_account::{TransparentKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use crate::metadata::ChainMetadata;
-use crate::scale::{compact_len, encode_bytes};
+use crate::scale::{compact_len, encode_bytes, read_compact};
 
 /// `sp_runtime`'s bare preamble. Versions 4 and 5 both decode; 4 is the one
 /// every runtime in this lineage accepts.
@@ -121,7 +136,7 @@ pub struct SigningContext {
 /// The explicit half of the transaction extensions: what rides in the
 /// extrinsic.
 ///
-/// Only four of the twelve encode anything. `CheckMortality` is immortal here,
+/// Only four of the eleven encode anything. `CheckMortality` is immortal here,
 /// so the era is one zero byte and its implicit hash is the genesis hash: a
 /// mortal era would need the block hash its period starts at, and a wallet
 /// that has to resubmit a `shield` gains nothing from the shorter window.
@@ -188,6 +203,196 @@ pub fn encode_signed(
     let mut out = compact_len(body.len());
     out.extend_from_slice(&body);
     Ok(out)
+}
+
+/// Every note ciphertext one extrinsic carries, in the order it carries them.
+///
+/// The walk goes as far as the call index and no further for a call that
+/// carries no payload, which is every call but the three below. A transparent
+/// transfer's sender, recipient and amount are in the body forever and this
+/// reads none of them.
+///
+/// Refuses rather than skipping. A body this wallet cannot walk is a body it
+/// cannot say carried no payment, and a scan that stepped over one would write
+/// a watermark above the block it was in. The three ways out are an envelope
+/// shape this wallet does not know, an argument list that does not decode, and
+/// an extension set the runtime declares and this wallet cannot lay out.
+pub fn extrinsic_payloads(metadata: &ChainMetadata, extrinsic: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let (declared, body_at) =
+        read_compact(extrinsic, 0).context("an extrinsic with no length prefix at all")?;
+    let body = extrinsic
+        .get(body_at..)
+        .filter(|body| body.len() as u64 == declared)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "an extrinsic declares {declared} bytes and carries {}. `chain_getBlock` returns \
+                 each extrinsic as its own SCALE `Vec<u8>`, so the two are the same number on \
+                 every block a node built.",
+                extrinsic.len().saturating_sub(body_at)
+            )
+        })?;
+
+    let preamble = *body
+        .first()
+        .context("an extrinsic with no preamble at all")?;
+    // `sp_runtime`'s preamble: the top two bits are the transaction type and
+    // the low six are the format version.
+    let cursor = match preamble >> 6 {
+        0b00 => 1,
+        0b10 => {
+            // The explicit half of a signed extrinsic, in the order
+            // `encode_signed` writes it.
+            metadata.ensure_known_signed_extensions()?;
+            let address = *body.get(1).context("a signed extrinsic with no address")?;
+            if address != MULTI_ADDRESS_ID {
+                bail!(
+                    "a signed extrinsic carries `MultiAddress` variant {address}, where this \
+                     wallet walks `Id` ({MULTI_ADDRESS_ID}) alone. Every signer this runtime \
+                     admits is an `AccountId32`."
+                );
+            }
+            let scheme = *body
+                .get(34)
+                .context("a signed extrinsic with no signature scheme")?;
+            if scheme != SIGNATURE_SCHEME_ML_DSA_87 {
+                bail!(
+                    "a signed extrinsic carries signature scheme {scheme}, where this wallet \
+                     walks ML-DSA-87 ({SIGNATURE_SCHEME_ML_DSA_87}) alone. A scheme of another \
+                     width moves the call index and every argument after it."
+                );
+            }
+            // 1 preamble, 1 address variant, 32 account, 1 scheme variant,
+            // then the signature and the public key, neither length prefixed.
+            skip_extensions(body, 35 + SIGNATURE_LEN + PUBLIC_KEY_LEN)?
+        }
+        0b01 => {
+            // A general transaction: an extension version byte, then the
+            // extensions of that version, then the call. This runtime builds
+            // none, and walking it is what keeps one appearing beside a
+            // settlement from refusing the whole pass.
+            metadata.ensure_known_signed_extensions()?;
+            skip_extensions(body, 2)?
+        }
+        bits => bail!(
+            "an extrinsic carries transaction type {bits:#04b}, which this wallet cannot walk. \
+             Its call and every argument after it are at offsets this wallet would be guessing."
+        ),
+    };
+
+    let pallet = *body
+        .get(cursor)
+        .context("an extrinsic with no call in it")?;
+    let call = *body
+        .get(cursor + 1)
+        .context("an extrinsic with no call index")?;
+    let args = &body[cursor + 2..];
+    if pallet != metadata.shielded_pallet_index {
+        return Ok(Vec::new());
+    }
+    if call == metadata.submit_private_batch || call == metadata.submit_public_batch {
+        read_batch_payloads(args)
+    } else if call == metadata.shield {
+        read_shield_payload(args)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// `submit_private_batch(proof, outputs)` and its public twin, read back.
+fn read_batch_payloads(args: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let (proof_len, proof_at) =
+        read_compact(args, 0).context("a settlement whose proof has no length prefix")?;
+    let mut cursor = usize::try_from(proof_len)
+        .ok()
+        .and_then(|len| proof_at.checked_add(len))
+        .filter(|end| *end <= args.len())
+        .context("a settlement whose proof runs past the end of its call")?;
+    let (slots, next) =
+        read_compact(args, cursor).context("a settlement whose output list has no length")?;
+    cursor = next;
+    // Two ciphertexts per settled slot, and the bound is the bytes that are
+    // actually there: `MaxOutputsPerBlock` is the chain's rule and this is a
+    // node's answer, so the count is only believed as far as the body goes.
+    let mut out = Vec::with_capacity((slots as usize).min(args.len() / 2).saturating_mul(2));
+    for slot in 0..slots {
+        for which in 1..=2 {
+            let (payload, next) = read_bytes(args, cursor)
+                .with_context(|| format!("a settlement whose slot {slot} carries no ct_{which}"))?;
+            cursor = next;
+            if !payload.is_empty() {
+                out.push(payload.to_vec());
+            }
+        }
+    }
+    ensure_consumed(args, cursor, "a settlement")?;
+    Ok(out)
+}
+
+/// `shield(value, inner, ciphertext)`, read back.
+fn read_shield_payload(args: &[u8]) -> Result<Vec<Vec<u8>>> {
+    // A `u128` balance and a raw 32-byte `inner`, neither length prefixed.
+    const CIPHERTEXT_AT: usize = 16 + 32;
+    if args.len() < CIPHERTEXT_AT {
+        bail!("a shield whose value and inner do not fit in its call");
+    }
+    let (payload, cursor) =
+        read_bytes(args, CIPHERTEXT_AT).context("a shield that carries no ciphertext")?;
+    let payload = payload.to_vec();
+    ensure_consumed(args, cursor, "a shield")?;
+    Ok(if payload.is_empty() {
+        Vec::new()
+    } else {
+        vec![payload]
+    })
+}
+
+/// A `Vec<u8>` argument: a compact length and exactly that many bytes.
+fn read_bytes(args: &[u8], offset: usize) -> Option<(&[u8], usize)> {
+    let (len, at) = read_compact(args, offset)?;
+    let end = usize::try_from(len)
+        .ok()
+        .and_then(|len| at.checked_add(len))?;
+    Some((args.get(at..end)?, end))
+}
+
+/// Every argument accounted for, with nothing left over.
+///
+/// A call this wallet decodes short is a call whose shape has moved, and
+/// reading a payload out of the wrong offsets is how a payment goes missing
+/// without anything saying so.
+fn ensure_consumed(args: &[u8], cursor: usize, what: &str) -> Result<()> {
+    if cursor != args.len() {
+        bail!(
+            "{what} whose arguments this wallet decoded to {cursor} bytes of {}. The call's \
+             shape has moved and this wallet would be reading payloads at offsets the chain did \
+             not write them at.",
+            args.len()
+        );
+    }
+    Ok(())
+}
+
+/// The explicit bytes the eleven transaction extensions contribute, in order.
+///
+/// Only four of the eleven encode anything, and they are the same four
+/// [`encode_extensions`] writes: `CheckMortality`'s era, `CheckNonce`'s
+/// compact nonce, `ChargeTransactionPayment`'s compact tip and
+/// `CheckMetadataHash`'s mode byte. The caller has already run
+/// [`ChainMetadata::ensure_known_signed_extensions`], which is what makes that
+/// list the runtime's own and not this wallet's guess.
+fn skip_extensions(body: &[u8], offset: usize) -> Result<usize> {
+    // `Era::Immortal` is one zero byte; a mortal era is two.
+    let era = *body
+        .get(offset)
+        .context("a signed extrinsic that ends before its era")?;
+    let mut cursor = offset + if era == ERA_IMMORTAL { 1 } else { 2 };
+    for what in ["nonce", "tip"] {
+        cursor = read_compact(body, cursor)
+            .map(|(_, next)| next)
+            .with_context(|| format!("a signed extrinsic that ends before its {what}"))?;
+    }
+    // `CheckMetadataHash`'s `Mode`, one byte whichever variant it is.
+    Ok(cursor + 1)
 }
 
 #[cfg(test)]
@@ -297,7 +502,7 @@ mod tests {
 
     /// The two preamble bytes are compiled in and the runtime publishes the
     /// format version they have to match. A runtime that drops the legacy
-    /// signed variant declares version 5 with the twelve extension identifiers
+    /// signed variant declares version 5 with the eleven extension identifiers
     /// unchanged, so the extension check passes and the signature dies inside
     /// the node's `Preamble::decode` with `Invalid transaction version`.
     #[test]
@@ -340,5 +545,70 @@ mod tests {
         // Version 4 is what this lineage declares, and both go out.
         assert!(encode_submit_private_batch(&runtime(), b"proof", &outputs).is_ok());
         assert!(encode_signed(&runtime(), &key, &call, &context).is_ok());
+    }
+
+    /// One extrinsic, length prefix and all, out of a preamble and a call.
+    fn bare_extrinsic(preamble: u8, call: &[u8]) -> Vec<u8> {
+        let mut body = vec![preamble];
+        body.extend_from_slice(call);
+        let mut out = crate::scale::compact_len(body.len());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A real block body is a mixture of preamble bytes, and the walk reads
+    /// no version out of either.
+    ///
+    /// The runtime builds its inherents at `EXTRINSIC_FORMAT_VERSION` 5, so a
+    /// node-built inherent carries preamble `0x05`, while this wallet signs
+    /// and settles at version 4 and its own extrinsics carry `0x04`.
+    /// `Preamble::decode` admits both, so both are in every block. The walk
+    /// keys off the top two bits alone: a wallet that pinned the low six
+    /// would refuse half of every body, and a scan that refuses a body cannot
+    /// say the block carried no payment of its owner's.
+    #[test]
+    fn a_body_mixing_version_5_and_version_4_preambles_walks() {
+        let metadata = runtime();
+        let outputs = vec![ShieldedOutput {
+            ct_1: vec![0xaa, 0xbb],
+            ct_2: vec![0xcc],
+        }];
+        let payloads = vec![vec![0xaa, 0xbb], vec![0xcc]];
+
+        // A node-built inherent at version 5: `Timestamp::set(now)`, a call on
+        // a pallet that is not `Shielded`, so the walk stops at the index.
+        let inherent = bare_extrinsic(0x05, &[1, 0, 0x0b, 0x00, 0x8a, 0x35, 0xd7, 0x9a, 0x01]);
+        assert!(extrinsic_payloads(&metadata, &inherent)
+            .expect("a version 5 inherent walks")
+            .is_empty());
+
+        // And this wallet's settlement at version 4, beside it.
+        let mut settlement =
+            encode_submit_private_batch(&metadata, &[0x01, 0x02], &outputs).expect("it encodes");
+        let (_, preamble_at) = read_compact(&settlement, 0).expect("it has a length prefix");
+        assert_eq!(settlement[preamble_at], BARE_PREAMBLE);
+        assert_eq!(
+            extrinsic_payloads(&metadata, &settlement).expect("a version 4 settlement walks"),
+            payloads
+        );
+
+        // The same settlement with the version the runtime's own builder
+        // would stamp on it: the same two ciphertexts come back, which is
+        // what says the version byte is not read.
+        settlement[preamble_at] = 0x05;
+        assert_eq!(
+            extrinsic_payloads(&metadata, &settlement).expect("a version 5 settlement walks"),
+            payloads
+        );
+
+        // A transaction type this wallet cannot walk still refuses, so the
+        // tolerance is in the version bits and nowhere else.
+        settlement[preamble_at] = 0b1100_0000 | 0x04;
+        let refused = extrinsic_payloads(&metadata, &settlement)
+            .expect_err("an unknown transaction type is refused");
+        assert!(
+            refused.to_string().contains("transaction type"),
+            "{refused}"
+        );
     }
 }

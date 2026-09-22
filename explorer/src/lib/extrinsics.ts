@@ -7,11 +7,12 @@
  * signed extrinsic. The explorer therefore reads the raw hex and walks the
  * envelope itself.
  *
- * It walks far enough to name the call and no further. A refused transparent
- * transfer carries its sender, recipient and amount in the block body forever,
- * and rendering those as an ordinary row would publish them a second time in a
- * form built for reading. The page says the arguments are there and leaves
- * them where the chain put them.
+ * It walks far enough to name the call and no further. Any call a block
+ * carries carries its own arguments with it, forever, and rendering those as an
+ * ordinary row would publish them a second time in a form built for reading.
+ * The page says the arguments are there and leaves them where the chain put
+ * them. A call the runtime refuses never reaches a block at all, so it is not
+ * what this rule is about.
  */
 
 import { readCompact } from './hex';

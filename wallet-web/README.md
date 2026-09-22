@@ -72,7 +72,7 @@ cd ../crates/qnero-prover-wasm
 ./scripts/build-threaded-wasm.sh       # the threaded one, nightly + -Z build-std
 ```
 
-## Authenticated reads and archive service
+## Authenticated reads and authenticated bodies
 
 Qloak verifies native V1 state-trie proofs in its existing Rust/WASM worker.
 Every storage value and absence used by scanning and spending is checked against a
@@ -85,14 +85,20 @@ profile is authenticated and matched to the compiled module. Other runtime
 metadata, such as fee constants and call indices, remains node-supplied
 compatibility information.
 
-Older ciphertexts require creation-block state proofs from an archive provider.
-The creation header is linked to the selected scan head before historical values
-are accepted. Missing archive data stops sync before progress is committed.
+Note ciphertexts are in no state map at all: they ride in the block bodies,
+inside the calls that append the leaves. A body is fetched by a hash this pass
+already trusts, rooted with the construction `frame_system` makes, and compared
+against the `extrinsicsRoot` in that block's own rehashed header, so a body the
+header does not carry is refused and no archive provider is needed for any of
+it. A block the node serves a header for and no body stops the sync before
+progress is committed.
+
 Wallets still trust their configured node for chain selection and freshness;
 Qloak does not verify RandomX work. Use a verified full node or an explicitly
 trusted provider/checkpoint policy. See [Authenticated reads](../docs/AUTHENTICATED_READS.md)
 for limits and deployment requirements. Deploy the updated WASM module together
-with this app: older modules lack the required state-proof verification export.
+with this app: older modules lack the state-proof and `extrinsicsRoot`
+verification exports this build calls.
 
 The worker smoke check uses both real staged modules without constructing
 proving circuits. Generate its deterministic fixture from the workspace root,
@@ -163,8 +169,8 @@ has the bug too.
   A new wallet records its **birthday**: the head the node it is connected to
   is at, rounded down to a multiple of 1024 blocks, with the leaf count that
   block held as its first watermark. A wallet cannot have been paid into a leaf
-  that existed before it did, so it never walks the headers under that block or
-  trial-decrypts the ciphertexts under that count. It is recorded as the
+  that existed before it did, so it never walks the headers under that block,
+  reads the bodies of the blocks under it or opens the payloads they carry. It is recorded as the
   store's first checkpoint, so it is the node's claim like every checkpoint and
   the fork walk rewinds through it; the screen says what was recorded and whose
   claim it is.
@@ -202,11 +208,13 @@ has the bug too.
   screen that asks for one. Each note's `rho`, `r`, `nullifier` and
   `memo` and the seed itself are sealed under it with a fresh 12-byte IV per
   record per write, bound to their own slot with additional data.
-- **Sync.** Every ciphertext on the chain is read by leaf index in batches and
-  tried against this wallet's viewing key in the worker; coinbase notes are
-  rebuilt from the miner key; the whole settled nullifier set is paged and
-  spent status is decided locally. The node is never told which leaves or
-  which nullifiers are this wallet's. A per-leaf key the node answers nothing
+- **Sync.** Every note ciphertext a scanned block's body carries is tried
+  against this wallet's viewing key in the worker, and a note that opens is
+  placed at the leaf whose commitment it opens, searched inside that block's
+  own folded leaf range; coinbase notes are rebuilt from the miner key; the
+  whole settled nullifier set is paged and spent status is decided locally.
+  The node is never told which leaves or which nullifiers are this wallet's,
+  and a body is the same bytes for every viewer of the chain. A per-leaf key the node answers nothing
   for below the count it reports at that same block refuses the pass:
   `ZkTree::Leaves` and `Shielded::LeafBlocks` are required at every index,
   because `pallet-shielded` writes both in the call that appends the leaf and
@@ -225,18 +233,20 @@ has the bug too.
   answer.**
   Presence of `Shielded::CoinbaseValues` used to decide it and presence is the
   node's to write, so eight invented bytes on an incoming payment routed it
-  onto the coinbase rebuild, which cannot open it, and an invented
-  `Shielded::Ciphertexts` beside a withheld coinbase value hid a mined reward
-  the other way round. What decides now is the header chain, walked between
+  onto the coinbase rebuild, which cannot open it. What decides now is the
+  header chain, walked between
   the head and a hash this wallet already trusts and rehashed from each
   header's own preimage, in chunks of `HEADER_WALK_LIMIT` blocks so a
   chain far ahead of the checkpoint syncs in one pass with one chunk resident;
   each block's leaf range, folded and compared against the `zkTreeRoot` its
   header carries, which makes `Shielded::LeafBlocks` advisory; and the coinbase
   position, which is a block's last leaf because the pallet mints it in
-  `on_finalize`. So a coinbase value below a block's last leaf is refused, a
-  withheld one at any coinbase position is refused, and a ciphertext is
-  required at every other position.
+  `on_finalize`. So a coinbase value below a block's last leaf is refused and a
+  withheld one at any coinbase position is refused. No position owes a
+  ciphertext, because none is read per position: the body roots as a whole and
+  a payload is placed by the commitment it opens, so a payment moved to another
+  position inside its own block, the coinbase position included, is still
+  found.
 - **No rule rests on the author label.** This wallet verifies no proof of work
   and will not in v1, so above its newest checkpoint a node picks every header
   field, the label included, and a rule gated on the label is one the node
@@ -253,11 +263,13 @@ has the bug too.
   `docs/WALLET.md` carries the per-position table and the section "What a lying
   node can and cannot do", and the same rules are in the command-line wallet's
   `crates/qnero-wallet/src/typing.rs`.
-- **Authenticated storage.** Counts, indices, ciphertexts, coinbase values,
-  and spent markers are reconstructed from proofs against the selected header.
-  The sorted commitment tree remains an additional consistency check. A missing
-  archived ciphertext or incomplete nullifier prefix refuses the pass before
-  progress is saved. Header selection still depends on the trusted node and
+- **Authenticated storage and authenticated bodies.** Counts, indices,
+  commitments, coinbase values and spent markers are reconstructed from state
+  proofs against the selected header; note ciphertexts are read out of block
+  bodies rooted against that header's `extrinsicsRoot` instead. The sorted
+  commitment tree remains an additional consistency check. A withheld body, a
+  body the header does not carry, or an incomplete nullifier prefix refuses the
+  pass before progress is saved. Header selection still depends on the trusted node and
   checkpoint policy described above.
 - **One scan at a time with a payment**, in both directions: a scan reads every note before it starts and
   commits them at the end, and a payment writes `spent` on those same rows the
@@ -392,8 +404,8 @@ every storage value is decoded at and the tree capacity `ZkTree::LeafCount` is
 bounded by, the refusal of each per-leaf key withheld below that count, one
 test per key on both the read layer and the scan, the refusal of the tree's own
 pad answered as a leaf below that count, authenticated storage and complete
-nullifier-prefix reads, historical ciphertext recovery and its refusal when
-archive data is unavailable, the merge that
+nullifier-prefix reads, the body a header carries and the four ways one is
+refused, the walk out of a settlement and a signed shield, the merge that
 keeps a spend's own writes when a scan commits over them, the bound on the
 shield-origin walk, the pipelined header walk against a node that answers
 headers out of order or a hash for a number its own header chain does not

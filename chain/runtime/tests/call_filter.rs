@@ -5,11 +5,17 @@
 //! transparent value from one account to another, the pool's own entry still
 //! works, and a wrapper is not a way around the first of those.
 //!
-//! Dispatched directly against `RuntimeOrigin::signed`, which is where the
-//! filter lives: `RuntimeCall::dispatch` asks the origin, and the origin's
-//! filter is `frame_system::Config::BaseCallFilter`. A signed extrinsic
-//! reaches exactly this call.
+//! Dispatched directly against `RuntimeOrigin::signed`, which is the filter's
+//! second line: `RuntimeCall::dispatch` asks the origin, and the origin's
+//! filter is `frame_system::Config::BaseCallFilter`. A submitted extrinsic is
+//! refused a layer earlier, in `Checkable::check`
+//! (`runtime/tests/transaction_policy.rs`), so what only this line reaches is a
+//! call no extrinsic carried: a due scheduler task
+//! (`runtime/tests/transactions/reversible_integration.rs`) and a `batch_all`
+//! child re-dispatched under the caller's origin. Both layers consult the same
+//! `Contains`, which is what these tests pin.
 
+use codec::Encode;
 use frame_support::{
 	dispatch::GetDispatchInfo,
 	traits::{Contains, Currency},
@@ -20,6 +26,13 @@ use qnero_runtime::{
 };
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::Dispatchable, BuildStorage, DispatchError, MultiAddress};
+
+// Every `.rs` directly under `tests/` is its own integration target, so the
+// shared helper is pulled in by path rather than by `use crate::common`.
+#[path = "common.rs"]
+#[allow(dead_code)]
+mod common;
+use common::call_names;
 
 fn account(id: u8) -> AccountId {
 	let mut bytes = [0u8; 32];
@@ -42,6 +55,22 @@ fn transfer(value: u128) -> RuntimeCall {
 	RuntimeCall::Balances(pallet_balances::Call::transfer_allow_death {
 		dest: MultiAddress::Id(account(2)),
 		value,
+	})
+}
+
+fn remark() -> RuntimeCall {
+	RuntimeCall::System(frame_system::Call::remark { remark: Vec::new() })
+}
+
+fn propose(payload: Vec<u8>) -> RuntimeCall {
+	propose_to(account(3), payload)
+}
+
+fn propose_to(multisig_address: AccountId, payload: Vec<u8>) -> RuntimeCall {
+	RuntimeCall::Multisig(pallet_multisig::Call::propose {
+		multisig_address,
+		call: payload.try_into().expect("the payload fits MaxCallSize"),
+		expiry: 100,
 	})
 }
 
@@ -101,6 +130,104 @@ fn a_wrapper_cannot_carry_a_transfer_past_the_filter() {
 			calls: vec![RuntimeCall::System(frame_system::Call::remark { remark: Vec::new() })],
 		});
 		assert!(QneroCallFilter::contains(&harmless));
+	});
+}
+
+/// `Multisig::propose` is the wrapper whose payload is not a typed call, and
+/// the filter unwraps it anyway.
+///
+/// The payload is opaque `BoundedVec<u8, MaxCallSize>` bytes. Left alone, a
+/// proposal carrying a transfer is an ordinary valid extrinsic: it enters a
+/// block with the sender, the recipient and the amount in its body, pays a fee
+/// and a deposit, and only the later `execute` is refused. The arm decodes it
+/// and holds it to the same rule.
+#[test]
+fn a_multisig_proposal_carrying_a_transfer_is_not_contained() {
+	new_test_ext().execute_with(|| {
+		assert!(!QneroCallFilter::contains(&propose(transfer(10 * UNIT).encode())));
+
+		let batched = RuntimeCall::Utility(pallet_utility::Call::batch_all {
+			calls: vec![transfer(10 * UNIT)],
+		});
+		assert!(!QneroCallFilter::contains(&propose(batched.encode())));
+
+		// One level is unwrapped, so a payload carrying a proposal of its own
+		// is refused without a second decode.
+		let nested = propose(transfer(10 * UNIT).encode());
+		assert!(!QneroCallFilter::contains(&propose(nested.encode())));
+		let nested_in_a_batch =
+			RuntimeCall::Utility(pallet_utility::Call::batch_all { calls: vec![nested] });
+		assert!(!QneroCallFilter::contains(&propose(nested_in_a_batch.encode())));
+
+		// A payload that can never execute is refused for that reason alone.
+		assert!(!QneroCallFilter::contains(&propose(vec![0xff, 0xff, 0xff])));
+		let mut trailing = remark().encode();
+		trailing.push(0x00);
+		assert!(!QneroCallFilter::contains(&propose(trailing)));
+
+		// And a proposal of a call v1 allows is still a proposal v1 allows.
+		assert!(QneroCallFilter::contains(&propose(remark().encode())));
+	});
+}
+
+/// The filter's verdict and the pallet's own phase-3 verdict on the same
+/// payload.
+///
+/// The two malformed shapes are the pallet's checks, mirrored: a decode at
+/// `MAX_MULTISIG_CALL_DEPTH` and a canonical re-encode. If the two layers ever
+/// disagreed there, the failure would be a proposal whose bytes were published
+/// for a dispatch that could never run. The well-formed transfer is the other
+/// half of the agreement, and the leak this arm closes: the pallet accepts it,
+/// so the filter is the only thing that stops the payload reaching a block.
+#[test]
+fn the_filter_and_the_pallet_read_a_proposal_payload_the_same_way() {
+	new_test_ext().execute_with(|| {
+		let signers = vec![account(1), account(2)];
+		let multisig = pallet_multisig::Pallet::<Runtime>::derive_multisig_address(&signers, 2, 0);
+		RuntimeCall::Multisig(pallet_multisig::Call::create_multisig {
+			signers,
+			threshold: 2,
+			nonce: 0,
+		})
+		.dispatch(RuntimeOrigin::signed(account(1)))
+		.expect("creating a multisig is allowed under v1");
+
+		let mut trailing = remark().encode();
+		trailing.push(0x00);
+		for payload in [vec![0xff, 0xff, 0xff], trailing] {
+			assert!(
+				!QneroCallFilter::contains(&propose_to(multisig.clone(), payload.clone())),
+				"the filter refuses a payload that can never execute"
+			);
+			assert_eq!(
+				pallet_multisig::Pallet::<Runtime>::propose(
+					RuntimeOrigin::signed(account(1)),
+					multisig.clone(),
+					payload.try_into().expect("the payload fits MaxCallSize"),
+					100,
+				)
+				.unwrap_err()
+				.error,
+				DispatchError::from(pallet_multisig::Error::<Runtime>::InvalidCall),
+				"and the pallet refuses it for the same two reasons"
+			);
+		}
+
+		// The pallet has no opinion about a well-formed transfer, which is why
+		// the filter has to.
+		let payload = transfer(10 * UNIT).encode();
+		assert!(!QneroCallFilter::contains(&propose_to(multisig.clone(), payload.clone())));
+		assert!(
+			pallet_multisig::Pallet::<Runtime>::propose(
+				RuntimeOrigin::signed(account(1)),
+				multisig,
+				payload.try_into().expect("the payload fits MaxCallSize"),
+				100,
+			)
+			.is_ok(),
+			"the pallet stores a transfer proposal, so only the filter keeps its \
+			 arguments out of a block"
+		);
 	});
 }
 
@@ -311,18 +438,6 @@ fn the_coinbase_is_a_mandatory_dispatch() {
 /// rather than quietly becoming a dispatchable transfer.
 #[test]
 fn a_new_balance_moving_call_is_matched_here() {
-	fn call_names<T: scale_info::TypeInfo + 'static>() -> Vec<String> {
-		let mut registry = scale_info::Registry::new();
-		let symbol = registry.register_type(&scale_info::meta_type::<T>());
-		let portable: scale_info::PortableRegistry = registry.into();
-		let scale_info::TypeDef::Variant(variants) =
-			&portable.resolve(symbol.id).expect("just registered").type_def
-		else {
-			panic!("a pallet Call is a variant type");
-		};
-		variants.variants.iter().map(|variant| variant.name.to_string()).collect()
-	}
-
 	assert_eq!(
 		call_names::<pallet_balances::Call<Runtime>>(),
 		["transfer_allow_death", "transfer_keep_alive", "transfer_all", "burn"],
@@ -336,10 +451,12 @@ fn a_new_balance_moving_call_is_matched_here() {
 		 dispatchable, and a new inherent must be claimed by `is_inherent`"
 	);
 
-	// The three pallets the filter enumerates beside `Balances`. Two of them
-	// move value through `T::Currency` directly rather than by dispatching a
-	// `Balances` call, so the enumeration here is the only thing standing
-	// between a new payout call and a transparent transfer on a v1 chain.
+	// The two pallets the filter enumerates beside `Balances`. Both move value
+	// through `T::Currency` directly rather than by dispatching a `Balances`
+	// call, so the enumeration here is the only thing standing between a new
+	// payout call and a transparent transfer on a v1 chain. `pallet-treasury`
+	// was a third until its calls were disabled: `set_treasury_account` has no
+	// `RuntimeCall` variant any more, which `no_admin_keys.rs` pins.
 	assert_eq!(
 		call_names::<pallet_vesting::Call<Runtime>>(),
 		["claim", "create_schedule", "end_schedule", "retarget_schedule"],
@@ -359,13 +476,6 @@ fn a_new_balance_moving_call_is_matched_here() {
 		"pallet-reversible-transfers grew or lost a call; decide whether it moves \
 		 transparent value and update the filter and docs/DESIGN.md section 7"
 	);
-	assert_eq!(
-		call_names::<pallet_treasury::Call<Runtime>>(),
-		["set_treasury_account"],
-		"pallet-treasury grew or lost a call; decide whether it moves transparent \
-		 value and update the filter and docs/DESIGN.md section 7"
-	);
-
 	// The wrappers. A wrapper the filter does not unwrap is a way around every
 	// arm above, so a new one has to be added to `refused_under_v1`.
 	assert_eq!(
@@ -385,27 +495,25 @@ fn a_new_balance_moving_call_is_matched_here() {
 			"claim_deposits",
 			"execute",
 		],
-		"pallet-multisig grew a call; `execute` is the one that dispatches an inner \
-		 call and `refused_under_v1` must unwrap every one that does"
+		"pallet-multisig grew a call; `execute` dispatches an inner call and \
+		 `propose` publishes one as opaque bytes, and `refused_under_v1` unwraps \
+		 both, so a new call carrying an inner call has to join them"
 	);
 
 	// The runtime's own pallet list. A pallet added to `construct_runtime` with
 	// a transfer dispatchable is caught by nothing above, so the list itself is
 	// the tripwire. Pallets with no dispatchables of their own are absent:
-	// `QPoW`, `MiningRewards`, `ZkTree`, `TransactionPayment` and `Origins`
-	// have no calls, and `Scheduler` is `#[runtime::disable_call]`.
+	// `QPoW`, `MiningRewards`, `ZkTree` and `TransactionPayment` have no calls,
+	// and `Scheduler`, `Preimage` and `TreasuryPallet` are all
+	// `#[runtime::disable_call]`.
 	assert_eq!(
 		call_names::<RuntimeCall>(),
 		[
 			"System",
 			"Timestamp",
 			"Balances",
-			"Preimage",
 			"Utility",
 			"ReversibleTransfers",
-			"TechCollective",
-			"TechReferenda",
-			"TreasuryPallet",
 			"Multisig",
 			"Vesting",
 			"Shielded",
@@ -442,7 +550,7 @@ fn the_runtime_identity_is_pinned() {
 	);
 	assert_eq!(
 		(version.spec_version, version.transaction_version),
-		(105, 7),
+		(106, 7),
 		"runtime metadata or the signed extrinsic encoding moved; see the rule above \
 		 `VERSION` in runtime/src/lib.rs and bump the half that changed"
 	);

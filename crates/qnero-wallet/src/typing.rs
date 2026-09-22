@@ -2,18 +2,25 @@
 //!
 //! A leaf is a coinbase or it is a transfer, and the two are opened by
 //! different rules: a coinbase is rebuilt from the miner key and the public
-//! value the chain hashed into its commitment, a transfer is trial-decrypted
-//! from the ciphertext beside it. Getting the kind wrong is silent. The wrong
-//! rule simply does not open the leaf, the scan reads it as somebody else's,
-//! and the pass then commits a watermark above it, so nothing looks at that
-//! leaf again without a rescan.
+//! value the chain hashed into its commitment, a transfer is opened by a
+//! ciphertext out of the block's own body. Getting the kind wrong is silent.
+//! The wrong rule simply does not open the leaf, the scan reads it as somebody
+//! else's, and the pass then commits a watermark above it, so nothing looks at
+//! that leaf again without a rescan.
 //!
 //! **The kind is never decided by which storage keys a node chose to answer.**
 //! Presence of `Shielded::CoinbaseValues` used to be the whole test, and
 //! presence is the node's to write: eight invented bytes at an incoming
-//! transfer leaf sent it down the coinbase rebuild and hid the payment, and an
-//! invented `Shielded::Ciphertexts` beside a withheld coinbase value hid a
-//! mined reward the other way round.
+//! transfer leaf sent it down the coinbase rebuild and hid the payment.
+//!
+//! **A transfer is not opened per leaf at all.** Every ciphertext the block's
+//! body carries is trial-decrypted, and one that opens has to match a
+//! commitment at some leaf index inside that block's folded range. The body is
+//! rooted to the header's `extrinsicsRoot` as a whole
+//! ([`crate::chain::Chain::authenticated_body`]), so it is complete by
+//! construction and there is no per-leaf payload a node can withhold, and the
+//! match is by commitment rather than by index, so where inside the block the
+//! node put the leaf decides nothing.
 //!
 //! What decides instead is position, and position is what the block headers
 //! commit to:
@@ -66,19 +73,27 @@
 //!
 //!    The leaf range of each block and the index the coinbase occupies inside
 //!    it are header-authenticated; the assignment of commitments to indices,
-//!    the leaf count inside a block and the height of the fold are not, and no
-//!    rule below recovers them. A node with honest headers can therefore move
-//!    an incoming payment to the coinbase position, answer no ciphertext
-//!    there, and hide the payment: the rules below type that leaf a coinbase,
-//!    the rebuild does not open it, there is no ciphertext to try, the leaf is
-//!    skipped and the watermark commits past it. One move the scan does catch
-//!    on its own: a move that leaves this wallet's ciphertext where the chain
-//!    published it opens under this wallet's key beside a commitment it does
-//!    not open, and `Wallet::sync_with` records the note at the index inside
-//!    the same block that holds the commitment it opens, with a warning.
-//!    `docs/WALLET.md`, under "What bound A does not cover", carries the whole
-//!    bound and the rescan against a second node that recovers a payment
-//!    hidden this way, and `docs/DESIGN.md` section 9 carries the closure.
+//!    the leaf count inside a block and the height of the fold are not.
+//!
+//!    **Position costs a node nothing now, and that is what the body bought.**
+//!    The payment's ciphertext is in the block body, not beside a leaf, so a
+//!    node has nothing to move it away from: every payload in the block is
+//!    tried and the note that comes out is matched against the commitments the
+//!    fold pinned. A payment moved to the coinbase position is found, because
+//!    the search does not read the index the node chose.
+//!
+//!    **The height of the fold is what is left.** With no level tag, `m`
+//!    level-1 node values served as leaves fold to the root of the `4m` leaves
+//!    under them, so a node can report a block's leaf range at the wrong
+//!    height and every root still checks out. The commitments this wallet then
+//!    searches are the node values rather than the leaves, and a payload that
+//!    opens matches none of them: the payment is discarded, silently, and the
+//!    watermark commits past it. It presents identically to the ordinary case
+//!    below, a payload the chain carried for a segment it skipped, so nothing
+//!    local tells the two apart and neither warns. A rescan against a second
+//!    node recovers a payment hidden this way. `docs/WALLET.md`, under "What
+//!    bound A does not cover", carries the whole bound, and `docs/DESIGN.md`
+//!    section 9 carries the closure.
 //! 3. The coinbase position. `pallet-mining-rewards`' `on_finalize` mints the
 //!    coinbase through `CoinbaseSink`, at pallet index 6, where every shield
 //!    and every settled output was appended during extrinsic execution and
@@ -120,11 +135,14 @@
 //!   whole-sync refusal for the price of one forged header field. The pass
 //!   takes the reward and reports the disagreement, which
 //!   `SyncReport::coinbase_label_disagreed` counts and the CLI prints.
-//! - A ciphertext at a coinbase position is still trial-decrypted. Under v1 a
-//!   coinbase carries none, so one there is either an encrypted coinbase or a
-//!   leaf that is not a coinbase at all.
-//! - At **every** other position `Shielded::Ciphertexts` is required and
-//!   trial-decrypted, and a `Shielded::CoinbaseValues` there refuses by name.
+//! - The body's payloads are tried against every position, the coinbase one
+//!   included. Under v1 a coinbase carries no payload of its own, so a payload
+//!   that opens a commitment at a coinbase position is a leaf that is not a
+//!   coinbase at all, and it is taken.
+//! - At **every** other position a `Shielded::CoinbaseValues` refuses by name.
+//!   No payload is owed at any position: which leaf a body's payload belongs
+//!   to is decided by the commitment it opens, so an absent one is a leaf
+//!   nobody wrote a note to this wallet at.
 //!
 //! `docs/WALLET.md`, under "What a lying node can and cannot do", carries the
 //! bound these rules actually hold to, the two per-leaf values nothing on
@@ -149,7 +167,7 @@ use crate::chain::{LeafRecord, VerifiedBlock};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeafKind {
     /// Below its block's last leaf, so it cannot be a coinbase: a shield or a
-    /// settled output, opened by trial decryption.
+    /// settled output, opened by a payload out of the block's body.
     Transfer,
     /// The coinbase position of its block, with the value the chain published.
     ///
@@ -426,6 +444,11 @@ pub fn check_chunk_appended_nothing(blocks: &[VerifiedBlock]) -> Result<()> {
 }
 
 /// A leaf below its block's last: a coinbase cannot sit here.
+///
+/// One rule left, and it is the one a node can break. Nothing is required of a
+/// transfer leaf itself: its ciphertext is in the block body, the body roots as
+/// a whole, and which leaf a payload belongs to is decided by the commitment it
+/// opens rather than by anything answered beside the leaf.
 fn below_the_coinbase_kind(record: &LeafRecord, block_number: u32) -> Result<LeafKind> {
     if record.coinbase_value.is_some() {
         bail!(
@@ -435,17 +458,6 @@ fn below_the_coinbase_kind(record: &LeafRecord, block_number: u32) -> Result<Lea
              A coinbase value anywhere else is an answer the chain never wrote, and taking it \
              would send a payment down the coinbase rebuild, which cannot open it. Nothing has \
              been changed.",
-            record.index
-        );
-    }
-    if record.ciphertext.is_none() {
-        bail!(
-            "this node answered with no Shielded::Ciphertexts for leaf {}, which the headers put \
-             below the last leaf of block {block_number} and so cannot be a coinbase. Every \
-             shield and every settled output stores its ciphertext in the call that appends the \
-             leaf and nothing removes it, so an absent one there is an answer withheld. Reading \
-             it as a leaf nobody can open would skip a payment and write a watermark above it. \
-             Nothing has been changed.",
             record.index
         );
     }

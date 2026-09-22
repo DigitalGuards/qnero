@@ -4,8 +4,9 @@
 //! A note ciphertext is a fixed 1731 bytes plus its memo, byte for byte
 //! (`qnero_pqcrypto::note_encryption`: the memo rides in its own AEAD payload
 //! and `to_bytes` length-prefixes it). The chain publishes those bytes in
-//! full, in `Shielded::Ciphertexts` and in the `SlotSettled` event, so an
-//! unpadded memo publishes its own exact length to every chain reader. Two
+//! full, in the block body that carried them, with the `SlotSettled` event
+//! naming their lengths, so an unpadded memo publishes its own exact length to
+//! every chain reader. Two
 //! things follow from that, and both are why every memo this wallet writes is
 //! padded to one size:
 //!
@@ -233,9 +234,9 @@ mod tests {
     }
 
     /// The regression, measured where it shows: on the wire. Two ciphertexts
-    /// of different lengths, published side by side in `SlotSettled` and in
-    /// `Shielded::Ciphertexts`, name which of a spend's outputs is the
-    /// sender's change and how many bytes the payment's memo was.
+    /// of different lengths, published side by side in one settlement's block
+    /// body, name which of a spend's outputs is the sender's change and how
+    /// many bytes the payment's memo was.
     #[test]
     fn padded_memos_produce_ciphertexts_of_one_length() {
         let alice = qnero_notes::SpendingKey::from_bytes([7u8; 32]);

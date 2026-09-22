@@ -71,14 +71,14 @@ The tree grows dynamically -- when the 5th leaf arrives, depth increases from 1 
 ### Circuit depth limit (known, accepted limitation)
 
 The on-chain tree may grow up to depth 32 (`MAX_TREE_DEPTH` in `pallets/zk-tree`), but the
-wormhole circuits only accept Merkle paths up to depth 16 (`MAX_DEPTH` in
+wormhole circuits only accept Merkle paths up to depth 20 (`MAX_DEPTH` in
 `qp-zk-circuits-common/src/zk_merkle.rs`). The circuit pads every proof's witness to the
-full `MAX_DEPTH` levels, so **every leaf proof pays the proving cost of a depth-16 path
+full `MAX_DEPTH` levels, so **every leaf proof pays the proving cost of a depth-20 path
 regardless of the tree's actual depth** -- that is why the circuit constant is kept as
 small as safely possible instead of matching the on-chain cap.
 
-**What happens at the limit:** once leaf 4^16 + 1 (~4.3 billion) is inserted, the tree
-grows to depth 17, all Merkle proofs gain a 17th sibling level, and the prover and
+**What happens at the limit:** once leaf 4^20 + 1 (~1.1 trillion) is inserted, the tree
+grows to depth 21, all Merkle proofs gain a 21st sibling level, and the prover and
 on-chain verifier reject them. Existing funds are never lost and nullifier state is
 untouched -- wormhole proof *generation* simply halts until the circuit is updated.
 
@@ -86,14 +86,15 @@ untouched -- wormhole proof *generation* simply halts until the circuit is updat
 to exhaustion at the 120 s target (the block-count row scales with the target, the
 rate rows do not):
 
-| Sustained leaf rate | Time to 4.3 B leaves |
+| Sustained leaf rate | Time to 1.1 T leaves |
 |---|---|
-| 1 leaf/block (mining-reward floor) | ~16,000 years |
-| 10 transfers/sec chain-wide | ~13 years |
-| ~2.6 transfers/sec (permanently full blocks, 318 settlements each) | ~52 years |
+| 1 leaf/block (mining-reward floor) | ~4.2 million years |
+| 10 transfers/sec chain-wide | ~3,500 years |
+| ~2.6 transfers/sec (permanently full blocks, 318 settlements each) | ~13,000 years |
 
 `LeafCount` is public storage, so the approach is observable years ahead; each +1 of
-circuit depth quadruples capacity (e.g. 16 → 20 buys ~256× the runway).
+circuit depth quadruples capacity. The relaunch bundle spent one such step, 16 → 20,
+for ~256× the runway; `docs/BENCH.md` measured what it cost the leaf circuit.
 
 **What the update involves:** bump `MAX_DEPTH` in `qp-zk-circuits-common`, release the
 circuit crates, rebuild -- `pallets/wormhole/build.rs` regenerates and embeds the new

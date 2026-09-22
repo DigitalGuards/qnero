@@ -28,7 +28,7 @@
 //!   free to grow with the batch size;
 //! - the index structure of the artifact against its own gate list, so a
 //!   corrupted selector range cannot turn verification into an unbounded loop
-//!   (see [`crate::ensure_common_data_is_structurally_sound`]).
+//!   (see `ensure_common_data_is_structurally_sound` in this crate's root).
 //!
 //! Requiring the recomputed `FriParams` to match is also what makes the
 //! artifact's two copies of the FRI configuration agree. An artifact carries
@@ -462,8 +462,10 @@ pub enum ProofRejection {
     /// The bytes did not deserialize against this verifier's circuit data. A
     /// proof built for other circuit dimensions lands here.
     Deserialization,
-    /// The bytes are not the canonical encoding of the proof they decode to:
-    /// see [`decode_canonical_proof`] for what that closes.
+    /// The bytes are not the canonical encoding of the proof they decode to.
+    /// `decode_canonical_proof` in this module re-encodes what it decoded and
+    /// requires the two to be the same bytes, which is what closes the
+    /// malleability this variant names.
     NonCanonicalEncoding,
     /// The public inputs did not parse at the documented indices.
     PublicInputLayout,

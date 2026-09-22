@@ -31,13 +31,23 @@ frame_benchmarking::define_benchmarks!(
 	[pallet_transaction_payment, TransactionPayment]
 	[pallet_reversible_transfers, ReversibleTransfers]
 	[pallet_mining_rewards, MiningRewards]
-	[pallet_preimage, Preimage]
 	[pallet_treasury, TreasuryPallet]
 	[pallet_multisig, Multisig]
 	[pallet_utility, Utility]
 	[pallet_scheduler, Scheduler]
-	[pallet_ranked_collective, TechCollective]
-	[pallet_referenda, TechReferenda]
 	[pallet_qpow, QPoW]
-	[pallet_vesting, Vesting]
 );
+
+// Four suites left this list with the governance removal.
+//
+// `pallet_ranked_collective` and `pallet_referenda` went with their pallets.
+// `pallet_preimage` and `pallet_vesting` went because their benchmarks call
+// `try_successful_origin()` on an origin that is now `NeverEnsureOrigin`:
+// preimage panics on the `expect`, vesting maps the failure to
+// `BenchmarkError::Stop`. `pallet_scheduler` stays because its own benchmarks
+// answer `BenchmarkError::Weightless` for exactly that case.
+//
+// The relaunch does not regenerate weights, so both pallets keep their
+// `SubstrateWeight` figures. That is acceptable for calls no origin can
+// dispatch: `Preimage` is `#[runtime::disable_call]` and every vesting admin
+// call is refused by the filter and by its origin.

@@ -1,0 +1,10 @@
+{
+  "_note": "A byte-fixed block body and the extrinsicsRoot that LayoutV0<Blake2Hasher> builds over it, in the shape chain/runtime/tests/fixtures/extrinsics_root_kat.json carries. That file is built by executing a real block and is the authority; this one exists so the two can be compared without running a runtime, and so the browser wallet can assert the same answer.",
+  "_shape": "Each entry is one extrinsic as chain_getBlock returns it, compact length prefix included. Here: a timestamp inherent, a bare submit_private_batch carrying one output slot, and the coinbase inherent.",
+  "extrinsics": [
+    "0x280403000b102700000000",
+    "0x440418001001020304040c6161610c626262",
+    "0x0c041803"
+  ],
+  "root": "0x7f1f55587ecb666b2ed2706a153d5b470352e0c3fc6117534817b78dcb0d9112"
+}

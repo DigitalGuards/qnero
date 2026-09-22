@@ -1,8 +1,9 @@
 # Qnero design (draft v0.1, 2026-09-11)
 
 **Current native architecture:** [NATIVE-UPGRADE.md](NATIVE-UPGRADE.md) describes
-runtime 105, reversible work-based consensus, authenticated wallet state and
-bounded live ciphertext retention. [CRYPTOGRAPHY.md](CRYPTOGRAPHY.md) records the
+runtime 106, reversible work-based consensus and authenticated wallet state.
+The note ciphertexts left the state trie for block bodies in the relaunch
+bundle; 12.9 is that decision as built. [CRYPTOGRAPHY.md](CRYPTOGRAPHY.md) records the
 experimental proof-system profile and independent qualification still required.
 The dated design and milestone entries below retain their historical context.
 
@@ -306,8 +307,8 @@ and still collects transaction fees, and it no longer mints anything to an
 account. It hands the credit to a sink, and the sink is the shielded pool.
 
 Genesis is the exception: `mainnet_vesting` mints 2% of `MAX_SUPPLY` at genesis
-as transparent balances, a keyless vesting pot plus a seed to each treasurer and
-each collective member. None of it is a note, all of it is inside
+as transparent balances, a keyless vesting pot plus a seed to each treasurer.
+None of it is a note, all of it is inside
 `Balances::total_issuance()`, and it reaches its holders through
 `Vesting::claim`, which publishes the beneficiary and the amount. Section 7.2
 is why that call is the one transparent payout v1 keeps.
@@ -317,10 +318,11 @@ minted 27% across 48 vesting rows to the upstream project's own allocation
 sheet, which is not an allocation this project can defend: those addresses have
 no relationship with Qnero and 27% of the supply is a claim on every miner who
 ever runs it. Every one of those rows is gone. What is there now is one vesting
-row to one placeholder ML-DSA-87 account, 419 940 QNR on the same one-year lock
-and three-year linear unlock, plus the 60 QNR of seed endowments that let the
-treasurers and the tech collective pay their first deposits. The treasury holds
-no schedule at all. Before mainnet genesis this is replaced with a real
+row to one placeholder ML-DSA-87 account, 419 970 QNR on the same one-year lock
+and three-year linear unlock, plus the 30 QNR of seed endowments that let the
+treasurers pay their first deposits. A second table of ten was seeded here too,
+the tech collective, and its 30 QNR went back into the placeholder row when
+section 7.7 removed the collective. The treasury holds no schedule at all. Before mainnet genesis this is replaced with a real
 allocation or deleted outright, and deleting it is a live option: a chain whose
 entire supply is mined is the cleanest thing this project could launch. Section
 7.3's pre-mainnet check carries the line.
@@ -394,15 +396,26 @@ Allowed list below carries the reasoning. This is the allowlist as a rule:
 everything is allowed except the calls below, and `runtime/tests/call_filter.rs`
 is the test.
 
-It is a dispatch-time check, which has a cost worth stating plainly. A refused
-call is still a valid extrinsic: it passes validation, enters a block, pays its
-fee and then fails with `CallFiltered`, so its arguments stay in the block body
-and in the `System::ExtrinsicFailed` event forever. One mistaken
-`Balances::transfer_keep_alive` therefore publishes the sender, the recipient
-and the amount that the policy exists to keep private, while nothing moves. A
-wallet should refuse these calls before it signs one. Moving the refusal into a
-`TransactionExtension` beside the existing ones would reject them at validation
-instead, so they never reach a block; that is the open option here.
+The refusal is at validation, which is what keeps a refused call out of the
+block body. `QneroUncheckedExtrinsic::check` consults the filter for every
+extrinsic format, and a refused call answers `InvalidTransaction::Call` before
+pool admission, before the signature is verified, before any transaction
+extension runs and before `note_extrinsic` records the extrinsic
+(`runtime/src/extrinsic.rs`, `runtime/tests/transaction_policy.rs`). A mistaken
+`Balances::transfer_keep_alive` therefore publishes nothing at all: no body
+entry, no event, no fee and no nonce. The same filter stays installed as
+`BaseCallFilter`, which is the second line and the only guard on a call no
+extrinsic carries, a due scheduler task and a `batch_all` child re-dispatched
+under the caller's origin.
+
+The wrappers are unwrapped in the extrinsic, `Multisig::propose` included. Its
+payload is opaque `BoundedVec<u8, MaxCallSize>` bytes, so the filter decodes it
+at `MAX_MULTISIG_CALL_DEPTH`, requires the bytes to be the decoded call's own
+canonical encoding, and refuses the payload when either check fails or when the
+call it decodes to is refused. The two malformed shapes mirror the pallet's own
+propose-time checks: a payload that can never execute has no reason to enter a
+block. One level is unwrapped, and a payload carrying a proposal of its own is
+refused outright, which bounds the decode at `MaxCallSize`.
 
 Refused:
 
@@ -412,7 +425,7 @@ Refused:
 | `ReversibleTransfers::schedule_transfer`, `schedule_transfer_with_delay`, `execute_transfer`, `cancel`, `recover_funds` | transfers with a delay, and the guardian seizures of their holds |
 | `ReversibleTransfers::set_high_security` | moves nothing, and is refused anyway: it is a one-way door into a feature whose every call v1 refuses, see below |
 | `Vesting::create_schedule`, `end_schedule`, `retarget_schedule` | funds the pot from the treasury, and moves a schedule's unpaid remainder |
-| `Utility::batch_all`, `Multisig::execute` carrying any of the above | a filter that stops a call and not the wrapper carrying it is decoration |
+| `Utility::batch_all`, `Multisig::execute`, `Multisig::propose` carrying any of the above | a filter that stops a call and not the wrapper carrying it is decoration |
 
 Allowed, and load bearing:
 
@@ -432,7 +445,7 @@ Allowed, and load bearing:
 - `Shielded::submit_private_batch` and `submit_public_batch`, which are unsigned and fee free, and
   `Shielded::coinbase`, which is an inherent. A filtered inherent is a mandatory dispatch failure,
   which is a dead chain rather than a dropped reward.
-- `Timestamp::set`, every `System` call, and the whole governance lane.
+- `Timestamp::set` and every `System` call, which after section 7.7 is `remark` and `remark_with_event`.
 - `Balances::burn`, which destroys the caller's own balance and moves nothing to anyone.
 - The fee path. `ChargeTransactionPayment` is a transaction extension and never reaches a `Contains`
   check, which is what lets a filtered runtime still charge for the calls it allows.
@@ -441,10 +454,10 @@ Allowed, and load bearing:
 and the reason is worth writing down because it looks like an omission. The
 call is one way: the pallet has nothing that clears the flag and refuses a
 second enrolment. From the block it succeeds in, the account can sign only what
-is on `HighSecurityConfig`'s whitelist, which is checked at validation rather
-than at dispatch, and v1 refuses every value-moving call on that list at
-dispatch, so the account can sign nothing at all. The whitelist stays as it is
-anyway. Every call on it is delayed and reversible, which is the whole of the
+is on `HighSecurityConfig`'s whitelist, which a transaction extension checks,
+and v1 refuses every value-moving call on that list at admission, so the
+account can sign nothing at all. The whitelist stays as it is anyway. Every
+call on it is delayed and reversible, which is the whole of the
 guarantee the feature sells: a stolen key can only schedule, and the
 owner's `cancel` or the guardian's `recover_funds` beats the delay.
 `Shielded::shield` and `Balances::burn` would each break that, because both are
@@ -456,12 +469,16 @@ is, the enrolment is refused, and no v1-genesis chain reaches the freeze: no
 non-benchmark preset seeds `HighSecurityAccounts` either.
 `the_high_security_whitelist_admits_only_reversible_calls` is the test and
 `chain/docs/RUNTIME_SURFACE.md` section 5 is the surface.
-Two things the filter does not reach, both by design in `frame_system` and both
+Two things about the filter's reach, both by design in `frame_system` and both
 stated here so they are decisions rather than discoveries:
 
-- **Root bypasses it.** `dispatch_bypass_filter` is how a privileged origin dispatches, so a tech
-  referendum can still move transparent value. The calls exist and the collective can enact them;
-  the filter is what keeps them out of ordinary use.
+- **Root bypasses it, and nothing can produce Root.** `dispatch_bypass_filter` is how a
+  privileged origin dispatches, and after section 7.7 this runtime has no privileged origin to
+  dispatch with: `OriginCaller` has `system` and nothing else, and every Root-gated config item is
+  `NeverEnsureOrigin`. The filter is therefore the whole rule for every dispatch this chain can
+  execute. The two callers `dispatch_bypass_filter` keeps are `pallet_utility::batch_all` under a
+  Root origin nothing can produce, and the benchmarking harness.
+  `runtime/tests/no_admin_keys.rs` is the test.
 - **The scheduler is not an exemption**, which is worth stating because it reads like one. Its own
   extrinsics are disabled, and it dispatches a due task with the origin that task carries. Only
   Root is exempt from `filter_call`, so a scheduled call under a signed or non-Root custom origin
@@ -519,8 +536,9 @@ extrinsic encoding: `transaction_version` stays where it is.
 so nothing is enumerated per call. Section 7.2's call filter is a different
 question answered at a different place: the filter decides what may run, and
 this rule decides who may sign. A transparent transfer signed with ML-DSA-87 is
-still admitted and still refused at dispatch with `CallFiltered`; the same
-transfer signed with ML-DSA-65 never reaches a block at all.
+refused at validation with `InvalidTransaction::Call`; the same transfer signed
+with ML-DSA-65 is refused a layer earlier still, with
+`InvalidTransaction::BadSigner`. Neither reaches a block.
 
 The other half of one scheme is that nothing on Qnero's own paths constructs an
 account under the other one. The presets derive every key-backed account from
@@ -537,8 +555,7 @@ literals could never sign: its vesting claim, its treasury approval and its
 faucet drip would each answer `BadSigner` at the entry, and whatever genesis
 vested to it would be stranded for good. Before mainnet genesis, confirm that
 every beneficiary key in `genesis_config_presets/mainnet_vesting.rs` (the ten
-treasurers, the ten tech collective members, and the account of every `VESTING`
-row) and every literal in `genesis_config_presets/mod.rs` was minted with
+treasurers and the account of every `VESTING` row) and every literal in `genesis_config_presets/mod.rs` was minted with
 `qnero-node key qnero`, which builds an ML-DSA-87 pair and has no other mode.
 `account_from_ss58` carries the same instruction beside the code.
 
@@ -579,8 +596,9 @@ inherited from the upstream chain along with everything else in `pallets/qpow`.
 Four reasons, in the order they matter.
 
 **It is Monero's cadence, and this chain's seed schedule is Monero's.** The
-RandomX seed epoch is 2048 blocks with a lag of 64, copied from Monero because
-the masked rule is what a stock rig already implements. At 12 s those 2048
+RandomX seed epoch is 2048 blocks, copied from Monero because the masked rule
+is what a stock rig already implements. The lag is 128, twice Monero's, decided
+on 2026-09-22 and recorded in open question 3. At 12 s those 2048
 blocks were 6.8 hours, so every full-mode rig paid a 2 GiB dataset rebuild four
 times a day where Monero's rigs pay it every 2.84 days. At 120 s the block
 count and the wall clock both match Monero, and the constant needed no special
@@ -588,13 +606,14 @@ value to get there. `pallets/qpow` carries the same note beside the constant.
 
 **The retarget is calmer on a small network.** The Homestead adjustment reads
 one block time and moves difficulty by at most +1/2048 or -99/2048. At a 12 s
-target one slow block inside a 10 s bucket is a real signal about a network with
-a handful of CPUs on it; at 120 s the same absolute timestamp noise is a tenth
-of the bucket and the retarget stops chasing it. The 15 s of legal timestamp
-drift a miner may claim used to push an honest block into the next bucket and
-cost a single -1 step, and at a 100 s divisor it does not leave the neutral band
-at all. The algorithm is unchanged: only its divisor is denominated in time, and
-that scales with the target.
+target one slow block inside an 8.3 s bucket is a real signal about a network
+with a handful of CPUs on it; at 120 s the same absolute timestamp noise is a
+tenth of the bucket and the retarget stops chasing it. The 15 s of legal
+timestamp drift a miner may claim used to push an honest block into the next
+bucket and cost a single -1 step, and at an 83.2 s divisor the inflated gap
+stays in the band and the forced catch-up block pays the step back, so the cycle
+books nothing. The algorithm is unchanged: only its divisor is denominated in
+time, and that scales with the target. 7.6 is where the divisor itself moved.
 
 **A light wallet walks ten times fewer headers a day.** Both wallets
 authenticate a block's leaf range by walking headers down from the head, one
@@ -644,11 +663,11 @@ list: the retarget in `pallets/qpow`, `TimestampBucketSize` in the scheduler, an
 `MinDelayPeriodMoment` in reversible transfers. Everything else that is
 denominated in the interval reads `TARGET_BLOCK_TIME_MS`, the compile-time
 constant. That means `MINUTES`, `HOURS` and `DAYS` and every window built on
-them, `UndecidingTimeout`, `DefaultDelay`, `HighSecurityTxWindowBlocks`,
-`MaxExpiryDuration` and the governance tracks, and it means `EmissionDivisor`.
-The line is drawn at metadata. Each of those is a `#[pallet::constant]` whose
-purpose is to be readable out of metadata by a client deciding what a governance
-period costs or what the supply schedule is, and a value that changed with a
+them, `DefaultDelay`, `HighSecurityTxWindowBlocks` and `MaxExpiryDuration`, and
+it means `EmissionDivisor`. The line is drawn at metadata. Each of those is a
+`#[pallet::constant]` whose purpose is to be readable out of metadata by a
+client deciding what a reversal delay costs or what the supply schedule is, and
+a value that changed with a
 storage read is a value no metadata could state. The consequence is that a chain
 running at another cadence keeps the public chain's block counts: on the 12 s
 `dev` chain `DAYS` is 720 blocks, which is 2.4 hours, the quota window and the
@@ -694,7 +713,7 @@ where it roots, so a floor bounds nothing about difficulty.
 block on another parent is free while its difficulty is at least the tip's
 divided by 8, because an honest short fork or competing tip differs from the
 tip by a few retarget steps and an eighth needs about 42 consecutive maximum
-decreases, each of which needs a claimed 10000 s gap. Anything cheaper draws a
+decreases, each of which needs a claimed 8 318 s gap under the centred retarget. Anything cheaper draws a
 token from a bucket of 1024 refilling at 900 an hour, and draws it once its
 seal has met the branch difficulty, so a junk seal drains nothing. A block that does not
 extend the tip and needs a cache fill for a seed that is neither pinned nor
@@ -711,13 +730,310 @@ at its own height would let a child of an old canonical block pass at ratio one
 however far the chain's difficulty has risen since.
 
 **Two numbers to keep.** The retarget's stationary mean block time under
-Poisson arrival is `divisor / ln 2` = 144 s at the public 100 s divisor, which
-is the measured 137 to 150 s and is a property of the Homestead shape rather
-than of the seed node's hashrate (it is the open retarget decision in 12.7). And
-a partition holding a fraction `p` of the hash settles at a difficulty ratio of
-`p / (1 - p)` to the majority's, so one under a ninth of the hash sits below the
-free line within about three days and is charged from then on. Both are stated
-in `docs/NATIVE-UPGRADE.md` with the operator flags and the four counters.
+Poisson arrival is `divisor / ln 2`, which was 144 s at the 100 s divisor the
+old `target * 10 / 12` rule gave and is the measured 137 to 150 s this chain
+ran at for its whole first life. 7.6 sets the divisor to `target * ln 2`, which
+makes that mean the target. And a partition holding a fraction `p` of the hash
+settles at a difficulty ratio of `p / (1 - p)` to the majority's, so one under a
+ninth of the hash sits below the free line within about two and a half days and
+is charged from then on. Both are stated in `docs/NATIVE-UPGRADE.md` with the
+operator flags and the four counters.
+
+### 7.6 Centring the retarget on the target (consensus, 2026-09-22)
+
+**The chain has never run at the interval it declares.** 7.4 chose 120 000 ms
+and every constant derived from it, and the public testnet measured 137 to 150 s
+a block from the day it launched. That is not the seed node's hashrate and it is
+not noise. It is a property of the Homestead shape, it is exactly predictable,
+and 7.5 named it and left it open. This closes it.
+
+**Why 144 s.** The adjustment in `pallets/qpow` is
+`max(1 - floor(block_time / divisor), -99)` in units of `parent / 2048`, with
+`divisor = target * 10 / 12`, which was 100 000 ms at a 120 s target. Block
+arrival under a constant hashrate is Poisson, so the inter-arrival time `T` is
+exponential with some mean `tau`, and `N = floor(T / divisor)` is geometric with
+`P(N >= k) = e^(-k * divisor / tau)`. Writing `q = e^(-divisor / tau)`, its mean
+is `E[N] = q / (1 - q)`, so the expected adjustment is
+
+    E[a] = 1 - q / (1 - q)
+
+and the `-99` clamp changes this by `e^(-100 ln 2)`, about `1e-30`. Difficulty
+is stationary when that expectation is zero, which happens at `q = 1/2`, which
+is
+
+    tau = divisor / ln 2
+
+and nowhere else. At a 100 s divisor that is 144.2 s, which is the measurement.
+The old ratio 10/12 was inherited from Geth, where the 10 s bucket sat against a
+12 to 15 s target and the same 1.2019 factor was equally present and equally
+unremarked.
+
+**The change is the divisor.** Set
+
+    divisor = target * ln 2
+
+as the integer `target_time_ms * 693_147 / 1_000_000`, which is 83 177 ms at a
+120 s target and gives a stationary mean of 119 999 ms, an error of 0.0008%. At
+the 12 s `dev` target it is 8 317 ms and 11 999 ms. Everything else about the
+rule is kept: integer, per block, a pure function of the parent difficulty and
+one block time, the minimum increment of one that M7 added so a chain can leave
+the floor, the 128 floor itself, the bounded maximum decrease of 99 units, and
+the 15 s of legal timestamp drift.
+
+**The neutral band still contains the target, and always will.** The band is one
+divisor wide by construction, `[divisor, 2 * divisor)`, which is 83.2 s to
+166.4 s at a 120 s target. The stationary mean is `1 / ln 2 = 1.4427` divisors,
+and 1.4427 lies inside `[1, 2)`, so a settled chain feels no retarget pressure at
+the interval it is aiming for. That is a structural property of the shape rather
+than a coincidence of these numbers, and `the_target_sits_inside_the_neutral_band`
+asserts it across a sweep of targets.
+
+| Quantity at a 120 s target | Divisor `target * 10 / 12` | Divisor `target * ln 2` |
+|---|---|---|
+| Divisor | 100 000 ms | 83 177 ms |
+| Neutral band | 100 s to 200 s | 83.2 s to 166.4 s |
+| Stationary mean block time | 144.2 s | 120.0 s |
+| Deterministic settle, climbing | 100 s | 83.2 s |
+| Deterministic settle, falling | 200 s | 166.4 s |
+| Claimed gap for the full decrease | 10 000 s | 8 318 s |
+| Decay time constant, `unit * divisor` | 56.9 h per e-fold | 47.3 h per e-fold |
+
+**What it fixes beyond the number.** Three claims elsewhere in this document
+rest on the cadence and have been wrong by the same 20%. The RandomX seed epoch
+of 2048 blocks is 2.84 days, Monero's own rotation interval, which 7.4 gives as
+the first reason for the 120 s target; at 144 s it was 3.41 days. The 256-block
+anchor window is 8.5 hours, the figure behind the claim that a phone can start a
+proof, lock its screen and finish later; it was 10.2 hours. And
+`EmissionDivisor` is a per-block schedule sized for a 120 s cadence, so the
+chain was issuing at 83.3% of its designed per-second curve. All three come
+right with the divisor and none of them needs its own change.
+
+**The unit stays at 1/2048.** The step size `parent / 2048` sets how fast
+difficulty moves and the divisor sets where it settles; the stationary mean is
+independent of the unit to within 0.14%. The asymmetry worth naming is that the
+rule can subtract up to 99 units in one block and can add only one, so a
+difficulty overshoot decays with a time constant of `2048 * divisor`, 47.3 hours
+per e-fold, while a tenfold hashrate arrival takes about 7 100 blocks and about
+five days to absorb. Widening the unit to `parent / 512` would move both caps
+together and keep the 1 to 99 ratio, bringing those to 11.8 hours and about
+1 780 blocks, at the cost of noise: the stationary standard deviation of log
+difficulty is `0.7215 / unit_divisor`, so 1.88% would become 3.75% and the
+autocorrelation time would fall from about two days to about twelve hours. That
+is a separate decision with its own set of climb and fall figures, and it is
+deferred rather than taken here. Neither figure threatens the mean.
+
+**A symmetric numerator is refused.** Making the fast side as strong as the slow
+side needs a reciprocal term, `floor(divisor / block_time) - 1` capped at +99,
+and that hands a miner with a hashrate burst a ratchet: blocks 500 ms apart raise
+difficulty 4.8% each, ten times in 48 blocks for roughly 204 block-equivalents of
+work, about seven hours of the whole network's output, after which the network
+grinds through 4.6 e-folds of decay. The timestamp floor and the monotone-clock
+rule bound the step size and force the blocks to be real, and the trade is still
+bad for the chain. The asymmetry stays, and the answer to slow upward tracking is
+the unit.
+
+**What it costs the side-branch budgets.** Nothing in the code, and one number
+in the reasoning. 7.5 admits a side-branch block free while its difficulty is
+within an eighth of the tip's, on the ground that reaching an eighth needs about
+42 consecutive maximum decreases, each needing a claimed gap of 100 divisors.
+The gap becomes 8 318 s, so the fall takes about four days rather than five. The
+free line itself does not move, because what it prices is the equilibrium
+difficulty ratio a partition holding a fraction `p` of the hash settles at,
+`p / (1 - p)`, and neither the divisor nor the unit touches that ratio. Only the
+time to arrive there changes. The step count and that wall clock are pinned in
+`pallets/qpow`'s own tests, where the constants live, so the client crate keeps
+its distance from the pallet and the coupling is still something a test breaks.
+The integer replay measures 43 steps at a 4 096 000 tip against a continuous
+estimate of 42.0, the extra one being the floor on `parent / 2048`, which is the
+difficulty-dependence the client's comment already names.
+
+**The one thing that gets worse.** The legal timestamp drift is an absolute 15 s,
+and the harm a miner can do by concentrating claimed time into one long gap
+scales as `drift / divisor`. A narrower divisor makes that lever longer. The
+cycle is three gaps against three honest ones at the target, so it books no
+deficit exactly while
+
+    floor((T + drift) / d) + floor((2T - drift - 100) / d) <= 3
+
+At the public target that is `1 + 2 = 3`: the inflated 135 s gap stays inside the
+band and the compressed follow-up costs the step the forced 100 ms block already
+paid, so the cycle books nothing, the same as the old rule. **Safety is not
+monotone in the target.** Both floors land on 2 for every target from about
+24.5 s to about 38.8 s, and the 12 s `dev` chain books one unit of deficit per
+cycle because 15 s is 1.8 divisors there. No single threshold separates the safe
+targets from the unsafe ones, so the invariant is asserted at the public target
+and the dev value is pinned beside it as a documented exception. The dev chain is
+a test harness with no adversarial miners, and it cleared the old rule by
+coincidence rather than by margin, its third gap of 8.9 s happening to fall under
+the 10 s divisor.
+
+**How it is verified.** `pallets/qpow` gains a simulation over the pure
+`calculate_difficulty`: exponential inter-arrival times from a pinned SplitMix64,
+a constant hashrate, 5 000 warmup blocks discarded and 20 000 measured,
+asserting the mean is within 3% of the target at both the public and the dev
+cadence. The sample mean's own standard deviation there is about 0.9%, and both
+arms measure inside 0.1%. A third arm runs the same harness at a 144 270 ms
+target, whose divisor is the old rule's 100 000 ms, and asserts it reproduces
+144 s: the measurement that started this is derived from the constant, and the
+test fails if anyone restores the old ratio. The deterministic climb and fall
+test is replayed rather than estimated: the climb from the 128 floor at 3 500 H/s
+takes 13 250 blocks and 48.1 hours against the old rule's 13 628 and 57.7, and
+the fall after losing nine tenths of the hashrate takes 1 558 monotonic steps and
+settles at 166.3 s. That 48.1 hours is two days with seven minutes to spare, a
+margin of 0.2%, so the day count in that test is worth reading as a tripwire on
+the seed hashrate and the `ln 2` precision rather than as a property of the
+retarget.
+
+### 7.7 No admin keys, and upgrade by node release (2026-09-22)
+
+**The decision.** The runtime ships with no privileged origin. The tech
+collective, the referenda instance it voted in and the custom origin its
+fast-upgrade track dispatched are removed; every `frame-system` dispatchable
+that can write `:code`, `:heappages` or a raw storage key is deleted from the
+fork; and `Root` becomes an origin nothing in the runtime can produce. "No admin
+keys" then reads literally. There is no key, no threshold of keys and no origin
+that can change this chain's rules after its genesis. A consensus change ships
+as a node release with a new genesis.
+
+**Why now.** The lane came from the project this chain forked and it has been
+dead on the public chain since the day that chain launched.
+`qnero_testnet_config_genesis` seeded no collective, `seed_tech_collective` was
+the only way a member ever entered, and `AddOrigin` was Root, which only a
+passed referendum could be. So no referendum has ever been submittable there
+and no upgrade has ever been authorizable, and the sentence in
+`docs/NATIVE-UPGRADE.md` about activating a runtime "through the chain's
+authorized upgrade mechanism" had been describing a mechanism that chain does
+not have. The relaunch is a fresh genesis, so nothing has to be migrated and
+this is the cheapest moment the decision will ever have.
+
+The cost is worth stating plainly rather than discovering later: a consensus bug
+found after genesis is a relaunch, and a relaunch discards the pool. A shielded
+balance is a commitment set, and no new genesis can re-mint it; only transparent
+allocations can be carried across. That raises Step 0 of section 12.7 from
+prudent to mandatory. Every measurement and every item of the pre-genesis bundle
+has to be finished before the genesis is cut, because after it there is no
+second bundle.
+
+**What goes.** `TechCollective` (`pallet-ranked-collective`, index 13) and
+`TechReferenda` (`pallet-referenda::Instance1`, index 14), with their configs
+and their parameter blocks. `Origins` (index 23), whose only variant
+`Origin::FastUpgrade` existed to be dispatched by the fast-upgrade track, and
+whose removal leaves `OriginCaller` with `system` and nothing else. The whole of
+`runtime/src/governance/`: `TechCollectiveTracksInfo`,
+`RootOrMemberForTechReferendaOrigin`, `EnsureRootRemoveKeepsMemberFloor`, the
+rank converters and `apply_test_timing` with the `fast-governance` cargo feature
+it hid behind. `PreimageDeposit` and `preimage_amount` are the one thing in that
+directory that was never governance, and they move to `configs/`.
+
+Nine `frame-system` dispatchables go with them: `set_heap_pages`, `set_code`,
+`set_code_without_checks`, `set_storage`, `kill_storage`, `kill_prefix`,
+`authorize_upgrade`, `authorize_upgrade_without_checks` and
+`apply_authorized_upgrade`, together with the `AuthorizedUpgrade` storage item,
+`CodeUpgradeAuthorization`, `can_set_code`, `do_authorize_upgrade`,
+`validate_code_is_authorized`, `update_code_in_storage` and the
+`apply_authorized_upgrade` arm of `validate_unsigned`. `Config::OnSetCode` and
+`Config::AuthorizeUpgradeOrigin` stay in the trait, defaulting to `()` and
+`NeverEnsureOrigin`, because twelve vendored mocks and benchmarking test
+runtimes assign them and neither item has a caller left. What the pallet still
+dispatches is `remark` and `remark_with_event`.
+
+The Root-gated origins on pallets that stay go the same way.
+`Preimage::ManagerOrigin`, `Scheduler::ScheduleOrigin` and
+`Vesting::AdminOrigin` become `NeverEnsureOrigin`, `EnsureTreasury` goes with
+the last of those, and `TreasuryPallet` takes `#[runtime::disable_call]` because
+its one call is `ensure_root` inside the pallet. `Preimage` takes `disable_call`
+too: its extrinsics existed for referenda submitters.
+
+**What stays, and why none of it is authority.** `Scheduler` stays because a
+reversible transfer is a scheduled task; its extrinsics were already disabled
+and it dispatches a due task with the origin that task carries, which after this
+change is only ever a signed one. `Preimage` stays because `Scheduler` and
+`ReversibleTransfers` store bounded calls through it, and that path is a Rust
+call rather than a dispatch. `Utility` stays because `batch_all` is the one
+wrapper the call filter and the high-security whitelist both already reason
+about, and one signature over several `shield` calls is a convenience with no
+privilege in it. `Multisig` stays because a multisig address is an ordinary
+account: every preset treasury is one, and `Multisig::execute` dispatches its
+inner call under the multisig's own signed origin, which meets the call filter
+like any other. The treasury's storage stays because `pallet-vesting` reads the
+account when a schedule ends. `Vesting::claim` stays, still the genesis
+distribution channel of section 7.2.
+
+**The code key.** No dispatchable can mutate `:code`, and the enforcement is
+structural rather than origin based, which is the point. The only writer in the
+tree was `Pallet::update_code_in_storage`, reached from `SetCode for ()`,
+reached from `set_code`, `set_code_without_checks` and
+`apply_authorized_upgrade`. All of those names are deleted, so the write does
+not exist to be reached. The raw-key route is deleted with `set_storage`,
+`kill_storage` and `kill_prefix`. The authorization route is deleted with the
+storage item that held it, and `frame_system::GenesisConfig` has no field for
+that item, so no chain spec can seed one either.
+
+Five tests in `runtime/tests/no_admin_keys.rs` carry the claim.
+`frame_system_dispatchables_are_remark_only` pins the call list read off the
+call enum's own type information, so a subtree merge that restores `set_code`
+fails there. `no_dispatchable_can_replace_the_runtime_code` constructs every
+remaining leaf call, dispatches each one with `dispatch_bypass_filter` under
+`RawOrigin::Root`, which is the strongest origin the type system can express,
+and asserts `:code` and `:heappages` are byte identical afterwards.
+`the_runtime_declares_no_custom_origin` pins `OriginCaller` to `system` alone,
+which is the typed statement that no pallet can mint a privileged origin: the
+only origins the runtime can construct are `Root`, `Signed(who)` and `None`, and
+`Root` has no producer. `the_root_gated_config_origins_never_succeed` is defence in depth: even
+a reachable Root could not schedule a task, pin a preimage or create a vesting
+schedule. `a_stale_collective_seed_is_refused_at_genesis` covers the operator's
+half, below.
+
+**Genesis.** The collective seed channel disappears with the collective:
+`TECH_COLLECTIVE_SEED_MEMBERS_KEY`, `prepare_genesis_build_input`,
+`seed_tech_collective`, `MIN_TECH_COLLECTIVE_MEMBERS`, the three per-preset seed
+helpers and `tech_referendum_cost`. `genesis_template` loses its
+`tech_collective_members` parameter and the JSON injection, and
+`GenesisBuilder::build_state` goes back to the plain helper. That last one has a
+consequence worth naming: `RuntimeGenesisConfig` is generated with
+`#[serde(deny_unknown_fields)]`, so a chain spec still carrying
+`tech_collective_seed_members` is refused at deserialization instead of ignored,
+which is the failure an operator wants. `mainnet_vesting` loses
+`TECH_COLLECTIVE` and ten of its twenty seed endowments, so `SEEDED_ACCOUNTS *
+SEED` falls from 60 QNR to 30 and the placeholder row moves with it; that
+allocation is under review either way (section 7.1).
+
+**Versions.** `spec_version` moves, and the pre-genesis bundle already moves it
+to 106, so this rides that bump. The metadata moves a long way: three pallets
+leave the pallet table, `frame-system` loses nine calls, a storage item and two
+events, `Preimage` and `TreasuryPallet` lose their call enums, and every
+referenda and collective constant leaves the constant tables.
+`transaction_version` stays at 7, because the extension tuple and the signed
+payload layout are untouched and every surviving pallet keeps its index: 13, 14
+and 23 join the existing vacancies at 4, 10, 12, 16, 17, 18 and 20 rather than
+being compacted. Compacting would move `Shielded` off index 24 for no benefit on
+a chain whose indices no upgrade can ever change again. The RFC-0078 metadata
+hash does change, since `RuntimeCall` is inside the extrinsic's type tree; both
+wallets sign with `CheckMetadataHash` in `Mode::Disabled`, so nothing they
+encode moves.
+
+**What upgrade by node release means.** A consensus change is a new runtime
+compiled into a new node binary, a new chain spec generated by
+`scripts/build-testnet-spec.sh`, a new genesis hash, a new network identity, a
+fresh database and a coordinated restart. Balances do not carry over unless a
+preset re-mints them, and pool notes cannot be re-minted at all. A node that
+runs the new binary against the old spec runs the old rules, because the runtime
+a chain executes is the one in its own state, written once at genesis. The
+practical shape of a release is therefore: publish the binary, publish the spec,
+announce the switch, and let the old chain stop. `CheckGenesis` already refuses
+a transaction signed for one chain on the other, so the two cannot be confused
+by an extrinsic replay. `chain/docs/RUNTIME_UPDATE.md` is the runbook.
+
+**What still looks like authority and is not.** Three things, and each is an
+operator's own choice rather than a power over anybody else. A chain spec is the
+chain: whoever hands you the file picks the genesis you join, which is true of
+every chain and is why the file is published with its hash. `codeSubstitutes`,
+honoured by the client and empty in the shipped spec, lets a node execute
+different code for a given block; `--wasm-runtime-overrides` does the same from
+a directory. Both change one node's execution, and a node that executes
+different rules from its peers leaves the chain rather than steering it. The
+shipped spec's empty `codeSubstitutes` is pinned by a test, so the field is a
+decision rather than a default.
 
 ## 8. Milestones
 
@@ -738,6 +1054,8 @@ in `docs/NATIVE-UPGRADE.md` with the operator flags and the four counters.
 | M13 | Authenticated storage reads through `state_getReadProof`, in both wallets | DONE 2026-09-16 by PR #5, see `docs/AUTHENTICATED_READS.md`; the plan as written 2026-09-14 follows (every per-leaf and per-chain value a scan reads is taken with a trie proof at the pinned block hash and verified against that header's own `stateRoot`, which the header walk already authenticates, closing the ciphertext, the index inside a block and the tree's depth together with no consensus change and the upstream tree untouched: section 9 open question 6 carries the design, the key list and the cost) |
 | M14 | One brand across the four surfaces: palette, typefaces and mark | DONE 2026-09-17 (`brand/` is the source of truth for every colour, both font stacks and the mark, and `scripts/sync-brand.mjs` fans it out to the site, Qloak, silQ Road and the faucet, with `--check` failing on a stale copy: four hand-maintained palettes had already drifted. The palette is Monero orange #FF6600 on a warm neutral ramp -- Graphite #141312, Coal #1E1C1A, Seam #2E2B28, Ash #A8A29A, Bone #F4F2F0 -- replacing the amber #e6a145 and its near-neutral greys; Ember ink #B84300 carries orange as text on light, where #FF6600 measures 2.9:1 and fails, while the filled ground stays #FF6600 in both themes so the primary button is one colour everywhere. Dark is the default in all four now. The typefaces are Archivo, as the variable face because the display type is drawn on its width axis at 125% and 110%, and IBM Plex Mono for identifiers and data, both OFL 1.1, latin subsets, 132 KB, self-hosted with their licence text beside them and fetched from no CDN: a privacy coin handing a font host each reader's address would break the no-third-party-request rule before a word is read, and `font-src 'self'` was added to the site's and the faucet's content policies, without which the fonts are blocked silently. The mark is four squares as a 4-ary Poseidon node with one leaf lit and displaced, no letterform in it, so it holds at 16 px; it replaces the Q glyph on every tab, the wordmark and the open-graph card. Checked: `scripts/check-contrast.mjs` measures 78 token pairs across the dark block and both light blocks at 4.5:1 for prose and 3:1 for a control's edge and holds the accent/notice hue separation at 60 degrees; a rendered walk of all eight site pages in both themes at 400 and 1280 px finds every text element clearing AA; no page scrolls sideways and no chip is wider than its box; 111 explorer tests, 383 wallet tests and 16 faucet tests pass. Two failures the palette caused were caught and fixed rather than shipped: Ember ink at 4.44:1 on a light ground invented under Bone, and a link in a hovered table row at 3.95:1 because orange is a darker ink than the amber it replaced) |
 | M15 | Consensus hardening on the live testnet: side-branch admission budgets, pinned RandomX seeds, settlement deferral at the ciphertext cap | DONE 2026-09-21 (client policy in `chain/client/consensus/randomx/src/admission.rs` and `vm.rs`, section 7.5; no runtime bump, deployed to the seed node by a node release and a restart. The ciphertext capacity check moved ahead of the ZK verify in `pallet-shielded`'s `pre_dispatch` and answers `ExhaustsResources`, which keeps a settlement in the pool when a block is full; that is runtime 106 on branch `feat/settlement-deferral-runtime-106`, held out of `main` until the next relaunch because the committed raw spec carries runtime 105 in its genesis, nodes execute the on-chain wasm, and this chain has no upgrade path. The milestone labels in the 2026-09-16 handoff shift by one: its measurements and pre-genesis bundle are M16 and M17, release qualification M18)
+| M16 | The three measurements the relaunch bundle waited on: ML-KEM-1024 decapsulation on both sides of the wasm boundary, the leaf circuit at tree depth 20, and real state, RocksDB and `state_getReadProof` at a page | DONE 2026-09-22 (three sections of `docs/BENCH.md`, all measured on one GCP `c3-highcpu-22` bench VM so the rows inside each are like for like. Decapsulation is 92.2 us native and 0.47 ms in the browser, which prices every scan figure 12.6 quotes. The leaf circuit at depth 20 is 387 gates in the same 512 padded rows at `degree_bits = 9`, which is the gate 12.5 set for Q5 and the reason the depth moved. A settled 2-in/2-out transfer writes 4 060 B of raw state at a measured RocksDB multiplier of about 4x, of which 3 668 B is ciphertext, so Q3's projected saving is about 11 000 B of disk per transfer and 12.3's 8 to 9x ratio reads 10.4x on measured values)
+| M17 | The relaunch bundle: one fresh genesis, one `spec_version`, one artifact pass and one chain-spec regeneration | DONE 2026-09-22 (runtime 106 and `transaction_version` 7, pinned by `chain/runtime/tests/call_filter.rs`. Seed lag 128 at an unchanged 2048-block epoch; the retarget divisor `target * 693_147 / 1_000_000`, a neutral band of 83.177 s to 166.354 s and a stationary mean of 120.0 s; Q1's per-suite exact-length settlement rule; the inherited governance removed with indices 13, 14 and 23 vacated and 7, 8, 15, 22 and 24 left where they are; the call-filter arm that reaches a multisig proposal's payload; `MAX_TREE_DEPTH` 20 with the three release digests refreshed against the artifact set built at it; and Q3, the note ciphertexts out of the state trie into block bodies, in `pallet-shielded`, the CLI wallet, Qloak and silQ Road, with `CiphertextRetentionBlocks` 0 and the prune path deleted. Qualification is step K of the same bundle: the native-upgrade smoke against the release binaries, the dev-node end-to-end run, and the chain spec regenerated once and last from the final tree, carrying the seed node's bootnode outside genesis. The 2026-09-16 handoff numbered this pre-genesis bundle M17 and its qualification M18; the qualification rode the bundle and has no milestone of its own. The committed spec produces genesis `0x58464dd7a6823f4bd8d17d7badd6778054562153eee085b3e80d5e6c94fa3df9`, which is the public chain's genesis from the moment the chain is replaced)
 
 About 10 to 12 weeks to a private testnet. M8 retired the measured risk this
 line used to name, wallet-side proving time and memory for a 2-in/2-out leaf
@@ -840,15 +1158,21 @@ way.
    sizing of its two seed constants was open under it and the epoch closed
    itself on 2026-09-14: the target block time moved to Monero's 120 s, so
    Monero's 2048 blocks is Monero's 2.84 days here as well, and the epoch stays
-   at 2048 with nothing left to tune. What remains open is the lag. It is
-   Monero's 64 blocks. `MaxReorgDepth` is `u32::MAX` since the reversible
-   consensus change: reorg depth is unbounded by finality, and side branches
-   are budgeted by the client rather than refused by depth (section 7.5), so
-   the seed block is always inside the window a legal reorg can move. That
-   cannot split the chain, because the seed is resolved along each candidate's
-   own ancestry, but a deep reorg across a boundary does change the seed under
-   work already started; a lag of 128 removes it. Decide it before a network
-   launches, because after that it is a fork.
+   at 2048 with nothing left to tune. **The lag closed on 2026-09-22 at 128
+   blocks**, twice Monero's 64, and ships in the pre-genesis bundle.
+   `MaxReorgDepth` is `u32::MAX` since the reversible consensus change: reorg
+   depth is unbounded by finality, and side branches are budgeted by the client
+   rather than refused by depth (section 7.5), so no depth floor refuses a
+   reorg that crosses an epoch boundary. Such a reorg cannot split the chain,
+   because the seed is resolved along each candidate's own ancestry, and what
+   it does is change the seed under work already started. 128 blocks is 4.3
+   hours at the 120 s target, which puts the seed block behind the depth a
+   reorg on this network reaches; deeper reorgs remain possible in principle
+   and section 7.5's budgets are what bounds them. The first rotation on a
+   fresh genesis therefore sits at height 2177, and every job carries the
+   coming seed for 4.3 hours before the turn where it carried it for 2.1. It
+   had to be decided before a network launched, because after that it is a
+   fork.
 4. Fee visibility: fees are public, as in Monero. **M4 decided: per-slot public
    fees, no tiering. M6 kept it, and the coinbase is why.** A block's coinbase
    note is worth the emission plus every fee the block settled, and that total
@@ -1063,6 +1387,11 @@ median floor, 175 B of public inputs.
 length limit and 3.16 s of the 4.5 s weight budget, so any capacity change is a two-constant
 change.
 
+**Recomputed after the bundle.** Q3 gives back two state writes and a queue update per slot,
+and the depth-20 leaf circuit spends none of it back, because it kept `degree_bits = 9`. The
+weight ceiling moves to 940 to 945 settlements per block and the length ceiling does not move,
+so length is now the one that binds. 12.9 carries the arithmetic.
+
 ### 12.1 Q1, the change output
 
 **Decision: keep two full-length ML-KEM-1024 ciphertexts per transfer. Reject the
@@ -1078,6 +1407,8 @@ exactly the fixed length for its `crypto_suite` id.**
 Cost: 1568 bytes per transfer kept forever, plus a few lines beside the `ct_digest`
 comparison. Leaks or forecloses nothing. The rule is only available while the bytes are in
 hand, at settlement.
+
+Built in the pre-genesis bundle. Section 12.8 is the shape it took in the code.
 
 Dissent, resolved: a flat length rule would refuse a later ML-KEM-768 suite, so it is keyed
 to the suite id. The cryptography review refutes two supporting arguments, that ML-KEM
@@ -1164,8 +1495,8 @@ build. Keep 16 if that build moves the leaf circuit off `degree_bits = 9`.**
 | Item | Depth 16 | Depth 20 |
 |---|---|---|
 | Capacity (4-ary) | 4.29e9 leaves | 1.10e12 leaves |
-| Leaf gates in 512 padded rows | 320 | 344 to 416 |
-| `degree_bits` | 9 | 9, subject to measurement |
+| Leaf gates in 512 padded rows | 320 | 387 measured (forecast 344 to 416) |
+| `degree_bits` | 9 | 9 measured |
 | Proof bytes, leaf / private / public | 105 500 / 150 908 / 237 544 | unchanged |
 | `FINALIZE_BASE_POSEIDON_EVALS`, frontier digests | 19, 48 | 23, 60 (+384 B) |
 
@@ -1219,16 +1550,36 @@ One `spec_version` bump, one artifact regeneration, one KAT pass, one review. Ea
 constant today and a hard fork after genesis.
 
 1. Q5, circuit depth 16 to 20, gated on the depth-20 build.
-2. Q3, ciphertexts out of state into bodies, with the settlement and weight changes.
-3. `CiphertextRetentionBlocks = 0` plus the no-op prune branch, so the constant is in
-   metadata at genesis and both wallets implement "absent below the retention window is
-   expected" before it is ever non-zero. Taken whichever way Q3 goes.
+   **Done 2026-09-22.** The build ran and held the gate: 387 leaf gates in the same 512
+   padded rows at `degree_bits = 9`. `MAX_TREE_DEPTH` is 20 and the three release digests in
+   `crates/qnero-circuit/src/profile.rs` were refreshed against the artifact set built at it.
+2. Q3, ciphertexts out of state into bodies, with the settlement and weight changes. Built;
+   12.9 is the shape it took.
+   **Done 2026-09-22.** All of it: the pallet writes the payload into the call, and the CLI
+   wallet, Qloak and silQ Road all read it back out of the block body, rooted to the header's
+   `extrinsicsRoot`.
+3. `CiphertextRetentionBlocks = 0`, so the constant is in metadata at genesis. Built with the
+   prune deleted rather than left as a no-op branch: with the queue gone the branch had
+   nothing to do, and the constant says so in its own doc comment.
+   **Done 2026-09-22.** Profile bytes 80..84 are zero and 88..92 is reserved zero, which is
+   what the release check reads to say the prune path is gone.
 4. Q1, the per-suite exact-length settlement rule.
-5. RandomX seed lag 64 to 128 (open question 3, already flagged for decision before launch).
+   **Done 2026-09-22.** Settlement only, so `shield` keeps the cap rule and the legal
+   zero-length entry ciphertext with it. 12.8 is the shape it took.
+5. RandomX seed lag 64 to 128. Decided at 128 on 2026-09-22 and closed in open question 3.
+   It carries no `spec_version` bump of its own and rides the bundle's move to 106.
+   **Done 2026-09-22.** The lag is 128 with the epoch left at 2048.
 6. The call filter moved from dispatch to a `TransactionExtension` (section 7.2), since a
    mistaken transparent transfer today fails with `CallFiltered` and leaves sender, recipient
    and amount in the body forever. It moves `transaction_version`.
+   **Withdrawn 2026-09-22.** The seam it asked for already ships in `Checkable::check`
+   (`chain/runtime/src/extrinsic.rs`), which runs the filter and answers
+   `InvalidTransaction::Call` before a body is ever built. An extension would be the weaker
+   of the two, because a bare extrinsic falls to `bare_validate` and that defaults to `Ok`,
+   and it would move `transaction_version` for nothing. What remained was one filter arm,
+   reaching a multisig proposal's payload, and that shipped instead.
 7. Q2 recorded as closed. No code.
+   **Done 2026-09-22.** Recorded.
 
 Refused, with the refusal written into section 9 as a decision:
 
@@ -1249,9 +1600,9 @@ limits.
 
 ### Step 3, how M13 changes (open question 6)
 
-M13 today reads every per-leaf storage value with `state_getReadProof` against the header
-`stateRoot`. Under Q3 it splits in two against that same header, and open question 6 is
-rewritten to say ciphertexts are no longer state.
+Built with Q3; 12.9 records it. M13 read every per-leaf storage value with
+`state_getReadProof` against the header `stateRoot`. Under Q3 it splits in two against that
+same header, and open question 6 is rewritten to say ciphertexts are no longer state.
 
 **Part one, against `stateRoot`, unchanged:** `ZkTree::LeafCount`, `ZkTree::Leaves(i)`,
 `Shielded::LeafBlocks(i)`, `Shielded::CoinbaseValues(i)`, `Shielded::EntryCount` and the
@@ -1272,3 +1623,228 @@ ciphertext fails that test, and no append-order replay is needed.
 settlement block a scanning wallet would make anyway. Added: the commitment search, a
 capability probe, a retention-watermark failure, and an adversarial test matrix. All three
 bounds M13 closes, position, depth and ciphertext binding, still close.
+
+### 12.8 Q1 as built: the exact-length settlement rule (2026-09-22)
+
+The decision is 12.1. This is the shape it takes in the code, and it rides in the pre-genesis
+bundle of 12.7 Step 1 as item 4.
+
+**The rule.** Every position in a settlement's `outputs` is one of two things: a pair of
+zero-length ciphertexts, which is the exemption a skipped position may take and which binds
+and prices nothing, or a pair of ciphertexts each exactly the serialized length its declared
+`crypto_suite` id fixes. Anything else is refused. One suite exists:
+
+| Suite | Contents | Exact bytes |
+|---|---|---|
+| 1 | ML-KEM-1024 plus ChaCha20-Poly1305, vendored KDF | 1792 |
+
+1792 is 19 bytes of framing (a version byte, a two-byte suite, a four-byte diversifier index,
+and a `u32` length before each of three payloads), a 1568-byte ML-KEM-1024 encapsulation, the
+112-byte note payload under a ChaCha20-Poly1305 tag, and a 61-byte memo under its own tag.
+The pair a transfer publishes is 3584 bytes, which is the wire figure 12.0 is built on.
+
+**Where the id comes from.** `NoteCiphertext::to_bytes` puts the suite at bytes 1..3, little
+endian, immediately after the version byte. The chain reads those three bytes and nothing
+else. It still does not parse the payload, and a blob of the exact length behind a valid
+header still settles whatever it contains: the rule fixes how many bytes a settlement may
+publish, and `ct_digest` fixes which bytes they are. Neither authenticates a note. The
+version byte at offset 0 stays unchecked on purpose, because it is an address version and the
+length is fixed by the suite alone.
+
+**Where it is enforced.** One flat pass at the head of `Pallet::plan_settlement`, after the
+`NothingToSettle` guard and ahead of the segment walk. That single site covers all three
+gates, because `plan_settlement` is what `validate_unsigned` runs before the ZK verify, what
+`pre_dispatch` runs before the verify, and what `check_settlement` runs inside the dispatch
+body before `settle` writes anything. The pass reads no storage and hashes nothing, so it is
+cheaper than the two `UsedNullifiers` probes per slot behind it and it belongs in front of
+them. 12.1 put the rule beside the `ct_digest` comparison; `bind_payload` sits behind the
+verify on purpose, and a length comparison in front of it would let a fabricated blob cost a
+node a verify first.
+
+**Errors.** `CiphertextLengthMismatch` for a length that does not match the declared suite,
+for a blob too short to carry a header, and for a position with one empty field and one full
+one. `UnknownCryptoSuite` for an id this release has no length for, which is the message a
+wallet one release ahead of the runtime is owed. Both are permanent, so both map to
+`InvalidTransaction::Call` and neither may join the `ExhaustsResources` arm the
+ciphertext-cap deferral added: a permanent failure answered as a full block is re-skipped
+every block until its longevity runs out.
+
+**The payload fee term.** `carried_bytes` keeps its arithmetic and loses its range. The only
+reachable value per non-emptied position is 3584 bytes, so the per-slot floor is a flat eight
+pool steps and the submission floor is the carried slot count times `MinLeafFee` plus seven
+steps per carried position. `CiphertextBytesPerFeeQuantum` stays 512 and keeps pricing those
+bytes; what it loses is its stated purpose. It was sized so that an honest pair and a pair
+padded to `MaxCiphertextBytes` land in different fee buckets, because the chain never parsed
+the bytes and nothing held a submission to a real ciphertext shape. The rule refuses that
+grind outright, so the separation it was tuned for prices a state nobody can reach.
+`MaxCiphertextBytes` stays 2048 and keeps bounding the entry path and the encoded length;
+lowering it would move `MaxEncodedLen` on `ShieldedOutput`, which is a metadata-visible type
+change and belongs in no bundle that also moves the settlement rules.
+
+**Scope.** Settlement only. `shield` keeps the cap rule, which preserves the legal zero-length
+entry ciphertext and the `shield(0)` weight fixture, and leaves the entry note's size the one
+place a length still says which wallet wrote it.
+
+**What it costs the ceiling.** An honest batch declares exactly what it declared before,
+because the weight is computed from the submitted vector. What falls is the adversarial
+ceiling: the worst payload a full 318-slot public batch can carry drops from 1 302 528 bytes
+to 1 139 712, about 12.5 percent off the `ct_digest` term of a maximally padded batch. The
+honest figures in 12.0 do not move.
+
+**The wallets.** Both already produce 1792 and both already refuse locally before submitting
+a pair that came out at another length, so no wallet changes what it sends. Three things
+change anyway. The memo pad inverts: it stops being the largest pad that separates two fee
+buckets and becomes the consensus length minus the serializer's fixed part, which also
+removes the coordination hazard that every wallet on the chain had to move the pad together.
+The machinery that reasons about padding to the cap goes, in both wallets and in their tests.
+And the local check names the consensus length, which matters because the pool answers a
+wrong-length submission with a bare `Call` rejection that names nothing, after the wallet has
+already paid for the proof. The explorer's per-leaf marking of a size other than 1792 turns
+from a documented open leak into an invariant violation on a settlement output, and stays a
+non-reference notice on a shield entry note.
+
+**Where the constant lives.** `qnero_circuit::chain`, beside `ct_digest`, which is the module
+for rules a runtime evaluates natively and the one crate the pallet, the CLI wallet and the
+browser prover can all link. Its value also goes into the protocol profile at bytes 92..94,
+previously reserved zeros, so it reaches both wallets inside `ActiveProtocolProfile`,
+authenticated against the header state root, with no new metadata surface. `MEMO_BYTES` stays
+a literal 61 in `qnero-notes`, held to the consensus length by a cross-check test rather than
+by a new crate edge, which is the pattern `qnero_circuit::chain` already uses for the restated
+`CM` tag.
+
+**Versioning.** No spec bump of its own: it rides the bundle's single bump.
+`transaction_version` is untouched, since the call signatures and the SCALE shape of
+`ShieldedOutput` are unchanged. Storage version and layout are unchanged. The profile change
+forces a coordinated release of every wallet binary and the wasm prover, which this bundle
+forces anyway. After genesis this is a hard fork with no upgrade path, because there are no
+admin keys and a runtime bump cannot reach a running chain, so it lands before the relaunch or
+not at all.
+
+**Independent of the depth gate.** Nothing in this item changes with the depth-20 outcome. The
+ciphertext length has no term in any circuit and `ct_digest` stays a free public input at
+depth 16 and at depth 20 alike, so the table, the helpers, the errors, the enforcement site
+and every test here are the same either way. What the depth decision moves is the shared cost
+this item already rides on: the profile's depth field, the three artifact digests, and the
+regeneration of the proof-carrying pallet fixtures.
+
+**Cost.** Roughly 60 lines of consensus code across two crates, against a fixture rewrite in
+the shielded pallet's test module, which is where nearly all the work is. Leaks or forecloses
+nothing. The one thing it makes harder is adding a second suite later, because a second length
+is now a hard on-chain label rather than a soft convention, and the decision to pad a shorter
+suite up has to be taken before that suite exists.
+
+### 12.9 Q3 as built: the ciphertexts move into block bodies (2026-09-22)
+
+The decision is 12.3 and it rides in the pre-genesis bundle of 12.7 Step 1 as items 2 and 3,
+which are one change and were never separable: a runtime that stops writing the payload and a
+constant that says it stopped are the same release. This is the shape it takes in the code.
+
+**What the chain keeps.** `Shielded::Ciphertexts`, the FIFO that expired it, its head and tail,
+the cleanup cursor for pre-upgrade history and the prune pass that drained both are removed.
+`UsedNullifiers`, `LeafBlocks`, `EntryCount`, `CoinbaseValues`, `PoolValue`, `PendingCoinbase`,
+`PendingCoinbaseFee` and `ActiveProtocolProfile` stay. Storage version moves 2 to 3 with no
+migration, because this chain's genesis is version 3.
+
+**What the numbers turned out to be.** M16 in `docs/BENCH.md` measured the layout rather than
+projecting it, and both of 12.3's figures survive with the ratio moving the right way:
+
+| Per transfer | 12.3 quoted | M16 measured |
+|---|---|---|
+| Raw state, ciphertexts in state | 4.1 to 4.3 KB | 4 060 B |
+| Raw state, ciphertexts in bodies | 600 to 750 B | 392 B |
+| Ratio | 8 to 9x | 10.4x |
+
+The ciphertext share of that state is 3 668 B, and the measured RocksDB write-ahead multiplier
+on state is about 4x, so the disk it costs is about 14 600 B. The same bytes as block body cost
+3 588 B at a measured multiplier of 1.0. The block itself grows by nothing, because the
+ciphertexts already rode in the settlement extrinsic. The unmeasured multiplier 12.3 flagged is
+now measured and it is the term that made the case stronger.
+
+**The events had to move with the map.** `System::Events` is a state value at every block and
+an archive node keeps every historical state value forever, so `SlotSettled` carrying
+`(Vec<u8>, Vec<u8>)` would have held the whole 3584 bytes in state under a different key and
+the saving would not have happened. `SlotSettled.ciphertext_bytes` is `(u32, u32)` and
+`Shielded.ciphertext_bytes` is `u32`. `CoinbaseMinted.has_ciphertext` was already the right
+shape; its doc comment named the map as the reason and now names the inherent.
+
+**The per-block cap counts what it always wrote.** `MaxCiphertextsPerBlock` becomes
+`MaxOutputsPerBlock` and the counter behind it becomes `OutputsWrittenThisBlock`, with
+`record_outputs` as its only writer: two per settling slot, one per shield. Deleting
+`store_ciphertext` without moving that increment would have left the cap comparing every
+submission against zero and the settlement-deferral gate that answers
+`InvalidTransaction::ExhaustsResources` unreachable, which is a silently unbounded block.
+`integrity_test` keeps the assertion that the cap is positive and asks retention for zero.
+
+**`CiphertextRetentionBlocks` stays in metadata at 0.** Nothing in the runtime reads it. It is
+published so that a wallet reading the pallet's metadata is told where the payload lives rather
+than inferring it from a storage item that is not there, which is what 12.7 Step 1 item 3 asked
+for, taken the way Q3 went.
+
+**The capability probe is the profile.** Byte 76 moves 1 to 2, bytes 80..84 read 0, 84..88 are
+the renamed output cap and 88..92 become a reserved zero. `ensure_supported` is strict equality
+over all 192 bytes, so a wallet built against the state copy refuses this chain by name instead
+of syncing and finding no payment. That refusal is the whole safety argument for a change with
+no overlap window: there is no upgrade path on this chain, so a runtime that stops writing the
+map at block 1 beside a wallet that still reads it is a wallet that finds nothing.
+
+**What authenticates a body.** The header carries `extrinsics_root` beside `state_root` and
+both wallets already feed it into the Poseidon header preimage. A wallet recomputes it with
+`sp_trie::LayoutV0<Blake2Hasher>::ordered_trie_root` over the encoded extrinsics of the block,
+which is the construction `frame_system` makes while `system_version` is 1.
+`chain/runtime/tests/extrinsics_root.rs` pins that version and carries the known-answer vector
+both implementations check against. A bump of `system_version` to 2 switches the construction
+to V1 silently and breaks every wallet's recomputation, which is why the pin exists.
+
+**The binding is not `ct_digest`.** A wallet decrypts a carried ciphertext, derives the note,
+computes `H(CM, inner, value)` and requires that commitment at a leaf index inside the block's
+folded leaf range, which `zkTreeRoot` already authenticates. That test is position independent,
+so it closes the bound-A hole where a node moved an incoming payment to another position. What
+stays open, narrowed: a fold reported at the wrong height, which presents identically to a
+skipped segment's carried payload.
+
+**Weights.** `SLOT_DB_OPS` moves (4, 6) to (4, 4) and `MINT_COINBASE_DB_OPS` (3, 6) to (3, 5);
+`shield` loses one write; the queue and pruning terms are deleted. `ct_digest_ref_time` stays
+and the payload stays in every `proof_size` term, because the extrinsic bytes are validation
+input for every node whether or not anything stores them.
+
+**Versioning.** No spec bump of its own: it rides the bundle's single move to 106.
+`transaction_version` is untouched, because `submit_private_batch`, `submit_public_batch` and
+`shield` keep their signatures and their encodings byte for byte. What moves is storage layout,
+metadata and the profile, all of which the bundle's one coordinated wallet release covers.
+
+**The 12.0 weight ceiling, recomputed once with the depth decision in hand.** Every figure
+below is the declaration the code makes, at `RocksDbWeight`, for a full public batch of 318
+real slots carrying the one reachable payload of 3584 bytes each.
+
+| Term, full public batch | Before Q3 | After Q3 |
+|---|---|---|
+| Verify and parse, both charged twice | 0.3169 s | 0.3169 s |
+| Storage | 0.5255 s | 0.4619 s |
+| Ciphertext queue bookkeeping | 0.2393 s | gone |
+| `ct_digest` sponge, charged twice | 0.7229 s | 0.7229 s |
+| Tree hashing | 0.0127 s | 0.0127 s |
+| **Total** | **1.8173 s** | **1.5144 s** |
+
+12.0's 1.578 s is that column without the queue term, which is where its 893 to 907 came
+from. Against the 4.5 s normal-class budget, and counting the fixed per-extrinsic verify
+separately from the per-slot marginal cost the way 12.0 did, three public batches now fit 940
+settlements where they fit 893 on 12.0's own basis and 751 against what the code actually
+declared. The flat ratio 4.5 / 1.5144 x 318 gives 945 where it gave 907.
+
+**So length binds first now.** The length ceiling is unchanged at about 908 settlements per
+block, because Q3 moves no byte onto the wire: the ciphertexts already rode in the settlement
+extrinsic. A capacity change is a one-constant change again, and the constant is
+`RuntimeBlockLength`.
+
+**Q5 spends none of it back.** The depth-20 build kept the leaf circuit at `degree_bits = 9`
+(`crates/qnero-circuit/src/params.rs`), so the leaf proof did not grow, the `MAX_PROOF_BYTES`
+margin did not shrink, and the body does not grow on the axis Q3 makes load bearing. What
+depth 20 does move is `pallet-zk-tree`'s once-per-block fold, `FINALIZE_BASE_DB_OPS` from
+(56, 22) to (68, 26) and `FINALIZE_BASE_POSEIDON_EVALS` from 19 to 23, which is about 0.74 ms
+in the Mandatory class and does not touch the normal budget settlements are drawn from.
+
+**And the block's mandatory reservation drops by 0.927 s.** `on_initialize` reserved the whole
+bounded pruning pass, 4096 prunes at 2048 bytes, which `docs/BENCH.md` records as a declared
+927.376 ms against a measured 10.372 ms. That reservation is gone with the prune. It never
+bound settlements, which are drawn from the normal class, and it was most of the distance
+between the block's mandatory floor and its 6 s ceiling.

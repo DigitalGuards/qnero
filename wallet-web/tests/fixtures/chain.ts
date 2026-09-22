@@ -223,6 +223,24 @@ export interface ChainShape {
   withheldBlocks?: ReadonlySet<number>;
   /** A leaf this node dates to a block its own headers do not put it in. */
   misdated?: ReadonlyMap<number, number>;
+  /**
+   * The note ciphertext the body of a leaf's own block carries for it, or
+   * `null` where the body carries none.
+   *
+   * Every coinbase is `null`, because `pallet-shielded`'s inherent refuses a
+   * non-empty payload by name. The default is a payload tagged with the leaf
+   * index, which is enough for a fixture that only needs the payment to be
+   * findable.
+   */
+  payloadAt?: (index: number) => Uint8Array | null;
+  /**
+   * Extra payloads a block's body carries, by block.
+   *
+   * The chain carries the payload of every slot of a settlement, the segments
+   * it skipped included, so a body full of payloads that match no commitment
+   * in that block is ordinary rather than a fault.
+   */
+  strayPayloads?: ReadonlyMap<number, readonly Uint8Array[]>;
   /** A block whose header this node serves with a field changed after the hash was fixed. */
   lyingHeaders?: ReadonlySet<number>;
   /** What `ZkTree::LeafCount` answers, where the chain is longer. */
@@ -285,10 +303,73 @@ function headerAt(shape: ChainShape, bytes: Uint8Array, number: number): RawChai
   };
 }
 
-/** The three reads a sync makes of the chain behind its leaves. */
-export function chainParts(shape: ChainShape): Pick<SyncChain, 'headers' | 'leafBlocks' | 'leafHashes'> {
+/**
+ * One note ciphertext, tagged with the leaf a fixture means it for.
+ *
+ * Four little-endian bytes, which is enough for every leaf count these tests
+ * reach. The real payload is an ML-KEM ciphertext and an AEAD box and the
+ * module decides what opens by decapsulating; what a fixture needs is a
+ * payload a stub prover can answer for, and a tag inside the bytes is that
+ * without the fixture having to say which leaf it lands on. Where it lands is
+ * decided by the commitment the stub's note carries, which is the rule under
+ * test.
+ */
+export function payloadFor(leaf: number): Uint8Array {
+  return new Uint8Array([leaf & 0xff, (leaf >> 8) & 0xff, (leaf >> 16) & 0xff, (leaf >> 24) & 0xff]);
+}
+
+/** The leaf a [`payloadFor`] payload was tagged with. */
+export function payloadLeaf(payload: Uint8Array): number {
+  return (
+    (payload[0] ?? 0) +
+    ((payload[1] ?? 0) << 8) +
+    ((payload[2] ?? 0) << 16) +
+    ((payload[3] ?? 0) << 24)
+  );
+}
+
+/** The four reads a sync makes of the chain behind its leaves. */
+export function chainParts(
+  shape: ChainShape,
+): Pick<SyncChain, 'headers' | 'leafBlocks' | 'leafHashes' | 'payloads'> {
   const bytes = leafBytes(shape);
   return {
+    /**
+     * The payloads one block's body carries, in body order.
+     *
+     * The hash is walked back to a height rather than parsed, because a
+     * fixture's hash spelling is its own: what matters is that the sync asks
+     * by a hash its own header walk produced, and a hash no header of this
+     * chain hashes to is a block this fixture cannot serve a body for.
+     */
+    payloads: (at) => {
+      const wanted = strip(at);
+      let block: number | null = null;
+      for (let number = 0; number <= shape.head; number += 1) {
+        if (hashOf(shape, number) === wanted) {
+          block = number;
+          break;
+        }
+      }
+      if (block === null) {
+        return Promise.reject(new Error(`this fixture serves no block body at ${at}`));
+      }
+      const out: Uint8Array[] = [];
+      for (let index = 0; index < shape.leafCount; index += 1) {
+        if (shape.blockOf(index) !== block) {
+          continue;
+        }
+        const payload =
+          shape.payloadAt === undefined ? payloadFor(index) : shape.payloadAt(index);
+        if (payload !== null) {
+          out.push(payload);
+        }
+      }
+      for (const payload of shape.strayPayloads?.get(block) ?? []) {
+        out.push(payload);
+      }
+      return Promise.resolve(out);
+    },
     // Ascending, `anchor` first, which is the order the read layer hands them
     // over in once it has verified the range as one chain.
     headers: (anchor, top, onHeader, onProgress) => {

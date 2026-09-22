@@ -2,16 +2,16 @@
 //!
 //! A coinbase note is the one note a wallet is not told about. Its value is
 //! public, its randomness is derived from the miner key the operator gave the
-//! node, and there is usually no ciphertext at all, so the scan has to
-//! reconstruct the note from its own key plus what the chain published and
-//! prove the reconstruction against the leaf. These cover both ways in, the
-//! derived one every Qnero node uses and the encrypted one the pallet still
-//! accepts, and the refusals that keep an author from writing a note into
-//! somebody else's balance.
+//! node, and it carries no ciphertext at all: the coinbase inherent refuses a
+//! non-empty payload by name, so no block body holds one. The scan therefore
+//! reconstructs the note from its own key plus what the chain published and
+//! proves the reconstruction against the leaf. These cover that rule and the
+//! refusals that keep an author from writing a note into somebody else's
+//! balance.
 
 mod support;
 
-use qnero_notes::{encrypt_note, Digest, MinerKey, Note};
+use qnero_notes::{Digest, MinerKey};
 use qnero_wallet::chain::Chain;
 use qnero_wallet::keys::create_seed;
 use qnero_wallet::rpc::RpcClient;
@@ -21,16 +21,11 @@ use qnero_wallet::wallet::Wallet;
 use support::{encode_u64, test_metadata, FakeNode, NodeState};
 
 /// Write one coinbase leaf the way `pallet-shielded` writes it: the
-/// commitment, the block, the public value, and a ciphertext only when the
-/// author encrypted one.
-fn put_coinbase(
-    state: &mut NodeState,
-    index: u64,
-    block: u32,
-    cm: Digest,
-    value: u64,
-    ct: Option<&[u8]>,
-) {
+/// commitment, the block and the public value.
+///
+/// No payload. The coinbase inherent refuses a non-empty ciphertext by name,
+/// so no block body carries one and the derived rebuild is the whole rule.
+fn put_coinbase(state: &mut NodeState, index: u64, block: u32, cm: Digest, value: u64) {
     state.put_storage(&identity_map_key("ZkTree", "Leaves", index), &cm.to_bytes());
     state.put_storage(
         &identity_map_key("Shielded", "LeafBlocks", index),
@@ -40,12 +35,6 @@ fn put_coinbase(
         &identity_map_key("Shielded", "CoinbaseValues", index),
         &codec::Encode::encode(&value),
     );
-    if let Some(ct) = ct {
-        state.put_storage(
-            &identity_map_key("Shielded", "Ciphertexts", index),
-            &codec::Encode::encode(&ct.to_vec()),
-        );
-    }
 }
 
 fn node_with(state: NodeState) -> FakeNode {
@@ -93,8 +82,8 @@ fn a_mined_block_becomes_a_spendable_note() {
     let first = miner_key.coinbase_note(&genesis, 7, 42).expect("a note");
     let second = miner_key.coinbase_note(&genesis, 8, 41).expect("a note");
 
-    put_coinbase(&mut state, 0, 7, first.commitment(), 42, None);
-    put_coinbase(&mut state, 1, 8, second.commitment(), 41, None);
+    put_coinbase(&mut state, 0, 7, first.commitment(), 42);
+    put_coinbase(&mut state, 1, 8, second.commitment(), 41);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
     let node = node_with(state);
     let rpc = RpcClient::new(&node.url);
@@ -117,9 +106,9 @@ fn a_mined_block_becomes_a_spendable_note() {
     assert_eq!(wallet.store.spendable().len(), 2);
 }
 
-/// An inconsistent selected state with neither coinbase value nor recoverable
-/// ciphertext refuses the pass. The fixture commits this state into its header;
-/// missing proof nodes against an unchanged header are covered by state_proofs.
+/// A coinbase position with no value answered refuses the pass by name. The
+/// fixture commits this state into its header; missing proof nodes against an
+/// unchanged header are covered by state_proofs.
 #[test]
 fn a_coinbase_value_withheld_below_the_leaf_count_refuses_the_pass() {
     let dir = support::scratch_dir("coinbase-withheld-value");
@@ -132,7 +121,7 @@ fn a_coinbase_value_withheld_below_the_leaf_count_refuses_the_pass() {
     let mined = miner_key
         .coinbase_note(&genesis_of(&state), 3, 25)
         .expect("a note");
-    put_coinbase(&mut state, 0, 3, mined.commitment(), 25, None);
+    put_coinbase(&mut state, 0, 3, mined.commitment(), 25);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
     let node = node_with(state);
     let rpc = RpcClient::new(&node.url);
@@ -140,13 +129,11 @@ fn a_coinbase_value_withheld_below_the_leaf_count_refuses_the_pass() {
 
     let refused = wallet
         .sync(&chain, &test_metadata())
-        .expect_err("a coinbase leaf with neither value nor ciphertext is refused");
+        .expect_err("a coinbase position with no value is refused");
     let message = format!("{refused:#}");
     assert!(
-        message.contains("Shielded::Ciphertexts archive has no authenticated payload for leaf 0")
-            && message.contains("creation block 3"),
-        "the leaf carries neither value nor payload, including at its authenticated \
-         creation state: {message}"
+        message.contains("no Shielded::CoinbaseValues for leaf 0") && message.contains("block 3"),
+        "the one leaf of block 3 is its coinbase position and its value is withheld: {message}"
     );
     assert_eq!(wallet.store.next_leaf, 0);
     assert!(wallet.store.notes.is_empty());
@@ -158,51 +145,6 @@ fn a_coinbase_value_withheld_below_the_leaf_count_refuses_the_pass() {
         .expect("the pass runs once the value is answered for");
     assert_eq!(report.coinbase_received, 1);
     assert_eq!(wallet.store.unspent_total(), 25);
-}
-
-/// The other way in: an author that does not hold the recipient's coinbase
-/// viewing key encrypts the payload instead. The value inside it is ignored
-/// and the note is rebuilt against the chain's.
-#[test]
-fn an_encrypted_coinbase_payload_is_rebuilt_against_the_public_value() {
-    let dir = support::scratch_dir("coinbase-encrypted");
-    let seed = dir.join("wallet.seed");
-    create_seed(&seed).expect("a fresh seed");
-    let mut wallet = Wallet::open(&seed).expect("the wallet opens");
-    let address = wallet.address();
-
-    // A payload built by something that is not this wallet's own node: fresh
-    // randomness, and a value of zero inside the ciphertext.
-    let rho = Digest::hash_bytes(&[b"coinbase/rho", &[9u8]]);
-    let r = Digest::hash_bytes(&[b"coinbase/r", &[9u8]]);
-    let carrier = Note::new(address.pk, 0, rho, r).expect("a note");
-    let ct = encrypt_note(&address.ek, &carrier, &[], &[3u8; 32])
-        .expect("encrypts")
-        .to_bytes();
-    // The note the chain actually minted is the same one at the public value.
-    let minted = Note::new(address.pk, 17, rho, r).expect("a note");
-
-    let mut state = NodeState {
-        head_number: 4,
-        ..Default::default()
-    };
-    put_coinbase(&mut state, 0, 3, minted.commitment(), 17, Some(&ct));
-    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
-    let node = node_with(state);
-    let rpc = RpcClient::new(&node.url);
-    let chain = Chain::new(&rpc);
-
-    let report = wallet
-        .sync(&chain, &test_metadata())
-        .expect("the sync runs");
-
-    assert_eq!(report.coinbase_received, 1);
-    assert_eq!(
-        wallet.store.unspent_total(),
-        17,
-        "the chain decides the amount"
-    );
-    assert_eq!(wallet.store.notes[0].origin, NoteOrigin::Coinbase);
 }
 
 /// The commitment check is the whole of the trust model. A leaf whose value
@@ -228,7 +170,7 @@ fn a_value_that_does_not_open_the_commitment_is_not_received() {
     let note = miner_key
         .coinbase_note(&genesis_of(&state), 7, 42)
         .expect("a note");
-    put_coinbase(&mut state, 0, 7, note.commitment(), 1_000, None);
+    put_coinbase(&mut state, 0, 7, note.commitment(), 1_000);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
     let node = node_with(state);
     let rpc = RpcClient::new(&node.url);
@@ -276,7 +218,6 @@ fn another_miners_coinbase_is_not_this_wallets_note() {
             .expect("a note")
             .commitment(),
         10,
-        None,
     );
     put_coinbase(
         &mut state,
@@ -287,7 +228,6 @@ fn another_miners_coinbase_is_not_this_wallets_note() {
             .expect("a note")
             .commitment(),
         10,
-        None,
     );
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
     let node = node_with(state);
@@ -326,8 +266,8 @@ fn a_coinbase_from_another_chain_is_not_this_wallets_note() {
         .coinbase_note(&genesis_of(&state), 8, 5)
         .expect("a note");
 
-    put_coinbase(&mut state, 0, 7, elsewhere.commitment(), 42, None);
-    put_coinbase(&mut state, 1, 8, here.commitment(), 5, None);
+    put_coinbase(&mut state, 0, 7, elsewhere.commitment(), 42);
+    put_coinbase(&mut state, 1, 8, here.commitment(), 5);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
     let node = node_with(state);
     let rpc = RpcClient::new(&node.url);

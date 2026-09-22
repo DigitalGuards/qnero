@@ -5,6 +5,7 @@
 #[allow(dead_code)]
 mod common;
 
+use codec::Encode;
 use common::TestCommons;
 use frame_support::traits::Currency;
 use qnero_runtime::{
@@ -58,6 +59,29 @@ fn transfer() -> RuntimeCall {
 	})
 }
 
+/// A `Multisig::propose` carrying `payload` as its opaque inner call.
+fn propose(payload: Vec<u8>) -> RuntimeCall {
+	RuntimeCall::Multisig(pallet_multisig::Call::propose {
+		multisig_address: AccountId::new([8; 32]),
+		call: payload.try_into().expect("the payload fits MaxCallSize"),
+		expiry: 100,
+	})
+}
+
+/// Valid call bytes with one byte after them.
+///
+/// `decode` does not have to consume its whole input, so this passes a bare
+/// decode and is still permanently unexecutable: `execute` requires the
+/// executor's typed call to re-encode byte-equal to the stored payload, and no
+/// typed call encodes trailing bytes. The pallet refuses it at propose time
+/// and so does the filter.
+fn non_canonical() -> Vec<u8> {
+	let mut bytes =
+		RuntimeCall::System(frame_system::Call::remark { remark: b"payload".to_vec() }).encode();
+	bytes.push(0x00);
+	bytes
+}
+
 /// Both bare encodings, the signed encoding, and the general preamble all
 /// reach the same call policy before their own authorization checks.
 fn formats(call: RuntimeCall) -> [UncheckedExtrinsic; 4] {
@@ -95,6 +119,16 @@ fn forbidden_calls() -> Vec<RuntimeCall> {
 				call: Box::new(transfer()),
 			})],
 		}),
+		// `propose` carries its inner call as opaque bytes and dispatches
+		// nothing, so the three shapes here are what the filter has to decode:
+		// a transfer, a wrapper carrying one, and a payload that can never
+		// execute at all.
+		propose(transfer().encode()),
+		propose(
+			RuntimeCall::Utility(pallet_utility::Call::batch_all { calls: vec![transfer()] })
+				.encode(),
+		),
+		propose(non_canonical()),
 		RuntimeCall::ReversibleTransfers(pallet_reversible_transfers::Call::schedule_transfer {
 			dest: MultiAddress::Id(recipient()),
 			amount: UNIT,
@@ -134,6 +168,7 @@ fn forbidden_calls_are_invalid_for_pool_admission_in_every_format() {
 
 #[test]
 fn forbidden_calls_are_invalid_before_block_recording_fees_or_nonce_changes() {
+	let empty = extrinsics_root_of_a_block_nothing_was_offered_to();
 	for call in forbidden_calls() {
 		test_ext().execute_with(|| {
 			let account_before = System::account(sender());
@@ -148,8 +183,22 @@ fn forbidden_calls_are_invalid_before_block_recording_fees_or_nonce_changes() {
 				assert_eq!(System::extrinsic_index(), index_before);
 				assert!(System::extrinsic_data(0).is_empty());
 			}
+			// The header half of the same property. `extrinsic_data` is the
+			// storage the body is built from, and `extrinsics_root` is what
+			// the header commits to, so a block offered four refused
+			// extrinsics has to hash to the block nobody offered anything to.
+			assert_eq!(
+				System::finalize().extrinsics_root,
+				empty,
+				"a refused call must leave the header it was offered to unchanged: {call:?}"
+			);
 		});
 	}
+}
+
+/// The `extrinsics_root` of the same block, finalized without the attempt.
+fn extrinsics_root_of_a_block_nothing_was_offered_to() -> H256 {
+	test_ext().execute_with(|| System::finalize().extrinsics_root)
 }
 
 #[test]
@@ -219,6 +268,74 @@ fn unsigned_settlements_continue_to_their_own_validity_checks() {
 				Executive::validate_transaction(TransactionSource::External, xt, H256::default());
 			assert!(result.is_err(), "an empty proof must still fail settlement validation");
 		});
+	}
+}
+
+/// A settlement carrying a wrong-length ciphertext is a permanent refusal, so
+/// the real runtime answers `InvalidTransaction::Call` and never
+/// `ExhaustsResources`.
+///
+/// The two answers mean opposite things to a block builder. `ExhaustsResources`
+/// is "block full": the transaction is skipped and offered again for the next
+/// block. `Call` is "invalid": it is dropped. The output-budget deferral added
+/// the only `ExhaustsResources` arm this pallet has, for the one condition that
+/// really is temporary, and `CiphertextLengthMismatch` and `UnknownCryptoSuite`
+/// must not join it: a permanent failure answered as a full block would be
+/// re-skipped once a block until its longevity ran out.
+///
+/// What this pins is the answer the whole runtime gives, through the production
+/// extrinsic wrapper. Which check fires first is pinned in the pallet, over a
+/// real proof, by `a_wrong_length_payload_is_a_permanent_call_refusal`: this
+/// crate links no prover, so the proof here is empty and the parse refuses
+/// ahead of the length rule.
+#[test]
+fn a_wrong_length_settlement_payload_is_never_answered_as_a_full_block() {
+	// One byte short of `qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES`. The
+	// literal is written out because this crate links `qnero-circuit` only
+	// behind an optional benchmark feature, and the pallet's own tests hold the
+	// number to the constant.
+	let short = vec![7u8; 1_791];
+	let outputs = vec![pallet_shielded::ShieldedOutput::<Runtime> {
+		ct_1: short.clone().try_into().expect("under MaxCiphertextBytes"),
+		ct_2: short.try_into().expect("under MaxCiphertextBytes"),
+	}];
+	for call in [
+		RuntimeCall::Shielded(pallet_shielded::Call::submit_private_batch {
+			proof: Vec::new(),
+			outputs: outputs.clone(),
+		}),
+		RuntimeCall::Shielded(pallet_shielded::Call::submit_public_batch {
+			proof: Vec::new(),
+			outputs: outputs.clone(),
+		}),
+	] {
+		test_ext().execute_with(|| {
+			let xt = UncheckedExtrinsic::new_bare(call);
+			assert_eq!(
+				Executive::validate_transaction(
+					TransactionSource::External,
+					xt.clone(),
+					H256::default(),
+				),
+				Err(INVALID_CALL),
+			);
+			assert_eq!(Executive::apply_extrinsic(xt), Err(INVALID_CALL));
+		});
+	}
+}
+
+/// Both errors the exact-length rule raises exist in the runtime's own
+/// `pallet-shielded` instance, so a wallet reading the metadata can name them
+/// and the rule is not a pallet-only build.
+#[test]
+fn the_runtime_carries_the_exact_length_errors() {
+	let names = [
+		pallet_shielded::Error::<Runtime>::CiphertextLengthMismatch,
+		pallet_shielded::Error::<Runtime>::UnknownCryptoSuite,
+	];
+	for error in names {
+		let dispatch: sp_runtime::DispatchError = error.into();
+		assert!(matches!(dispatch, sp_runtime::DispatchError::Module(_)));
 	}
 }
 

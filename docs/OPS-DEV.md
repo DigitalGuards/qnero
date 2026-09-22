@@ -1,6 +1,6 @@
 # Running the Qnero dev chain
 
-**Runtime 105 policy:** confirmations remain reversible, genesis is the only
+**Runtime 106 policy:** confirmations remain reversible, genesis is the only
 irreversible checkpoint, and nodes retain all branch states and block bodies.
 Wallets authenticate storage and require the matching protocol profile. Read
 [NATIVE-UPGRADE.md](NATIVE-UPGRADE.md) before changing an existing database or
@@ -700,7 +700,7 @@ every bit.
 **The seed rule.** RandomX is keyed by a 32-byte seed that moves on a slow
 schedule, because every move costs a full-mode rig a dataset rebuild. The rule
 is Monero's, and the two constants are runtime constants
-(`pallet_qpow::Config::SeedEpochBlocks` and `SeedEpochLag`, 2048 and 64), so a
+(`pallet_qpow::Config::SeedEpochBlocks` and `SeedEpochLag`, 2048 and 128), so a
 chain can pick its own without a client release:
 
 ```
@@ -714,7 +714,7 @@ fork hashes under its own branch's seed. Every job a rig is handed carries
 `next_seed_hash` as well, so xmrig builds the next dataset in the background
 instead of stalling at the boundary.
 
-Two things about 2048 and 64 are worth knowing before a launch, and both are a
+Two things about 2048 and 128 are worth knowing before a launch, and both are a
 one-line change in `runtime/src/configs/mod.rs`:
 
 - 2048 blocks at Monero's 120 s target is 2.84 days, and this chain's target is
@@ -722,13 +722,16 @@ one-line change in `runtime/src/configs/mod.rs`:
   rebuilds its dataset here as often as it does there and no more. Under the old
   12 s target the same 2048 blocks was 6.8 hours and the epoch was the constant
   that would have had to move; it does not.
-- The lag is 64. `MaxReorgDepth` is `u32::MAX` since the reversible
-  consensus change (it was 100 when this was written), so reorg depth is
-  unbounded by finality and the seed block is always inside the window a legal
-  reorg can move. That cannot split the chain, because the seed follows each
-  candidate's ancestry, but a deep reorg across an epoch boundary does change
-  the seed under work already started. A lag of 128 removes even that. In wall
-  clock the lag is 2.1 hours at a 120 s target.
+- The lag is 128, decided on 2026-09-22 and twice Monero's 64.
+  `MaxReorgDepth` is `u32::MAX` since the reversible consensus change (it was
+  100 when this was written), so reorg depth is unbounded by finality and no
+  depth floor refuses a reorg that crosses an epoch boundary. That cannot split
+  the chain, because the seed follows each candidate's ancestry, and what such
+  a reorg does is re-key work already started. In wall clock 128 blocks is 4.3
+  hours at a 120 s target: it puts the seed block behind the depth a reorg on
+  this network reaches, and it gives a full-mode rig 4.3 hours of notice on its
+  next 2 GiB dataset build. What bounds a deeper reorg is the client admission
+  budget of `docs/DESIGN.md` 7.5.
 
 **The difficulty floor moved with the engine.** `get_min_difficulty()` was
 Ethereum's 2^17 and is now 128. At the 33 H/s one light-mode thread manages,
@@ -1826,7 +1829,8 @@ what the memo pad costs the chain. The fix pass re-ran the whole end-to-end
 flow against a fresh `--dev --tmp` node, because one change moves numbers the
 run above recorded: the memo pad is 61 bytes where it was 256, so each output
 ciphertext is a uniform 1792 bytes and the submission floor is back to
-0.08 QNR.
+0.08 QNR. The pre-genesis bundle later made 1792 the length settlement
+requires, so the figures here describe the only settled payload there is.
 
 ### What changed
 
@@ -2005,9 +2009,13 @@ leaf 59: ciphertext 1792 bytes
 
 1792 is 1731 plus the 61-byte pad. The payment carried a 12-byte memo, the
 change carried none and the shield carried another, and all five are one
-length on chain. The pair per spend is 3584 bytes, which is `ceil(3584 / 512)
-= 7` quanta of payload where a pair padded to the cap is 8: the separation the
-divisor exists for is back.
+length on chain. The pair per spend is 3584 bytes, which is `3584 / 512 = 7`
+quanta of payload exactly, so a settling slot's floor is eight steps. At the
+time this run was taken that was a fee argument, with a pair padded to the cap
+at 8 quanta one bucket above. The pre-genesis bundle made it a rule: a
+settlement carries exactly the suite's length, so the four settled ciphertexts
+above are the only shape the chain now accepts and the capped pair is refused
+rather than priced. The shield's entry note still has the cap and not the rule.
 
 === 9. a hostile memo cannot drive the terminal, or widen the row ===
 
@@ -4980,34 +4988,37 @@ costs is named in the runbook: nobody can pass
 `RootOrMemberForTechReferendaOrigin`, so there is no runtime upgrade by
 referendum on this chain and the recovery for a runtime bug is a relaunch.
 
-**The initial difficulty is 5 000, and it is the one number in the spec that
+**The initial difficulty is 4 000, and it is the one number in the spec that
 cannot be corrected afterwards.** Difficulty is expected hashes per block, and
-the retarget's equilibrium is the divisor rather than the target:
-`divisor = target * 10 / 12` is 100 000 ms at a 120 s target and the neutral
-band is one to two divisors wide, so a chain settles between `100 * H` and
-`200 * H`. The hash rate this chain is certain of is its own node's single
-light-mode RandomX thread, 32.9 H/s from the M7 measurements, which puts that
-band at 3 300 to 6 600 and its middle at one block every 152 seconds with no
-retarget pressure at all.
+the retarget's equilibrium is the target itself: the divisor is `target * ln 2`,
+83 177 ms at a 120 s target, which is the value that puts the stationary mean
+block time on the target, and the band is one divisor wide. So a chain settles
+at about `120 * H`, inside a deterministic band of `83.2 * H` to `166.4 * H`.
+The hash rate this chain is certain of is its own node's single light-mode
+RandomX thread, 32.9 H/s from the M7 measurements, which puts that band at
+2 737 to 5 473 and 4 000 at one block every 122 seconds with no retarget
+pressure at all.
 
 Low on purpose, and the asymmetry is the argument. The Homestead retarget moves
 by one 2048th of the difficulty per step, which works out as linear growth at
 `H / 2048` per second upward and exponential decay with a time constant of
-`100 * 2048` seconds downward: 57 hours per e-fold whatever the numbers are. A
+`2048 * divisor` seconds downward: 47.3 hours per e-fold at the public target. A
 difficulty above the available hash rate is days of a chain that looks dead; one
 below it is hours of fast blocks that fix themselves. Inheriting
-`QPoWInitialDifficulty`, 1 000 000 and sized for about 8 300 H/s, would have
+`QPoWInitialDifficulty`, 1 000 000 and 8 333 H/s at the target, would have
 been 8.4 hours to the first block on the node alone and about a week to
 converge. There is no floor field to set beside it: `get_min_difficulty()` is a
 hard-coded 128 and genesis only validates against it.
 
-The seed epoch stays at 2 048 blocks with a lag of 64, both runtime constants a
-spec cannot move. The open question is restated in the runbook rather than
-closed here: the lag sits inside the 100-block reorg window, so a deep reorg
-across an epoch boundary changes the seed under work already started. That
-cannot split the chain, because the seed follows each candidate's own ancestry
-rather than canonical height, and a lag of 128 would remove even the
-disturbance, at the cost of a runtime upgrade.
+The seed epoch stays at 2 048 blocks and the lag is 128, both runtime constants
+a spec cannot move: they are compiled into the runtime wasm and published in
+metadata. `MaxReorgDepth` is `u32::MAX`, so a reorg across an epoch boundary is
+legal at any depth and changes the seed under work already started. That cannot
+split the chain, because the seed follows each candidate's own ancestry rather
+than canonical height, and 128 blocks is 4.3 hours at the 120 s target, which
+puts the seed block behind the depth such a reorg reaches. Moving either
+constant after a launch takes a new genesis or a coordinated node release at a
+known height.
 
 ### The faucet account
 
@@ -5094,11 +5105,12 @@ within a second of it:
 ```
 
 Block 1 took **199 seconds** on one in-process light-mode thread at difficulty
-5 000. The expectation at 32.9 H/s is 152 seconds and block times are
-exponentially distributed, so 199 is an ordinary draw; block 2 took 5 seconds,
-which is the other tail of the same distribution. Both are inside the neutral
-band the difficulty was chosen for, which is what the spec's 5 000 was meant to
-produce and is the whole reason the number is not 1 000 000.
+5 000. The expectation at that difficulty and 32.9 H/s is 152 seconds and block
+times are exponentially distributed, so 199 is an ordinary draw; block 2 took 5
+seconds, which is the other tail of the same distribution. The relaunch spec
+sets 4 000 instead, whose expectation is 122 seconds, the target itself: that is
+what the divisor change in DESIGN 7.6 buys, and it is the whole reason the
+number is not 1 000 000.
 
 `scripts/probe-node.sh` against both nodes:
 
@@ -5802,3 +5814,98 @@ nginx -t with the real-ip include missing                         fails, and nam
 
 The stratum test flake noted at the end of the previous pass is still open and
 still pre-existing. This pass touches nothing in `chain/node/src/stratum`.
+
+## The relaunch bundle closes: the spec regenerated, and what qualified it, 2026-09-22
+
+The bundle is one pre-genesis change set, taken in one move because this
+runtime deleted every dispatchable that can write `:code`: the RandomX seed lag
+at 128 on an unchanged 2048-block epoch, the retarget divisor
+`target * 693_147 / 1_000_000` with a neutral band of 83.177 s to 166.354 s
+around a stationary mean of 120.0 s, the per-suite exact-length settlement rule,
+the inherited governance lane removed with indices 13, 14 and 23 vacated, one
+more call-filter arm that reaches a multisig proposal's payload, `MAX_TREE_DEPTH`
+raised to 20 with the three release digests refreshed against an artifact set
+built at that depth, and the note ciphertexts moved out of the state trie into
+block bodies with `CiphertextRetentionBlocks` at 0 and the prune path deleted.
+One `spec_version`, 105 to 106. `transaction_version` stayed at 7, because the
+filter never left `Checkable::check` and no extension was added.
+
+The chain spec was regenerated once, last, from the tree that produced the
+release binaries, which is the rule the runbook states and the reason nothing
+after the regeneration touches a consensus constant. `build-testnet-spec.sh`
+ran with `QNERO_BOOTNODES` unset, so the committed bootnode list was preserved
+and is still the seed node's single entry, and `--check` then printed that the
+committed spec matches what this binary exports. The new genesis hash is
+`0x58464dd7a6823f4bd8d17d7badd6778054562153eee085b3e80d5e6c94fa3df9`, read off
+a 40-second dry start of the committed file. Against the spec it replaces,
+genesis moved in five keys and lost three, and nowhere else: `:code`, which is
+132 KB smaller than the runtime 105 blob; `System::LastRuntimeUpgrade`, now 106;
+`pallet-shielded`'s storage version, now 3; the 192-byte protocol profile, now
+carrying tree depth 20 and ciphertext location 2, the block body; and
+`QPoW::CurrentDifficulty`, now the preset's 4 000. The three lost keys are the
+storage-version markers of `TechCollective`, `TechReferenda` and `Origins`,
+which went with the governance lane.
+
+The regeneration also settled the 2026-09-21 caveat, by replacing it with a
+measurement. The exported wasm is bound to the checkout the node was built in:
+two binaries built from an identical tree at two absolute paths exported specs
+that differ in `:code` alone, by 377 bytes, with every other genesis key equal,
+and the difference is in the hash suffixes of mangled symbol names, because
+cargo's crate metadata hash includes a path dependency's path. The wasm carries
+no literal path, which `runtime_wasm_uses_portable_source_paths` asserts, and it
+is still not byte-identical across paths. So the spec's reproducibility answers
+for the binary that wrote it, and the operational rule is to regenerate once, in
+the tree the release binaries come from, and ship that binary beside the file.
+
+Qualification ran against those binaries, on a 30-core build machine, with the
+node built with the real runtime wasm and `SKIP_WASM_BUILD` never set:
+
+```
+cargo build --release -p qnero-node                    17m 56s, wasm built
+cargo build --release -p qnero-faucet -p qnero-wallet  11.2s
+build-testnet-spec.sh --check                          the committed spec matches
+cargo test -p qnero-node --test testnet_spec           4 passed, 0 failed
+cargo test -p qnero-node --test naming_guard           6 passed, 0 failed
+scripts/check-native-upgrade.py                        PASS, spec 106, tx 7
+cargo test -p qnero-wallet --test dev_node_e2e         2 passed, 0 failed, 53.08s
+```
+
+`testnet_spec` is fully green for the first time since PR #5, including
+`the_committed_testnet_spec_is_what_this_binary_exports`, which the old spec
+could not satisfy. The native-upgrade smoke reported `specVersion` 106,
+`transactionVersion` 7, `systemVersion` 1, a profile with byte 76 at 2 and
+retention zero, and a wallet that synced two coinbase notes at the selected tip
+with its state proof verified. The dev-node end-to-end run is the leg that had
+been silently skipping since runtime 105 for want of its environment variable:
+it shielded 10 QNR, paid 3 QNR and 1 QNR back through two private batches at
+about 4.5 s of proving each, read the miner's 16 coinbase notes off a real
+chain, and had `system_dryRun` answer `0x010000` to a transparent transfer,
+which is `InvalidTransaction::Call` before the pool admits anything.
+
+Three manual checks ran on a dev node of the same binary. Started with
+`--rpc-methods safe`, which is what the public endpoint is proxied to serve
+(the node's own default is `auto`, everything on loopback and the safe subset
+otherwise), `chain_getBlock` answered with a block and its two extrinsics and
+`state_getReadProof` answered with a five-node, 754-byte proof at the hash it
+was asked for, while `system_dryRun` was refused as unsafe. The mining log names
+its seed on every job, `seed #0` on a fresh chain. The announcement of the
+*next* seed one lag ahead is not reachable on a dev chain in a sitting, because
+it turns at block 2048 + 128, so the assertion of record stays the unit test
+`the_next_seed_is_announced_one_lag_ahead`. Qloak's peak memory on a full-size
+settlement body was not measured here and is still open.
+
+Both browser prover modules were rebuilt from the same final tree, under
+binaryen 116, and both passed the `extrinsicsRoot` acceptance in headless
+Chromium 143.0.7499.4: the single-threaded module is 2 686 884 bytes after
+`wasm-opt -O` took 17.8 percent off it and initialises in 47 ms, the threaded
+one is 2 989 820 bytes after a 48.7 percent saving and initialises in 36 ms, and
+each answered both known-answer roots exactly.
+
+What is left is the host, and none of it was touched here. The runbook's
+"On the host" list is the order: stop the units, move the database, the faucet's
+note store and the claims database aside under dated names, keep the node key,
+install the binaries and the spec, read the genesis hash off the first start,
+write it into the monitor's expected-genesis value, clear the monitor's
+remembered height and alert state, reset the watchdog's height, and start the
+faucet. Balances belong to the genesis they were mined under, and the
+announcement says so in both wallets' wording.

@@ -25,18 +25,14 @@ use crate as utility;
 use frame_support::{
 	assert_err_ignore_postinfo, assert_noop, assert_ok, derive_impl,
 	dispatch::{DispatchErrorWithPostInfo, Pays},
-	parameter_types, storage,
-	traits::{ConstU64, Contains},
+	parameter_types,
+	traits::{ConstU64, Contains, EnsureOrigin},
 	weights::Weight,
 };
-use frame_system::EnsureRoot;
-use pallet_collective::{EnsureProportionAtLeast, Instance1};
 use sp_runtime::{
 	traits::{BadOrigin, Dispatchable},
 	BuildStorage, TokenError,
 };
-
-type BlockNumber = u64;
 
 // example module to test behaviors.
 #[frame_support::pallet(dev_mode)]
@@ -132,6 +128,30 @@ mod mock_democracy {
 		pub enum Event<T: Config> {
 			ExternalProposed,
 		}
+
+		/// A body origin, in the shape a collective's `Members` origin carries.
+		///
+		/// It stands in for the council this mock used to mount a whole
+		/// `pallet-collective` for. What the test below needs of it is that it
+		/// is neither `Signed` nor `Root`, because that is the case
+		/// `batch_all` forwards to its children without the signed-origin
+		/// path touching it.
+		#[pallet::origin]
+		#[derive(
+			PartialEq,
+			Eq,
+			Clone,
+			RuntimeDebug,
+			Encode,
+			Decode,
+			DecodeWithMemTracking,
+			TypeInfo,
+			MaxEncodedLen,
+		)]
+		pub enum Origin {
+			/// `ayes` of `total` members carried it.
+			Members(u32, u32),
+		}
 	}
 }
 
@@ -144,7 +164,6 @@ frame_support::construct_runtime!(
 		Timestamp: pallet_timestamp,
 		Balances: pallet_balances,
 		RootTesting: pallet_root_testing,
-		Council: pallet_collective::<Instance1>,
 		Utility: utility,
 		Example: example,
 		Democracy: mock_democracy,
@@ -182,32 +201,34 @@ impl pallet_timestamp::Config for Test {
 	type WeightInfo = ();
 }
 
-const MOTION_DURATION_IN_BLOCKS: BlockNumber = 3;
-parameter_types! {
-	pub const MotionDuration: BlockNumber = MOTION_DURATION_IN_BLOCKS;
-	pub const MaxProposals: u32 = 100;
-	pub const MaxMembers: u32 = 100;
-	pub MaxProposalWeight: Weight = sp_runtime::Perbill::from_percent(50) * BlockWeights::get().max_block;
-}
-
-type CouncilCollective = pallet_collective::Instance1;
-impl pallet_collective::Config<CouncilCollective> for Test {
-	type RuntimeOrigin = RuntimeOrigin;
-	type Proposal = RuntimeCall;
-	type RuntimeEvent = RuntimeEvent;
-	type MotionDuration = MotionDuration;
-	type MaxProposals = MaxProposals;
-	type MaxMembers = MaxMembers;
-	type DefaultVote = pallet_collective::PrimeDefaultVote;
-	type WeightInfo = ();
-	type SetMembersOrigin = frame_system::EnsureRoot<Self::AccountId>;
-	type MaxProposalWeight = MaxProposalWeight;
-	type DisapproveOrigin = EnsureRoot<Self::AccountId>;
-	type KillOrigin = EnsureRoot<Self::AccountId>;
-	type Consideration = ();
-}
-
 impl example::Config for Test {}
+
+/// Three quarters of a body's members, the proportion the council origin this
+/// mock used to build carried.
+///
+/// Written out here rather than reached through `pallet-collective`, which
+/// this mock mounted for one origin and one test. The dependency was also a
+/// build failure under `--features runtime-benchmarks`: the feature is
+/// enabled across the workspace, which does not reach a crates.io
+/// dev-dependency, so its `EnsureOrigin` impls arrived without the
+/// `try_successful_origin` that `frame-support` then required of them.
+pub struct EnsureMembersAtLeastThreeQuarters;
+impl EnsureOrigin<RuntimeOrigin> for EnsureMembersAtLeastThreeQuarters {
+	type Success = ();
+
+	fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
+		match Into::<Result<mock_democracy::Origin, RuntimeOrigin>>::into(origin) {
+			Ok(mock_democracy::Origin::Members(ayes, total)) if ayes * 4 >= total * 3 => Ok(()),
+			Ok(body) => Err(RuntimeOrigin::from(body)),
+			Err(origin) => Err(origin),
+		}
+	}
+
+	#[cfg(feature = "runtime-benchmarks")]
+	fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
+		Ok(RuntimeOrigin::from(mock_democracy::Origin::Members(3, 3)))
+	}
+}
 
 pub struct TestBaseCallFilter;
 impl Contains<RuntimeCall> for TestBaseCallFilter {
@@ -228,7 +249,7 @@ impl Contains<RuntimeCall> for TestBaseCallFilter {
 }
 impl mock_democracy::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
-	type ExternalMajorityOrigin = EnsureProportionAtLeast<u64, Instance1, 3, 4>;
+	type ExternalMajorityOrigin = EnsureMembersAtLeastThreeQuarters;
 }
 impl Config for Test {
 	type RuntimeEvent = RuntimeEvent;
@@ -258,13 +279,6 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 	pallet_balances::GenesisConfig::<Test> {
 		balances: vec![(1, 10), (2, 10), (3, 10), (4, 10), (5, 2)],
 		..Default::default()
-	}
-	.assimilate_storage(&mut t)
-	.unwrap();
-
-	pallet_collective::GenesisConfig::<Test, Instance1> {
-		members: vec![1, 2, 3],
-		phantom: Default::default(),
 	}
 	.assimilate_storage(&mut t)
 	.unwrap();
@@ -312,24 +326,29 @@ fn batch_all_works() {
 
 #[test]
 fn batch_all_with_root_works() {
+	use sp_runtime::Perbill;
 	new_test_ext().execute_with(|| {
-		let k = b"a".to_vec();
-		let k2 = b"b".to_vec();
-		let call = RuntimeCall::System(frame_system::Call::set_storage {
-			items: vec![(k.clone(), k.clone())],
-		});
-		assert!(!TestBaseCallFilter::contains(&call));
-		assert_ok!(Utility::batch_all(
-			RuntimeOrigin::root(),
-			vec![
-				RuntimeCall::System(frame_system::Call::set_storage {
-					items: vec![(k2.clone(), k2.clone())],
-				}),
-				call, // Check filters are correctly bypassed
-			]
-		));
-		assert_eq!(storage::unhashed::get_raw(&k2), Some(k2));
-		assert_eq!(storage::unhashed::get_raw(&k), Some(k));
+		// This used `System::set_storage` and checked the two raw keys it wrote.
+		// That call is deleted from this fork along with every other
+		// `frame-system` dispatchable that can write `:code`, `:heappages` or a
+		// raw storage key, so the stand-in is `RootTesting::fill_block`: the
+		// test filter refuses it and only Root can dispatch it, which is the
+		// pair this test needs. What it observes is the refusal and its absence.
+		let call = || {
+			RuntimeCall::RootTesting(RootTestingCall::fill_block {
+				ratio: Perbill::from_percent(1),
+			})
+		};
+		assert!(!TestBaseCallFilter::contains(&call()));
+
+		// A signed batch meets the filter on the way in.
+		assert_err_ignore_postinfo!(
+			Utility::batch_all(RuntimeOrigin::signed(1), vec![call()]),
+			frame_system::Error::<Test>::CallFiltered
+		);
+
+		// Root bypasses it, which is what `dispatch_bypass_filter` is for.
+		assert_ok!(Utility::batch_all(RuntimeOrigin::root(), vec![call(), call()]));
 	});
 }
 
@@ -516,12 +535,31 @@ fn batch_all_doesnt_work_with_inherents() {
 }
 
 #[test]
-fn batch_all_works_with_council_origin() {
+fn batch_all_works_with_a_body_origin() {
 	new_test_ext().execute_with(|| {
+		// A batch dispatched from an origin that is neither signed nor root
+		// reaches its children as that same origin: the child here admits no
+		// other one.
 		assert_ok!(Utility::batch_all(
-			RuntimeOrigin::from(pallet_collective::RawOrigin::Members(3, 3)),
+			RuntimeOrigin::from(mock_democracy::Origin::Members(3, 3)),
 			vec![RuntimeCall::Democracy(mock_democracy::Call::external_propose_majority {})]
 		));
+	})
+}
+
+#[test]
+fn batch_all_forwards_a_body_origin_the_child_refuses() {
+	new_test_ext().execute_with(|| {
+		// And the origin really is carried rather than widened on the way in:
+		// one aye of four does not clear three quarters, and the child says
+		// so from inside the batch.
+		assert_err_ignore_postinfo!(
+			Utility::batch_all(
+				RuntimeOrigin::from(mock_democracy::Origin::Members(1, 4)),
+				vec![RuntimeCall::Democracy(mock_democracy::Call::external_propose_majority {})]
+			),
+			BadOrigin
+		);
 	})
 }
 

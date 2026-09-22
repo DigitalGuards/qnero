@@ -3,7 +3,7 @@
 //! ```text
 //! qnero-circuit-builder --output <dir> --num-leaf-proofs <n>
 //!                       [--num-private-batch-proofs <n>] [--no-public-batch]
-//!                       [--skip-padding-batch]
+//!                       [--skip-padding-batch] [--report-pins]
 //! ```
 //!
 //! The flags are parsed by hand. A build-host tool that pulls in an argument
@@ -14,7 +14,8 @@
 use anyhow::{bail, Context, Result};
 
 use qnero_circuit_builder::{
-    generate_all_artifacts, DEFAULT_NUM_LEAF_PROOFS, DEFAULT_NUM_PRIVATE_BATCH_PROOFS,
+    generate_all_artifacts_with, PinPolicy, DEFAULT_NUM_LEAF_PROOFS,
+    DEFAULT_NUM_PRIVATE_BATCH_PROOFS,
 };
 
 /// Environment overrides, for a build script that has no command line.
@@ -63,6 +64,7 @@ struct Args {
     num_leaf_proofs: usize,
     num_private_batch_proofs: Option<usize>,
     include_padding_batch: bool,
+    pins: PinPolicy,
 }
 
 /// The numbers are not spelled out here: they live in
@@ -78,6 +80,10 @@ usage: qnero-circuit-builder [options]
                                      default, or QNERO_NUM_PRIVATE_BATCH_PROOFS)
   --no-public-batch                  stop at the private batch
   --skip-padding-batch               do not prove the all-padding private batch
+  --report-pins                      print the three artifact digests and publish the set
+                                     whatever they are, instead of holding it to the
+                                     release pin. For the release that moves the circuit
+                                     on purpose and needs the new digests.
   --help                             print this
 ";
 
@@ -100,6 +106,7 @@ fn parse_args(mut args: impl Iterator<Item = String>, env: EnvLookup<'_>) -> Res
                 .unwrap_or(DEFAULT_NUM_PRIVATE_BATCH_PROOFS),
         ),
         include_padding_batch: true,
+        pins: PinPolicy::Enforce,
     };
 
     while let Some(flag) = args.next() {
@@ -117,6 +124,7 @@ fn parse_args(mut args: impl Iterator<Item = String>, env: EnvLookup<'_>) -> Res
             }
             "--no-public-batch" => parsed.num_private_batch_proofs = None,
             "--skip-padding-batch" => parsed.include_padding_batch = false,
+            "--report-pins" => parsed.pins = PinPolicy::Report,
             other => bail!("unknown argument {}\n\n{}", other, USAGE),
         }
     }
@@ -139,12 +147,21 @@ fn main() -> Result<()> {
             .map_or_else(|| String::from("none"), |n| n.to_string()),
     );
 
+    if args.pins == PinPolicy::Report {
+        println!(
+            "--report-pins: this run measures and prints the release pin instead of holding \
+             the set to it. Paste the digests into crates/qnero-circuit/src/profile.rs and \
+             rebuild with no flag."
+        );
+    }
+
     let started = std::time::Instant::now();
-    generate_all_artifacts(
+    generate_all_artifacts_with(
         &args.output,
         args.num_leaf_proofs,
         args.num_private_batch_proofs,
         args.include_padding_batch,
+        args.pins,
     )?;
     println!("done in {:.1}s", started.elapsed().as_secs_f64());
     Ok(())
@@ -222,6 +239,7 @@ mod tests {
             "--num-private-batch-proofs",
             "5",
             "--skip-padding-batch",
+            "--report-pins",
         ])
         .unwrap()
         .unwrap();
@@ -229,9 +247,22 @@ mod tests {
         assert_eq!(parsed.num_leaf_proofs, 3);
         assert_eq!(parsed.num_private_batch_proofs, Some(5));
         assert!(!parsed.include_padding_batch);
+        assert_eq!(parsed.pins, PinPolicy::Report);
 
         let parsed = args(&["--no-public-batch"]).unwrap().unwrap();
         assert_eq!(parsed.num_private_batch_proofs, None);
+    }
+
+    /// The pin is enforced unless an operator asks for it not to be. A
+    /// default that reported would let a circuit change reach a runtime with
+    /// nothing refusing it.
+    #[test]
+    fn the_release_pin_is_enforced_unless_the_flag_asks_otherwise() {
+        assert_eq!(args(&[]).unwrap().unwrap().pins, PinPolicy::Enforce);
+        assert_eq!(
+            args(&["--report-pins"]).unwrap().unwrap().pins,
+            PinPolicy::Report
+        );
     }
 
     /// A flag with no value, or a value that is not a number, must be an

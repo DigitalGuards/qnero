@@ -1,9 +1,8 @@
-//! Tests for the treasury config pallet (account for mining-reward fallbacks).
+//! The treasury config pallet, and the one call it no longer has.
 
 #[cfg(test)]
 mod tests {
-	use frame_support::{assert_err, assert_ok};
-	use frame_system::RawOrigin;
+	use crate::common::call_names;
 	use qnero_runtime::{
 		configs::TreasuryPalletId, AccountId, Runtime, System, TreasuryPallet, UNIT,
 	};
@@ -39,29 +38,23 @@ mod tests {
 		});
 	}
 
+	/// The account a chain's genesis names is the only one it will ever have.
+	///
+	/// `set_treasury_account_works` and `set_treasury_account_requires_root`
+	/// were here and are gone with the origin they exercised. The pallet's one
+	/// extrinsic is `ensure_root` inside the pallet, and this runtime has no
+	/// origin that can produce Root, so `TreasuryPallet` takes
+	/// `#[runtime::disable_call]` and the call has no `RuntimeCall` variant at
+	/// all. That is the stronger statement, and it is the one asserted here:
+	/// not that the call refuses every caller, but that there is no call.
 	#[test]
-	fn set_treasury_account_works() {
-		new_test_ext().execute_with(|| {
-			let new_account = AccountId::new([99u8; 32]);
-			assert_ok!(TreasuryPallet::set_treasury_account(
-				RawOrigin::Root.into(),
-				new_account.clone()
-			));
-			assert_eq!(TreasuryPallet::account_id(), new_account);
-		});
-	}
-
-	#[test]
-	fn set_treasury_account_requires_root() {
-		new_test_ext().execute_with(|| {
-			let new_account = AccountId::new([99u8; 32]);
-			assert_err!(
-				TreasuryPallet::set_treasury_account(
-					RawOrigin::Signed(treasury_account_id()).into(),
-					new_account
-				),
-				sp_runtime::DispatchError::BadOrigin
-			);
-		});
+	fn the_treasury_account_cannot_be_changed_after_genesis() {
+		assert!(
+			!call_names::<qnero_runtime::RuntimeCall>()
+				.iter()
+				.any(|name| name == "TreasuryPallet"),
+			"TreasuryPallet is dispatchable again; `set_treasury_account` is `ensure_root` \
+			 inside the pallet and this runtime must have no way to reach it"
+		);
 	}
 }

@@ -28,15 +28,6 @@ export function bytesToHex(bytes: Uint8Array): string {
   return out;
 }
 
-/** Byte length of a hex-encoded blob, which is what the explorer shows for a ciphertext. */
-export function hexByteLength(hex: string): number {
-  const body = stripPrefix(hex);
-  if (body.length % 2 !== 0) {
-    throw new Error(`hex string of odd length: ${body.length} characters`);
-  }
-  return body.length / 2;
-}
-
 /** A little-endian byte string as an integer. `U512` and every fixed-width chain integer is one. */
 export function leBytesToBigInt(bytes: Uint8Array): bigint {
   let out = 0n;

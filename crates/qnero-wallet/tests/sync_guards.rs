@@ -46,13 +46,12 @@ fn ct_for(address: &qnero_notes::Address, note: &Note, tag: u8) -> Vec<u8> {
 fn put_leaf(state: &mut NodeState, index: u64, block: u32, cm: Digest, ct: &[u8]) {
     state.put_storage(&identity_map_key("ZkTree", "Leaves", index), &cm.to_bytes());
     state.put_storage(
-        &identity_map_key("Shielded", "Ciphertexts", index),
-        &codec::Encode::encode(&ct.to_vec()),
-    );
-    state.put_storage(
         &identity_map_key("Shielded", "LeafBlocks", index),
         &codec::Encode::encode(&block),
     );
+    if !ct.is_empty() {
+        support::put_payload(state, block, ct);
+    }
 }
 
 /// Rule 1. A node behind this wallet's own watermark is refused, and the sync
@@ -232,42 +231,35 @@ fn a_leaf_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing() {
     assert_eq!(wallet.store.unspent_total(), 1_000);
 }
 
-/// A ciphertext the node withholds refuses the pass the same way a withheld
-/// commitment does.
+/// A block whose body the node will not serve refuses the pass, and moves
+/// nothing.
 ///
-/// The regression: the refusal covered `ZkTree::Leaves` alone. A settled
-/// output's ciphertext is written by the same call that appends its leaf, in
-/// `pallet-shielded`, and nothing removes it, so an absent one below the count
-/// is an answer withheld exactly as a missing commitment is. Read as "no
-/// ciphertext here" it was a leaf nobody could open: the scan stepped over it,
-/// the pass saved `next_leaf` above it, and the payment on that leaf was out
-/// of the balance permanently with no error anywhere, which is the defect the
-/// commitment rule closed arriving through the key beside it.
+/// This is where the withheld-ciphertext refusal went. The payload is in the
+/// block body now and the body roots as a whole, so there is no single
+/// ciphertext to withhold: what is left is a node that answers the header and
+/// refuses the block beside it. Read as a block that carried nothing it would
+/// step over every payment in that block, save `next_leaf` above them, and
+/// take them out of the balance permanently with no error anywhere, which is
+/// the defect the per-key rule closed arriving through the body instead.
 #[test]
-fn a_ciphertext_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing() {
-    let dir = support::scratch_dir("withheld-ciphertext");
+fn a_withheld_body_below_the_leaf_count_refuses_the_pass_and_moves_nothing() {
+    let dir = support::scratch_dir("withheld-body");
     let seed = dir.join("wallet.seed");
     create_seed(&seed).expect("a fresh seed");
     let mut wallet = Wallet::open(&seed).expect("the wallet opens");
     let address = wallet.address();
 
-    let mine = note_for(address.pk, 1_000, "withheld-ct");
+    let mine = note_for(address.pk, 1_000, "withheld-body");
     let ct = ct_for(&address, &mine, 7);
 
     let mut state = NodeState {
         head_number: 9,
-        // The commitment of leaf 1 is answered for and its ciphertext is not,
-        // which is the shape that used to pass silently.
-        withheld_ciphertexts: [1].into_iter().collect(),
+        // The header of block 8 is served and the block is not.
+        withheld_bodies: [8].into_iter().collect(),
         ..Default::default()
     };
     put_leaf(&mut state, 0, 8, Digest::hash_bytes(&[b"leaf zero"]), &[]);
     put_leaf(&mut state, 1, 8, mine.commitment(), &ct);
-    // Block 8's own coinbase, which is what puts the payment below the block's
-    // last leaf. A leaf at the last index owes a coinbase value rather than a
-    // ciphertext, so a withheld ciphertext there is the shape a coinbase has
-    // and says nothing; the withholding this test is about is the one at a
-    // position that cannot be a coinbase.
     put_leaf(&mut state, 2, 8, Digest::hash_bytes(&[b"leaf two"]), &[]);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
     let node = FakeNode::start(state);
@@ -278,13 +270,10 @@ fn a_ciphertext_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing
     let before = serde_json::to_value(&wallet.store).expect("the store serializes");
     let refused = wallet
         .sync(&chain, &metadata)
-        .expect_err("a ciphertext withheld below the count is refused");
+        .expect_err("a block with no body is refused");
     let message = format!("{refused:#}");
-    assert!(
-        message.contains("Shielded::Ciphertexts archive has no authenticated payload for leaf 1"),
-        "{message}"
-    );
-    assert!(message.contains("creation block 8"), "{message}");
+    assert!(message.contains("no body beside it"), "{message}");
+    assert!(message.contains("block 8"), "{message}");
 
     assert_eq!(wallet.store.next_leaf, 0);
     assert_eq!(
@@ -293,11 +282,11 @@ fn a_ciphertext_withheld_below_the_leaf_count_refuses_the_pass_and_moves_nothing
         "a refused sync must not have written anything"
     );
 
-    // The same node answering for it finds the payment.
-    node.state().withheld_ciphertexts.clear();
+    // The same node serving the body finds the payment.
+    node.state().withheld_bodies.clear();
     let report = wallet
         .sync(&chain, &metadata)
-        .expect("the pass runs once the ciphertext is answered for");
+        .expect("the pass runs once the body is served");
     assert_eq!(report.received, 1);
     assert_eq!(wallet.store.next_leaf, 3);
     assert_eq!(wallet.store.unspent_total(), 1_000);
@@ -379,10 +368,6 @@ fn a_leaf_above_the_count_carries_no_keys_and_is_not_a_refusal() {
     state.put_storage(
         &identity_map_key("Shielded", "LeafBlocks", 0),
         &codec::Encode::encode(&8u32),
-    );
-    state.put_storage(
-        &identity_map_key("Shielded", "Ciphertexts", 0),
-        &codec::Encode::encode(&Vec::<u8>::new()),
     );
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
     let node = FakeNode::start(state);
@@ -929,7 +914,6 @@ fn a_heavier_shorter_branch_is_a_fork_and_syncs() {
         state.fork_tag = 3;
         state.head_number = 17;
         state.remove_storage(&identity_map_key("ZkTree", "Leaves", 4));
-        state.remove_storage(&identity_map_key("Shielded", "Ciphertexts", 4));
         state.remove_storage(&identity_map_key("Shielded", "LeafBlocks", 4));
         // The replacement branch appended leaves 4 and 5 in block 9 as well,
         // and dating them says so: a leaf's block can never be below the block
@@ -1337,7 +1321,6 @@ fn a_rescan_recovers_a_leaf_below_the_watermark_and_keeps_every_note() {
         // The branch that survived never re-included the settlement that
         // created leaf 3's note, so that leaf holds something else now.
         state.remove_storage(&identity_map_key("ZkTree", "Leaves", 3));
-        state.remove_storage(&identity_map_key("Shielded", "Ciphertexts", 3));
     }
     let report = wallet
         .sync(&chain, &metadata)
@@ -1435,7 +1418,6 @@ fn a_rescan_bypasses_the_node_gate_and_only_adds() {
         let mut state = node.state();
         state.remove_storage(&used_key);
         state.remove_storage(&identity_map_key("ZkTree", "Leaves", 6));
-        state.remove_storage(&identity_map_key("Shielded", "Ciphertexts", 6));
         state.remove_storage(&identity_map_key("Shielded", "LeafBlocks", 6));
         state.remove_storage(&identity_map_key("Shielded", "LeafBlocks", 5));
         put_leaf(
@@ -1528,6 +1510,13 @@ fn a_rescan_bypasses_the_node_gate_and_only_adds() {
         state.fork_from = 15;
         state.fork_tag = 3;
         state.head_number = 25;
+        // Leaf 5 is dated again, at the block whose body carries its payload.
+        // A note is found where the chain put both halves, and this node can
+        // answer for block 19 once its head is past it.
+        state.put_storage(
+            &identity_map_key("Shielded", "LeafBlocks", 5),
+            &codec::Encode::encode(&19u32),
+        );
         state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(8));
     }
     let report = wallet

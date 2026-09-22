@@ -55,9 +55,10 @@ symptom of the proxied choice is a wallet that reconnects every hundred seconds
 and nothing that says why.
 
 The chain: 120 second blocks, RandomX proof of work, an initial difficulty of
-5 000, one endowed account at genesis (the faucet's), no treasury, no vesting,
-no tech collective and no sudo. `chain/runtime/src/genesis_config_presets/mod.rs`
-carries the reasoning for each of those; the short version is in section 4.
+5 000, one endowed account at genesis (the faucet's), no treasury, no vesting
+and no privileged origin of any kind. `chain/runtime/src/genesis_config_presets/mod.rs`
+carries the reasoning for the genesis; `docs/DESIGN.md` section 7.7 carries the
+reasoning for the last of those. The short version is in section 4.
 
 ## 2. Prerequisites
 
@@ -110,6 +111,29 @@ no keys: those are the one-time steps below, and they are steps a person reads
 before running.
 
 Run a single stage with an argument: `deploy-testnet.sh wallet`.
+
+**Staging prover modules built somewhere else.** The `wallet` stage rebuilds
+both wasm prover modules before it stages them, because a module older than the
+crate's surface is a wallet whose screens die on an export that is not there
+and nothing in the bundle can catch it: the module is fetched at runtime, never
+imported, never typed. On a machine that is not allowed to build wasm, build
+the two modules elsewhere, copy them into `crates/qnero-prover-wasm/www/pkg`
+and `www/pkg-threaded`, and set the flag:
+
+```bash
+QNERO_WASM_PREBUILT=1 QNERO_HOST=<user>@<host> QNERO_DOMAIN=<domain> \
+  ./scripts/deploy-testnet.sh wallet
+```
+
+It skips `build-wasm.sh` and `build-threaded-wasm.sh` and stages what is
+already in those two directories. It does not skip `stage-wasm.sh`'s export
+check, which reads every `js_name` the crate declares and refuses a module that
+is missing one, so the flag trades a build for a copy and not for a weaker
+deploy. Build the modules with binaryen 116 or newer on `PATH`: the version
+some distributions package, 108, emits a module that fails to initialise in
+current Chromium with `WebAssembly.Table.grow(): failed to grow table`, and
+nothing before the browser says so. `cargo install wasm-opt --locked` is the
+version-pinned way to get one.
 
 **Deploying the faucet on its own.** `node` builds, copies and restarts both
 binaries, so a change to the faucet page used to arrive by restarting the
@@ -173,30 +197,38 @@ What is in it, and what is deliberately not:
 - **No vesting table.** The dev and Heisenberg example table pays three public keys.
 - **No mainnet placeholder.** That allocation is 2% of the supply to an address nobody holds
   a key for, and it reaches a chain only through the mainnet preset.
-- **No treasury and no tech collective.** A collective is five real key holders or none;
-  with none, nobody can pass the tech-referenda origin, so **there is no runtime upgrade by
-  referendum on this chain** and the recovery for a runtime bug is a relaunch. On a testnet
-  that is the cheaper side of the trade.
+- **No treasury**, because there is nothing for one to hold and nothing to spend from it.
+- **No admin keys, as a property of the runtime rather than of this genesis.** The tech
+  collective, its referenda instance and the fast-upgrade origin were removed from the
+  binary, and with them every `frame-system` dispatchable that could write `:code`,
+  `:heappages` or a raw storage key. No chain this binary launches has an origin that can
+  change its own rules, so **there is no runtime upgrade on this chain** and the recovery
+  for a runtime bug is a relaunch. `docs/DESIGN.md` section 7.7 carries the decision and
+  its cost; on a testnet it is the cheaper side of the trade.
 - **No sudo.** There is no sudo pallet in this runtime.
 - **A 120 000 ms target block time**, written into `pallet_qpow::TargetBlockTimeMs` at
   genesis. There is no setter and no extrinsic that moves it afterwards; clients read it
   with `QPoWApi_get_target_block_time`.
-- **An initial difficulty of 5 000**, set rather than inherited. Difficulty is expected
-  hashes per block and the retarget's equilibrium is the divisor, so a chain settles between
-  `100 * H` and `200 * H` for a hash rate of `H`. The rate this chain is certain of is its
-  own node's single light-mode RandomX thread, about 33 H/s, which puts that band at 3 300
-  to 6 600 and its middle at one block every 152 seconds with no retarget pressure at all.
-  The inherited constant is 1 000 000, sized for 8 300 H/s, which would be 8.4 hours to the
-  first block.
+- **An initial difficulty of 4 000**, set rather than inherited. Difficulty is expected
+  hashes per block and the retarget's equilibrium is the target, so a chain settles at about
+  `120 * H` for a hash rate of `H`, inside a deterministic band of `83.2 * H` to `166.4 * H`.
+  The rate this chain is certain of is its own node's single light-mode RandomX thread, about
+  33 H/s, which puts that band at 2 737 to 5 473 and 4 000 at one block every 122 seconds
+  with no retarget pressure at all. The inherited constant is 1 000 000, which is 8 333 H/s
+  at the target, and would be 8.4 hours to the first block.
 - **There is no difficulty floor field.** `get_min_difficulty()` is a hard-coded 128; genesis
   validates against it and cannot move it. Do not go looking for a knob.
-- **Seed epoch constants stay at 2 048 blocks with a lag of 64.** They are runtime constants
-  a chain spec cannot move. 2 048 blocks at 120 s is 2.84 days, which is Monero's own
-  rotation interval, and matching it is why the target is 120 s. **The open question:** the
-  lag of 64 sits inside the 100-block reorg window, so a deep reorg across an epoch boundary
-  can change the seed under work already started. That cannot split the chain, because the
-  seed follows each candidate's own ancestry rather than canonical height. A lag of 128 would
-  remove even that, at the cost of a runtime upgrade, and nothing here has decided it.
+- **The seed epoch is 2 048 blocks and the lag is 128.** Both are runtime constants a chain
+  spec cannot move: they are compiled into the runtime wasm, so an operator cannot patch
+  either one in a spec file. 2 048 blocks at 120 s is 2.84 days, which is Monero's own
+  rotation interval, and matching it is why the target is 120 s. The lag was Monero's 64 and
+  was decided at 128 on 2026-09-22. `MaxReorgDepth` is `u32::MAX`, so a reorg across an epoch
+  boundary is legal at any depth and changes the seed under work already started. That cannot
+  split the chain, because the seed follows each candidate's own ancestry rather than
+  canonical height. 128 blocks is 4.3 hours at 120 s, which puts the seed block behind the
+  depth such a reorg reaches and gives a rig 4.3 hours of notice on its next dataset build.
+  Changing either constant after a launch takes a new genesis or a coordinated node release
+  at a known height.
 
 Record the genesis hash at first start. Everything binds to it: the wallet
 store refuses a store built against another chain, coinbase note derivation
@@ -322,16 +354,19 @@ are byte-identical and the stage is idempotent. The reproducibility test
 compares everything except `bootNodes` and validates the multiaddr shape, so a
 committed list keeps it green.
 
-One caveat, found 2026-09-21: the committed spec's runtime wasm was exported by
-a binary built in a checkout at another path (the worktree PR #5 came from),
-and a build of the same sources with the same compiler and lock file in this
-checkout produces a wasm that differs in symbol names and custom-section order.
-The likely cause is cargo's crate metadata hash, which for path dependencies
-includes the path. Until the spec is regenerated at the next relaunch the byte
-comparison fails here, and it must not be regenerated before then: a different
-wasm is a different genesis hash, which would cut new nodes off from the live
-chain. Nothing about a node release depends on it; the node stage copies the
-binary and the host keeps its spec.
+One property of that comparison is worth knowing before any regeneration. The
+exported runtime wasm is bound to the checkout the node was built in: the same
+sources, the same compiler and the same lock file at two different absolute
+paths produce two modules whose mangled symbol names carry different hash
+suffixes, because cargo's crate metadata hash includes the path of a path
+dependency. The wasm holds no literal path, which is what
+`runtime_wasm_uses_portable_source_paths` asserts, and it is still not
+byte-identical. Measured on 2026-09-22, two binaries built from an identical
+tree at two paths exported specs that differed in `:code` alone, by 377 bytes,
+with every other genesis key equal. So `--check` answers for the binary that
+wrote the file, and a regeneration from a second checkout is a second genesis
+hash. Regenerate once, in the tree the release binaries are built in, and ship
+that binary with it.
 
 A peer id is public and belongs in a public repository. The key that produces
 it is not, and it never leaves `/etc/qnero/node-key`.
@@ -777,9 +812,9 @@ There is exactly one generation of this: a second deploy overwrites
 deploying again, or keep a dated copy of your own.
 
 A rollback across a runtime change is not a rollback: the chain's state was
-produced by whichever runtime executed it. Under v1 there is no runtime upgrade
-by referendum on this chain anyway, so the runtime in the genesis wasm is the
-runtime for the chain's life.
+produced by whichever runtime executed it. No dispatchable on this chain can
+replace `:code`, so the runtime in the genesis wasm is the runtime for the
+chain's life, and a runtime change is a new chain.
 
 **A bad static deploy.** `git checkout` the previous commit of `site/`,
 `wallet-web/` or `explorer/` and run that stage again. `--delete` means the
@@ -794,7 +829,7 @@ the old one is gone with it. Say so before doing it.
 stopped authoring. Check `journalctl -u qnero-node` for "Mining paused", and
 check that `--force-authoring` is still on the command line if this node is the
 only authority. If the difficulty has run far above the available hash rate, the
-retarget will come back down at one 2048th per step, which is about 57 hours per
+retarget will come back down at one 2048th per step, which is about 47 hours per
 e-fold; pointing a rig at the stratum port is faster than waiting.
 
 **Refused blocks in the log.** Two warn lines are policy and self-healing:

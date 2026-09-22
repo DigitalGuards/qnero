@@ -375,12 +375,6 @@
                 publicly a pair. Which of the two is which stays hidden, because the wallet draws
                 the payment's output slot per spend.
               </li>
-              <li>
-                <strong>A refused transparent transfer still enters a block.</strong> The call
-                filter is checked at dispatch, so the extrinsic pays its fee and then fails, and its
-                arguments stay in the body forever. One mistaken attempt publishes exactly the
-                sender, recipient and amount triple the policy exists to deny.
-              </li>
             </ul>
             <p>
               <a href="/how-it-works.html#reveals">The full list is on the how-it-works page</a>,

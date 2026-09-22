@@ -28,6 +28,12 @@ import { ProverClient } from '../src/worker/client';
 import { ENTRY_WALK_LIMIT } from '../src/worker/protocol';
 import { ProverCore, type ModuleLoader, type WasmModule, type WasmProver } from '../src/worker/core';
 
+/**
+ * `max_tree_depth` here is deliberately above the circuit's own
+ * `MAX_TREE_DEPTH`, which the relaunch moves to 20: nothing in this file
+ * bounds a leaf count against it, and an over-large stand-in keeps the case
+ * that a limit read out of the module is used rather than assumed.
+ */
 const LIMITS = {
   memo_bytes: 61,
   ciphertext_fixed_bytes: 1731,
@@ -74,16 +80,16 @@ function stubModule(counts: Counts): WasmModule {
     entropySelfCheck: () => undefined,
     walletLimits: () => JSON.stringify(LIMITS),
     readStateProof: () => '[]',
+    extrinsicsRoot: () => `0x${'ee'.repeat(32)}`,
     deriveAccount: () =>
       JSON.stringify({ address: ADDRESS, pk: 'PK', ak: 'AK', cvk: 'CVK-SECRET' }),
     minerKey: () => 'qnm1stub',
     decryptNote: (_seed, ciphertext, expected) => {
       if (expected !== '') {
-        // Nothing in the worker takes the module's checked path any more. Both
-        // batches open the payload on its own and compare afterwards, which is
-        // what keeps "this wallet's note, moved" apart from "somebody else's":
-        // the module's refusal on a mismatch reads the same as a stranger's
-        // ciphertext and threw the one local detector away.
+        // Nothing in the worker takes the module's checked path. A payload out
+        // of a block body has no commitment beside it to check against: the
+        // note's own commitment comes back and the page matches it against the
+        // leaves the block's root folded.
         throw new Error('this stub refuses the checked path');
       }
       return JSON.stringify({
@@ -102,11 +108,14 @@ function stubModule(counts: Counts): WasmModule {
         nullifier: `null-${value}`,
       });
     },
-    coinbaseNote: () =>
+    // The whole coinbase rule now: derived from the miner key against the
+    // value the chain published, and the commitment decides. The stub answers
+    // a commitment a test can either match or miss.
+    coinbaseNote: (_seed: string, _genesis: string, block: number, value: bigint) =>
       JSON.stringify({
         rho: 'cc'.repeat(32),
         r: 'dd'.repeat(32),
-        commitment: 'not-this-wallets-coinbase',
+        commitment: `coinbase-${block}-${value}`,
         nullifier: 'nn'.repeat(32),
       }),
     // `H(RHO_ENTRY, block, index)`, stubbed as something a test can predict.
@@ -254,13 +263,14 @@ describe('a transfer leaf', () => {
   /**
    * The transfer rule, and the answer the scan acts on.
    *
-   * The payload opens on its own and the commitment beside it is compared
-   * here. A note that opens to a different commitment comes back with `moved`
-   * set, which is what `runSync` searches the block's authenticated leaf range
-   * on. Handing the module the leaf's commitment instead would make it refuse,
-   * and a refusal reads exactly like a stranger's ciphertext.
+   * A payload comes out of a block body with no leaf beside it, so nothing is
+   * handed in but the bytes and nothing is compared here. What comes back is
+   * the commitment the note opens, which is what `runSync` searches the
+   * block's authenticated leaf range for. Handing the module a commitment
+   * instead would make it refuse on a mismatch, and a refusal reads exactly
+   * like a stranger's ciphertext.
    */
-  it('marks a note whose leaf carries a commitment it does not open', async () => {
+  it('answers with the commitment the note opens and no leaf at all', async () => {
     const { core } = await started();
     await core.handle({ kind: 'unlock', seed: new Uint8Array(32) }, () => undefined);
     const answer = (
@@ -268,30 +278,25 @@ describe('a transfer leaf', () => {
         {
           kind: 'decryptBatch',
           items: [
-            {
-              index: 1,
-              ciphertext: new Uint8Array([1, 2, 3]),
-              commitment: `commit-${PAYLOAD_VALUE}-aaaa`,
-            },
-            { index: 2, ciphertext: new Uint8Array([1, 2, 3]), commitment: 'a-different-leaf' },
+            { ciphertext: new Uint8Array([1, 2, 3]) },
+            { ciphertext: new Uint8Array([4, 5]) },
           ],
         },
         () => undefined,
       )
-    ).value as ({ commitment: string; moved?: boolean } | null)[];
+    ).value as ({ commitment: string; memo: string } | null)[];
 
     expect(answer[0]?.commitment).toBe(`commit-${PAYLOAD_VALUE}-aaaa`);
-    expect(answer[0]?.moved).toBeUndefined();
+    expect(answer[0]?.memo).toBe('payload of 3 bytes');
     expect(answer[1]?.commitment).toBe(`commit-${PAYLOAD_VALUE}-aaaa`);
-    expect(answer[1]?.moved).toBe(true);
+    expect(answer[1]?.memo).toBe('payload of 2 bytes');
   });
 });
 
 describe('a coinbase leaf', () => {
-  it('is rebuilt at the value the chain published, not the payload\'s', async () => {
+  it('is rebuilt from the miner key at the value the chain published', async () => {
     const { core, counts } = await started();
-    const unlocked = new Uint8Array(32);
-    await core.handle({ kind: 'unlock', seed: unlocked }, () => undefined);
+    await core.handle({ kind: 'unlock', seed: new Uint8Array(32) }, () => undefined);
     const answer = (
       await core.handle(
         {
@@ -302,21 +307,24 @@ describe('a coinbase leaf', () => {
               blockNumber: 9,
               value: CHAIN_VALUE.toString(),
               genesisHash: '11'.repeat(32),
-              commitment: `commit-${CHAIN_VALUE}-aaaa`,
-              ciphertext: new Uint8Array([1, 2, 3]),
+              commitment: `coinbase-9-${CHAIN_VALUE}`,
             },
           ],
         },
         () => undefined,
       )
-    ).value as ({ value: string; memo: string } | null)[];
+    ).value as ({ value: string; memo: string; mined?: boolean } | null)[];
 
-    expect(counts.digests).toEqual([{ value: CHAIN_VALUE, rho: 'aa'.repeat(32) }]);
+    // The derived path answers it, so no note digest is recomputed and no
+    // payload is opened: a coinbase carries none, because the inherent refuses
+    // a non-empty one by name.
+    expect(counts.digests).toEqual([]);
     expect(answer[0]?.value).toBe(CHAIN_VALUE.toString());
-    expect(answer[0]?.memo).toBe('payload of 3 bytes');
+    expect(answer[0]?.memo).toBe('');
+    expect(answer[0]?.mined).toBe(true);
   });
 
-  it('is nobody\'s when the commitment does not open at the chain\'s value', async () => {
+  it("is nobody's when the rebuild does not reach the commitment the tree holds", async () => {
     const { core } = await started();
     await core.handle({ kind: 'unlock', seed: new Uint8Array(32) }, () => undefined);
     const answer = (
@@ -330,13 +338,15 @@ describe('a coinbase leaf', () => {
               value: CHAIN_VALUE.toString(),
               genesisHash: '11'.repeat(32),
               commitment: 'somebody-elses-coinbase',
-              ciphertext: new Uint8Array([1, 2, 3]),
             },
           ],
         },
         () => undefined,
       )
     ).value as (object | null)[];
+    // And it is not offered a second way in. A payload that opens a commitment
+    // at a coinbase position is found by the body pass, which is what makes
+    // that position no longer a place to hide a payment.
     expect(answer[0]).toBeNull();
   });
 });

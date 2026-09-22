@@ -93,7 +93,34 @@ pub const DEFAULT_NUM_LEAF_PROOFS: usize = qnero_circuit::profile::RELEASE_NUM_L
 pub const DEFAULT_NUM_PRIVATE_BATCH_PROOFS: usize =
     qnero_circuit::profile::RELEASE_NUM_PRIVATE_BATCHES;
 
-/// Generate the whole artifact set into `output_dir`.
+/// What a run does when regenerated release artifacts miss the pinned digests.
+///
+/// The pin is the release identity: at the chain's own dimensions the
+/// generator rebuilds the set and checks it against the three digests in
+/// `qnero_circuit::profile`, so a circuit change cannot reach a runtime
+/// without an explicit new profile and a wallet release.
+///
+/// [`PinPolicy::Report`] exists for the one moment that check has to be
+/// answered rather than obeyed: the release that moves the circuit on purpose
+/// and needs the new digests to paste back into the pin. Enforcing then is
+/// circular, and it is also silent, because the check runs before the profile
+/// is committed and a failed run deletes its whole staging directory, so the
+/// operator gets the refusal and no digests.
+///
+/// `Report` is a build-host affordance and changes no artifact: the same files
+/// are built, read back through their own loaders and committed either way.
+/// Only the comparison against the pin is replaced by printing what was
+/// measured. Every automatic caller, a pallet's `build.rs` above all, takes
+/// [`PinPolicy::Enforce`] through [`generate_all_artifacts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinPolicy {
+    /// Refuse a set at release dimensions whose digests miss the pin.
+    Enforce,
+    /// Print the three digests and publish the set whatever they are.
+    Report,
+}
+
+/// Generate the whole artifact set into `output_dir`, enforcing the pin.
 ///
 /// `include_padding_batch` controls the all-padding private-batch proof, which
 /// only a public-batch prover needs and which costs a full recursive proving
@@ -117,6 +144,25 @@ pub fn generate_all_artifacts<P: AsRef<Path>>(
     num_private_batch_proofs: Option<usize>,
     include_padding_batch: bool,
 ) -> Result<()> {
+    generate_all_artifacts_with(
+        output_dir,
+        num_leaf_proofs,
+        num_private_batch_proofs,
+        include_padding_batch,
+        PinPolicy::Enforce,
+    )
+}
+
+/// [`generate_all_artifacts`] with the release-pin policy chosen by the
+/// caller. See [`PinPolicy`]; only an operator regenerating the pin itself
+/// passes anything but [`PinPolicy::Enforce`].
+pub fn generate_all_artifacts_with<P: AsRef<Path>>(
+    output_dir: P,
+    num_leaf_proofs: usize,
+    num_private_batch_proofs: Option<usize>,
+    include_padding_batch: bool,
+    pins: PinPolicy,
+) -> Result<()> {
     // Dimensions are bounded before anything is built or written: a bad count
     // would otherwise drive a circuit build whose cost scales with it.
     let config = CircuitBinsConfig::new(num_leaf_proofs, num_private_batch_proofs)?;
@@ -125,7 +171,7 @@ pub fn generate_all_artifacts<P: AsRef<Path>>(
     let staging = create_staging_dir(output_path)?;
 
     let generated = (|| -> Result<()> {
-        generate_into(&staging, config, include_padding_batch)?;
+        generate_into(&staging, config, include_padding_batch, pins)?;
         // Written last: its presence is what marks a staged set complete.
         config.save(&staging)
     })();
@@ -144,6 +190,7 @@ fn generate_into(
     staging: &Path,
     config: CircuitBinsConfig,
     include_padding_batch: bool,
+    pins: PinPolicy,
 ) -> Result<()> {
     // --- leaf ---
     let leaf_circuit = QneroSpendCircuit::new(qnero_leaf_circuit_config())?;
@@ -242,21 +289,55 @@ fn generate_into(
 
     let mut snippet = circuit_config_snippet(config);
     if let Some(num_inner) = config.num_private_batch_proofs {
+        let leaf_digest = artifact_digest(&staging.join("leaf_verifier.bin"))?;
+        let private_digest = artifact_digest(&staging.join("private_batch_verifier.bin"))?;
+        let public_digest = artifact_digest(&staging.join("public_batch_verifier.bin"))?;
         let profile = qnero_circuit::profile::protocol_profile(
             config.num_leaf_proofs,
             num_inner,
-            artifact_digest(&staging.join("leaf_verifier.bin"))?,
-            artifact_digest(&staging.join("private_batch_verifier.bin"))?,
-            artifact_digest(&staging.join("public_batch_verifier.bin"))?,
+            leaf_digest,
+            private_digest,
+            public_digest,
         );
-        if config.num_leaf_proofs == DEFAULT_NUM_LEAF_PROOFS
-            && num_inner == DEFAULT_NUM_PRIVATE_BATCH_PROOFS
-        {
-            qnero_circuit::profile::ensure_supported(&profile, config.num_leaf_proofs).map_err(
-                |reason| {
-                    anyhow!("regenerated release artifacts differ from the release pin: {reason}")
-                },
-            )?;
+        let at_release_dimensions = config.num_leaf_proofs == DEFAULT_NUM_LEAF_PROOFS
+            && num_inner == DEFAULT_NUM_PRIVATE_BATCH_PROOFS;
+        match pins {
+            PinPolicy::Enforce if at_release_dimensions => {
+                qnero_circuit::profile::ensure_supported(&profile, config.num_leaf_proofs)
+                    .map_err(|reason| {
+                        anyhow!(
+                            "regenerated release artifacts differ from the release pin: {reason}"
+                        )
+                    })?;
+            }
+            PinPolicy::Enforce => {}
+            PinPolicy::Report => {
+                // Printed in the order `protocol_profile` takes them and the
+                // order they sit in `qnero_circuit::profile`, so an operator
+                // refreshing the pin reads them straight down the file.
+                println!("release pins measured at these dimensions, blake2b-256 per file:");
+                for (name, digest) in [
+                    ("RELEASE_LEAF_DIGEST", leaf_digest),
+                    ("RELEASE_PRIVATE_DIGEST", private_digest),
+                    ("RELEASE_PUBLIC_DIGEST", public_digest),
+                ] {
+                    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+                    println!("  {name} = {hex}");
+                }
+                if at_release_dimensions {
+                    println!(
+                        "  these are the release dimensions ({} leaf slots, {} private batches), \
+                         so they are the three pins",
+                        config.num_leaf_proofs, num_inner
+                    );
+                } else {
+                    println!(
+                        "  these are NOT the release dimensions ({} leaf slots, {} private \
+                         batches) and must not be pasted into the pin",
+                        config.num_leaf_proofs, num_inner
+                    );
+                }
+            }
         }
         snippet.push_str(&format!(
             "pub const PROTOCOL_PROFILE: [u8; {}] = {:?};\n",

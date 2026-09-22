@@ -1,4 +1,4 @@
-# Native architecture changes: runtime 105
+# Native architecture changes: runtime 106
 
 This change set requires coordinated node and wallet releases. Preparing a build
 or a new chain specification does not activate a network upgrade. Preserve the
@@ -71,13 +71,15 @@ into a branch the node refuses for ever.
    archive database using the new client. Replay executes the historical runtime
    stored in chain state. Check block hashes, state roots, accumulated work,
    balances and recoverable wallet history against the preserved chain.
-3. Coordinate adoption of the native client, then qualify and activate runtime
-   105 through the chain's authorized upgrade mechanism. The deployed testnet's
-   empty governance configuration must be accounted for before choosing this
-   route. A fresh genesis may be required if it has no authorized upgrade path.
+3. Coordinate adoption of the native client. There is no second step here, and
+   this is where the route ends: no Qnero chain has an authorized upgrade
+   mechanism. The runtime deleted every dispatchable that could write `:code`,
+   so the runtime in a chain's genesis wasm is the runtime for that chain's
+   life. Keeping an existing chain therefore means keeping its existing
+   runtime; a runtime change is the next section.
 4. Publish the exact protocol manifest and matching wallets. New wallets require
-   the authenticated profile and therefore refuse the previous runtime until
-   its profile has been installed by the upgrade.
+   the authenticated profile, so a wallet release that moves the profile is a
+   wallet release for the next chain rather than for this one.
 
 ### Starting a new testnet
 
@@ -87,18 +89,23 @@ Use a separate database and explicit network identity. Existing balances and
 wallet scan checkpoints belong to the previous genesis. Generating that candidate
 specification in a development branch does not reset the active testnet.
 
-The raw `chain/node/chain-specs/qnero-testnet.json` in this branch is regenerated
-from runtime 105 and has an empty bootnode list. It is a candidate for a new
-genesis. Keep the deployed network's original specification for an upgrade or
+The raw `chain/node/chain-specs/qnero-testnet.json` in this branch was
+regenerated from runtime 106 at the close of the relaunch bundle, and it carries
+the seed node's bootnode, `/dns/node.qnero.io/tcp/30333/p2p/QmfXuYvCz21mBHhPCuaQkchwN9tR5fS9VjKcLEeLiQpYzv`.
+That list sits outside genesis, so it did not move the genesis hash. It is a
+candidate for a new genesis. Keep the deployed network's original specification for an upgrade or
 replay of its existing history; choose a separate network identity before
 activating this candidate.
 
 ## Transaction and artifact compatibility
 
-Runtime `spec_version` is 105; `transaction_version` remains 7. The signed SCALE
+Runtime `spec_version` is 106; `transaction_version` remains 7. The signed SCALE
 encoding and extension tuple are unchanged. Unsupported transparent calls become
 invalid at extrinsic checking, before inclusion, fees, nonce updates or body
-recording. The dispatch filter remains in place. Historical blocks use their
+recording. That now covers a `Multisig::propose` payload: the check decodes the
+opaque bytes and holds them to the same rule, so a proposal carrying a refused
+call is invalid too. The dispatch filter remains in place for internal
+dispatch. Historical blocks use their
 historical runtime; importing them under a replacement genesis is a different
 chain and is unsupported.
 
@@ -115,8 +122,12 @@ Current state keeps ordinary ciphertexts for 64 blocks, with at most 2048 new
 ciphertexts per block and at most 4096 cleanup steps per block. A FIFO queue
 tracks only stored ciphertexts, so unrelated commitment-tree leaves cannot make
 that queue grow. At the 2048-byte runtime payload cap, the steady-state payload
-bound is 256 MiB, plus queue, map and database overhead. Real ordinary outputs
-currently use 1792 bytes. This bound concerns the live ciphertext map.
+bound is 256 MiB, plus queue, map and database overhead. That cap is still what
+bounds the entry path, so 256 MiB stays the number to plan against. What a
+settlement writes is now fixed rather than observed: an ordinary output is
+exactly 1792 bytes, because settlement requires the length the declared crypto
+suite fixes, so the settled share of the map is 224 MiB at the same block
+counts. This bound concerns the live ciphertext map.
 
 The storage-version-2 migration records a finite legacy leaf-index range and
 delays cleanup by 64 blocks. It removes at most the unused portion of the cleanup
@@ -162,8 +173,8 @@ burst then one per 150 s. An honest chain that carries `N` cheap blocks (a
 minority partition whose hashrate returned) imports `min(N, 1024)` at once and
 the rest at the budgeted rate, each exhausted batch costing the serving peer one
 drop and the node one sync restart; a partition holding under a ninth of the
-hash settles below the free line within a few days and is charged from then
-on. Two follow-ups remain open: an ancestor search
+hash settles below the free line within about two and a half days and is charged
+from then on. Two follow-ups remain open: an ancestor search
 that recognises a known side-branch block, so budgeted recovery re-downloads
 nothing it already holds; and headers-first admission, which would verify
 seals only and execute a branch's bodies once its header work is competitive.
@@ -199,7 +210,7 @@ It mines distinct ordinary forks, restarts both nodes as followers, connects
 their reserved peers, and requires convergence to B's strictly greater
 configured chain work. It checks genesis-only finalization, retrieval of the
 former A block body and historical profile proof on A after its reorganization,
-runtime 105, the 192-byte profile, and native wallet discovery of B's positive
+runtime 106, the 192-byte profile, and native wallet discovery of B's positive
 coinbase notes.
 The result also records whether B learned the losing A branch during reconnect;
 that depends on ordinary peer timing and is optional.

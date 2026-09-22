@@ -4,14 +4,20 @@
 //! [`crate::configs::QneroCallFilter`] runs for every extrinsic format during
 //! [`Checkable::check`]. A forbidden call returns [`InvalidTransaction::Call`]
 //! before signature verification, transaction extensions, fees, or recording
-//! the extrinsic in the block. The filter also covers calls nested in its
-//! supported wrappers. Bare inherents and unsigned settlements pass the same
-//! policy before their own origin and validity checks.
+//! the extrinsic in the block. The filter also covers calls nested in the
+//! wrappers that carry them in the extrinsic: `Utility::batch_all`,
+//! `Multisig::execute`, and `Multisig::propose`, whose payload is opaque bytes
+//! the filter decodes and holds to the same rule. Bare inherents and unsigned
+//! settlements pass the same policy before their own origin and validity
+//! checks.
 //!
-//! The same filter remains installed as `BaseCallFilter` for internal dispatch.
+//! The same filter remains installed as `BaseCallFilter` for internal dispatch,
+//! which is the only guard left on a call no extrinsic carries: a due scheduler
+//! task, and a `batch_all` child re-dispatched under the caller's origin.
 //! This admission rule prevents accidental publication of an unsupported
 //! transparent transfer as a failed extrinsic. Calls that deliberately publish
-//! arbitrary bytes still require the sender to protect their own data.
+//! arbitrary bytes, `System::remark` and `remark_with_event`, still require the
+//! sender to protect their own data.
 //!
 //! # Consensus rule: the transparent entry admits ML-DSA-87 only
 //!
@@ -38,7 +44,7 @@
 //! The refusal sits in [`Checkable::check`] for [`QneroUncheckedExtrinsic`],
 //! which is the single seam under both `Executive::validate_transaction` and
 //! `Executive::apply_extrinsic`. Every signed call therefore inherits it with no
-//! per-call enumeration: transfers, governance, multisig, `Utility::batch_all`,
+//! per-call enumeration: transfers, multisig, `Utility::batch_all`,
 //! `Vesting::claim` and `Shielded::shield` alike. The `try-runtime` blind-check
 //! path carries the same refusal, so a replay, which skips signature
 //! verification entirely, cannot admit what the live path refuses.
@@ -326,6 +332,15 @@ mod tests {
 		RuntimeCall::System(frame_system::Call::remark { remark: alloc::vec![42u8] })
 	}
 
+	/// A `Multisig::propose` carrying `payload` as its opaque inner call.
+	fn propose(payload: Vec<u8>) -> RuntimeCall {
+		RuntimeCall::Multisig(pallet_multisig::Call::propose {
+			multisig_address: AccountId::new([8u8; 32]),
+			call: payload.try_into().expect("the payload fits MaxCallSize"),
+			expiry: 100,
+		})
+	}
+
 	fn signed_with(signature: Signature) -> QneroUncheckedExtrinsic {
 		QneroUncheckedExtrinsic::new_signed(
 			call(),
@@ -355,6 +370,32 @@ mod tests {
 			refused.ensure_supported_signature_scheme(),
 			Err(InvalidTransaction::BadSigner.into()),
 			"the transparent entry admits ML-DSA-87 only"
+		);
+	}
+
+	/// The call policy's one wrapper whose payload is not a typed call.
+	///
+	/// A proposal carries its inner call as opaque bytes and dispatches
+	/// nothing, so without the arm in `refused_under_v1` a proposal carrying a
+	/// transfer is an ordinary valid extrinsic and the sender, the recipient
+	/// and the amount go into the block body. Asserted against the shared
+	/// function rather than through externalities, because the answer depends
+	/// on no state.
+	#[test]
+	fn a_multisig_proposal_carrying_a_transfer_is_refused_by_ensure_allowed_call() {
+		let transfer = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {
+			dest: sp_runtime::MultiAddress::Id(AccountId::new([7u8; 32])),
+			value: 1,
+		});
+		assert_eq!(
+			QneroUncheckedExtrinsic::new_bare(propose(transfer.encode())).ensure_allowed_call(),
+			Err(InvalidTransaction::Call.into()),
+			"a proposal is held to the same rule as the call it carries"
+		);
+		assert_eq!(
+			QneroUncheckedExtrinsic::new_bare(propose(call().encode())).ensure_allowed_call(),
+			Ok(()),
+			"and a proposal of an allowed call is allowed"
 		);
 	}
 

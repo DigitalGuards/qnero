@@ -1,4 +1,7 @@
-use crate::{mock::*, Config, CurrentDifficulty};
+use crate::{
+	mock::*, retarget_divisor, Config, CurrentDifficulty, MAX_RETARGET_DECREASE_UNITS,
+	RETARGET_INCREMENT_DIVISOR,
+};
 use frame_support::{pallet_prelude::TypedGet, traits::Hooks};
 use primitive_types::U512;
 use sp_runtime::BuildStorage;
@@ -152,8 +155,11 @@ fn test_retarget_floors_small_block_time() {
 	new_test_ext().execute_with(|| {
 		let difficulty = U512::from(1_000_000u64);
 
-		// target 600ms -> divisor 500ms, equal to the 500ms floor: a sub-floor
-		// delta is clamped to the floor and yields no increase.
+		// The floor is 500 ms and the divisor is `target * ln 2`, so the two are
+		// equal at a 722 ms target (500 / ln 2 = 721.3 ms) and the floor is the
+		// wider of the pair below that. At the 600 ms target here the divisor is
+		// 415 ms, so a sub-floor delta is clamped to 500 ms, still lands in the
+		// first bucket and yields no increase.
 		let target = 600u64;
 		let floored = QPow::calculate_difficulty(difficulty, 1, target);
 		let at_floor = QPow::calculate_difficulty(difficulty, 500, target);
@@ -285,40 +291,70 @@ fn test_adjust_difficulty_with_zero_storage_uses_initial_difficulty() {
 /// `create_inherent` is forced to produce must not leave a permanent deficit
 /// versus the same wall clock of honest blocks at the target.
 ///
-/// The drift allowance is an absolute number of seconds and the retarget's
-/// buckets scale with the target, so moving the public target from 12 s to
-/// 120 s made this strictly safer: a 15 s inflate used to push a 12 s wait into
-/// the next 10 s bucket and cost a single -1, and at a 100 s divisor it does not
-/// leave the neutral band at all. Both targets are checked, because the dev
-/// chain still runs at 12 s.
+/// The cycle is three gaps: a wait at the target inflated by the full 15 s of
+/// legal drift, the `last + 100 ms` block the inherent is then forced to
+/// produce, and the compressed follow-up that brings the claimed clock back to
+/// the honest wall clock. Three honest gaps at the target book nothing, so the
+/// condition for the cycle to book nothing either is
+///
+///     floor((T + drift) / d) + floor((2T - drift - 100) / d) <= 3
+///
+/// with `d = retarget_divisor(T)`. At the public target that is `1 + 2 = 3` and
+/// the cycle books exactly zero, the same as the old `target * 10 / 12`
+/// divisor did.
+///
+/// **Safety is not monotone in the target**, so the invariant is asserted at
+/// the public target alone. Both floors above land on 2 for every target from
+/// about 24.5 s to about 38.8 s, and the 12 s `dev` target books one unit of
+/// deficit for the same reason: 15 s is 1.8 divisors there, where the whole
+/// concentration budget is one. That arm is pinned below as a documented
+/// exception. A dev chain is a test harness with no adversarial miners, and it
+/// cleared the old rule by coincidence rather than by margin, its third gap of
+/// 8.9 s happening to fall under the old 10 s divisor.
 #[test]
 fn max_timestamp_drift_does_not_bias_difficulty_down() {
 	new_test_ext().execute_with(|| {
-		let start = U512::from(4_000_000u64);
-		let run = |target: u64, mut d: U512, deltas: &[u64]| {
-			for &t in deltas {
-				d = QPow::calculate_difficulty(d, t, target);
+		// At a parent of exactly one increment divisor the step the retarget
+		// takes *is* the adjustment in units, so the comparison below is free
+		// of the increment's own integer rounding.
+		let units = |target: u64, gap: u64| -> i64 {
+			let parent = U512::from(RETARGET_INCREMENT_DIVISOR);
+			let next = QPow::calculate_difficulty(parent, gap, target);
+			if next >= parent {
+				(next - parent).low_u64() as i64
+			} else {
+				-((parent - next).low_u64() as i64)
 			}
-			d
 		};
+		let cycle =
+			|target: u64, gaps: &[u64]| -> i64 { gaps.iter().map(|&gap| units(target, gap)).sum() };
 
-		// Dev target: 12s wait + 15s future, then last+100ms, then the wall
-		// clock catches up.
-		let honest = run(DEV_TARGET, start, &[12_000, 12_000, 12_000]);
-		let attacked = run(DEV_TARGET, start, &[27_000, 100, 8_900]);
-		assert_eq!(honest, start, "honest 12s blocks leave difficulty unchanged");
-		assert!(
-			attacked >= honest,
-			"max-drift cycle must not book a deficit at the dev target: honest {honest}, attacked {attacked}"
+		// Public target: a 120 s wait inflated by the full 15 s, the forced
+		// 100 ms block, then the catch-up. 135_000 + 100 + 224_900 is 360_000,
+		// the same wall clock as three honest 120 s blocks.
+		assert_eq!(
+			cycle(PUBLIC_TARGET, &[120_000, 120_000, 120_000]),
+			0,
+			"honest 120s blocks leave difficulty unchanged"
+		);
+		assert_eq!(
+			cycle(PUBLIC_TARGET, &[135_000, 100, 224_900]),
+			0,
+			"the max-drift cycle must not book a deficit at the public target"
 		);
 
-		// Public target: the same 15s inflate after a 120s wait.
-		let honest = run(PUBLIC_TARGET, start, &[120_000, 120_000, 120_000]);
-		let attacked = run(PUBLIC_TARGET, start, &[135_000, 100, 104_900]);
-		assert_eq!(honest, start, "honest 120s blocks leave difficulty unchanged");
-		assert!(
-			attacked >= honest,
-			"max-drift cycle must not book a deficit at the public target: honest {honest}, attacked {attacked}"
+		// The dev chain is the documented exception, pinned so a future target
+		// change cannot cross the band unnoticed. 27_000 + 100 + 8_900 is
+		// 36_000, three honest 12 s blocks.
+		assert_eq!(
+			cycle(DEV_TARGET, &[12_000, 12_000, 12_000]),
+			0,
+			"honest 12s blocks leave difficulty unchanged"
+		);
+		assert_eq!(
+			cycle(DEV_TARGET, &[27_000, 100, 8_900]),
+			-1,
+			"the dev target books one unit per max-drift cycle: 15s is 1.8 divisors there"
 		);
 	});
 }
@@ -356,45 +392,54 @@ fn settle(start: U512, hash_rate: u64, target: u64, max_blocks: u32) -> (u32, U5
 /// come back down the same way. This pins both, and the second half is where
 /// the band is not symmetric with intuition.
 ///
-/// The Homestead band is one to two divisors wide, so at a 120 s target (a 100 s
-/// divisor) it is 100 s to 200 s and it is dead in both directions. A chain
-/// climbing into it stops at the bottom, at 100 s blocks; a chain falling into
-/// it stops at the top, at 200 s blocks, and stays there. Both are inside the
-/// band by construction, and the target itself is the middle of it. `chain/MINING.md` says the same
-/// thing to an operator.
+/// The Homestead band is one divisor wide, so at a 120 s target (an 83.177 s
+/// divisor) it is 83.2 s to 166.4 s and it is dead in both directions. A chain
+/// climbing into it stops at the bottom, at 83 s blocks; a chain falling into
+/// it stops at the top, at 166 s blocks, and stays there. The target sits
+/// inside the band at 1.4427 divisors, which is where the stationary mean is.
+/// `chain/MINING.md` says the same thing to an operator.
 ///
 /// The climb's cost is worth stating in both units, because one of them is not
-/// ten times the 12 s figure. At 120 s it is 13 628 blocks and 2.40 days; at
-/// 12 s it is 8 857 blocks and 0.25 days. The block count grows by half because
-/// the settle difficulty is ten times higher and every step is a fixed 1/2048
-/// fraction. The wall clock grows by ten for the same reason, the difficulty:
-/// the whole climb runs far below the target, so multiplying the block count by
-/// 120 s would overstate it by a factor of eight.
+/// ten times the 12 s figure. At 120 s it is 13 250 blocks and 2.00 days; at
+/// 12 s it is 8 466 blocks and 5.096 hours. The block count grows by half
+/// because the settle difficulty is ten times higher and every step is a fixed
+/// 1/2048 fraction. The wall clock grows by ten for the same reason, the
+/// difficulty: the whole climb runs far below the target, so multiplying the
+/// block count by 120 s would overstate it by a factor of eight.
 #[test]
 fn a_chain_at_the_floor_converges_to_the_target_band() {
 	new_test_ext().execute_with(|| {
 		/// A small testnet rig: about two modern cores in full mode.
 		const HASH_RATE: u64 = 3_500;
-		/// Measured: 13_628 blocks and 2.40 days of wall clock.
+		/// Measured: 13_250 blocks and 48.1 hours of wall clock.
 		const MAX_BLOCKS: u32 = 14_000;
-		let band = PUBLIC_TARGET * 10 / 12..PUBLIC_TARGET * 20 / 12;
+		let band = retarget_divisor(PUBLIC_TARGET)..2 * retarget_divisor(PUBLIC_TARGET);
 
+		// Measured on the first run under the new divisor: 13 250 blocks,
+		// difficulty 291 239, block time 83 211 ms, 48.112 hours. The same
+		// replay reproduces the old rule's committed 13 628 and 57.7 hours
+		// exactly, so these are measurements rather than estimates.
 		let (blocks, difficulty, block_time_ms, wall_clock_ms) =
 			settle(QPow::get_min_difficulty(), HASH_RATE, PUBLIC_TARGET, MAX_BLOCKS);
 
 		assert!(
 			(13_000..MAX_BLOCKS).contains(&blocks),
-			"climb from the floor took {blocks} blocks, expected about 13_628"
+			"climb from the floor took {blocks} blocks, expected about 13_250"
 		);
+		// 48.1 hours, so the integer day count is 2 with about seven minutes to
+		// spare out of forty-eight hours, a margin of 0.2%. Any later move to
+		// the seed hash rate, the difficulty floor or the ln 2 precision can
+		// flip this to 1, so read a failure here as a changed input rather than
+		// as a broken retarget.
 		let days = wall_clock_ms / (24 * 60 * 60 * 1_000);
-		assert_eq!(days, 2, "the climb covers about 2.4 days: it runs far below the target");
+		assert_eq!(days, 2, "the climb covers about 2.00 days: it runs far below the target");
 		assert!(
 			band.contains(&block_time_ms),
 			"settled block time {block_time_ms}ms is outside the retarget's neutral band"
 		);
 		// The band's lower edge is `hash_rate * divisor`, and the climb stops on
 		// the first step that lands inside it.
-		assert!(difficulty >= U512::from(HASH_RATE * (PUBLIC_TARGET * 10 / 12) / 1_000));
+		assert!(difficulty >= U512::from(HASH_RATE * retarget_divisor(PUBLIC_TARGET) / 1_000));
 
 		// The same climb at the `dev` preset's target, for the comparison the
 		// docs quote: fewer blocks, because the settle difficulty is ten times
@@ -402,15 +447,16 @@ fn a_chain_at_the_floor_converges_to_the_target_band() {
 		let (dev_blocks, _, dev_block_time_ms, _) =
 			settle(QPow::get_min_difficulty(), HASH_RATE, DEV_TARGET, MAX_BLOCKS);
 		assert!(
-			(8_500..9_500).contains(&dev_blocks),
-			"the 12 s climb took {dev_blocks} blocks, expected about 8_857"
+			(8_100..8_900).contains(&dev_blocks),
+			"the 12 s climb took {dev_blocks} blocks, expected about 8_466"
 		);
-		assert!((DEV_TARGET * 10 / 12..DEV_TARGET * 20 / 12).contains(&dev_block_time_ms));
+		assert!((retarget_divisor(DEV_TARGET)..2 * retarget_divisor(DEV_TARGET))
+			.contains(&dev_block_time_ms));
 		assert!(dev_blocks < blocks, "a ten times higher settle difficulty costs more steps");
 
 		// Now take nine tenths of the hash rate away. The chain falls through
 		// the band from above and stops at its top edge, so a network that lost
-		// its miners holds 200 s blocks for good, with no drift back toward 120.
+		// its miners holds 166 s blocks for good, with no drift back toward 120.
 		// Monotonic all the way down: no oscillation, no overshoot.
 		let mut falling = difficulty;
 		let mut steps = 0u32;
@@ -426,14 +472,17 @@ fn a_chain_at_the_floor_converges_to_the_target_band() {
 			assert!(next < falling, "the fall must be monotonic, {next} is not below {falling}");
 			falling = next;
 		}
+		// Measured: 1 558 steps settling at 166 305 ms, which is 1.386 times
+		// the target. Both endpoints scale with the divisor, so the ratio of
+		// 5.0 and the step count are what they were under the old rule.
 		assert!(
 			(1_000..2_000).contains(&steps),
-			"the fall took {steps} blocks, expected about 1_555"
+			"the fall took {steps} blocks, expected about 1_558"
 		);
 		assert!(band.contains(&fell_to), "settled at {fell_to}ms, outside the band");
 		assert!(
 			fell_to > PUBLIC_TARGET,
-			"a chain falling into the band settles at its top edge, about 200 s"
+			"a chain falling into the band settles at its top edge, about 166 s"
 		);
 	});
 }
@@ -476,7 +525,7 @@ fn test_genesis_rejects_zero_target_block_time() {
 fn the_seed_schedule_is_readable_from_the_runtime() {
 	new_test_ext().execute_with(|| {
 		assert_eq!(QPow::get_seed_epoch_blocks(), 2048);
-		assert_eq!(QPow::get_seed_epoch_lag(), 64);
+		assert_eq!(QPow::get_seed_epoch_lag(), 128);
 	});
 }
 
@@ -533,4 +582,255 @@ fn the_increment_is_unchanged_above_the_rounding_boundary() {
 	let parent = U512::from(4_096_000u64);
 	let expected = parent + parent / U512::from(2048u64);
 	assert_eq!(QPow::calculate_difficulty(parent, 1, 1000), expected);
+}
+
+/// The divisor is the one constant that decides where the chain settles, so it
+/// is pinned by value at every target the tree uses. `target * ln 2` in
+/// millionths, floored at one so a sub-millisecond target cannot divide by
+/// zero.
+#[test]
+fn the_divisor_is_the_target_times_ln_two() {
+	assert_eq!(retarget_divisor(PUBLIC_TARGET), 83_177);
+	assert_eq!(retarget_divisor(DEV_TARGET), 8_317);
+	assert_eq!(retarget_divisor(1_000), 693);
+	assert_eq!(retarget_divisor(600), 415);
+	assert_eq!(retarget_divisor(1), 1, "the floor keeps the divisor non-zero");
+
+	let mut previous = 0u64;
+	for target_ms in (0..600_000).step_by(97) {
+		let divisor = retarget_divisor(target_ms);
+		assert!(divisor >= previous, "the divisor fell from {previous} at target {target_ms}ms");
+		previous = divisor;
+	}
+}
+
+/// The structural property that makes the rule sane at any target: the neutral
+/// band is `[divisor, 2 * divisor)`, the stationary mean is `1 / ln 2 = 1.4427`
+/// divisors, and 1.4427 lies inside `[1, 2)`. So a chain that has settled on
+/// the interval it declares feels no retarget pressure there, and that stays
+/// true whatever the target is rather than being a coincidence of 120 s.
+#[test]
+fn the_target_sits_inside_the_neutral_band() {
+	for target_ms in (600..600_000).step_by(89) {
+		let divisor = retarget_divisor(target_ms);
+		assert!(divisor <= target_ms, "target {target_ms}ms is below its own band");
+		assert!(2 * divisor > target_ms, "target {target_ms}ms is above its own band");
+	}
+}
+
+/// SplitMix64, pinned so the simulations below are the same run every time.
+///
+/// `f64` lives here and nowhere else: the retarget itself is integer, and this
+/// is a `#[cfg(test)]` sampler feeding it.
+struct Rng(u64);
+
+impl Rng {
+	fn next_u64(&mut self) -> u64 {
+		self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+		let mut z = self.0;
+		z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+		z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+		z ^ (z >> 31)
+	}
+
+	/// Uniform on `(0, 1]`, never zero so the logarithm below is finite.
+	fn uniform(&mut self) -> f64 {
+		((self.next_u64() >> 11) + 1) as f64 / (1u64 << 53) as f64
+	}
+
+	/// An exponential draw, which is the inter-arrival time of a Poisson
+	/// process and therefore what a constant hash rate produces.
+	fn exponential_ms(&mut self, mean_ms: f64) -> u64 {
+		(-mean_ms * self.uniform().ln()) as u64
+	}
+}
+
+/// The seed every simulation below starts from.
+const POISSON_SEED: u64 = 0x5165_726F_5F31_3230;
+
+/// Drive the real `calculate_difficulty` with Poisson block times at a constant
+/// hash rate and report the mean block time over the measured tail.
+///
+/// Difficulty is expected hashes per block, so the mean inter-arrival time is
+/// `difficulty / hash_rate` and the sampler draws around it.
+fn poisson_run(
+	hash_rate: u64,
+	start: U512,
+	target_ms: u64,
+	measured_blocks: u32,
+	warmup_blocks: u32,
+) -> (f64, U512) {
+	let mut rng = Rng(POISSON_SEED);
+	let mut difficulty = start;
+	let mut measured_total_ms = 0u128;
+	for block in 0..(warmup_blocks + measured_blocks) {
+		let mean_ms = difficulty.low_u64() as f64 * 1_000.0 / hash_rate as f64;
+		let block_time_ms = rng.exponential_ms(mean_ms);
+		if block >= warmup_blocks {
+			measured_total_ms += block_time_ms as u128;
+		}
+		difficulty = QPow::calculate_difficulty(difficulty, block_time_ms, target_ms);
+	}
+	(measured_total_ms as f64 / measured_blocks as f64, difficulty)
+}
+
+/// A small testnet rig, for the simulations.
+const SIM_HASH_RATE: u64 = 3_500;
+/// Blocks discarded before measuring, about three autocorrelation times of the
+/// difficulty's own wander at a 1/2048 unit.
+const SIM_WARMUP_BLOCKS: u32 = 5_000;
+/// Blocks measured. The sample mean's relative standard deviation here is
+/// about 0.9%, so the 3% band below is better than three sigma.
+const SIM_MEASURED_BLOCKS: u32 = 20_000;
+
+/// The whole point of the divisor: a chain at a constant hash rate averages the
+/// interval it declares.
+///
+/// Under the old `target * 10 / 12` divisor this simulation produced 144 s at a
+/// 120 s target, which is what the public testnet measured for its whole life.
+///
+/// Measured on the first run, with the analytic `divisor / ln 2` beside it:
+/// 119 907 ms against 119 999 at the public target (-0.08%), and 11 988 ms
+/// against 11 999 at the dev target (-0.10%). Both gaps are inside the sample
+/// mean's own 0.9% standard deviation, so the band below is a tolerance rather
+/// than a pinned value: the sampler is `f64`, and a last-ulp difference across
+/// platforms can move a bucket boundary.
+#[test]
+fn a_poisson_chain_at_constant_hashrate_averages_the_target() {
+	new_test_ext().execute_with(|| {
+		for target_ms in [PUBLIC_TARGET, DEV_TARGET] {
+			// The equilibrium difficulty is `hash_rate * target_seconds`.
+			let start = U512::from(SIM_HASH_RATE * target_ms / 1_000);
+			let (mean_ms, _) = poisson_run(
+				SIM_HASH_RATE,
+				start,
+				target_ms,
+				SIM_MEASURED_BLOCKS,
+				SIM_WARMUP_BLOCKS,
+			);
+			let error = (mean_ms - target_ms as f64).abs() / target_ms as f64;
+			assert!(
+				error < 0.03,
+				"mean block time {mean_ms:.0}ms is {:.2}% off a {target_ms}ms target",
+				error * 100.0
+			);
+		}
+	});
+}
+
+/// The tripwire that makes the change falsifiable.
+///
+/// A 144 270 ms target has a new-rule divisor of 100 000 ms, which is exactly
+/// what `target * 10 / 12` gave at a 120 s target. So this arm reproduces the
+/// live testnet's measured 137 to 150 s from the old constant, and it fails if
+/// anyone restores the old ratio: under `10 / 12` the same run would settle at
+/// about 173 s instead.
+///
+/// Measured on the first run: 144 160 ms against the analytic 144 269 (-0.08%).
+#[test]
+fn the_old_divisor_explains_the_measured_144_s() {
+	new_test_ext().execute_with(|| {
+		const OLD_RULE_TARGET: u64 = 144_270;
+		assert_eq!(retarget_divisor(OLD_RULE_TARGET), 100_000, "this is the old 120 s divisor");
+
+		let start = U512::from(SIM_HASH_RATE * OLD_RULE_TARGET / 1_000);
+		let (mean_ms, _) = poisson_run(
+			SIM_HASH_RATE,
+			start,
+			OLD_RULE_TARGET,
+			SIM_MEASURED_BLOCKS,
+			SIM_WARMUP_BLOCKS,
+		);
+		let error = (mean_ms - OLD_RULE_TARGET as f64).abs() / OLD_RULE_TARGET as f64;
+		assert!(
+			error < 0.03,
+			"mean block time {mean_ms:.0}ms is {:.2}% off the old rule's 144 270ms",
+			error * 100.0
+		);
+	});
+}
+
+/// The two caps, by name and by the claimed gap each one needs.
+///
+/// The asymmetry is the decision: one unit up per block against ninety-nine
+/// down, which is why a difficulty overshoot decays in hours where a hash rate
+/// arrival is absorbed over days.
+#[test]
+fn the_maximum_per_block_moves_are_the_named_units() {
+	let parent = U512::from(4_096_000u64);
+	let unit = parent / U512::from(RETARGET_INCREMENT_DIVISOR);
+	let divisor = retarget_divisor(PUBLIC_TARGET);
+
+	assert_eq!(
+		QPow::calculate_difficulty(parent, 1, PUBLIC_TARGET),
+		parent + unit,
+		"the fastest possible block adds exactly one unit"
+	);
+
+	// The full decrease needs a claimed gap of exactly 100 divisors: at one
+	// millisecond less the retarget is still a unit short of the clamp.
+	let full_decrease_gap = 100 * divisor;
+	assert_eq!(
+		QPow::calculate_difficulty(parent, full_decrease_gap, PUBLIC_TARGET),
+		parent - unit * U512::from(MAX_RETARGET_DECREASE_UNITS as u64),
+		"100 divisors of claimed gap reaches the clamp"
+	);
+	assert_eq!(
+		QPow::calculate_difficulty(parent, full_decrease_gap - 1, PUBLIC_TARGET),
+		parent - unit * U512::from(98u64),
+		"one millisecond short of 100 divisors is one unit short of the clamp"
+	);
+	assert_eq!(
+		QPow::calculate_difficulty(parent, full_decrease_gap * 10, PUBLIC_TARGET),
+		parent - unit * U512::from(MAX_RETARGET_DECREASE_UNITS as u64),
+		"the clamp holds however long the claimed gap is"
+	);
+	assert_eq!(full_decrease_gap, 8_317_700, "8 317.7 s at the public target");
+}
+
+/// `chain/client/consensus/randomx/src/admission.rs` admits a side-branch block
+/// for free while its difficulty is within an eighth of the tip's, on the
+/// ground that an eighth takes about 42 consecutive maximum decreases and each
+/// of those needs a claimed gap of 100 divisors. Both halves of that sentence
+/// are arithmetic in this pallet's constants, so the count is asserted here,
+/// where the constants live, rather than behind a dependency edge from the
+/// client crate to a runtime pallet.
+///
+/// The free line itself does not move with the divisor: what it prices is the
+/// equilibrium difficulty ratio `p / (1 - p)` a partition holding a fraction
+/// `p` of the hash settles at, and neither the divisor nor the unit touches
+/// that ratio. Only the wall clock to arrive there moves.
+#[test]
+fn the_free_line_is_reached_in_the_documented_number_of_max_decrease_steps() {
+	new_test_ext().execute_with(|| {
+		/// `admission::SIDE_BRANCH_DIFFICULTY_FRACTION`.
+		const FRACTION: u64 = 8;
+		let tip = U512::from(4_096_000u64);
+		let divisor = retarget_divisor(PUBLIC_TARGET);
+		let full_decrease_gap = 100 * divisor;
+
+		let mut branch = tip;
+		let mut steps = 0u32;
+		// `admission::is_difficulty_admissible`: free while `branch * 8 >= tip`.
+		while branch * U512::from(FRACTION) >= tip {
+			branch = QPow::calculate_difficulty(branch, full_decrease_gap, PUBLIC_TARGET);
+			steps += 1;
+			assert!(steps < 1_000, "the fall to the free line must terminate");
+		}
+		// 43 measured here against a continuous estimate of 42.0
+		// (`0.95166^42 = 0.1248`). The extra step is the integer floor on
+		// `parent / 2048`, which makes every decrease a shade smaller than the
+		// fraction; at a tip of 10^9 the same walk takes the estimated 42. That
+		// is the difficulty-dependence `admission.rs` names.
+		assert_eq!(steps, 43, "43 maximum decreases take a 4 096 000 tip past an eighth");
+
+		// And the claimed wall clock those steps need, which is the number the
+		// module comment quotes to an operator.
+		let claimed_ms = steps as u64 * full_decrease_gap;
+		let claimed_days = claimed_ms as f64 / (24.0 * 60.0 * 60.0 * 1_000.0);
+		assert!(
+			(4.0..4.3).contains(&claimed_days),
+			"the fall claims {claimed_days:.2} days, expected about 4.1"
+		);
+	});
 }

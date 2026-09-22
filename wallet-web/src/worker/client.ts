@@ -248,6 +248,23 @@ export class ProverClient {
     return this.call({ kind: 'readStateProof', root, nodes, keys: [], prefix });
   }
 
+  /**
+   * The `extrinsicsRoot` a block header carries over its body, recomputed.
+   *
+   * Each entry is one extrinsic as `chain_getBlock` returned it, `0x` hex with
+   * the compact length prefix included, and the answer is the `0x` hex root.
+   * The caller compares it against the header's own field, which is what
+   * authenticates a body. See `chain/authenticated.ts`.
+   *
+   * Behind this boundary because the construction is a Blake2 trie over
+   * SCALE-encoded keys and the module already links sp-trie for
+   * [`readStateProof`]. It holds no secret and needs none: the body is public
+   * and so is its root.
+   */
+  extrinsicsRoot(extrinsics: readonly string[]): Promise<string> {
+    return this.call({ kind: 'extrinsicsRoot', extrinsics: [...extrinsics] });
+  }
+
   headerBlockHash(anchor: Anchor): Promise<string> {
     return this.call({ kind: 'headerBlockHash', anchor });
   }

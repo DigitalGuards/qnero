@@ -232,14 +232,19 @@ marker for which output is the sender's change; `docs/WALLET.md` has the
 argument.
 
 The second review fix pass re-ran them again, with the memo pad cut from 256
-bytes to 61. The fee is what bounds the pad, ahead of
-`MaxCiphertextBytes`: `CiphertextBytesPerFeeQuantum` (512) is sized so that a
-real ciphertext pair and a pair padded to the cap fall in different buckets,
+bytes to 61. The fee was what bounded the pad at the time, ahead of
+`MaxCiphertextBytes`: `CiphertextBytesPerFeeQuantum` (512) was sized so that a
+real ciphertext pair and a pair padded to the cap fell in different buckets,
 and a 256-byte pad put `2 * (1731 + 256) = 3974` in the cap's own bucket, which
 let a settler pad to the cap and write 512 bytes of permanent state per slot
 for the same fee an honest spend pays. At 61 each output is 1792 bytes, the
 pair is 3584, and the floor is back to 0.08 QNR where the unpadded wallet paid
-0.08 and the 256-padded one paid 0.09. Circuit build 2.31 and 2.38 s, proving
+0.08 and the 256-padded one paid 0.09. The pre-genesis bundle then made that
+length a consensus rule rather than a fee argument: a settlement carries
+exactly the length its declared crypto suite fixes, so the padded-to-the-cap
+pair is refused instead of priced and 1792 is the only payload these figures
+can describe. The measurements below did not move, because the wallet already
+sent 1792. Circuit build 2.31 and 2.38 s, proving
 3.34 and 3.51 s, proof 150908 bytes unchanged, submit to inclusion 0.53 s both
 times, wall clock 6.47 and 6.56 s. Nothing in the proving path moved: the
 ciphertext rides in the extrinsic, and only its `ct_digest` reaches the
@@ -1267,8 +1272,12 @@ proofs: six leaf slots and 53 private batches.
 | Payload binding, two checks, 318 maximum-size slots | 337.790 | 340.211 | 824.620 |
 | Full bounded ciphertext-retention hook | 10.372 | 10.842 | 927.376 |
 
-All measured component gates passed. This single-host sample does not justify
-reducing weights. This closes the absence of runtime-executor component
+All measured component gates passed. The last row measures a hook the relaunch
+bundle removed: the retention pass went with the state copy of the ciphertexts
+(`docs/DESIGN.md` 12.9), so the harness no longer carries that operation and a
+re-run of this table produces eight rows. Its 927.376 ms declared budget is the
+reservation `on_initialize` no longer makes. This single-host sample does not
+justify reducing weights. This closes the absence of runtime-executor component
 measurements. Full successful settlement, block import,
 disk costs, admission under legitimate congestion and minimum-hardware capacity
 remain unqualified. Production runtimes omit the measurement exports; changes to

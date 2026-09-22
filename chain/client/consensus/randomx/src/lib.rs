@@ -261,6 +261,12 @@ where
 	let seed_height = seed::seed_height(height, epoch, lag);
 	let next_seed_height = seed::next_seed_height(height, epoch, lag);
 
+	// `epoch + lag` is the seed walk's bound, so it follows the two constants
+	// and is never a literal. The worst-case distance from the candidate's
+	// parent at `height - 1` down to its seed height is `epoch + lag - 1`, and
+	// `resolve_on_branch` runs `max_walk + 1` iterations, so the bound clears
+	// the worst case by exactly one iteration. That margin is one iteration at
+	// any lag and does not grow when the lag does.
 	let seed = hash_at_ancestor::<B, C>(client, parent_hash, height, seed_height, epoch + lag)?;
 	let next = if next_seed_height == seed_height {
 		seed

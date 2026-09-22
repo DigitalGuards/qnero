@@ -403,13 +403,16 @@ pub fn address_is_valid(address: &str) -> bool {
 /// The pad is the one that matters. Every memo is padded to `memo_bytes`, so
 /// every ciphertext this workspace writes is one length; a wallet that padded
 /// to a different number would publish its own ciphertext length, which is the
-/// leak the pad exists to close. The fee floor is computed from these and from
-/// the runtime's own metadata constants, never from a copy of either.
+/// leak the pad exists to close. That length is now also a consensus rule, so
+/// `padded_ciphertext_bytes` is the consensus constant itself rather than the
+/// pad arithmetic that happens to reach it. The fee floor is computed from
+/// these and from the runtime's own metadata constants, never from a copy of
+/// either.
 pub fn wallet_limits_json() -> String {
     json!({
         "memo_bytes": qnero_notes::MEMO_BYTES,
         "ciphertext_fixed_bytes": qnero_notes::CIPHERTEXT_FIXED_BYTES,
-        "padded_ciphertext_bytes": qnero_notes::CIPHERTEXT_FIXED_BYTES + qnero_notes::MEMO_BYTES,
+        "padded_ciphertext_bytes": qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES,
         "digest_logs_size": DIGEST_LOGS_SIZE,
         "max_tree_depth": MAX_DEPTH,
         "tree_arity": ARITY,
@@ -639,14 +642,20 @@ mod tests {
     }
 
     /// The pad is a chain-wide agreement, so a wallet reads it rather than
-    /// pinning its own copy.
+    /// pinning its own copy, and the padded length is the number consensus
+    /// settles on: a browser build whose pad stopped reaching it would produce
+    /// ciphertexts the chain refuses, after a 33-second proof.
     #[test]
     fn the_limits_carry_the_pad_and_the_depth_cap() {
         let limits: serde_json::Value = serde_json::from_str(&wallet_limits_json()).unwrap();
         assert_eq!(limits["memo_bytes"], qnero_notes::MEMO_BYTES);
         assert_eq!(
             limits["padded_ciphertext_bytes"].as_u64().unwrap() as usize,
-            qnero_notes::CIPHERTEXT_FIXED_BYTES + qnero_notes::MEMO_BYTES
+            qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES
+        );
+        assert_eq!(
+            qnero_notes::CIPHERTEXT_FIXED_BYTES + qnero_notes::MEMO_BYTES,
+            qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES
         );
         assert_eq!(limits["max_tree_depth"], MAX_DEPTH);
         assert_eq!(limits["digest_logs_size"], DIGEST_LOGS_SIZE);
