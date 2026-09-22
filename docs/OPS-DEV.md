@@ -700,7 +700,7 @@ every bit.
 **The seed rule.** RandomX is keyed by a 32-byte seed that moves on a slow
 schedule, because every move costs a full-mode rig a dataset rebuild. The rule
 is Monero's, and the two constants are runtime constants
-(`pallet_qpow::Config::SeedEpochBlocks` and `SeedEpochLag`, 2048 and 64), so a
+(`pallet_qpow::Config::SeedEpochBlocks` and `SeedEpochLag`, 2048 and 128), so a
 chain can pick its own without a client release:
 
 ```
@@ -714,7 +714,7 @@ fork hashes under its own branch's seed. Every job a rig is handed carries
 `next_seed_hash` as well, so xmrig builds the next dataset in the background
 instead of stalling at the boundary.
 
-Two things about 2048 and 64 are worth knowing before a launch, and both are a
+Two things about 2048 and 128 are worth knowing before a launch, and both are a
 one-line change in `runtime/src/configs/mod.rs`:
 
 - 2048 blocks at Monero's 120 s target is 2.84 days, and this chain's target is
@@ -722,13 +722,16 @@ one-line change in `runtime/src/configs/mod.rs`:
   rebuilds its dataset here as often as it does there and no more. Under the old
   12 s target the same 2048 blocks was 6.8 hours and the epoch was the constant
   that would have had to move; it does not.
-- The lag is 64. `MaxReorgDepth` is `u32::MAX` since the reversible
-  consensus change (it was 100 when this was written), so reorg depth is
-  unbounded by finality and the seed block is always inside the window a legal
-  reorg can move. That cannot split the chain, because the seed follows each
-  candidate's ancestry, but a deep reorg across an epoch boundary does change
-  the seed under work already started. A lag of 128 removes even that. In wall
-  clock the lag is 2.1 hours at a 120 s target.
+- The lag is 128, decided on 2026-09-22 and twice Monero's 64.
+  `MaxReorgDepth` is `u32::MAX` since the reversible consensus change (it was
+  100 when this was written), so reorg depth is unbounded by finality and no
+  depth floor refuses a reorg that crosses an epoch boundary. That cannot split
+  the chain, because the seed follows each candidate's ancestry, and what such
+  a reorg does is re-key work already started. In wall clock 128 blocks is 4.3
+  hours at a 120 s target: it puts the seed block behind the depth a reorg on
+  this network reaches, and it gives a full-mode rig 4.3 hours of notice on its
+  next 2 GiB dataset build. What bounds a deeper reorg is the client admission
+  budget of `docs/DESIGN.md` 7.5.
 
 **The difficulty floor moved with the engine.** `get_min_difficulty()` was
 Ethereum's 2^17 and is now 128. At the 33 H/s one light-mode thread manages,
@@ -5001,13 +5004,15 @@ been 8.4 hours to the first block on the node alone and about a week to
 converge. There is no floor field to set beside it: `get_min_difficulty()` is a
 hard-coded 128 and genesis only validates against it.
 
-The seed epoch stays at 2 048 blocks with a lag of 64, both runtime constants a
-spec cannot move. The open question is restated in the runbook rather than
-closed here: the lag sits inside the 100-block reorg window, so a deep reorg
-across an epoch boundary changes the seed under work already started. That
-cannot split the chain, because the seed follows each candidate's own ancestry
-rather than canonical height, and a lag of 128 would remove even the
-disturbance, at the cost of a runtime upgrade.
+The seed epoch stays at 2 048 blocks and the lag is 128, both runtime constants
+a spec cannot move: they are compiled into the runtime wasm and published in
+metadata. `MaxReorgDepth` is `u32::MAX`, so a reorg across an epoch boundary is
+legal at any depth and changes the seed under work already started. That cannot
+split the chain, because the seed follows each candidate's own ancestry rather
+than canonical height, and 128 blocks is 4.3 hours at the 120 s target, which
+puts the seed block behind the depth such a reorg reaches. Moving either
+constant after a launch takes a new genesis or a coordinated node release at a
+known height.
 
 ### The faucet account
 

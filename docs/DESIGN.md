@@ -579,8 +579,9 @@ inherited from the upstream chain along with everything else in `pallets/qpow`.
 Four reasons, in the order they matter.
 
 **It is Monero's cadence, and this chain's seed schedule is Monero's.** The
-RandomX seed epoch is 2048 blocks with a lag of 64, copied from Monero because
-the masked rule is what a stock rig already implements. At 12 s those 2048
+RandomX seed epoch is 2048 blocks, copied from Monero because the masked rule
+is what a stock rig already implements. The lag is 128, twice Monero's, decided
+on 2026-09-22 and recorded in open question 3. At 12 s those 2048
 blocks were 6.8 hours, so every full-mode rig paid a 2 GiB dataset rebuild four
 times a day where Monero's rigs pay it every 2.84 days. At 120 s the block
 count and the wall clock both match Monero, and the constant needed no special
@@ -840,15 +841,21 @@ way.
    sizing of its two seed constants was open under it and the epoch closed
    itself on 2026-09-14: the target block time moved to Monero's 120 s, so
    Monero's 2048 blocks is Monero's 2.84 days here as well, and the epoch stays
-   at 2048 with nothing left to tune. What remains open is the lag. It is
-   Monero's 64 blocks. `MaxReorgDepth` is `u32::MAX` since the reversible
-   consensus change: reorg depth is unbounded by finality, and side branches
-   are budgeted by the client rather than refused by depth (section 7.5), so
-   the seed block is always inside the window a legal reorg can move. That
-   cannot split the chain, because the seed is resolved along each candidate's
-   own ancestry, but a deep reorg across a boundary does change the seed under
-   work already started; a lag of 128 removes it. Decide it before a network
-   launches, because after that it is a fork.
+   at 2048 with nothing left to tune. **The lag closed on 2026-09-22 at 128
+   blocks**, twice Monero's 64, and ships in the pre-genesis bundle.
+   `MaxReorgDepth` is `u32::MAX` since the reversible consensus change: reorg
+   depth is unbounded by finality, and side branches are budgeted by the client
+   rather than refused by depth (section 7.5), so no depth floor refuses a
+   reorg that crosses an epoch boundary. Such a reorg cannot split the chain,
+   because the seed is resolved along each candidate's own ancestry, and what
+   it does is change the seed under work already started. 128 blocks is 4.3
+   hours at the 120 s target, which puts the seed block behind the depth a
+   reorg on this network reaches; deeper reorgs remain possible in principle
+   and section 7.5's budgets are what bounds them. The first rotation on a
+   fresh genesis therefore sits at height 2177, and every job carries the
+   coming seed for 4.3 hours before the turn where it carried it for 2.1. It
+   had to be decided before a network launched, because after that it is a
+   fork.
 4. Fee visibility: fees are public, as in Monero. **M4 decided: per-slot public
    fees, no tiering. M6 kept it, and the coinbase is why.** A block's coinbase
    note is worth the emission plus every fee the block settled, and that total
@@ -1224,7 +1231,8 @@ constant today and a hard fork after genesis.
    metadata at genesis and both wallets implement "absent below the retention window is
    expected" before it is ever non-zero. Taken whichever way Q3 goes.
 4. Q1, the per-suite exact-length settlement rule.
-5. RandomX seed lag 64 to 128 (open question 3, already flagged for decision before launch).
+5. RandomX seed lag 64 to 128. Decided at 128 on 2026-09-22 and closed in open question 3.
+   It carries no `spec_version` bump of its own and rides the bundle's move to 106.
 6. The call filter moved from dispatch to a `TransactionExtension` (section 7.2), since a
    mistaken transparent transfer today fails with `CallFiltered` and leaves sender, recipient
    and amount in the body forever. It moves `transaction_version`.

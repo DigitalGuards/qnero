@@ -132,7 +132,7 @@ cannot submit.
 - Every absolute-QNR price (fees, deposits, the high-security fee cap) derives from the `FEE_SCALE_NUM/DEN` dial in `runtime/src/lib.rs` via `scale_fee`; percentage rates, the existential deposit, and the leaf step are deliberately not scaled.
 
 ### Index 5 - `QPoW` (`pallet-qpow`, local)
-- `InitialDifficulty = U512([1_000_000, 0, …])`, `TargetBlockTime = 120_000ms`, `MaxReorgDepth = 100`, `SeedEpochBlocks = 2_048`, `SeedEpochLag = 64`, `WeightInfo = SubstrateWeight<Runtime>`.
+- `InitialDifficulty = U512([1_000_000, 0, …])`, `TargetBlockTime = 120_000ms`, `MaxReorgDepth = u32::MAX`, `SeedEpochBlocks = 2_048`, `SeedEpochLag = 128`, `WeightInfo = SubstrateWeight<Runtime>`.
 - `TargetBlockTimeMs` is a genesis-configured storage value with no setter, defaulting to the constant above; `Pallet::target_block_time()` falls back to the constant when it is unset. That is what lets one binary serve a 120 s public chain and a 12 s dev chain.
 - No dispatchable calls. Implements `Hooks` (`on_initialize`/`on_finalize`) to track block timing and recompute difficulty. Powers the `QPoWApi` runtime API.
 

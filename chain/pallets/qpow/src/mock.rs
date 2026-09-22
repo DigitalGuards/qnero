@@ -79,7 +79,7 @@ impl pallet_qpow::Config for Test {
 	type TargetBlockTime = ConstU64<1000>;
 	type MaxReorgDepth = ConstU32<10>;
 	type SeedEpochBlocks = ConstU32<2048>;
-	type SeedEpochLag = ConstU32<64>;
+	type SeedEpochLag = ConstU32<128>;
 }
 
 // Build genesis storage according to the mock runtime

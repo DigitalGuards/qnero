@@ -190,13 +190,17 @@ What is in it, and what is deliberately not:
   first block.
 - **There is no difficulty floor field.** `get_min_difficulty()` is a hard-coded 128; genesis
   validates against it and cannot move it. Do not go looking for a knob.
-- **Seed epoch constants stay at 2 048 blocks with a lag of 64.** They are runtime constants
-  a chain spec cannot move. 2 048 blocks at 120 s is 2.84 days, which is Monero's own
-  rotation interval, and matching it is why the target is 120 s. **The open question:** the
-  lag of 64 sits inside the 100-block reorg window, so a deep reorg across an epoch boundary
-  can change the seed under work already started. That cannot split the chain, because the
-  seed follows each candidate's own ancestry rather than canonical height. A lag of 128 would
-  remove even that, at the cost of a runtime upgrade, and nothing here has decided it.
+- **The seed epoch is 2 048 blocks and the lag is 128.** Both are runtime constants a chain
+  spec cannot move: they are compiled into the runtime wasm, so an operator cannot patch
+  either one in a spec file. 2 048 blocks at 120 s is 2.84 days, which is Monero's own
+  rotation interval, and matching it is why the target is 120 s. The lag was Monero's 64 and
+  was decided at 128 on 2026-09-22. `MaxReorgDepth` is `u32::MAX`, so a reorg across an epoch
+  boundary is legal at any depth and changes the seed under work already started. That cannot
+  split the chain, because the seed follows each candidate's own ancestry rather than
+  canonical height. 128 blocks is 4.3 hours at 120 s, which puts the seed block behind the
+  depth such a reorg reaches and gives a rig 4.3 hours of notice on its next dataset build.
+  Changing either constant after a launch takes a new genesis or a coordinated node release
+  at a known height.
 
 Record the genesis hash at first start. Everything binds to it: the wallet
 store refuses a store built against another chain, coinbase note derivation

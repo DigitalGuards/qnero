@@ -115,7 +115,15 @@ pub mod pallet {
 		/// Blocks between an epoch boundary and the block whose hash seeds it.
 		///
 		/// The lag is what gives every node the seed block well before the
-		/// first block that hashes under it.
+		/// first block that hashes under it, and what gives a rig the coming
+		/// seed the same distance ahead of the turn.
+		///
+		/// This chain sets it to 128 blocks, 4.3 hours at its 120 s target,
+		/// above Monero's 64. `MaxReorgDepth` is `ConstU32<{ u32::MAX }>`
+		/// (`chain/runtime/src/configs/mod.rs`), so a reorg that crosses an
+		/// epoch boundary is bounded by the client's side-branch admission
+		/// budgets and by no depth floor; the longer lag keeps the seed block
+		/// behind the depth such a reorg reaches.
 		#[pallet::constant]
 		type SeedEpochLag: Get<u32>;
 

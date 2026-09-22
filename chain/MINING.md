@@ -92,14 +92,16 @@ allowlist or a pool.
 
 ## Seed rotation
 
-RandomX's key rotates the way Monero's does: every 2048 blocks, lagged 64
+RandomX's key rotates the way Monero's does: every 2048 blocks, lagged 128
 blocks, resolved along the block's own ancestry. Both constants are runtime
 constants and are read by the node. At this chain's 120 second target 2048
 blocks is 2.84 days, which is Monero's own rotation cadence to the hour: the
 block count and the wall clock both match, so a rig pays the same dataset
-rebuild here as it pays there and no more often. The lag of 64 blocks is 2.1
-hours, and whether to raise it above `MaxReorgDepth` is the one part of the
-schedule still open, recorded in `docs/DESIGN.md`.
+rebuild here as it pays there and no more often. The lag is twice Monero's 64,
+decided on 2026-09-22 and recorded in `docs/DESIGN.md`: 128 blocks is 4.3
+hours, and that is how long before the turn every job already carries the
+coming seed in `next_seed_hash`, so a full-mode rig has 4.3 hours to build its
+next 2 GiB dataset in the background.
 
 ## Difficulty
 

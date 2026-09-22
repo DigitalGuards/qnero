@@ -84,7 +84,7 @@ test('the home page reads the head, the work and the pool off the node', async (
   // on a copy edit rather than on a wrong number.
   const seedNote = page.locator('[data-field="Next seed height"] .field__note');
   await expect(seedNote).toContainText('epoch 2,048 blocks');
-  await expect(seedNote).toContainText('lag 64');
+  await expect(seedNote).toContainText('lag 128');
 
   await expect(field(page, 'Commitment tree leaves')).toHaveText(/\d/);
   await expect(page.locator('[data-field="Commitment tree leaves"] .field__note')).toContainText(

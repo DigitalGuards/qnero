@@ -131,3 +131,41 @@ fn the_storage_target_does_not_reach_the_day_denominated_windows() {
 		assert_eq!(DAYS, 720, "`DAYS` is the compile-time constant's day, on every chain");
 	});
 }
+
+/// The RandomX seed schedule, in the block counts the runtime ships and the
+/// wall clock those counts mean at the public target.
+///
+/// `chain/pallets/qpow/src/tests.rs` asserts the pallet's mock, so without
+/// this test the values the chain actually ships are pinned only by the byte
+/// comparison against the committed chain spec. The schedule belongs to this
+/// file for the same reason the anchor window does: the block count is fixed
+/// and the wall clock it means comes from `TARGET_BLOCK_TIME_MS`.
+///
+/// 2048 blocks is 245 760 000 ms, 2.84 days, Monero's own rotation interval.
+/// 128 blocks is 15 360 000 ms, 4.3 hours, the distance between the block that
+/// supplies a seed and the first block that hashes under it, and the notice a
+/// full-mode rig gets on its next dataset build. `docs/DESIGN.md` 7.4 and
+/// open question 3 carry the decision.
+#[test]
+fn the_seed_schedule_is_the_one_the_chain_ships() {
+	// `ConstU32` answers `Get<u32>` and `Get<Option<u32>>` both, so the
+	// binding names the one this file means.
+	let epoch: u32 = <qnero_runtime::Runtime as pallet_qpow::Config>::SeedEpochBlocks::get();
+	let lag: u32 = <qnero_runtime::Runtime as pallet_qpow::Config>::SeedEpochLag::get();
+
+	assert_eq!(epoch, 2_048, "Monero's epoch, kept because the target is Monero's 120 s");
+	assert_eq!(lag, 128, "twice Monero's lag, decided in the pre-genesis bundle");
+
+	let epoch = u64::from(epoch);
+	let lag = u64::from(lag);
+
+	assert_eq!(epoch * TARGET_BLOCK_TIME_MS, 245_760_000, "2048 blocks at 120 s is 2.84 days");
+	assert_eq!(lag * TARGET_BLOCK_TIME_MS, 15_360_000, "128 blocks at 120 s is 4.3 hours");
+
+	// The two numbers the consensus client derives from the pair. Below
+	// `epoch + lag` every block seeds from genesis, so the first rotation on a
+	// fresh genesis is at 2177, and the seed walk is bounded by `epoch + lag`
+	// (`chain/client/consensus/randomx/src/lib.rs`, `max_walk`).
+	assert_eq!(epoch + lag, 2_176, "the seed-walk bound");
+	assert_eq!(epoch + lag + 1, 2_177, "the first height with a seed other than genesis");
+}
