@@ -11,6 +11,12 @@ description = "Shared native and browser verification of Qnero state trie proofs
 sp-trie = { version = "=42.0.1", default-features = false }
 sp-core = { version = "=39.0.0", default-features = false }
 
+[dev-dependencies]
+# The known-answer body and its root live in a JSON file so the runtime's own
+# vector and the browser wallet's test can be the same two fields.
+serde_json.workspace = true
+hex.workspace = true
+
 [features]
 default = []
 # Deterministic in-memory trie fixtures for downstream wallet regression tests.

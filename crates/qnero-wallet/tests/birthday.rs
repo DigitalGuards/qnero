@@ -50,13 +50,12 @@ fn note_for(pk: Digest, value: u64, tag: &str) -> Note {
 fn put_leaf(state: &mut NodeState, index: u64, block: u32, cm: Digest, ct: &[u8]) {
     state.put_storage(&identity_map_key("ZkTree", "Leaves", index), &cm.to_bytes());
     state.put_storage(
-        &identity_map_key("Shielded", "Ciphertexts", index),
-        &codec::Encode::encode(&ct.to_vec()),
-    );
-    state.put_storage(
         &identity_map_key("Shielded", "LeafBlocks", index),
         &block.to_le_bytes(),
     );
+    if !ct.is_empty() {
+        support::put_payload(state, block, ct);
+    }
 }
 
 #[test]
@@ -85,7 +84,7 @@ fn chain_with_a_payment(address: &qnero_notes::Address) -> (NodeState, Note) {
             index,
             500,
             Digest::hash_bytes(&[b"somebody else", &index.to_le_bytes()]),
-            &[0x11u8; 64],
+            &[],
         );
     }
     // The payment, in a block above the birthday epoch.
@@ -132,16 +131,22 @@ fn a_wallet_created_at_a_head_skips_the_history_under_it_and_is_paid_after_it() 
     assert_eq!(wallet.store.notes[0].commitment, mine.commitment().to_hex());
 
     let state = node.state();
-    // Never asks for a leaf under the watermark. The ciphertext is the
-    // expensive read and the one that says which leaves this wallet cared
-    // about, and the three under the birthday are never named.
-    for index in 0..3u64 {
-        let key = hex::encode(identity_map_key("Shielded", "Ciphertexts", index));
-        assert!(
-            !state.asked_about(&key),
-            "the pass asked for the ciphertext of leaf {index}, which is under its birthday"
-        );
-    }
+    // Never fetches the body of a block under the watermark. The body is the
+    // expensive read and it is the one that says which blocks this wallet
+    // cared about, so the block the three older leaves sit in is never named.
+    // The leaf hashes below the watermark are read, and deliberately: they are
+    // what the fold is seeded from, and a hash says nothing about whose leaf
+    // it is.
+    let old_block = hex::encode(state.hash_at(500));
+    assert!(
+        !state.asked_about(&old_block),
+        "the pass fetched the body of block 500, which is under its birthday"
+    );
+    assert_eq!(
+        state.calls("chain_getBlock"),
+        1,
+        "one body for the one block above the birthday that appended a leaf"
+    );
     // And never walks a header under it either. The walk stands on the
     // birthday block, so the bottom of the range is that block and not zero.
     assert!(

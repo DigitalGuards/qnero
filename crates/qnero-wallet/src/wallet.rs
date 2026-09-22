@@ -9,8 +9,8 @@ use qnero_circuit::chain::ct_digest;
 use qnero_circuit::merkle::{MerklePath, TreeFrontier};
 use qnero_circuit::witness::{InputNote, OutputNote, SpendWitness};
 use qnero_notes::{
-    decrypt_note, encrypt_note, entry_rho, try_receive_coinbase, Address, Digest, MinerKey, Note,
-    NoteCiphertext, ReceivedNote,
+    decrypt_note, encrypt_note, entry_rho, Address, Digest, MinerKey, Note, NoteCiphertext,
+    ReceivedNote,
 };
 use qnero_notes::{IncomingViewingKey, SpendingKey};
 use qnero_prover::WalletProver;
@@ -156,7 +156,7 @@ fn inclusion_timeout(chain: &Chain) -> Duration {
 /// How many shield entries the origin walk hashes before it gives up.
 ///
 /// `Shielded::EntryCount` is a `u64` the node answers with, and
-/// [`entry_rho_matches`] runs one Poseidon2 hash per unit of it for every
+/// `entry_rho_matches` runs one Poseidon2 hash per unit of it for every
 /// non-coinbase note a scan receives. Unbounded, a single storage answer
 /// decides how long the sync runs. The bound is affordable because the answer
 /// is a label: `origin` separates a shield from a spend's output in the
@@ -240,92 +240,6 @@ pub fn full_scan_estimate(blocks: u32) -> String {
     FULL_SCAN_ESTIMATE
         .replace("{blocks}", &blocks.to_string())
         .replace("{spell}", &spell)
-}
-
-/// How many per-leaf detector warnings one pass writes out in full.
-///
-/// The detector in the scan writes one sentence per leaf whose ciphertext this
-/// wallet's key opens beside a commitment that note does not open, and how
-/// many of those a pass meets is a node's choice: it can answer a mismatching
-/// commitment at every leaf it serves. Uncapped that is one sentence per leaf
-/// held in memory and printed, out of an answer nobody has checked. Past the
-/// cap the pass counts instead and says how many, so the two summaries below
-/// bound the list at eighteen entries whatever a node answers.
-///
-/// Eight, because the list is read by a person: it is enough entries to see
-/// the pattern, and the count after them is what says the size. `wallet-web`
-/// holds the same bound in `src/wallet/sync.ts`.
-pub const WARNED_LEAVES_PER_PASS: u64 = 8;
-
-/// "leaf" or "leaves", for a count that is written into a sentence.
-fn leaves_word(count: u64) -> &'static str {
-    if count == 1 {
-        "leaf"
-    } else {
-        "leaves"
-    }
-}
-
-/// One leaf whose opened note the same block holds at another index.
-///
-/// The payment arrives, at the index inside the block that holds the
-/// commitment the note opens, and the sentence carries both indices because
-/// the one this node answered at is the thing a second node would disagree
-/// about. `wallet-web/src/wallet/sync.ts` writes the same sentence.
-fn moved_leaf_warning(leaf: u64, block_number: u32, index: u64) -> String {
-    format!(
-        "leaf {leaf} carries a ciphertext this wallet's own key opens, and the tree entry \
-         answered beside it is one that payment does not open. Block {block_number} holds the \
-         opened payment's entry at leaf {index}, inside the range this pass folded against \
-         that block's own header, so the payment is recorded at leaf {index} and it arrives. A \
-         ciphertext that opens under this wallet's key is this wallet's payment, so the pair \
-         was moved. Which index inside a block holds which entry is bound by nothing on chain: \
-         sync against a second node before spending it."
-    )
-}
-
-/// One leaf whose opened note its own block holds nowhere.
-///
-/// Skipped and said out loud, because a sender who encrypts a payload opening
-/// a commitment it never published produces the identical reading and nothing
-/// local tells the two apart. `wallet-web/src/wallet/sync.ts` writes the same
-/// sentence.
-fn unplaceable_leaf_warning(leaf: u64, block_number: u32) -> String {
-    format!(
-        "leaf {leaf} carries a ciphertext this wallet's own key opens, and block {block_number} \
-         holds the tree entry it opens at none of the leaves it appended. The leaf is skipped \
-         and the pass continues, because a sender who encrypts a payload opening a tree entry it \
-         never published produces the same reading and nothing here tells the two apart. If a \
-         payment is missing, sync against a second node."
-    )
-}
-
-/// What the cap held back for moved leaves, carried as a count.
-///
-/// The sentence per leaf stops at [`WARNED_LEAVES_PER_PASS`] and this says how
-/// many more there were, so a node that mismatches at every leaf costs one
-/// closing sentence for the whole pass. `wallet-web/src/wallet/sync.ts` writes
-/// the same sentence.
-fn moved_overflow_warning(more: u64) -> String {
-    format!(
-        "and {more} more {} in this pass carried a ciphertext this wallet's own key \
-         opens beside a tree entry that payment does not open, each recorded at the \
-         index inside its own block that holds the entry it opens. Sync against \
-         a second node before spending them.",
-        leaves_word(more)
-    )
-}
-
-/// What the cap held back for unplaceable leaves, carried as a count.
-///
-/// `wallet-web/src/wallet/sync.ts` writes the same sentence.
-fn unplaceable_overflow_warning(more: u64) -> String {
-    format!(
-        "and {more} more {} in this pass carried a ciphertext this wallet's own key \
-         opens whose tree entry their own block holds nowhere, each skipped. If a \
-         payment is missing, sync against a second node.",
-        leaves_word(more)
-    )
 }
 
 pub struct Wallet {
@@ -447,7 +361,7 @@ impl Wallet {
     /// above the watermark to scan is left with the roots the chunk's own
     /// headers carry. Both refusals a too-high count trips name this birthday
     /// and the rescan, because no other node can satisfy a watermark that was
-    /// wrong when it was written: see [`birthday_watermark_note`].
+    /// wrong when it was written: see `birthday_watermark_note`.
     ///
     /// The genesis binding is written here as well, because this is an
     /// operation that commits: a birthday is a statement about one chain, and a
@@ -756,10 +670,6 @@ impl Wallet {
         let mut cursor_leaf = start;
         let mut trusted_block = anchor_block;
         let mut trusted_hash = anchor_hash;
-        // The two detector counts of this pass, which are what the per-leaf
-        // warnings are capped against. See [`WARNED_LEAVES_PER_PASS`].
-        let mut moved_leaves: u64 = 0;
-        let mut unplaceable_leaves: u64 = 0;
         loop {
             let top = trusted_block
                 .saturating_add(HEADER_WALK_LIMIT)
@@ -818,11 +728,13 @@ impl Wallet {
                 // refuses the same pair one layer down, and `wallet-web`
                 // refuses it in `chain/reads.ts` and again in `runSync`.
                 //
-                // The third key, `Shielded::Ciphertexts`, is not a flat
-                // requirement: whether a leaf owes one is decided by where the
-                // headers put it, in `crate::typing`, which is also what
-                // refuses an invented `Shielded::CoinbaseValues` and what
-                // requires one at every coinbase position.
+                // No note ciphertext is owed per leaf: the payloads are in the
+                // block bodies below, the body roots as a whole, and which
+                // leaf a payload belongs to is decided by the commitment it
+                // opens. `Shielded::CoinbaseValues` is the one key decided per
+                // position, in `crate::typing`, which refuses an invented one
+                // below a block's last leaf and requires one at every coinbase
+                // position.
                 for record in &records {
                     if record.commitment.is_none() {
                         return Err(withheld_key(
@@ -843,145 +755,135 @@ impl Wallet {
                 }
                 let typed = type_chunk(fold, &blocks, &records, &miner)?;
                 cursor_leaf += typed.len() as u64;
-                // Where this chunk holds which commitment, built by the first
-                // mismatch in it and by nothing else. An honest chain produces
-                // none, so the ordinary pass never builds it. See
-                // [`index_chunk`].
+                report.leaves_scanned += typed.len() as u64;
+
+                // What this chunk takes out of the chain, before anything is
+                // written. Two rules fill it and they meet nowhere else: the
+                // coinbase rebuild, which is per position, and the body's
+                // payloads, which are per block and carry no position at all.
+                let mut received: Vec<Receipt> = Vec::new();
+
+                // The coinbase rule. Its value is public, the note is rebuilt
+                // from this wallet's own miner key against it, and the
+                // commitment the tree holds is what decides. Under v1 a
+                // coinbase carries no ciphertext of its own: the inherent
+                // refuses a non-empty one, so there is no payload to hand the
+                // encrypted path and `None` is the whole of it. A payload that
+                // does open a commitment at a coinbase position is found by
+                // the body pass below, which is what makes that position no
+                // longer a place to hide a payment.
+                for leaf in &typed {
+                    let LeafKind::Coinbase {
+                        ours,
+                        value,
+                        label_disagrees,
+                    } = leaf.kind
+                    else {
+                        continue;
+                    };
+                    report.coinbase_leaves += 1;
+                    if label_disagrees {
+                        report.coinbase_label_disagreed += 1;
+                    }
+                    match receive_coinbase(
+                        &miner_key,
+                        &genesis_hash,
+                        leaf.block_number,
+                        value,
+                        &leaf.commitment,
+                    ) {
+                        Some(note) => received.push(Receipt {
+                            leaf_index: leaf.index,
+                            block_number: leaf.block_number,
+                            commitment: leaf.commitment,
+                            note,
+                            from_coinbase: true,
+                        }),
+                        // `ours` is the typing pass's own rebuild of this
+                        // wallet's coinbase note against the tree-authenticated
+                        // commitment, so the opener above rebuilds the
+                        // identical note and cannot miss. Saying so out loud
+                        // rather than falling through is what keeps a later
+                        // change to either rule from turning a mined reward
+                        // back into a silent skip.
+                        None if ours => bail!(
+                            "leaf {} was typed as this wallet's own coinbase for block {} at {} \
+                             QNR and the same rebuild does not open it. The two rebuilds are one \
+                             rule, so this is a build whose halves disagree. Nothing has been \
+                             changed.",
+                            leaf.index,
+                            leaf.block_number,
+                            qnr(value)
+                        ),
+                        None => {}
+                    }
+                }
+
+                // The transfer rule. One body per block that appended a leaf,
+                // rooted to that block's own header, every payload in it tried,
+                // and a note that opens placed at the leaf whose commitment it
+                // opens. The search is by commitment and never by index, so
+                // where inside the block a node put the leaf decides nothing:
+                // the bound-A move that used to hide a payment at the coinbase
+                // position is closed by this and by nothing else.
+                //
+                // Built once per chunk. A block with no leaf in this chunk is
+                // not fetched at all, because a block that appended nothing
+                // appended nothing of this wallet's either.
                 let mut by_commitment: Option<HashMap<(u32, Digest), u64>> = None;
-                for (record, leaf) in records.iter().zip(typed.iter()) {
-                    report.leaves_scanned += 1;
-                    let commitment = leaf.commitment;
-                    let block_number = leaf.block_number;
+                let appended: BTreeSet<u32> = typed.iter().map(|leaf| leaf.block_number).collect();
+                for block in blocks.iter().skip(1) {
+                    if !appended.contains(&block.number) {
+                        continue;
+                    }
+                    let body = chain.authenticated_body(&block.hash)?;
+                    for payload in chain.block_payloads(metadata, &body)? {
+                        let Ok(parsed) = NoteCiphertext::from_bytes(&payload) else {
+                            continue;
+                        };
+                        let Ok(note) = decrypt_note(&ivk, &parsed) else {
+                            continue;
+                        };
+                        // A payload of this wallet's whose note the block holds
+                        // at no leaf. Discarded, and deliberately in silence:
+                        // the chain carries the payload of every slot of a
+                        // settlement, including the segments it skipped, so an
+                        // ordinary block full of other people's settlements
+                        // produces these by the hundred and none of them is a
+                        // fault. The two readings nothing local tells apart,
+                        // a sender who encrypted a payload opening a
+                        // commitment it never published, and a node that
+                        // reported the block's fold at the wrong height, are
+                        // both in `crate::typing`'s bound.
+                        let Some(leaf_index) = by_commitment
+                            .get_or_insert_with(|| index_chunk(&typed))
+                            .get(&(block.number, note.commitment))
+                            .copied()
+                        else {
+                            continue;
+                        };
+                        received.push(Receipt {
+                            leaf_index,
+                            block_number: block.number,
+                            commitment: note.commitment,
+                            note,
+                            from_coinbase: false,
+                        });
+                    }
+                }
 
-                    // Whether the note came out of the coinbase rule, which is
-                    // what `NoteOrigin::Coinbase` records and what the report
-                    // counts. A leaf at a coinbase position that no coinbase rule
-                    // opens is still offered to the transfer rule when it carries
-                    // a ciphertext: under v1 a coinbase carries none, so a
-                    // ciphertext there is either an encrypted coinbase or a leaf
-                    // that is not a coinbase at all, and skipping it would be the
-                    // silent step-over this whole pass exists to close.
-                    let mut from_coinbase = false;
-                    let opened = match leaf.kind {
-                        LeafKind::Coinbase {
-                            ours,
-                            value,
-                            label_disagrees,
-                        } => {
-                            report.coinbase_leaves += 1;
-                            if label_disagrees {
-                                report.coinbase_label_disagreed += 1;
-                            }
-                            match receive_coinbase(
-                                &miner_key,
-                                &ivk,
-                                &genesis_hash,
-                                block_number,
-                                value,
-                                &commitment,
-                                record.ciphertext.as_deref(),
-                            ) {
-                                Some(received) => {
-                                    from_coinbase = true;
-                                    OpenedLeaf::Here(received)
-                                }
-                                // `ours` is the typing pass's own rebuild of
-                                // this wallet's coinbase note against the
-                                // tree-authenticated commitment, so the opener
-                                // above rebuilds the identical note and cannot
-                                // miss. Saying so out loud rather than falling
-                                // through to the transfer arm is what keeps a
-                                // later change to either rule from turning a
-                                // mined reward back into a silent skip.
-                                None if ours => bail!(
-                                    "leaf {} was typed as this wallet's own coinbase for block \
-                                     {block_number} at {} QNR and the same rebuild does not open \
-                                     it. The two rebuilds are one rule, so this is a build whose \
-                                     halves disagree. Nothing has been changed.",
-                                    record.index,
-                                    qnr(value)
-                                ),
-                                None => record
-                                    .ciphertext
-                                    .as_deref()
-                                    .map_or(OpenedLeaf::NotOurs, |bytes| {
-                                        try_transfer(&ivk, bytes, &commitment)
-                                    }),
-                            }
-                        }
-                        LeafKind::Transfer => match record.ciphertext.as_deref() {
-                            Some(ciphertext) => try_transfer(&ivk, ciphertext, &commitment),
-                            // Unreachable: `type_chunk` refuses a transfer leaf
-                            // with no ciphertext by name.
-                            None => OpenedLeaf::NotOurs,
-                        },
-                    };
+                // In leaf order, so a pass records what the chain holds in the
+                // order the chain holds it whichever rule found it.
+                received.sort_by_key(|receipt| receipt.leaf_index);
 
-                    // Where this note is recorded, and which commitment it is
-                    // recorded under. Both are the leaf the pass is standing on
-                    // until the detector below moves them.
-                    let mut leaf_index = record.index;
-                    let (received, commitment) = match opened {
-                        OpenedLeaf::NotOurs => continue,
-                        OpenedLeaf::Here(received) => (received, commitment),
-                        // The one local detector for a leaf this node moved.
-                        //
-                        // These bytes decapsulated under this wallet's ML-KEM
-                        // key and opened under an AEAD whose associated data is
-                        // this wallet's own `pk`, so the note inside them is
-                        // this wallet's. A commitment beside them that the note
-                        // does not open is therefore the node taking a pair
-                        // apart, and this pass can say where the pair belongs:
-                        // the block's leaf range is already folded and compared
-                        // against the `zkTreeRoot` its header carries, so a
-                        // commitment found inside it is one the block appended.
-                        OpenedLeaf::Elsewhere(received) => {
-                            let found = by_commitment
-                                .get_or_insert_with(|| index_chunk(&typed))
-                                .get(&(block_number, received.commitment))
-                                .copied();
-                            match found {
-                                Some(index) => {
-                                    moved_leaves += 1;
-                                    if moved_leaves <= WARNED_LEAVES_PER_PASS {
-                                        report.warnings.push(moved_leaf_warning(
-                                            record.index,
-                                            block_number,
-                                            index,
-                                        ));
-                                    }
-                                    leaf_index = index;
-                                    let commitment = received.commitment;
-                                    (received, commitment)
-                                }
-                                // Skipped and said out loud, and a warning
-                                // deliberately. One other thing produces this
-                                // reading and nothing local tells it apart: a
-                                // sender who encrypted a payload opening a
-                                // commitment the sender never published. The
-                                // circuit leaves `ct_digest` unconstrained
-                                // (`docs/CIRCUIT.md` section 1), so no rule on
-                                // chain ties a ciphertext's plaintext to the
-                                // commitment beside it, and anyone holding this
-                                // wallet's address can write such a leaf for
-                                // the price of one transaction. Refusing the
-                                // pass here would hand that sender a permanent
-                                // sync denial: the leaf is read again on every
-                                // later pass and on a rescan as well.
-                                None => {
-                                    unplaceable_leaves += 1;
-                                    if unplaceable_leaves <= WARNED_LEAVES_PER_PASS {
-                                        report.warnings.push(unplaceable_leaf_warning(
-                                            record.index,
-                                            block_number,
-                                        ));
-                                    }
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-
+                for Receipt {
+                    leaf_index,
+                    block_number,
+                    commitment,
+                    note: received,
+                    from_coinbase,
+                } in received
+                {
                     let commitment_hex = commitment.to_hex();
                     if self.store.has_commitment(&commitment_hex) {
                         // Already held, and possibly not where it was. A rescan
@@ -1106,20 +1008,6 @@ impl Wallet {
             trusted_hash = top_hash;
             if top == head.number {
                 break;
-            }
-        }
-
-        // What the cap held back, carried as a count, so the report a person
-        // reads stays one list whatever a node answered. See
-        // [`moved_overflow_warning`] and [`unplaceable_overflow_warning`].
-        if let Some(more) = moved_leaves.checked_sub(WARNED_LEAVES_PER_PASS) {
-            if more > 0 {
-                report.warnings.push(moved_overflow_warning(more));
-            }
-        }
-        if let Some(more) = unplaceable_leaves.checked_sub(WARNED_LEAVES_PER_PASS) {
-            if more > 0 {
-                report.warnings.push(unplaceable_overflow_warning(more));
             }
         }
 
@@ -2237,93 +2125,58 @@ pub fn output_ct_digest(output: &ShieldedOutput) -> Result<Digest> {
 
 /// One coinbase leaf, decided against this wallet.
 ///
-/// Two ways in, and the order matters. The derived path is what a Qnero node
-/// publishes: a block author's node cannot encrypt to an ML-KEM key, so it
-/// derives the note from the miner key the operator configured it with and
-/// publishes only `inner`. `qnero_note_core::coinbase_r` carries why. The
-/// encrypted path is for a coinbase paid to an address whose coinbase viewing
-/// key the author does not hold, which nothing in this wallet produces today
-/// and the pallet still accepts.
+/// One way in, and the chain is what narrowed it to one. A block author's node
+/// cannot encrypt to an ML-KEM key, so it derives the note from the miner key
+/// the operator configured it with and publishes only `inner`;
+/// `qnero_note_core::coinbase_r` carries why.
 ///
-/// Both end at the same check: rebuild the note against the value the chain
+/// The encrypted coinbase, for a recipient whose coinbase viewing key the
+/// author does not hold, is not a shape any Qnero chain produces:
+/// `pallet-shielded`'s coinbase inherent refuses a non-empty payload by name
+/// (`CoinbasePayloadNotSupported`), because an inherent pays no fee and those
+/// bytes would be the one place on the chain where permanent storage is free.
+/// So there is no coinbase payload in any block body, the body walk reads the
+/// settlement and shield calls alone, and the derived rebuild is the whole
+/// coinbase rule. When a builder for third-party coinbases lands
+/// (`docs/CIRCUIT.md` section 10.6) the inherent joins the walk and this path
+/// grows a second arm.
+///
+/// It ends where it always did: rebuild the note against the value the chain
 /// published and compare the commitment to the leaf. Nothing a block author
-/// writes is trusted, the amount inside an encrypted payload included, which
-/// is the one field of a coinbase note the chain has already decided.
+/// writes is trusted.
 ///
-/// The derived path takes the genesis because the derivation is deterministic
-/// and is bound to one chain; the store is bound to the same genesis, and the
-/// sync checked that before it read a leaf.
+/// The genesis goes in because the derivation is deterministic and is bound to
+/// one chain; the store is bound to the same genesis, and the sync checked
+/// that before it read a leaf.
 fn receive_coinbase(
     miner_key: &MinerKey,
-    ivk: &IncomingViewingKey,
     genesis_hash: &[u8],
     block: u32,
     value: u64,
     commitment: &Digest,
-    ciphertext: Option<&[u8]>,
 ) -> Option<ReceivedNote> {
-    if let Ok(note) = miner_key.coinbase_note(genesis_hash, block, value) {
-        let derived = note.commitment();
-        if &derived == commitment {
-            return Some(ReceivedNote {
-                note,
-                memo: Vec::new(),
-                commitment: derived,
-            });
-        }
-    }
-    let parsed = NoteCiphertext::from_bytes(ciphertext?).ok()?;
-    try_receive_coinbase(ivk, &parsed, value, commitment).ok()
+    let note = miner_key.coinbase_note(genesis_hash, block, value).ok()?;
+    let derived = note.commitment();
+    (&derived == commitment).then(|| ReceivedNote {
+        note,
+        memo: Vec::new(),
+        commitment: derived,
+    })
 }
 
-/// What the ciphertext beside a leaf opened.
+/// One note this chunk took out of the chain, and where the chain holds it.
 ///
-/// Three answers where there used to be two. The third is the whole of the one
-/// local detector this wallet has for a moved leaf, and collapsing it into
-/// "somebody else's" threw that detector away.
-enum OpenedLeaf {
-    /// Not this wallet's, or not a ciphertext at all. The ordinary answer for
-    /// almost every leaf on the chain.
-    NotOurs,
-    /// This wallet's, and the commitment beside it is the one it opens.
-    Here(ReceivedNote),
-    /// This wallet's, and the commitment beside it is a different one.
-    ///
-    /// The payload is authenticated: it decapsulated under this wallet's
-    /// ML-KEM decapsulation key and the AEAD opened with this wallet's own
-    /// `pk` as associated data, so the note inside it is this wallet's note
-    /// and the bytes were written by somebody who holds this wallet's address.
-    /// What the commitment beside it says is that the pair was taken apart.
-    Elsewhere(ReceivedNote),
-}
-
-/// One leaf opened by the ordinary transfer rule: a shield or a settled
-/// output, whose value comes out of the payload and off the chain nowhere.
-///
-/// A payload that opens beside a commitment it does not open is carried out
-/// of here as [`OpenedLeaf::Elsewhere`] and the caller acts on it. It used to
-/// be folded into "somebody else's", which is the same reading as a
-/// stranger's ciphertext and reaches the same silent skip, and it is the one
-/// reading a wallet can tell apart on its own: a stranger's bytes do not open
-/// at all, while these did.
-fn try_transfer(ivk: &IncomingViewingKey, ciphertext: &[u8], commitment: &Digest) -> OpenedLeaf {
-    let Ok(parsed) = NoteCiphertext::from_bytes(ciphertext) else {
-        return OpenedLeaf::NotOurs;
-    };
-    // One decapsulation per leaf, and the comparison after it.
-    //
-    // `try_receive` is `decrypt_note` plus this comparison, so calling it and
-    // then decrypting again on a mismatch ran the ML-KEM decapsulation and the
-    // AEAD open twice for the same bytes. How many mismatches a pass meets is
-    // a node's choice: it can answer a commitment the payload does not open at
-    // every leaf it serves, and each one used to cost a second decapsulation.
-    // The note the first open produced is the note either arm needs, so it is
-    // kept and the commitment decides which arm it goes down.
-    match decrypt_note(ivk, &parsed) {
-        Ok(received) if received.commitment == *commitment => OpenedLeaf::Here(received),
-        Ok(received) => OpenedLeaf::Elsewhere(received),
-        Err(_) => OpenedLeaf::NotOurs,
-    }
+/// Both rules fill the same list and the recording below reads only this, so a
+/// coinbase and a payment are written the same way. `leaf_index` is where the
+/// commitment sits inside the block's folded range: for a coinbase that is the
+/// position it was typed at, and for a payment it is the index the commitment
+/// search answered, which is the whole reason the search exists.
+struct Receipt {
+    leaf_index: u64,
+    block_number: u32,
+    commitment: Digest,
+    note: ReceivedNote,
+    from_coinbase: bool,
 }
 
 /// Where each block of this chunk holds each commitment, keyed by both.
@@ -2503,50 +2356,31 @@ pub struct SyncReport {
     /// else's. It is also exactly what the two per-leaf values nothing on
     /// chain binds look like, and that is why the pass says it out loud.
     ///
-    /// The first is `Shielded::Ciphertexts(i)`: the commitment carries no
-    /// ciphertext, and `ct_digest` binds the bytes only inside the settlement
-    /// extrinsic at inclusion, which a storage-only reader never fetches. So a
-    /// node with honest headers can answer a stranger's bytes at this wallet's
-    /// incoming payment and the AEAD does not open.
+    /// One value is left, and it is the height of the fold inside a block.
+    /// `hash_node` sorts a node's children at every level and tags no level,
+    /// so a shorter tree of internal node values served as leaves folds to the
+    /// root of the leaves under them: a node can report a block's range at the
+    /// wrong height and every header still checks out. The commitments this
+    /// pass then searches are node values, a payload that opens matches none
+    /// of them, and the payment is discarded in silence. Which index inside
+    /// the block holds which commitment is no longer one of these: the payment
+    /// is found by the commitment its payload opens, wherever the node put it.
     ///
-    /// The second is where a commitment sits inside its block's own leaf
-    /// range. `hash_node` sorts a node's children at every level and tags no
-    /// level, so a block's `zkTreeRoot` pins that block's leaf multiset and
-    /// each internal node's child multiset and nothing further: sibling swaps
-    /// composed at any level move a payment to any position the range's
-    /// aligned subtrees allow, the coinbase position included, and a shorter
-    /// tree of internal node values served as leaves folds to the same root,
-    /// so the root pins neither the leaf count nor the height inside a block.
-    /// At the coinbase position a ciphertext is not owed and the coinbase
-    /// rebuild opens nobody else's note, so the payment is skipped.
-    ///
-    /// One of those the scan does catch on its own, and the catch is the
-    /// [`OpenedLeaf::Elsewhere`] detector: a move that leaves this wallet's
-    /// ciphertext where the chain published it is a ciphertext that opens
-    /// beside a commitment it does not open, and the note is recorded at the
-    /// index inside the same block that holds the commitment it does open,
-    /// with a warning. What stays hidden is a move that takes this wallet's
-    /// ciphertext away with the commitment, or leaves none at all.
-    ///
-    /// Either way the leaf reads as somebody else's and the watermark is
-    /// written above it. The checkpoint fork walk does not recover either,
-    /// because the headers agree; a rescan against a second node recovers
-    /// both. `docs/WALLET.md`, under "What a lying node can and cannot do",
-    /// carries the bound and the closure that would end it.
+    /// The checkpoint fork walk does not recover it, because the headers
+    /// agree; a rescan against a second node does. `docs/WALLET.md`, under
+    /// "What a lying node can and cannot do", carries the bound and the
+    /// closure that would end it.
     pub scanned_and_received_nothing: bool,
     /// What this pass gave up, could not verify, or recovered from a node
     /// answer the chain does not back, in sentences the caller prints.
     ///
     /// Rare by construction, which is what keeps the list worth reading. The
-    /// two entries today both come out of the detector in the scan: a
-    /// ciphertext this wallet's own key opened beside a commitment it does not
-    /// open, either relocated to the index inside the same block that holds
-    /// the opened note's commitment, or skipped because that block holds it
-    /// nowhere. `wallet-web` carries the same list as `report.warnings`.
-    ///
-    /// Both of those are per leaf and a node decides how many leaves produce
-    /// one, so both are capped at [`WARNED_LEAVES_PER_PASS`] sentences and the
-    /// rest of each is one closing sentence carrying the count.
+    /// per-leaf detector that used to fill it is gone with the per-leaf
+    /// ciphertext: a payload has no leaf beside it to disagree with, so there
+    /// is nothing to relocate and nothing to warn about. A payload that opens
+    /// and matches no commitment in its block is the ordinary answer on a
+    /// chain that skips settlement segments, and it is discarded in silence.
+    /// `wallet-web` carries the same list as `report.warnings`.
     pub warnings: Vec<String>,
     /// The node gate this sync bypassed, as the refusal it would have been.
     ///

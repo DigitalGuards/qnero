@@ -21,6 +21,7 @@ use codec::Encode;
 use qnero_circuit::header::{HeaderInputs, DIGEST_LOGS_SIZE};
 use qnero_circuit::merkle::TreeFrontier;
 use qnero_notes::{Digest, MinerKey};
+use qnero_wallet::extrinsic::ShieldedOutput;
 use qnero_wallet::metadata::{
     ChainMetadata, StorageItem, KNOWN_SIGNED_EXTENSIONS, REQUIRED_STORAGE,
 };
@@ -66,14 +67,19 @@ pub struct NodeState {
     /// filled by [`storage_at`], because a fixture with a hole in it is a
     /// chain no node can serve.
     pub withheld_leaves: BTreeSet<u64>,
-    /// The same hook for `Shielded::Ciphertexts`.
+    /// Blocks `chain_getBlock` answers nothing for, whatever its header says.
     ///
-    /// One hook per key rather than one for all four. `pallet-shielded` writes
-    /// each of these in the same call that appends the leaf and removes none
-    /// of them, so each is its own withheld answer with its own way of hiding
-    /// the leaf, and a test that can only take the commitment away cannot
-    /// cover the other three.
-    pub withheld_ciphertexts: BTreeSet<u64>,
+    /// The one way a node can hide a payload now that the payload is in the
+    /// body: the body roots as a whole, so there is no single extrinsic to
+    /// withhold, and a node that will not serve the block at all is what is
+    /// left. The wallet refuses the pass by name and commits no watermark.
+    pub withheld_bodies: BTreeSet<u32>,
+    /// Blocks whose body `chain_getBlock` serves with one byte changed.
+    ///
+    /// Changed on the way out, after the header was built, so the header still
+    /// carries the root of the body this node actually holds and the body it
+    /// serves roots elsewhere. That is the whole of the authentication.
+    pub tampered_bodies: BTreeSet<u32>,
     /// The same hook for `Shielded::LeafBlocks`.
     pub withheld_leaf_blocks: BTreeSet<u64>,
     /// The same hook for `Shielded::CoinbaseValues`, which is the one key of
@@ -282,6 +288,10 @@ impl NodeState {
         self.fork_from.hash(&mut hasher);
         self.short_leaf_count.hash(&mut hasher);
         self.storage.hash(&mut hasher);
+        // The bodies reach `build` through the `extrinsicsRoot` it puts in
+        // every header, so a fixture that appends an extrinsic gets a fresh
+        // chain.
+        self.blocks.hash(&mut hasher);
         self.sealed.hash(&mut hasher);
         self.misdated_leaves.hash(&mut hasher);
         self.authored.hash(&mut hasher);
@@ -290,7 +300,6 @@ impl NodeState {
         // folds the tree out of, so a test that clears one between syncs has
         // to get a fresh chain.
         self.withheld_leaves.hash(&mut hasher);
-        self.withheld_ciphertexts.hash(&mut hasher);
         self.withheld_leaf_blocks.hash(&mut hasher);
         self.withheld_coinbase_values.hash(&mut hasher);
         self.lying_headers.hash(&mut hasher);
@@ -365,6 +374,13 @@ impl ChainView {
             };
             let entries = trie_entries(state, number);
             let (state_root, _) = qnero_state_proof::fixtures::proof(&entries, &[]);
+            // The header's own commitment to this block's body, built the way
+            // `frame_system` builds it. A fixture whose headers carried a
+            // constant here would be a node no wallet could read a payload
+            // off, because the body check is what authenticates every note
+            // ciphertext on the chain.
+            let extrinsics_root = qnero_state_proof::extrinsics_root(&body_at(state, number))
+                .expect("a fixture body roots");
             let logs = if state.unlabelled.contains(&number) {
                 Vec::new()
             } else {
@@ -387,7 +403,7 @@ impl ChainView {
                 Digest::from_bytes(&parent).expect("a canonical parent"),
                 claimed,
                 state_root,
-                [0x22u8; 32],
+                extrinsics_root,
                 root,
                 &digest_window(&logs),
             )
@@ -397,7 +413,7 @@ impl ChainView {
                 "parentHash": format!("0x{}", hex::encode(parent)),
                 "number": format!("0x{claimed:x}"),
                 "stateRoot": format!("0x{}", hex::encode(state_root)),
-                "extrinsicsRoot": format!("0x{}", hex::encode([0x22u8; 32])),
+                "extrinsicsRoot": format!("0x{}", hex::encode(extrinsics_root)),
                 "zkTreeRoot": format!("0x{}", root.to_hex()),
                 "digest": {"logs": logs},
             }));
@@ -646,7 +662,23 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
                 .and_then(Value::as_str)
                 .and_then(|hash| chain.number_of(hash))
                 .unwrap_or(state.head_number);
-            let extrinsics = state.blocks.get(&number).cloned().unwrap_or_default();
+            if state.withheld_bodies.contains(&number) {
+                // What a node that will not serve a block answers: a result
+                // with no block in it, which is not an error and which a
+                // wallet must not read as a block that carried nothing.
+                return Ok(Value::Null);
+            }
+            let mut extrinsics = state.blocks.get(&number).cloned().unwrap_or_default();
+            if state.tampered_bodies.contains(&number) {
+                // One byte, in the last extrinsic, after the header was built.
+                let last = extrinsics
+                    .last_mut()
+                    .expect("a tampered body has an extrinsic to tamper with");
+                let mut bytes = hex::decode(last.trim_start_matches("0x")).expect("hex");
+                let end = bytes.len() - 1;
+                bytes[end] ^= 0x01;
+                *last = format!("0x{}", hex::encode(bytes));
+            }
             Ok(json!({"block": {"extrinsics": extrinsics}}))
         }
         "state_getRuntimeVersion" => Ok(json!({"specVersion": 152, "transactionVersion": 6})),
@@ -773,17 +805,18 @@ fn dispatch(state: &mut NodeState, method: &str, params: &Value) -> Result<Value
 /// One storage value, with every per-leaf map filled in below its own count.
 ///
 /// `pallet-zk-tree` appends a leaf and raises `LeafCount` in one call and
-/// nothing ever removes one, and `pallet-shielded` writes the leaf's other
-/// keys in that same call: a shield and a settled output write `Ciphertexts`
-/// and `LeafBlocks`, and a coinbase writes `LeafBlocks` and `CoinbaseValues`.
-/// So a real chain carries a commitment, a block and, where the leaf is not a
-/// coinbase, a ciphertext at every index below its count, and the wallet
-/// refuses an absent one there by name: below the count, no answer is an
-/// answer withheld, and scanning past it hides a payment behind a watermark
-/// written above it (`Chain::leaves` and `Wallet::sync_with`). A fixture that
-/// writes one leaf and a count of six is describing a chain no node can serve,
-/// so the gaps are filled here rather than in every test: what a fixture sets
-/// is what the wallet reads, and the rest is a leaf that belongs to nobody.
+/// nothing ever removes one, and `pallet-shielded` writes `LeafBlocks` in that
+/// same call, plus `CoinbaseValues` where the leaf is the coinbase. So a real
+/// chain carries a commitment and a block at every index below its count, and
+/// the wallet refuses an absent one there by name: below the count, no answer
+/// is an answer withheld, and scanning past it hides a payment behind a
+/// watermark written above it (`Chain::leaves` and `Wallet::sync_with`). A
+/// fixture that writes one leaf and a count of six is describing a chain no
+/// node can serve, so the gaps are filled here rather than in every test: what
+/// a fixture sets is what the wallet reads, and the rest is a leaf that
+/// belongs to nobody. The note ciphertexts are not filled in at all: they live
+/// in block bodies, a body with no payload in it is a chain any node can
+/// serve, and [`put_payload`] is how a fixture puts one there.
 ///
 /// The same argument reaches `CoinbaseValues` now that a wallet requires one
 /// at every coinbase position. A block's coinbase is the last leaf it
@@ -812,7 +845,6 @@ fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
     };
     let withheld = match item {
         LeafKey::Leaves => &state.withheld_leaves,
-        LeafKey::Ciphertexts => &state.withheld_ciphertexts,
         LeafKey::LeafBlocks => &state.withheld_leaf_blocks,
         LeafKey::CoinbaseValues => &state.withheld_coinbase_values,
     };
@@ -833,24 +865,16 @@ fn storage_at(state: &NodeState, key: &str) -> Option<Vec<u8>> {
     if item == LeafKey::Leaves {
         return Some(filler_leaf(index));
     }
-    let wrote_value = has_storage(state, "Shielded", "CoinbaseValues", index);
     let mints_here = ends_its_block(state, index);
     match item {
         LeafKey::Leaves => Some(filler_leaf(index)),
         LeafKey::LeafBlocks => leaf_blocks(state)
             .get(index as usize)
             .map(codec::Encode::encode),
-        // Not for a coinbase leaf: under v1 the inherent refuses a payload, so
-        // a coinbase leaf carries no ciphertext, and a fixture whose coinbase
-        // was handed a filler would be exercising the payload branch by
-        // accident.
-        LeafKey::Ciphertexts if !wrote_value && !mints_here => {
-            Some(codec::Encode::encode(&filler_ciphertext(index)))
-        }
         LeafKey::CoinbaseValues if mints_here => {
             Some(codec::Encode::encode(&filler_coinbase_value(index)))
         }
-        LeafKey::Ciphertexts | LeafKey::CoinbaseValues => None,
+        LeafKey::CoinbaseValues => None,
     }
 }
 
@@ -867,11 +891,15 @@ fn ends_its_block(state: &NodeState, index: u64) -> bool {
     }
 }
 
-/// The four maps a scan reads per leaf.
+/// The three maps a scan reads per leaf.
+///
+/// The note ciphertexts are not among them: the chain publishes them in block
+/// bodies, so a fixture puts one in a body with [`put_payload`] and this node
+/// serves it through `chain_getBlock`, under a header whose `extrinsicsRoot`
+/// is the root of that body.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LeafKey {
     Leaves,
-    Ciphertexts,
     LeafBlocks,
     CoinbaseValues,
 }
@@ -880,7 +908,6 @@ enum LeafKey {
 fn leaf_key(key: &str) -> Option<(LeafKey, u64)> {
     for (item, pallet, name) in [
         (LeafKey::Leaves, "ZkTree", "Leaves"),
-        (LeafKey::Ciphertexts, "Shielded", "Ciphertexts"),
         (LeafKey::LeafBlocks, "Shielded", "LeafBlocks"),
         (LeafKey::CoinbaseValues, "Shielded", "CoinbaseValues"),
     ] {
@@ -990,22 +1017,93 @@ fn explicit_leaf_block(state: &NodeState, index: u64) -> Option<u32> {
         .map(u32::from_le_bytes)
 }
 
-/// A ciphertext that is nobody's: bytes derived from the index, which
-/// `NoteCiphertext::from_bytes` refuses at its length before any key is tried.
-fn filler_ciphertext(index: u64) -> Vec<u8> {
-    qnero_wallet::scale::blake2_256(&index.to_le_bytes()).to_vec()
-}
-
 /// A coinbase value that is nobody's: the leaf beside it is a filler, so no
 /// value rebuilds this wallet's own coinbase note over it.
 fn filler_coinbase_value(index: u64) -> u64 {
     index + 1
 }
 
-/// A leaf that is nobody's: 32 bytes derived from the index, with a filler
-/// ciphertext beside it that decrypts for no one.
+/// A leaf that is nobody's: 32 bytes derived from the index, opened by no
+/// payload any body carries.
 fn filler_leaf(index: u64) -> Vec<u8> {
     qnero_wallet::scale::blake2_256(&index.to_le_bytes()).to_vec()
+}
+
+/// The extrinsics of one block, decoded, in the order `chain_getBlock` serves
+/// them.
+fn body_at(state: &NodeState, number: u32) -> Vec<Vec<u8>> {
+    state
+        .blocks
+        .get(&number)
+        .map(|extrinsics| {
+            extrinsics
+                .iter()
+                .map(|extrinsic| {
+                    hex::decode(extrinsic.trim_start_matches("0x")).expect("a fixture body is hex")
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Put one note ciphertext into a block's body, the way a settlement carries
+/// it.
+///
+/// A bare `submit_private_batch` with one output slot: the payload as `ct_1`
+/// and an empty `ct_2`, which is the shape a settling slot that emptied its
+/// second position publishes. The header's `extrinsicsRoot` follows
+/// automatically, because [`ChainView::build`] roots whatever is in
+/// `NodeState::blocks`.
+pub fn put_payload(state: &mut NodeState, block: u32, ciphertext: &[u8]) {
+    let extrinsic = settlement_extrinsic(&[ciphertext.to_vec(), Vec::new()]);
+    state
+        .blocks
+        .entry(block)
+        .or_default()
+        .push(format!("0x{}", hex::encode(extrinsic)));
+}
+
+/// A bare `submit_private_batch(proof, outputs)` carrying these payloads, two
+/// to a slot.
+///
+/// Built through the wallet's own encoder, so the walk the scan makes is
+/// reading back exactly what the wallet writes and a change to either side
+/// fails here rather than in production.
+pub fn settlement_extrinsic(payloads: &[Vec<u8>]) -> Vec<u8> {
+    let outputs: Vec<ShieldedOutput> = payloads
+        .chunks(2)
+        .map(|pair| ShieldedOutput {
+            ct_1: pair[0].clone(),
+            ct_2: pair.get(1).cloned().unwrap_or_default(),
+        })
+        .collect();
+    qnero_wallet::extrinsic::encode_submit_private_batch(&test_metadata(), b"a proof", &outputs)
+        .expect("the fixture settlement encodes")
+}
+
+/// A signed `shield(value, inner, ciphertext)`, as a dev account submits one.
+///
+/// The one signed shape the walk has to handle: past `MultiAddress::Id`, past
+/// the ML-DSA-87 signature and public key, past the four extensions that
+/// encode anything, and only then the call and its arguments.
+pub fn shield_extrinsic(value_planck: u128, inner: &[u8; 32], ciphertext: &[u8]) -> Vec<u8> {
+    let metadata = test_metadata();
+    let key = qnero_wallet::dev_account::TransparentKey::dev("alice").expect("a dev key");
+    let call =
+        qnero_wallet::extrinsic::encode_shield_call(&metadata, value_planck, inner, ciphertext);
+    qnero_wallet::extrinsic::encode_signed(
+        &metadata,
+        &key,
+        &call,
+        &qnero_wallet::extrinsic::SigningContext {
+            spec_version: 152,
+            transaction_version: 6,
+            genesis_hash: [0x11; 32],
+            nonce: 0,
+            tip: 0,
+        },
+    )
+    .expect("the fixture shield signs")
 }
 
 /// An opaque 32 bytes to pin a read to.
@@ -1109,10 +1207,8 @@ fn trie_entries(state: &NodeState, number: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
     }
     for index in 0..count.min(MAX_FIXTURE_LEAVES) {
         let mints_here = dates.get(index as usize + 1) != dates.get(index as usize);
-        let wrote_value = has_storage(state, "Shielded", "CoinbaseValues", index);
         for (pallet, item, withheld) in [
             ("ZkTree", "Leaves", &state.withheld_leaves),
-            ("Shielded", "Ciphertexts", &state.withheld_ciphertexts),
             ("Shielded", "LeafBlocks", &state.withheld_leaf_blocks),
             (
                 "Shielded",
@@ -1133,9 +1229,6 @@ fn trie_entries(state: &NodeState, number: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
                 match item {
                     "Leaves" => Some(filler_leaf(index)),
                     "LeafBlocks" => dates.get(index as usize).map(codec::Encode::encode),
-                    "Ciphertexts" if !wrote_value && !mints_here => {
-                        Some(codec::Encode::encode(&filler_ciphertext(index)))
-                    }
                     "CoinbaseValues" if mints_here => {
                         Some(codec::Encode::encode(&filler_coinbase_value(index)))
                     }

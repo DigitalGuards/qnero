@@ -462,6 +462,38 @@ pub fn prove_zk_leaf(request_json: &str) -> Result<String, JsError> {
     serde_json::to_string(&report).map_err(|error| JsError::new(&error.to_string()))
 }
 
+/// Recompute a block's `extrinsicsRoot` from the body a node served.
+///
+/// Takes `{ "extrinsics": ["0x..", ..] }`, each entry one extrinsic as
+/// `chain_getBlock` returns it, and answers the `0x`-prefixed root. The caller
+/// compares it against the `extrinsicsRoot` of a header it has already
+/// rehashed to the hash it asked for; this function selects no chain and
+/// trusts no header.
+///
+/// Here rather than in the browser because the construction is a Blake2 trie
+/// over SCALE-encoded keys and this module already links sp-trie for
+/// [`read_state_proof`]. Two implementations of one consensus construction
+/// would be two ways to disagree with the chain.
+#[wasm_bindgen(js_name = extrinsicsRoot)]
+pub fn extrinsics_root(request_json: &str) -> Result<String, JsError> {
+    #[derive(serde::Deserialize)]
+    struct Request {
+        extrinsics: Vec<String>,
+    }
+    let request: Request =
+        serde_json::from_str(request_json).map_err(|error| JsError::new(&error.to_string()))?;
+    let body = request
+        .extrinsics
+        .iter()
+        .map(|extrinsic| {
+            hex::decode(extrinsic.strip_prefix("0x").unwrap_or(extrinsic))
+                .map_err(|error| JsError::new(&error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let root = qnero_state_proof::extrinsics_root(&body).map_err(|error| JsError::new(&error))?;
+    Ok(format!("0x{}", hex::encode(root)))
+}
+
 /// Read authenticated values or an entire complete map prefix from raw RPC
 /// proof nodes. Header trust and selection are the caller's responsibility.
 #[wasm_bindgen(js_name = readStateProof)]
