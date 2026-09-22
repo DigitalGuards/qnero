@@ -18,7 +18,10 @@
 //! power of two and stays well defined elsewhere. The folk version of this
 //! formula, `h - (h % epoch) - lag`, is **not** the same function: at h = 2113
 //! with Monero's constants it gives 1984 where the real rule gives 2048, and a
-//! one-block disagreement about the seed is a chain split.
+//! one-block disagreement about the seed is a chain split. Qnero keeps Monero's
+//! epoch of 2048 and raises the lag to 128, which moves the same disagreement
+//! to h = 2177, where the rule gives 2048 and the folk formula gives
+//! 2177 - 129 - 128 = 1920.
 
 use primitive_types::H256;
 
@@ -31,7 +34,11 @@ use primitive_types::H256;
 pub const DEFAULT_SEED_EPOCH_BLOCKS: u32 = 2048;
 
 /// Default lag, in blocks, between the epoch boundary and the seed block.
-pub const DEFAULT_SEED_EPOCH_LAG: u32 = 64;
+///
+/// Qnero's runtime sets 128, twice Monero's 64, which is 4.3 hours at the
+/// 120 s target. The runtime constant is still what decides it, and the value
+/// here is only the fallback when the runtime cannot be asked.
+pub const DEFAULT_SEED_EPOCH_LAG: u32 = 128;
 
 /// The height of the block whose hash keys the RandomX cache for `height`.
 pub fn seed_height(height: u64, epoch_blocks: u64, lag: u64) -> u64 {
@@ -110,7 +117,7 @@ mod tests {
 	use super::*;
 
 	const EPOCH: u64 = 2048;
-	const LAG: u64 = 64;
+	const LAG: u64 = 128;
 
 	/// Monero's own reference, transcribed from `rx-slow-hash.c`, so the test
 	/// compares against the C rule rather than against a restatement of the
@@ -125,15 +132,15 @@ mod tests {
 
 	#[test]
 	fn the_first_epoch_seeds_from_genesis() {
-		for height in [0u64, 1, 2, 100, 2048, 2111, 2112] {
+		for height in [0u64, 1, 2, 100, 2048, 2111, 2112, 2175, 2176] {
 			assert_eq!(seed_height(height, EPOCH, LAG), 0, "height {height}");
 		}
 	}
 
 	#[test]
 	fn the_seed_moves_one_block_after_the_epoch_plus_lag() {
-		assert_eq!(seed_height(2112, EPOCH, LAG), 0);
-		assert_eq!(seed_height(2113, EPOCH, LAG), 2048);
+		assert_eq!(seed_height(2176, EPOCH, LAG), 0);
+		assert_eq!(seed_height(2177, EPOCH, LAG), 2048);
 	}
 
 	#[test]
@@ -160,8 +167,38 @@ mod tests {
 	#[test]
 	fn the_folk_formula_is_a_different_function() {
 		let folk = |h: u64| h - (h % EPOCH) - LAG;
-		assert_eq!(seed_height(2113, EPOCH, LAG), 2048);
-		assert_eq!(folk(2113), 1984);
+		// At this chain's lag the disagreement sits one block past
+		// `EPOCH + LAG`: 2177 - (2177 % 2048) - 128 = 2177 - 129 - 128.
+		assert_eq!(seed_height(2177, EPOCH, LAG), 2048);
+		assert_eq!(folk(2177), 1920);
+	}
+
+	/// The reference helper above reads this module's `LAG`, so once `LAG` is
+	/// Qnero's 128 nothing else in the file pins Monero's published rule at
+	/// Monero's own constants. This does, and it is the test that would fail
+	/// if the rule itself were rewritten into something merely self-consistent.
+	#[test]
+	fn it_is_moneros_rule_at_moneros_own_constants() {
+		const MONERO_EPOCH: u64 = 2048;
+		const MONERO_LAG: u64 = 64;
+
+		assert_eq!(seed_height(2112, MONERO_EPOCH, MONERO_LAG), 0);
+		assert_eq!(seed_height(2113, MONERO_EPOCH, MONERO_LAG), 2048);
+
+		let masked = |height: u64| {
+			if height <= MONERO_EPOCH + MONERO_LAG {
+				0
+			} else {
+				(height - MONERO_LAG - 1) & !(MONERO_EPOCH - 1)
+			}
+		};
+		for height in (0..40_000u64).step_by(37) {
+			assert_eq!(
+				seed_height(height, MONERO_EPOCH, MONERO_LAG),
+				masked(height),
+				"height {height}"
+			);
+		}
 	}
 
 	#[test]
@@ -189,7 +226,9 @@ mod tests {
 		// nothing changes.
 		assert_eq!(next_seed_height(3000, EPOCH, LAG), seed_height(3000, EPOCH, LAG));
 		// A lag before the rotation it is the one that is about to be used.
+		// At this chain's constants that is 2 * 2048 + 128 + 1 = 4225.
 		let rotate_at = 2 * EPOCH + LAG + 1;
+		assert_eq!(rotate_at, 4225);
 		assert_eq!(next_seed_height(rotate_at - LAG, EPOCH, LAG), 2 * EPOCH);
 		assert_eq!(seed_height(rotate_at, EPOCH, LAG), 2 * EPOCH);
 	}
@@ -197,10 +236,10 @@ mod tests {
 	#[test]
 	fn a_non_power_of_two_epoch_still_partitions_the_chain() {
 		let epoch = 1000;
-		assert_eq!(seed_height(1064, epoch, LAG), 0);
-		assert_eq!(seed_height(1065, epoch, LAG), 1000);
-		assert_eq!(seed_height(2064, epoch, LAG), 1000);
-		assert_eq!(seed_height(2065, epoch, LAG), 2000);
+		assert_eq!(seed_height(1128, epoch, LAG), 0);
+		assert_eq!(seed_height(1129, epoch, LAG), 1000);
+		assert_eq!(seed_height(2128, epoch, LAG), 1000);
+		assert_eq!(seed_height(2129, epoch, LAG), 2000);
 	}
 
 	#[test]
