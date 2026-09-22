@@ -279,13 +279,22 @@ class Smoke:
     def profile_at(self, name, block_hash):
         header = self.rpc(name, "chain_getHeader", [block_hash])
         version = self.rpc(name, "state_getRuntimeVersion", [block_hash])
-        check(version["specVersion"] == 105, "smoke requires runtime spec_version 105")
+        check(version["specVersion"] == 106, "smoke requires runtime spec_version 106")
         value = self.rpc(name, "state_getStorage", [PROFILE_KEY, block_hash])
         check(isinstance(value, str), "active protocol profile is absent")
         profile = bytes.fromhex(value.removeprefix("0x"))
         check(len(profile) == 192 and profile[:8] == b"QNRPRF01", "unexpected protocol profile")
-        check(profile[76] == 1 and int.from_bytes(profile[80:84], "little") == 64,
-              "unexpected ciphertext retention profile")
+        # Byte 76 is where a note ciphertext lives: 1 was state, 2 is the block
+        # body, authenticated against the header's extrinsicsRoot. Bytes 80..84
+        # are CiphertextRetentionBlocks, which is 0 because nothing in the
+        # runtime retains or prunes a ciphertext any more: the queue and the
+        # prune loop are gone, and the constant stays in metadata saying so.
+        check(profile[76] == 2 and int.from_bytes(profile[80:84], "little") == 0,
+              "unexpected ciphertext location and retention profile")
+        # 88..92 carried the per-block ciphertext prune cap and is reserved
+        # zero now. A non-zero there is a runtime that kept a prune path.
+        check(int.from_bytes(profile[88:92], "little") == 0,
+              "byte 88..92 of the profile is reserved zero since the prune path was deleted")
         proof = self.rpc(name, "state_getReadProof", [[PROFILE_KEY], block_hash])
         check(proof["at"] == block_hash and bool(proof["proof"]), "missing pinned state proof")
         return {"header": header, "runtime": version, "profile": value, "read_proof": proof}
