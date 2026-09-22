@@ -9,6 +9,25 @@ use qp_dilithium_crypto::Dilithium87Pair;
 use sp_core::{crypto::AccountId32, Pair};
 use sp_runtime::{generic::Era, traits::AccountIdConversion, BuildStorage, MultiAddress};
 
+/// The variant names of a `Call` enum, read off its own type information.
+///
+/// This is what the runtime metadata is built from, so a call added or removed
+/// anywhere fails the test that pins the list rather than quietly changing what
+/// the chain dispatches. It lived inside a test body in `call_filter.rs` until
+/// `no_admin_keys.rs` needed it too, and every `.rs` directly under `tests/` is
+/// its own integration target, so the shared copy has to live here.
+pub fn call_names<T: scale_info::TypeInfo + 'static>() -> Vec<String> {
+	let mut registry = scale_info::Registry::new();
+	let symbol = registry.register_type(&scale_info::meta_type::<T>());
+	let portable: scale_info::PortableRegistry = registry.into();
+	let scale_info::TypeDef::Variant(variants) =
+		&portable.resolve(symbol.id).expect("just registered").type_def
+	else {
+		panic!("a pallet Call is a variant type");
+	};
+	variants.variants.iter().map(|variant| variant.name.to_string()).collect()
+}
+
 /// Dispatch a signed call past v1's call filter.
 ///
 /// These tests cover pallet behaviour: holds, guardians, quotas, vesting
@@ -90,18 +109,6 @@ impl TestCommons {
 		});
 
 		ext
-	}
-
-	/// Create a test externality. Governance track timing is selected at
-	/// compile time via the `quantus-runtime/fast-governance` feature:
-	/// - feature ON:  all referenda windows collapse to 2 blocks (fast tests)
-	/// - feature OFF: production timing (hours/days): slow but mainnet-accurate
-	pub fn new_fast_governance_test_ext() -> sp_io::TestExternalities {
-		#[cfg(feature = "fast-governance")]
-		println!("Fast governance: all referenda windows = 2 blocks (compile-time).");
-		#[cfg(not(feature = "fast-governance"))]
-		println!("Production governance: real mainnet timing (hours/days).");
-		Self::new_test_ext()
 	}
 
 	// Helper function to run blocks
@@ -197,17 +204,5 @@ impl TestCommons {
 		let signature = raw_payload.using_encoded(sign);
 
 		UncheckedExtrinsic::new_signed(call, MultiAddress::Id(sender), signature, tx_ext)
-	}
-
-	/// Helper to calculate total blocks needed for a governance process
-	/// This helps tests understand how many blocks they need to advance
-	pub fn calculate_governance_blocks(
-		prepare_period: u32,
-		decision_period: u32,
-		confirm_period: u32,
-		min_enactment_period: u32,
-	) -> u32 {
-		prepare_period + decision_period + confirm_period + min_enactment_period + 5
-		// +5 for buffer
 	}
 }

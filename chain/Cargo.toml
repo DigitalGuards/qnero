@@ -38,8 +38,6 @@ members = [
 	"pallets/multisig",
 	"pallets/preimage",
 	"pallets/qpow",
-	"pallets/ranked-collective",
-	"pallets/referenda",
 	"pallets/reversible-transfers",
 	"pallets/scheduler",
 	"pallets/shielded",
@@ -312,8 +310,6 @@ frame-system-rpc-runtime-api = { path = "./frame/system-rpc-runtime-api", defaul
 frame-try-runtime = { path = "./frame/try-runtime", default-features = false }
 hickory-resolver = { version = "0.26.1" }
 pallet-preimage = { path = "./pallets/preimage", default-features = false }
-pallet-ranked-collective = { path = "./pallets/ranked-collective", default-features = false }
-pallet-referenda = { path = "./pallets/referenda", default-features = false }
 pallet-timestamp = { path = "./pallets/timestamp", default-features = false }
 pallet-transaction-payment = { path = "./pallets/transaction-payment", default-features = false }
 pallet-transaction-payment-rpc = { path = "./pallets/transaction-payment-rpc", default-features = false }

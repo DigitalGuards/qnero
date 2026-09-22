@@ -14,10 +14,11 @@
 //!    project decides on. Replace it or delete the whole allocation before mainnet genesis; there
 //!    is no launch that should ship this address. `docs/DESIGN.md` section 7.3 carries the
 //!    pre-mainnet check.
-//! 4. Each of [`TREASURERS`] and [`TECH_COLLECTIVE`] (distinct sets) is endowed with [`SEED`] as
-//!    free balance so they can pay fees and deposits from block 1. They hold no vesting schedule.
-//!    The vesting pot additionally receives its existential deposit from `genesis_template`, the
-//!    only issuance outside the 2%.
+//! 4. Each of [`TREASURERS`] is endowed with [`SEED`] as free balance so they can pay fees and
+//!    deposits from block 1. They hold no vesting schedule. The vesting pot additionally receives
+//!    its existential deposit from `genesis_template`, the only issuance outside the 2%. A second
+//!    table of ten, the tech collective, was endowed here too until the governance removal; its 30
+//!    QNR went back into the placeholder row.
 //! 5. The treasury multisig is derived from [`TREASURERS`] and holds no genesis balance at all.
 //! 6. Accounts are SS58 addresses only, and carry no personal names.
 //! 7. Every address below must be an ML-DSA-87 account, minted with `qnero-node key qnero`. An SS58
@@ -51,10 +52,10 @@ pub const GRANT_UNLOCK_DELAY_DAYS: u64 = 365;
 pub const GRANT_UNLOCK_PERIOD_DAYS: u64 = 3 * 365;
 /// Finish of the delayed schedule, in days from TGE.
 pub const GRANT_END_DAYS: u64 = GRANT_UNLOCK_DELAY_DAYS + GRANT_UNLOCK_PERIOD_DAYS;
-/// Free balance endowed to each treasurer and tech collective member at genesis.
+/// Free balance endowed to each treasurer at genesis.
 pub const SEED: u128 = 3 * UNIT;
-/// Number of [`SEED`] endowments: [`TREASURERS`] plus [`TECH_COLLECTIVE`].
-pub const SEEDED_ACCOUNTS: u128 = (TREASURERS.len() + TECH_COLLECTIVE.len()) as u128;
+/// Number of [`SEED`] endowments: [`TREASURERS`].
+pub const SEEDED_ACCOUNTS: u128 = TREASURERS.len() as u128;
 /// Approvals required on the treasury multisig.
 pub const TREASURY_THRESHOLD: u32 = 6;
 const TREASURY_NONCE: u64 = 0;
@@ -64,7 +65,7 @@ pub const PLACEHOLDER_AMOUNT: u128 = GENESIS_ALLOCATION - SEEDED_ACCOUNTS * SEED
 /// Whether this table is a launch allocation.
 ///
 /// `false`, and it stays `false` until the allocation question is answered. [`require_finalized`]
-/// panics on it, so `treasurers`, `tech_collective`, `treasury_account`, `seed_balances` and
+/// panics on it, so `treasurers`, `treasury_account`, `seed_balances` and
 /// `schedules` all refuse, `mainnet_config_genesis` refuses with them, and `preset_names` leaves
 /// `mainnet` off the list a spec can be built from. The bool on its own is a weak guard, so
 /// [`vesting_names_the_placeholder`] backs it at compile time.
@@ -82,20 +83,6 @@ pub const TREASURERS: [&str; 10] = [
 	"qzm2TcoDAyqycAmMuS91bXhPwWqEgaKcYGh5nQ3wqBqCzc9d5",
 	"qzjuYZSefPGu3DFgBfXDRgGXJ3YvdFwXBNTSbE8Fa7dk3aV8u",
 	"qzmHuteJKcKmyNdLrgS9WivKrsSv6AvwDC56ETf21YhastHXm",
-];
-
-/// Tech collective members, distinct from [`TREASURERS`].
-pub const TECH_COLLECTIVE: [&str; 10] = [
-	"qzpfF7tvw4nhTzhhAjifFGPRKqKTBfCk68dgvM5DwnDCSyXYJ",
-	"qzjpLEi51md3q9FpECBTxRuLQsP31N5NmT9CF3ovVXY2RVKWE",
-	"qzomCRTgMZHtdDWBBAqm5WLG8FwLKuYCJHgrAMznkKEhWG8qJ",
-	"qzmQoa5gvngjmTafLJqCBnmmmNKFCuaVvZiZcdairrGWVCBjA",
-	"qzosrX14BSUfTsGYB3NmakBWBvJgLGwqboJCQAvL2V1Tm64UA",
-	"qznivf7i8HDSqqb4uCSzeAypCPpKAHZASC2QPQa4D1zzYGsZu",
-	"qzmyhjrbKk9Nhtcq3gnNpX5p9CR8HnM92SUGBC2cVW6FpAzd2",
-	"qzneDSjVt2Lbf2nq3UZFGG3cutFfkk5ktffaeJRamAb134obQ",
-	"qzmdJBPzYdtBGLaJYjtT7FutNd47q79rjr63qhJTeQNzvBb9c",
-	"qzoijuSKGJAgAbPChRc1LxxxjeZRpWGLBooHDUYzhPJ6ooTvw",
 ];
 
 /// The one account the placeholder allocation vests to.
@@ -125,8 +112,8 @@ const fn vesting_total() -> u128 {
 }
 
 const _: () = assert!(GENESIS_ALLOCATION == 420_000 * UNIT);
-const _: () = assert!(SEEDED_ACCOUNTS * SEED == 60 * UNIT);
-const _: () = assert!(PLACEHOLDER_AMOUNT == 419_940 * UNIT);
+const _: () = assert!(SEEDED_ACCOUNTS * SEED == 30 * UNIT);
+const _: () = assert!(PLACEHOLDER_AMOUNT == 419_970 * UNIT);
 const _: () = assert!(GRANT_UNLOCK_PERIOD_DAYS == 3 * 365);
 const _: () = assert!(GRANT_END_DAYS == 4 * 365);
 const _: () = assert!(GRANT_UNLOCK_DELAY_DAYS < GRANT_END_DAYS);
@@ -196,17 +183,6 @@ pub fn treasurers() -> Vec<AccountId> {
 	accounts(&TREASURERS, "treasurers")
 }
 
-/// Tech collective members; must not overlap the treasurers.
-pub fn tech_collective() -> Vec<AccountId> {
-	let treasurers = treasurers();
-	let members = accounts(&TECH_COLLECTIVE, "tech collective members");
-	assert!(
-		members.iter().all(|m| !treasurers.contains(m)),
-		"mainnet tech collective members must differ from the treasurers"
-	);
-	members
-}
-
 /// The [`TREASURY_THRESHOLD`]-of-10 multisig of [`TREASURERS`].
 pub fn treasury_account() -> AccountId {
 	Multisig::<crate::Runtime>::derive_multisig_address(
@@ -216,13 +192,9 @@ pub fn treasury_account() -> AccountId {
 	)
 }
 
-/// [`SEED`] free balance for every treasurer and tech collective member.
+/// [`SEED`] free balance for every treasurer.
 pub fn seed_balances() -> Vec<(AccountId, u128)> {
-	treasurers()
-		.into_iter()
-		.chain(tech_collective())
-		.map(|who| (who, SEED))
-		.collect()
+	treasurers().into_iter().map(|who| (who, SEED)).collect()
 }
 
 /// [`VESTING`] in row order (ids from 0). Times are offsets from the first non-zero timestamp.
@@ -247,7 +219,6 @@ mod tests {
 		assert_eq!(GENESIS_ALLOCATION, 420_000 * UNIT);
 		assert_eq!(SEED, 3 * UNIT);
 		assert_eq!(TREASURERS.len(), 10);
-		assert_eq!(TECH_COLLECTIVE.len(), 10);
 		let vested: u128 = VESTING.iter().map(|(_, amount, _, _)| *amount).sum();
 		assert_eq!(vested, PLACEHOLDER_AMOUNT);
 		assert_eq!(vested + SEEDED_ACCOUNTS * SEED, GENESIS_ALLOCATION);
@@ -256,9 +227,9 @@ mod tests {
 	/// The whole allocation is one row to one address, and that is the point:
 	/// there is one thing to delete when the allocation question is settled.
 	///
-	/// It reads the SS58 tables through `accounts`, because `treasurers`,
-	/// `tech_collective` and `treasury_account` all refuse while `FINALIZED` is
-	/// `false`, and refusing is their whole job. What they would have added over
+	/// It reads the SS58 table through `accounts`, because `treasurers` and
+	/// `treasury_account` both refuse while `FINALIZED` is `false`, and refusing
+	/// is their whole job. What they would have added over
 	/// this is the refusal itself, which `refuses_to_build_until_finalized`
 	/// asserts on its own.
 	#[test]
@@ -273,14 +244,12 @@ mod tests {
 
 		let placeholder = account_from_ss58(PLACEHOLDER);
 		let treasurers = accounts(&TREASURERS, "treasurers");
-		let collective = accounts(&TECH_COLLECTIVE, "tech collective members");
 		let treasury = Multisig::<crate::Runtime>::derive_multisig_address(
 			&treasurers,
 			TREASURY_THRESHOLD,
 			TREASURY_NONCE,
 		);
 		assert!(treasurers.iter().all(|who| *who != placeholder));
-		assert!(collective.iter().all(|who| *who != placeholder));
 		assert_ne!(placeholder, treasury);
 	}
 
@@ -293,22 +262,19 @@ mod tests {
 		}
 		let mut accounts: Vec<&str> = VESTING.iter().map(|(who, ..)| *who).collect();
 		accounts.extend(TREASURERS);
-		accounts.extend(TECH_COLLECTIVE);
 		let total = accounts.len();
 		accounts.sort_unstable();
 		accounts.dedup();
-		assert_eq!(
-			accounts.len(),
-			total,
-			"allocation, treasurer and tech collective addresses must be distinct"
-		);
+		assert_eq!(accounts.len(), total, "allocation and treasurer addresses must be distinct");
 	}
 
+	/// The referendum half of this went with the collective: a submission
+	/// deposit, a decision deposit and a preimage deposit priced a seed that no
+	/// account can spend on a referendum any more.
 	#[test]
 	fn seeds_cover_bootstrap_costs() {
-		use super::super::{tech_referendum_cost, treasury_signer_seed};
+		use super::super::treasury_signer_seed;
 		assert!(treasury_signer_seed(TREASURERS.len() as u32) <= SEED);
-		assert!(tech_referendum_cost() <= SEED);
 	}
 
 	/// The flag and the table cannot both stand. `FINALIZED` is a bool, and a bool is worth what
@@ -320,7 +286,6 @@ mod tests {
 		if vesting_names_the_placeholder() {
 			assert!(std::panic::catch_unwind(schedules).is_err());
 			assert!(std::panic::catch_unwind(treasurers).is_err());
-			assert!(std::panic::catch_unwind(tech_collective).is_err());
 			assert!(std::panic::catch_unwind(treasury_account).is_err());
 			assert!(std::panic::catch_unwind(seed_balances).is_err());
 		}
@@ -333,7 +298,6 @@ mod tests {
 				.iter()
 				.map(|(who, ..)| *who)
 				.chain(TREASURERS)
-				.chain(TECH_COLLECTIVE)
 				.filter(|s| s.starts_with("REPLACE_WITH_"))
 				.count();
 			assert_eq!(placeholders, 0);
@@ -349,7 +313,6 @@ mod tests {
 			}));
 		} else {
 			assert!(std::panic::catch_unwind(treasurers).is_err());
-			assert!(std::panic::catch_unwind(tech_collective).is_err());
 			assert!(std::panic::catch_unwind(treasury_account).is_err());
 			assert!(std::panic::catch_unwind(seed_balances).is_err());
 			assert!(std::panic::catch_unwind(schedules).is_err());

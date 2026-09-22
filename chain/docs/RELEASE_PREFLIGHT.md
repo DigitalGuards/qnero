@@ -123,7 +123,7 @@ Must still end Idle at tip. Warp is not a substitute for gate 2.
 
 This is the transaction suite we already run: `quantus exercise` against
 a `--dev` node. `crystal_alice` is genesis-funded there, so every default
-phase can run (including governance).
+phase can run.
 
 **Terminal 1 — fresh dev node**
 
@@ -142,12 +142,14 @@ quantus exercise --fail-fast
 ```
 
 Default phases (all required): `reads`, `balances`, `utility`, `reversible`,
-`multisig`, `preimage`, `governance`, `vesting`, `negative`,
-`fuzz`, `wormhole`.
+`multisig`, `vesting`, `negative`, `fuzz`, `wormhole`.
 
 Do **not** `--skip` phases for a release candidate. `wormhole` is slow; still
-run it. Leave `upgrade` off unless this is a runtime-upgrade rehearsal on a
-fast-governance node.
+run it. The `governance`, `preimage` and `upgrade` phases do not apply to this
+chain: the collective and its referenda are gone, `Preimage`'s calls are
+disabled, and there is no runtime-upgrade dispatch to rehearse. A CLI that
+still offers them will fail them; skip those three explicitly and record that
+you did.
 
 ### Pass
 

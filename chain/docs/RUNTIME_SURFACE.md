@@ -6,13 +6,16 @@ surface: the runtime crate's own modules, the pallets composed into the runtime,
 their dispatchable calls, the runtime APIs, transaction extensions, genesis
 logic, and the workspace primitive crates pulled in.
 
-Reconciled with the runtime at M6 (2026-09-12), which removed `pallet-wormhole`
-and its transaction extension, added `pallet-shielded` at index 24, and renamed
-the runtime. `docs/DESIGN.md` section 7 is the v1 policy this inventory is the
-surface of.
+Reconciled with the runtime at the pre-genesis relaunch bundle (spec 106,
+2026-09-22), which removed the inherited governance lane: the tech collective
+(13), its referenda instance (14) and the custom origin pallet (23) are gone,
+`Preimage` (7) and `TreasuryPallet` (15) have their calls disabled, and the
+forked `frame-system` lost the nine dispatchables that could write `:code`,
+`:heappages` or a raw storage key. `docs/DESIGN.md` sections 7 and 7.6 are the
+policy this inventory is the surface of.
 
 - **Crate:** `qnero-runtime` (`runtime/`), version `1.0.0-gm`. Renamed from `quantus-runtime` in `e3d3889`, along with the node package; the wasm it emits is `wbuild/qnero-runtime/qnero_runtime.wasm`. The chain identifies itself by the spec below.
-- **Spec:** `spec_name = qnero`, `impl_name = qnero-node`, `spec_version = 104`, `transaction_version = 7`, `authoring_version = 1`
+- **Spec:** `spec_name = qnero`, `impl_name = qnero-node`, `spec_version = 106`, `transaction_version = 7`, `authoring_version = 1`, `system_version = 1`
 - **Build:** `no_std` WASM via `substrate-wasm-builder` (`runtime/build.rs`); native `std` build for the node/client
 - **Block time target:** 120s (`TARGET_BLOCK_TIME_MS = 120_000`), Monero's interval. It is the public default and the value in metadata; what a chain actually retargets against is `pallet_qpow::TargetBlockTimeMs`, written once at genesis from the chain spec, which the `dev` preset sets to `12_000`. `QPoWApi::get_target_block_time` reads it. Derived block counts: `MINUTES = 1` (so 2 minutes, the shortest a block count can express), `HOURS = 30`, `DAYS = 720`
 - **Consensus:** QPoW (quantum-resistant Proof of Work, Poseidon2-based)
@@ -30,7 +33,6 @@ surface of.
 | `apis.rs` | `impl_runtime_apis!` - every runtime API exposed to the client/RPC. |
 | `extrinsic.rs` | `QneroUncheckedExtrinsic`, the runtime's own extrinsic type. SCALE-transparent wrapper over the upstream generic one whose `Checkable` implementation carries one consensus rule: the transparent entry admits ML-DSA-87 and refuses the ML-DSA-65 variant with `InvalidTransaction::BadSigner`, on the live path and the `try-runtime` replay path alike. |
 | `transaction_extensions.rs` | Custom transaction extension `ReversibleTransactionExtension`, and `HighSecurityFungibleAdapter`, the configured `OnChargeTransaction`. |
-| `governance/mod.rs` + `governance/definitions.rs` | Referenda tracks (`TechCollectiveTracksInfo`, the only lane), preimage deposit model, custom origins, rank converters. |
 | `genesis_config_presets/` | Genesis presets: `dev`, `heisenberg`, `planck`, `mainnet`. Mainnet allocation is `mainnet_vesting.rs`. |
 | `benchmarks.rs` | `define_benchmarks!` list (only under `runtime-benchmarks`). |
 
@@ -73,15 +75,15 @@ The runtime derives `RuntimeCall`, `RuntimeEvent`, `RuntimeError`, `RuntimeOrigi
 | 4 | - | *(vacant; was `pallet-sudo`)* | - | - |
 | 5 | `QPoW` | `pallet-qpow` | **Local** (`pallets/qpow`) | no |
 | 6 | `MiningRewards` | `pallet-mining-rewards` | **Local** (`pallets/mining-rewards`) | no |
-| 7 | `Preimage` | `pallet-preimage` `45.0.0` | **Inlined** (`pallets/preimage`) | yes |
+| 7 | `Preimage` | `pallet-preimage` `45.0.0` | **Inlined** (`pallets/preimage`) | **calls disabled** (`#[runtime::disable_call]`) |
 | 8 | `Scheduler` | `pallet-scheduler` | **Local fork** (`pallets/scheduler`) | **calls disabled** (`#[runtime::disable_call]`) |
 | 9 | `Utility` | `pallet-utility` `45.0.0` | **Inlined** (`pallets/utility`) | yes |
 | 10 | - | *(vacant; was community `Referenda`)* | - | - |
 | 11 | `ReversibleTransfers` | `pallet-reversible-transfers` | **Local** (`pallets/reversible-transfers`) | yes |
 | 12 | - | *(vacant; was `ConvictionVoting`)* | - | - |
-| 13 | `TechCollective` | `pallet-ranked-collective` `45.0.0` | **Inlined** (`pallets/ranked-collective`) | yes |
-| 14 | `TechReferenda` | `pallet-referenda::Pallet<Runtime, Instance1>` `45.0.0` | **Inlined** (2nd instance) | yes |
-| 15 | `TreasuryPallet` | `pallet-treasury` | **Local** (`pallets/treasury`) | yes |
+| 13 | - | *(vacant; was `TechCollective`, `pallet-ranked-collective`)* | - | - |
+| 14 | - | *(vacant; was `TechReferenda`, `pallet-referenda::Instance1`)* | - | - |
+| 15 | `TreasuryPallet` | `pallet-treasury` | **Local** (`pallets/treasury`) | **calls disabled** (`#[runtime::disable_call]`) |
 | 16 | - | *(vacant)* | - | - |
 | 17 | - | *(vacant; was `pallet-assets`)* | - | - |
 | 18 | - | *(vacant; was `pallet-assets-holder`)* | - | - |
@@ -89,10 +91,10 @@ The runtime derives `RuntimeCall`, `RuntimeEvent`, `RuntimeError`, `RuntimeOrigi
 | 20 | - | *(vacant; was `pallet-wormhole`, removed at M6 with the transparent exit)* | - | - |
 | 21 | `ZkTree` | `pallet-zk-tree` | **Local fork** (`pallets/zk-tree`) | no |
 | 22 | `Vesting` | `pallet-vesting` | **Local** (`pallets/vesting`) | yes |
-| 23 | `Origins` | `pallet_custom_origins` | **Local** (`runtime/src/governance/origins.rs`) | no |
+| 23 | - | *(vacant; was `Origins`, `pallet_custom_origins`)* | - | - |
 | 24 | `Shielded` | `pallet-shielded` | **Local** (`pallets/shielded`) | yes (two unsigned, one signed, one inherent) |
 
-> Indices 4, 10, 12, 16, 17, 18 and 20 are intentionally left vacant after pallet removals so downstream indices stay stable. The `pallet-wormhole` crate stays in the tree and is out of the runtime; `qp-wormhole`, the primitives crate, stays in the runtime because the QPoW author derivation lives there.
+> Indices 4, 10, 12, 13, 14, 16, 17, 18, 20 and 23 are intentionally left vacant after pallet removals so downstream indices stay stable. Compacting them would move `Shielded` off index 24, which the wallet's fixtures pin, and no upgrade can change an index on this chain anyway. The `pallet-wormhole` crate stays in the tree and is out of the runtime; `qp-wormhole`, the primitives crate, stays in the runtime because the QPoW author derivation lives there.
 
 ---
 
@@ -106,15 +108,17 @@ value between accounts a user chooses, and it recurses through `Utility::batch_a
 and `Multisig::execute`. A call listed below as dispatchable may therefore be
 refused at dispatch for an ordinary signer; `docs/DESIGN.md` section 7.2 is the
 allowlist and `runtime/tests/call_filter.rs` is the test. Root bypasses the
-filter (`dispatch_bypass_filter`), so governance can still enact what an account
-cannot submit.
+filter, and nothing on this chain can produce Root: the filter is therefore the
+whole rule for every dispatch this chain can execute
+(`runtime/tests/no_admin_keys.rs`).
 
 ### Index 0 - `System` (`frame-system`, local fork)
 - Config via `#[derive_impl(SolochainDefaultConfig)]`. `Block = Block`, `Hashing = BlakeTwo256`, `AccountData = pallet_balances::AccountData<Balance>`, `SS58Prefix = 189`, `MaxConsumers = 16`, `BlockHashCount = 4096`.
 - `RuntimeBlockWeights`: 6s ref_time, `proof_size = u64::MAX` (uncapped - solo PoW chain).
 - `RuntimeBlockLength`: 5 MB, normal dispatch ratio 75%.
 - **Local fork additions:** `ZkTreeRoot` storage + `set_zk_tree_root` / `deposit_log` helpers; intra-block entropy.
-- **Calls (call_index):** `remark`(0), `set_heap_pages`(1), `set_code`(2), `set_code_without_checks`(3), `set_storage`(4), `kill_storage`(5), `kill_prefix`(6), `remark_with_event`(7), `do_task`(8), `authorize_upgrade`(9), `authorize_upgrade_without_checks`(10), `apply_authorized_upgrade`(11).
+- **Calls (call_index):** `remark`(0), `remark_with_event`(7), and `do_task`(8) under the `experimental` feature, which this runtime does not enable.
+- **Local fork removals:** `set_heap_pages`(1), `set_code`(2), `set_code_without_checks`(3), `set_storage`(4), `kill_storage`(5), `kill_prefix`(6), `authorize_upgrade`(9), `authorize_upgrade_without_checks`(10) and `apply_authorized_upgrade`(11) are deleted, together with the `AuthorizedUpgrade` storage item, `CodeUpgradeAuthorization`, `can_set_code`, `do_authorize_upgrade`, `validate_code_is_authorized`, `update_code_in_storage`, the two authorization events and the seven errors only those calls raised. `Config::OnSetCode` and `Config::AuthorizeUpgradeOrigin` remain in the trait, defaulting to `()` and `NeverEnsureOrigin`, because twelve vendored mocks assign them; neither has a caller. `CodeUpdated` stays in the event enum for `frame_executive`'s tests. The call indices are not reused. `runtime/tests/no_admin_keys.rs::frame_system_dispatchables_are_remark_only` is the tripwire.
 
 ### Index 1 - `Timestamp` (`pallet-timestamp`)
 - `Moment = u64`, `MinimumPeriod = 100`, `OnTimestampSet = Vesting` (one-shot rebase of the genesis offset schedules onto the first non-zero timestamp in the block-1 inherent; constant-bounded by the genesis table's fixed capacity, `MAX_GENESIS_SCHEDULES` = 64).
@@ -140,14 +144,14 @@ cannot submit.
 - `Currency = Balances`, `CoinbaseSink = Shielded`, `ShieldedSupply = pallet_shielded::ShieldedSupply<Runtime>`, `FindAuthor = QpowAuthor`, `MaxSupply = 21_000_000 * UNIT`, `EmissionDivisor = 5_000_000`, `Unit = UNIT`. Credits are aligned to the pool step (`AMOUNT_SCALE_DOWN_FACTOR` = 10^10, 0.01 QNR).
 - No dispatchable calls. Exposes `TransactionFeesCollector` + `collect_transaction_fees`. `on_finalize` combines transaction fees and the block reward into one credit and hands it to the sink, which mints it as the block's coinbase note; **no account is credited** under v1. Emission measures supply across both books, `Balances::total_issuance()` plus the pool, because a planck inside the pool has left issuance. A sub-step remainder stays in `CollectedFees` for the next block. Nothing is minted to treasury.
 
-### Index 7 - `Preimage` (`pallet-preimage`)
-- `ManagerOrigin = EnsureRoot`, `Consideration = PreimageDeposit` (custom: 0.1 UNIT base + 0.0001 UNIT/byte, × `FEE_SCALE`, see `governance/definitions.rs`).
-- **Calls:** `note_preimage`, `unnote_preimage`, `request_preimage`, `unrequest_preimage`, `ensure_updated` (upstream).
+### Index 7 - `Preimage` (`pallet-preimage`) - **calls disabled**
+- `ManagerOrigin = NeverEnsureOrigin`, `Consideration = PreimageDeposit` (custom: 0.1 UNIT base + 0.0001 UNIT/byte, × `FEE_SCALE`, in `configs/mod.rs`).
+- Calls exist upstream (`note_preimage`, `unnote_preimage`, `request_preimage`, `unrequest_preimage`, `ensure_updated`) and are **disabled at the runtime level**: they existed for referenda submitters. The pallet stays because `Scheduler` and `ReversibleTransfers` bind calls through it as a `StorePreimage`/`QueryPreimage`, which is a Rust call rather than a dispatch.
 
 ### Index 8 - `Scheduler` (`pallet-scheduler`, local) - **calls disabled**
-- `RuntimeCall`, `MaximumWeight = 80% max block`, `MaxScheduledPerBlock = 50`, `ScheduleOrigin = EnsureRoot`, `Preimages = Preimage`, `TimeProvider = Timestamp`, `Moment = u64`, `TimestampBucketSize = 2 * block time`.
-- Calls exist (`schedule`(0), `cancel`(1), `schedule_named`(2), `cancel_named`(3), `schedule_after`(4), `schedule_named_after`(5), `set_retry`(6), `set_retry_named`(7), `cancel_retry`(8), `cancel_retry_named`(9)) but are **disabled at the runtime level** so users cannot enqueue arbitrary calls. Used internally by reversible-transfers and governance via the `ScheduleNamed` trait. Local fork adds block-number-or-timestamp scheduling.
-- **Priority-reserved headroom:** tasks scheduled at `LOWEST_PRIORITY` (the permissionless scheduling surface - reversible transfers) may occupy at most ~80% of a block's agenda (40 of 50 slots). This reserves ~20% per block - at least one slot even if `MaxScheduledPerBlock < 5` - so a permissionless caller cannot cheaply pre-fill a referendum's deterministic enactment block with priority-255 tasks. Mid-priority tasks (e.g. referendum alarms at 128) can still occupy reserved slots, but `schedule_enactment` retries at `when + 1` for up to 16 blocks on `Exhausted` before logging failure.
+- `RuntimeCall`, `MaximumWeight = 80% max block`, `MaxScheduledPerBlock = 50`, `ScheduleOrigin = NeverEnsureOrigin`, `Preimages = Preimage`, `TimeProvider = Timestamp`, `Moment = u64`, `TimestampBucketSize = 2 * block time`.
+- Calls exist (`schedule`(0), `cancel`(1), `schedule_named`(2), `cancel_named`(3), `schedule_after`(4), `schedule_named_after`(5), `set_retry`(6), `set_retry_named`(7), `cancel_retry`(8), `cancel_retry_named`(9)) but are **disabled at the runtime level** so users cannot enqueue arbitrary calls, and `ScheduleOrigin` refuses every caller including Root. Used internally by reversible-transfers via the `ScheduleNamed` trait, which is a Rust call. A due task is dispatched with the origin that task carries, which on this chain is only ever a signed one. Local fork adds block-number-or-timestamp scheduling.
+- **Priority-reserved headroom:** tasks scheduled at `LOWEST_PRIORITY` (the permissionless scheduling surface - reversible transfers) may occupy at most ~80% of a block's agenda (40 of 50 slots). This reserves ~20% per block, at least one slot even if `MaxScheduledPerBlock < 5`. It was sized against a referendum's deterministic enactment block, which no longer exists; the reservation stays because a permissionless caller filling every agenda slot is a denial of service against whatever else the scheduler is asked to hold. `schedule_enactment` retries at `when + 1` for up to 16 blocks on `Exhausted` before logging failure.
 
 ### Index 9 - `Utility` (`pallet-utility`)
 - `RuntimeCall`, `PalletsOrigin = OriginCaller`.
@@ -161,17 +165,21 @@ cannot submit.
 - The guardian holds instant, total seizure power (`recover_funds` sweeps all holds plus the whole free balance to it, no delay, no second approver, immutable relationship), so the recommended guardian is a **multisig address**: `pallet_multisig` dispatches as its derived address, and the cancel/recover lifecycle under a multisig guardian is pinned by an integration test.
 - Backs `HighSecurityConfig` (account whitelist/guardian logic).
 
-### Index 13 - `TechCollective` (`pallet-ranked-collective`)
-- `AddOrigin = EnsureRootWithSuccess<AccountId, ConstU16<0>>` (Root-only, i.e. a passed TechReferenda vote; #91267), `RemoveOrigin = EnsureRootRemoveKeepsMemberFloor` (Root-only **and** refuses removals that would leave fewer than `MIN_TECH_COLLECTIVE_MEMBERS` members - the floor that keeps the tech-referenda lane live), `Promote/Demote/ExchangeOrigin = NeverEnsureOrigin`, `Polls = TechReferenda (Instance1)`, `VoteWeight = Linear`, `MaxMemberCount = 13` (via `GlobalMaxMembers`).
-- **Calls:** `add_member`, `promote_member`, `demote_member`, `remove_member`, `vote`, `cleanup_poll`, `exchange_member`. Removal intentionally leaves the member's votes in ongoing tallies (upstream behavior); `support` clamps at 100% so the shrunken electorate cannot overflow the curve.
+### Indices 13 and 14 - vacant (were `TechCollective` and `TechReferenda`)
 
-### Index 14 - `TechReferenda` (`pallet-referenda`, `Instance1`)
-- `SubmitOrigin = RootOrMemberForTechReferendaOrigin`, `Tracks = TechCollectiveTracksInfo` (track 0 for Root proposals, 61% approval / 60% support constant curves; track 1 `fast_upgrade` for `FastUpgrade` proposals, 80%/80% constant curves with 10-minute prepare/confirm/enactment), `Tally = pallet_ranked_collective::TallyOf<Runtime>`, `MaxActive = 128` / `MaxActivePerAccount = 8` (global + per-submitter caps on `Ongoing` referenda; storage `ActiveReferendaCount` / `ActiveSubmissionCount`; errors `TooManyActive` / `TooManyActiveBySubmitter`), `MaxProposalSize = 4 KiB`.
-- **Calls:** the stock `pallet-referenda` set (`submit`, `place_decision_deposit`, `refund_decision_deposit`, `cancel`, `kill`, `nudge_referendum`, `one_fewer_deciding`, `refund_submission_deposit`, `set_metadata`). This is the only referenda instance; the community lane at index 10 and its `ConvictionVoting` at index 12 are gone.
+`pallet-ranked-collective` held a 13-seat tech collective whose members were the
+only accounts that could submit to `pallet-referenda`'s `Instance1`, and that
+instance held two tracks: a Root track and a `fast_upgrade` track dispatching
+the custom `FastUpgrade` origin. Together they were the only way this chain's
+rules could ever have been changed by a dispatch. The pre-genesis relaunch
+bundle removed both pallets and both vendored crates. The lane had been dead on
+the public chain since the day it launched: the `qnero-testnet` preset seeded no
+members, and seeding was the only way a member ever entered.
 
-### Index 15 - `TreasuryPallet` (`pallet-treasury`, local)
+### Index 15 - `TreasuryPallet` (`pallet-treasury`, local) - **calls disabled**
 - Minimal local treasury. Config only sets `WeightInfo`.
-- **Calls:** `set_treasury_account`(0, root). Exposes `account_id()`. Treasury is not paid from mining rewards.
+- `set_treasury_account`(0) is `ensure_root` inside the pallet and no origin here can produce Root, so the pallet takes `#[runtime::disable_call]` and the call has no `RuntimeCall` variant. The account a chain's genesis names is the only one it will ever have.
+- Exposes `account_id()`. The storage stays because `pallet-vesting` reads the account when a schedule ends. Treasury is not paid from mining rewards.
 
 ### Index 19 - `Multisig` (`pallet-multisig`, local)
 - `MaxSigners = 100`, `MaxTotalProposalsInStorage = 200`, `MaxCallSize = 10 KB`, `MultisigFee = 0.03 × FEE_SCALE UNIT` (burned), `ProposalDeposit = 0.01 × FEE_SCALE UNIT`, `ProposalFee = 0.05 × FEE_SCALE UNIT`, `MaxExpiryDuration ≈ 2 weeks`, `MaxInnerCallWeight = (10^12, 2.5 MB)`, `HighSecurity = HighSecurityConfig`, `PalletId = "py/mltsg"`.
@@ -195,18 +203,23 @@ what the `QpowAuthor` seam hashes a block author's digest item with.
 
 ### Index 22 - `Vesting` (`pallet-vesting`, local)
 - Pull-based "vesting wallet": the pallet's sovereign pot (`PalletId(*b"qvesting")`, keyless) holds the entire unclaimed allocation; beneficiaries are paid by plain keep-alive transfers only when a payout is due. **No locks, freezes, or holds ever touch a beneficiary account.** Under v1 every beneficiary must be an account that can sign, since `claim` pays a plain transparent balance and `shield` is the only way onward; `every_genesis_planck_is_reachable_under_the_call_filter` is the test.
-- Config: `Currency = Balances` (`fungible::{Inspect, Mutate}`), `TimeProvider = Timestamp` (ms since epoch), `AdminOrigin = EitherOfDiverse<EnsureRoot, EnsureTreasury>` (`EnsureTreasury` = signed by the configured treasury account; the treasury multisig executes proposals as a plain signed origin), `TreasuryAccount = TreasuryAccountOption` (Option-returning storage read, never panics), `ProofRecorder = NoTransferProofNeeded` (records nothing and reports success; the pallet treats a dropped credit as fatal and there is no leaf to write since the exit is gone), `PayoutQuantum = SCALE_DOWN_FACTOR` (10^10 = 0.01 QNR), `MinClaimInterval = 86,400,000 ms` (24 hours). Non-final claims are further aligned to `pallet_vesting::NON_FINAL_PAYOUT_QUANTA` (2,500) leaf quanta = 25 QNR, the smallest 4 bps fee-exact multiple. Timestamp `OnTimestampSet = Vesting`: when genesis used `anchor_to_first_timestamp`, the first non-zero timestamp (block 1 inherent, not genesis-block `Now` which is 0) is stored in `Launch` and added onto those genesis offsets. The genesis table is a `BoundedVec` of at most `MAX_GENESIS_SCHEDULES` (64) entries, so that one-time rebase is constant-bounded.
+- Config: `Currency = Balances` (`fungible::{Inspect, Mutate}`), `TimeProvider = Timestamp` (ms since epoch), `AdminOrigin = NeverEnsureOrigin` (the three admin calls are unreachable twice over: the call filter refuses them and this origin accepts nobody, so the genesis table is the whole set of schedules a chain will ever hold), `TreasuryAccount = TreasuryAccountOption` (Option-returning storage read, never panics), `ProofRecorder = NoTransferProofNeeded` (records nothing and reports success; the pallet treats a dropped credit as fatal and there is no leaf to write since the exit is gone), `PayoutQuantum = SCALE_DOWN_FACTOR` (10^10 = 0.01 QNR), `MinClaimInterval = 86,400,000 ms` (24 hours). Non-final claims are further aligned to `pallet_vesting::NON_FINAL_PAYOUT_QUANTA` (2,500) leaf quanta = 25 QNR, the smallest 4 bps fee-exact multiple. Timestamp `OnTimestampSet = Vesting`: when genesis used `anchor_to_first_timestamp`, the first non-zero timestamp (block 1 inherent, not genesis-block `Now` which is 0) is stored in `Launch` and added onto those genesis offsets. The genesis table is a `BoundedVec` of at most `MAX_GENESIS_SCHEDULES` (64) entries, so that one-time rebase is constant-bounded.
 - **Storage:** `Schedules: schedule_id (u64) → { beneficiary, start, cliff, end, total, claimed, last_claim_at }` (ids sequential, never reused; a beneficiary may hold any number of schedules), `NextScheduleId`, `Launch` (absent on absolute-time chains; `Pending` → `Anchored(moment)` once offset genesis schedules are rebased). Storage version 0 has no migration: an in-place upgrade with no schedules may leave the pot unfunded, and `create_schedule` then fails with `PotUnderfunded` until the treasury sends it one ED.
 - Vesting math: `vested(t) = 0` before `cliff`, `total` from `end`, else `⌊total·(t−start)/(end−start)⌋` (256-bit rational, floor; the `end` branch guarantees exactness).
 - **Payout policy:** the leaf quantum is `10^10`, so a sub-quantum payout used to create a zero-value leaf and strand funds on a keyless beneficiary; the quantization stays as it is now that no leaf is written. Schedule totals must be a positive multiple of `PayoutQuantum`; payouts are quantized and `claimed` stays aligned. A successful claim must pay at least one quantum and be at least 24 hours after that schedule's previous payout. Non-final claims additionally round down to 25 QNR (`NON_FINAL_PAYOUT_QUANTA` leaf quanta), which used to make each intermediate leaf's 4 bps wormhole fee exact; leftover dust stays on the schedule. The final claim pays the exact remainder (at least one quantum). `end_schedule` pays the unpaid vested part rounded to the nearest `PayoutQuantum` to the beneficiary when that amount is at least one quantum; otherwise the sliver is refunded with every leftover planck to treasury. No leg writes a leaf under v1.
 - **Proof recording:** the pallet still calls `TransferProofRecorder` itself (`transfer_and_record` fuses transfer + record and fails with `TransferProofNotRecorded` if the recorder drops the credit, rolling the transfer back), and under v1 the configured recorder is `NoTransferProofNeeded`, which writes no leaf and reports success. `pallet_vesting::weights` still prices the insert it no longer performs (one leaf for `claim` and `create_schedule`, two for `end_schedule`), which is an overcharge on the one transparent payout v1 keeps.
-- **Calls:** `claim`(0) - **permissionless**; pays the largest valid claim from the pot to the schedule's stored beneficiary (never the caller); the only claim path for keyless/high-security beneficiaries. `create_schedule`(1) - admin; validates the schedule and funds the pot from the treasury in the same call. `end_schedule`(2) - admin; unpaid vested part rounded to the nearest quantum → beneficiary if it is at least one quantum, otherwise the whole remainder → treasury; schedule removed. `retarget_schedule`(3) - admin; changes the beneficiary and pays nothing out. A retarget replaces the *same* grantee's lost/stolen/abandoned wallet, so settling the old address would burn funds or pay a thief; everything vested but unclaimed stays on the schedule and reaches the new wallet at its next claim. (A permissionless claim landing before the retarget still pays the old address, so rotations should happen promptly.)
+- **Calls:** `claim`(0) - **permissionless**; pays the largest valid claim from the pot to the schedule's stored beneficiary (never the caller); the only claim path for keyless/high-security beneficiaries. The other three are unreachable, and what follows is the surface as it stands. `create_schedule`(1) - admin; validates the schedule and funds the pot from the treasury in the same call. `end_schedule`(2) - admin; unpaid vested part rounded to the nearest quantum → beneficiary if it is at least one quantum, otherwise the whole remainder → treasury; schedule removed. `retarget_schedule`(3) - admin; changes the beneficiary and pays nothing out. A retarget replaces the *same* grantee's lost/stolen/abandoned wallet, so settling the old address would burn funds or pay a thief; everything vested but unclaimed stays on the schedule and reaches the new wallet at its next claim. (A permissionless claim landing before the retarget still pays the old address, so rotations should happen promptly.)
 - Genesis build validates every schedule (`start ≤ cliff ≤ end`, `start < end`, `total` a positive multiple of `PayoutQuantum`, beneficiary ≠ pot) and, for a non-empty table, asserts the pot holds exactly `Σ schedule totals + ED`; a misconfigured chain refuses to start. `try_state` validates stored schedules, aligned claims, remaining obligations of zero or at least one quantum, and, when any schedule exists, `pot balance ≥ Σ(total − claimed) + ED`; an empty schedule table is valid with an unfunded pot.
 
-### Index 23 - `Origins` (`pallet_custom_origins`, local)
-- Storage-less, call-less, event-less origin declaration: its whole body is one `#[pallet::origin] enum Origin { FastUpgrade }`. A pallet is the only way to contribute a variant to `RuntimeOrigin`/`OriginCaller`.
-- `Origin::FastUpgrade` is the proposal origin of tech-referenda track 1 (`fast_upgrade`) and is honored **only** by `system.authorize_upgrade` (`AuthorizeUpgradeOrigin = EitherOfDiverse<EnsureRoot, FastUpgrade>` in the forked frame-system). `set_code` and `authorize_upgrade_without_checks` remain Root-only, so the track can publish an upgrade hash and nothing else.
-- **Calls:** none. See `docs/RUNTIME_UPGRADE_VIA_GOVERNANCE.md` for the authorize-then-apply flow.
+### Index 23 - vacant (was `Origins`)
+
+`pallet_custom_origins` was a storage-less, call-less, event-less origin
+declaration whose whole body was one `#[pallet::origin] enum Origin {
+FastUpgrade }`. A pallet is the only way to contribute a variant to
+`RuntimeOrigin`/`OriginCaller`, so removing it leaves `OriginCaller` with
+`system` and nothing else: no pallet in this runtime can mint a privileged
+origin, which
+`runtime/tests/no_admin_keys.rs::the_runtime_declares_no_custom_origin` pins.
 
 ### Index 24 - `Shielded` (`pallet-shielded`, local)
 
@@ -265,14 +278,16 @@ The high-security whitelist (`HighSecurityConfig::is_whitelisted`, extension 8) 
 
 ---
 
-## 6. Governance definitions (`governance/definitions.rs`)
+## 6. Removed: the governance definitions
 
-- `PreimageDeposit` - custom `Consideration` fee model for preimages.
-- `TechCollectiveTracksInfo` - tech-collective referenda; track 0 for Root proposals (10 × `FEE_SCALE` UNIT deposit, 61% approval / 60% support constant curves, 1-day decision/confirm/enactment) and track 1 `fast_upgrade` for `FastUpgrade` proposals (10 × `FEE_SCALE` UNIT deposit, 80%/80% constant curves = 8-of-10 at genesis, 10-minute prepare/confirm/enactment - the runtime-upgrade lane, see `docs/RUNTIME_UPGRADE_VIA_GOVERNANCE.md`).
-- `MinRankOfClassConverter`, `GlobalMaxMembers` - rank/membership converters.
-- `RootOrMemberForTechReferendaOrigin` - custom origin for TechReferenda submission (Root or ranked-collective member).
-- `governance/origins.rs` (`pallet_custom_origins`, runtime index 23 as `Origins`) - storage-less origin declarations; `Origin::FastUpgrade` is dispatched by approved fast-track referenda and honored only by `system.authorize_upgrade` (`AuthorizeUpgradeOrigin = Root or FastUpgrade` in the forked frame-system).
-- `apply_test_timing` - compiled only under `fast-governance` (collapses all timing windows to 2 blocks for CI).
+`runtime/src/governance/` held `TechCollectiveTracksInfo`,
+`RootOrMemberForTechReferendaOrigin`, `EnsureRootRemoveKeepsMemberFloor`, the
+rank converters, `apply_test_timing` and `pallet_custom_origins`. The whole
+directory was deleted with the lane. `PreimageDeposit` and `preimage_amount`,
+the one thing in it that was never governance, moved to `configs/mod.rs`.
+
+`docs/DESIGN.md` section 7.6 is the decision, its cost and what upgrade by node
+release means in practice.
 
 ---
 
@@ -283,11 +298,11 @@ The high-security whitelist (`HighSecurityConfig::is_whitelisted`, extension 8) 
   - `dev` - local development.
   - `heisenberg` - **internal integration testnet**, not mainnet. Tokens have no monetary value; the network may be reset.
   - `planck` - public testnet (live treasury signers + faucet).
-  - `mainnet` - production genesis. Allocation is `runtime/src/genesis_config_presets/mainnet_vesting.rs`: **2% of `MAX_SUPPLY` (420_000) at TGE, and it is a placeholder.** `VESTING` is one row of `(account, amount, start day, end day)`: 419_940 QNR to `PLACEHOLDER`, locked until day 365 then linear to day 1460. `SEED` (3 QNR) is endowed as free balance to each of the 10 `TREASURERS` and 10 `TECH_COLLECTIVE` members so they can act from block 1; the two lists are distinct. `sum(VESTING) + 20 × SEED == GENESIS_ALLOCATION` is a compile-time assertion; the pot's ED is the only issuance outside it. The treasury is the 6-of-10 multisig derived from `TREASURERS` and holds no genesis balance and no schedule. Vesting clocks are offsets from the first non-zero timestamp. The preset panics until `FINALIZED` is flipped. The inherited 27% across 48 rows was removed on 2026-09-14: `docs/DESIGN.md` sections 7.1 and 7.3 carry the decision and the pre-mainnet check, and `PLACEHOLDER` is replaced or the row deleted before any mainnet genesis.
+  - `mainnet` - production genesis. Allocation is `runtime/src/genesis_config_presets/mainnet_vesting.rs`: **2% of `MAX_SUPPLY` (420_000) at TGE, and it is a placeholder.** `VESTING` is one row of `(account, amount, start day, end day)`: 419_970 QNR to `PLACEHOLDER`, locked until day 365 then linear to day 1460. `SEED` (3 QNR) is endowed as free balance to each of the 10 `TREASURERS` so they can act from block 1. `sum(VESTING) + 10 × SEED == GENESIS_ALLOCATION` is a compile-time assertion; the pot's ED is the only issuance outside it. The treasury is the 6-of-10 multisig derived from `TREASURERS` and holds no genesis balance and no schedule. Vesting clocks are offsets from the first non-zero timestamp. The preset panics until `FINALIZED` is flipped. The inherited 27% across 48 rows was removed on 2026-09-14: `docs/DESIGN.md` sections 7.1 and 7.3 carry the decision and the pre-mainnet check, and `PLACEHOLDER` is replaced or the row deleted before any mainnet genesis.
 - **Vesting genesis:** every preset endows the vesting pot with `Σ schedule totals + ED` (ED alone when the table is empty, as on `planck`). The pot is keyless, so `Vesting::claim` is the only call that moves its balance, and v1's call filter leaves that one call dispatchable for exactly that reason. `dev`/`heisenberg` seed the same example schedules (one account with two schedules). `mainnet` uses the `VESTING` table in `mainnet_vesting.rs` (address, amount, start day, end day; no personal names). Times are offsets from the first non-zero timestamp (`anchor_to_first_timestamp`); the genesis block timestamp is 0 and is not used. Every row has `start == cliff`, so nothing unlocks as a lump.
-- Dilithium well-known accounts: `crystal_alice`, `dilithium_bob`, `crystal_charlie` (public seeds `[0]` / `[1]` / `[2]`). Used by `dev` and **intentionally also by `heisenberg`** so integrators and CI can exercise governance, treasury, and transfer flows without distributing secrets. Those private keys are public by design; do **not** reuse this pattern on a mainnet or any value-bearing chain (Planck already uses distinct live treasury signers).
+- Dilithium well-known accounts: `crystal_alice`, `dilithium_bob`, `crystal_charlie` (public seeds `[0]` / `[1]` / `[2]`). Used by `dev` and **intentionally also by `heisenberg`** so integrators and CI can exercise treasury and transfer flows without distributing secrets. Those private keys are public by design; do **not** reuse this pattern on a mainnet or any value-bearing chain (Planck already uses distinct live treasury signers).
 - Treasury = 2-of-3 multisig of the three signers for `dev`/`heisenberg`, 6-of-10 of `TREASURERS` for `mainnet`; no liquid treasury genesis balance (the mainnet treasury receives its share through vesting rows).
-- Tech-collective seeded via the chain-spec-only `tech_collective_seed_members` JSON field (`prepare_genesis_build_input` + `seed_tech_collective`).
+- Every field a preset writes is a `RuntimeGenesisConfig` field. The chain-spec-only `tech_collective_seed_members` JSON field, and the `prepare_genesis_build_input`/`seed_tech_collective` pair that handled it, went with the collective. `RuntimeGenesisConfig` carries `#[serde(deny_unknown_fields)]`, so a spec still carrying that field is refused at deserialization rather than ignored.
 - Genesis balances are transparent and stay that way until their holder shields them. v1 removed `pallet-wormhole`, so nothing derives a spendable leaf from a genesis balance and no preset endows an account that cannot sign.
 
 ---
@@ -358,7 +373,6 @@ layer crates (`parity-scale-codec`, `scale-info`, `primitive-types`,
 | `runtime-benchmarks` | Compiles `benchmarks.rs`, benchmark `Config` impls, and `Benchmark` API; adds benchmark-only genesis (reversible-transfers HS account). |
 | `try-runtime` | Compiles `TryRuntime` API and migration checks. |
 | `metadata-hash` | Enables `CheckMetadataHash` metadata generation (double WASM compile). |
-| `fast-governance` | **Test/CI only.** Collapses every referenda timing window to 2 blocks (`apply_test_timing`). Must be OFF for production. |
 | `on-chain-release-build` | `metadata-hash` + `sp-api/disable-logging` for release WASM. |
 
 ---

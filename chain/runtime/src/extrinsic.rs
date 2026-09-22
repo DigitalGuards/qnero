@@ -38,7 +38,7 @@
 //! The refusal sits in [`Checkable::check`] for [`QneroUncheckedExtrinsic`],
 //! which is the single seam under both `Executive::validate_transaction` and
 //! `Executive::apply_extrinsic`. Every signed call therefore inherits it with no
-//! per-call enumeration: transfers, governance, multisig, `Utility::batch_all`,
+//! per-call enumeration: transfers, multisig, `Utility::batch_all`,
 //! `Vesting::claim` and `Shielded::shield` alike. The `try-runtime` blind-check
 //! path carries the same refusal, so a replay, which skips signature
 //! verification entirely, cannot admit what the live path refuses.

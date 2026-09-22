@@ -133,13 +133,16 @@ pub fn create_benchmark_extrinsic(
 	let raw_payload = runtime::SignedPayload::from_raw(
 		call.clone(),
 		tx_ext.clone(),
+		// Eleven entries, one per `TxExtension` member (`runtime/src/lib.rs`).
+		// `CheckNonce`, `CheckWeight`, `ReversibleTransactionExtension` and
+		// `ChargeTransactionPayment` each imply `()`, `CheckMetadataHash`
+		// implies `Option<[u8; 32]>`, and `WeightReclaim` implies `()`.
 		(
 			(),
 			runtime::VERSION.spec_version,
 			runtime::VERSION.transaction_version,
 			genesis_hash,
 			best_hash,
-			(),
 			(),
 			(),
 			(),

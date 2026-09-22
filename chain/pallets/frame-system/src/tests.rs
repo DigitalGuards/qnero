@@ -611,168 +611,21 @@ fn prunes_block_hash_mappings() {
 	})
 }
 
-#[test]
-fn set_code_checks_works() {
-	struct ReadRuntimeVersion(Vec<u8>);
-
-	impl sp_core::traits::ReadRuntimeVersion for ReadRuntimeVersion {
-		fn read_runtime_version(
-			&self,
-			_wasm_code: &[u8],
-			_ext: &mut dyn sp_externalities::Externalities,
-		) -> Result<Vec<u8>, String> {
-			Ok(self.0.clone())
-		}
-	}
-
-	let test_data = vec![
-		("test", 1, 2, Err(Error::<Test>::SpecVersionNeedsToIncrease)),
-		("test", 1, 1, Err(Error::<Test>::SpecVersionNeedsToIncrease)),
-		("test2", 1, 1, Err(Error::<Test>::InvalidSpecName)),
-		(
-			"test",
-			2,
-			1,
-			Ok(Some(<mock::Test as pallet::Config>::BlockWeights::get().max_block).into()),
-		),
-		("test", 0, 1, Err(Error::<Test>::SpecVersionNeedsToIncrease)),
-		("test", 1, 0, Err(Error::<Test>::SpecVersionNeedsToIncrease)),
-	];
-
-	for (spec_name, spec_version, impl_version, expected) in test_data.into_iter() {
-		let version = RuntimeVersion {
-			spec_name: spec_name.into(),
-			spec_version,
-			impl_version,
-			..Default::default()
-		};
-		let read_runtime_version = ReadRuntimeVersion(version.encode());
-
-		let mut ext = new_test_ext();
-		ext.register_extension(sp_core::traits::ReadRuntimeVersionExt::new(read_runtime_version));
-		ext.execute_with(|| {
-			let res = System::set_code(RawOrigin::Root.into(), vec![1, 2, 3, 4]);
-
-			// Success or failure, no digest item may be deposited (QPoW window).
-			assert_no_deposited_digest_items();
-			assert_eq!(expected.map_err(DispatchErrorWithPostInfo::from), res);
-		});
-	}
-}
-
-#[test]
-fn set_code_drains_remaining_block_weight() {
-	struct ReadRuntimeVersion(Vec<u8>);
-
-	impl sp_core::traits::ReadRuntimeVersion for ReadRuntimeVersion {
-		fn read_runtime_version(
-			&self,
-			_wasm_code: &[u8],
-			_ext: &mut dyn sp_externalities::Externalities,
-		) -> Result<Vec<u8>, String> {
-			Ok(self.0.clone())
-		}
-	}
-
-	let version =
-		RuntimeVersion { spec_name: "test".into(), spec_version: 2, ..Default::default() };
-	let read_runtime_version = ReadRuntimeVersion(version.encode());
-
-	let mut ext = new_test_ext();
-	ext.register_extension(sp_core::traits::ReadRuntimeVersionExt::new(read_runtime_version));
-	ext.execute_with(|| {
-		let max_block = <mock::Test as pallet::Config>::BlockWeights::get().max_block;
-		assert!(System::block_weight().total().all_lt(max_block));
-
-		// The post-dispatch `actual_weight` returned by `set_code` is capped at the static
-		// pre-dispatch weight, so the block must be drained by direct weight registration.
-		assert_ok!(System::set_code(RawOrigin::Root.into(), vec![1, 2, 3, 4]));
-
-		assert_eq!(System::block_weight().total(), max_block);
-	});
-}
-
-#[test]
-fn validate_unsigned_apply_authorized_upgrade_honors_check_version() {
-	struct ReadRuntimeVersion(Vec<u8>);
-
-	impl sp_core::traits::ReadRuntimeVersion for ReadRuntimeVersion {
-		fn read_runtime_version(
-			&self,
-			_wasm_code: &[u8],
-			_ext: &mut dyn sp_externalities::Externalities,
-		) -> Result<Vec<u8>, String> {
-			Ok(self.0.clone())
-		}
-	}
-
-	let code = vec![1, 2, 3, 4];
-	let code_hash = BlakeTwo256::hash(&code);
-	let call = Call::<Test>::apply_authorized_upgrade { code };
-
-	// The mock runtime runs `spec_name: "test"` at `spec_version: 1`, so a candidate that
-	// does not increase the spec version fails the version check.
-	let bad_version =
-		RuntimeVersion { spec_name: "test".into(), spec_version: 1, ..Default::default() };
-	let good_version =
-		RuntimeVersion { spec_name: "test".into(), spec_version: 2, ..Default::default() };
-
-	let test_data = vec![
-		// The authorization requires the version check and it fails -> invalid.
-		(bad_version.clone(), true, false),
-		// Same failing version, but the authorization skips the check -> valid.
-		(bad_version, false, true),
-		// The authorization requires the version check and it passes -> valid.
-		(good_version, true, true),
-	];
-
-	for (version, check_version, expect_valid) in test_data.into_iter() {
-		let read_runtime_version = ReadRuntimeVersion(version.encode());
-
-		let mut ext = new_test_ext();
-		ext.register_extension(sp_core::traits::ReadRuntimeVersionExt::new(read_runtime_version));
-		ext.execute_with(|| {
-			if check_version {
-				assert_ok!(System::authorize_upgrade(RawOrigin::Root.into(), code_hash));
-			} else {
-				assert_ok!(System::authorize_upgrade_without_checks(
-					RawOrigin::Root.into(),
-					code_hash
-				));
-			}
-
-			let res = <System as sp_runtime::traits::ValidateUnsigned>::validate_unsigned(
-				TransactionSource::External,
-				&call,
-			);
-
-			if expect_valid {
-				let valid = res.expect("transaction should be valid");
-				assert_eq!(valid.provides, vec![code_hash.encode()]);
-			} else {
-				assert_eq!(res, Err(InvalidTransaction::Call.into()));
-			}
-		});
-	}
-}
-
-/// The QPoW header commits a fixed digest window that the pre-runtime item and
-/// seal fill exactly, so a runtime-deposited digest item (like upstream's
-/// `RuntimeEnvironmentUpdated`) makes the sealed block unimportable
-/// network-wide. Environment-changing calls must deposit NO digest items.
-fn assert_no_deposited_digest_items() {
-	assert_eq!(
-		System::digest().logs,
-		alloc::vec::Vec::new(),
-		"runtime code must not deposit digest items: the QPoW digest window has \
-		 no spare capacity and the sealed block would be rejected at import",
-	);
-}
-
-// NOTE: Tests `set_code_with_real_wasm_blob`, `set_code_rejects_during_mbm`,
-// `set_code_via_authorization_works`, and `runtime_upgraded_with_set_storage` were removed
-// because they depend on `substrate_test_runtime_client` which is not available on crates.io.
-// These tests are covered upstream in the polkadot-sdk repository.
+// NOTE: every test of the code-replacement surface went with the calls it
+// covered: `set_code_checks_works`, `set_code_drains_remaining_block_weight`,
+// `validate_unsigned_apply_authorized_upgrade_honors_check_version`,
+// `no_digest_item_deposited_when_heap_pages_changed`,
+// `set_heap_pages_validates_range` and the `assert_no_deposited_digest_items`
+// helper they shared. `set_heap_pages`, `set_code`, `set_code_without_checks`,
+// `set_storage`, `kill_storage`, `kill_prefix`, `authorize_upgrade`,
+// `authorize_upgrade_without_checks` and `apply_authorized_upgrade` are deleted
+// from this fork; see the removal note at the top of `lib.rs`. What now carries
+// the claim is `runtime/tests/no_admin_keys.rs`.
+//
+// Earlier, and for a different reason: `set_code_with_real_wasm_blob`,
+// `set_code_rejects_during_mbm`, `set_code_via_authorization_works` and
+// `runtime_upgraded_with_set_storage` were removed because they depend on
+// `substrate_test_runtime_client`, which is not available on crates.io.
 
 #[test]
 fn events_not_emitted_during_genesis() {
@@ -808,39 +661,6 @@ fn extrinsics_root_is_calculated_correctly() {
 			sp_core::storage::StateVersion::V0,
 		);
 		assert_eq!(ext_root, *header.extrinsics_root());
-	});
-}
-
-#[test]
-fn no_digest_item_deposited_when_heap_pages_changed() {
-	new_test_ext().execute_with(|| {
-		System::reset_events();
-		System::initialize(&1, &[0u8; 32].into(), &Default::default());
-		System::set_heap_pages(RawOrigin::Root.into(), 64).unwrap();
-		assert_no_deposited_digest_items();
-	});
-}
-
-#[test]
-fn set_heap_pages_validates_range() {
-	new_test_ext().execute_with(|| {
-		System::reset_events();
-		System::initialize(&1, &[0u8; 32].into(), &Default::default());
-
-		// V12 audit #162546: values below the 4 MiB executor minimum and above the 4 GiB
-		// wasm32 linear-memory maximum are rejected.
-		for pages in [0u64, 63, 65537] {
-			assert_noop!(
-				System::set_heap_pages(RawOrigin::Root.into(), pages),
-				Error::<Test>::InvalidHeapPages
-			);
-		}
-
-		// Both bounds of the allowed range are accepted, without depositing any
-		// digest item (the QPoW digest window has no spare capacity).
-		assert_ok!(System::set_heap_pages(RawOrigin::Root.into(), 64));
-		assert_ok!(System::set_heap_pages(RawOrigin::Root.into(), 65536));
-		assert_no_deposited_digest_items();
 	});
 }
 

@@ -17,35 +17,18 @@
 
 //! Frame System benchmarks.
 
-use alloc::{vec, vec::Vec};
-use codec::Encode;
+use alloc::vec;
 use frame_benchmarking::v2::*;
-use frame_support::{dispatch::DispatchClass, storage, traits::Get};
+use frame_support::{dispatch::DispatchClass, traits::Get};
 use frame_system::{Call, Pallet as System, RawOrigin};
-use sp_core::storage::well_known_keys;
 use sp_runtime::traits::Hash;
 
 pub struct Pallet<T: Config>(System<T>);
-pub trait Config: frame_system::Config {
-	/// Adds ability to the Runtime to test against their sample code.
-	///
-	/// Default is `../res/kitchensink_runtime.compact.compressed.wasm`.
-	fn prepare_set_code_data() -> Vec<u8> {
-		include_bytes!("../res/kitchensink_runtime.compact.compressed.wasm").to_vec()
-	}
-
-	/// Adds ability to the Runtime to prepare/initialize before running benchmark `set_code`.
-	fn setup_set_code_requirements(_code: &Vec<u8>) -> Result<(), BenchmarkError> {
-		Ok(())
-	}
-
-	/// Adds ability to the Runtime to do custom validation after benchmark.
-	///
-	/// Default is checking for `CodeUpdated` event .
-	fn verify_set_code() {
-		System::<Self>::assert_last_event(frame_system::Event::<Self>::CodeUpdated.into());
-	}
-}
+// The `Config` hooks `prepare_set_code_data`, `setup_set_code_requirements` and
+// `verify_set_code` went with the `set_code` benchmark: this fork has no
+// dispatchable that can write `:code`. What is left to benchmark is `remark`
+// and `remark_with_event`, which is the whole call surface of the pallet.
+pub trait Config: frame_system::Config {}
 
 #[benchmarks]
 mod benchmarks {
@@ -78,153 +61,6 @@ mod benchmarks {
 		System::<T>::assert_last_event(
 			frame_system::Event::<T>::Remarked { sender: caller, hash }.into(),
 		);
-		Ok(())
-	}
-
-	#[benchmark]
-	fn set_heap_pages() -> Result<(), BenchmarkError> {
-		// V12 audit #162546: `set_heap_pages` now enforces a `64..=65536` range, so the
-		// benchmark must use a value within it.
-		#[extrinsic_call]
-		set_heap_pages(RawOrigin::Root, 64);
-
-		Ok(())
-	}
-
-	#[benchmark]
-	fn set_code() -> Result<(), BenchmarkError> {
-		let runtime_blob = T::prepare_set_code_data();
-		T::setup_set_code_requirements(&runtime_blob)?;
-
-		#[extrinsic_call]
-		set_code(RawOrigin::Root, runtime_blob);
-
-		T::verify_set_code();
-		Ok(())
-	}
-
-	#[benchmark(extra)]
-	fn set_code_without_checks() -> Result<(), BenchmarkError> {
-		// Assume Wasm ~4MB
-		let code = vec![1; 4_000_000 as usize];
-		T::setup_set_code_requirements(&code)?;
-
-		#[block]
-		{
-			System::<T>::set_code_without_checks(RawOrigin::Root.into(), code)?;
-		}
-
-		let current_code =
-			storage::unhashed::get_raw(well_known_keys::CODE).ok_or("Code not stored.")?;
-		assert_eq!(current_code.len(), 4_000_000 as usize);
-		Ok(())
-	}
-
-	#[benchmark(skip_meta)]
-	fn set_storage(i: Linear<0, { 1_000 }>) -> Result<(), BenchmarkError> {
-		// Set up i items to add
-		let mut items = Vec::new();
-		for j in 0..i {
-			let hash = (i, j).using_encoded(T::Hashing::hash).as_ref().to_vec();
-			items.push((hash.clone(), hash.clone()));
-		}
-
-		let items_to_verify = items.clone();
-
-		#[extrinsic_call]
-		set_storage(RawOrigin::Root, items);
-
-		// Verify that they're actually in the storage.
-		for (item, _) in items_to_verify {
-			let value = storage::unhashed::get_raw(&item).ok_or("No value stored")?;
-			assert_eq!(value, *item);
-		}
-		Ok(())
-	}
-
-	#[benchmark(skip_meta)]
-	fn kill_storage(i: Linear<0, { 1_000 }>) -> Result<(), BenchmarkError> {
-		// Add i items to storage
-		let mut items = Vec::with_capacity(i as usize);
-		for j in 0..i {
-			let hash = (i, j).using_encoded(T::Hashing::hash).as_ref().to_vec();
-			storage::unhashed::put_raw(&hash, &hash);
-			items.push(hash);
-		}
-
-		// Verify that they're actually in the storage.
-		for item in &items {
-			let value = storage::unhashed::get_raw(item).ok_or("No value stored")?;
-			assert_eq!(value, *item);
-		}
-
-		let items_to_verify = items.clone();
-
-		#[extrinsic_call]
-		kill_storage(RawOrigin::Root, items);
-
-		// Verify that they're not in the storage anymore.
-		for item in items_to_verify {
-			assert!(storage::unhashed::get_raw(&item).is_none());
-		}
-		Ok(())
-	}
-
-	#[benchmark(skip_meta)]
-	fn kill_prefix(p: Linear<0, { 1_000 }>) -> Result<(), BenchmarkError> {
-		let prefix = p.using_encoded(T::Hashing::hash).as_ref().to_vec();
-		let mut items = Vec::with_capacity(p as usize);
-		// add p items that share a prefix
-		for i in 0..p {
-			let hash = (p, i).using_encoded(T::Hashing::hash).as_ref().to_vec();
-			let key = [&prefix[..], &hash[..]].concat();
-			storage::unhashed::put_raw(&key, &key);
-			items.push(key);
-		}
-
-		// Verify that they're actually in the storage.
-		for item in &items {
-			let value = storage::unhashed::get_raw(item).ok_or("No value stored")?;
-			assert_eq!(value, *item);
-		}
-
-		#[extrinsic_call]
-		kill_prefix(RawOrigin::Root, prefix, p);
-
-		// Verify that they're not in the storage anymore.
-		for item in items {
-			assert!(storage::unhashed::get_raw(&item).is_none());
-		}
-		Ok(())
-	}
-
-	#[benchmark]
-	fn authorize_upgrade() -> Result<(), BenchmarkError> {
-		let runtime_blob = T::prepare_set_code_data();
-		T::setup_set_code_requirements(&runtime_blob)?;
-		let hash = T::Hashing::hash(&runtime_blob);
-
-		#[extrinsic_call]
-		authorize_upgrade(RawOrigin::Root, hash);
-
-		assert_eq!(System::<T>::authorized_upgrade().unwrap().code_hash(), &hash);
-		Ok(())
-	}
-
-	#[benchmark]
-	fn apply_authorized_upgrade() -> Result<(), BenchmarkError> {
-		let runtime_blob = T::prepare_set_code_data();
-		T::setup_set_code_requirements(&runtime_blob)?;
-		let hash = T::Hashing::hash(&runtime_blob);
-		// Will be heavier when it needs to do verification (i.e. don't use `...without_checks`).
-		System::<T>::authorize_upgrade(RawOrigin::Root.into(), hash)?;
-
-		#[extrinsic_call]
-		apply_authorized_upgrade(RawOrigin::Root, runtime_blob);
-
-		// Can't check for `CodeUpdated` in parachain upgrades. Just check that the authorization is
-		// gone.
-		assert!(System::<T>::authorized_upgrade().is_none());
 		Ok(())
 	}
 

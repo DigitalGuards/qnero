@@ -55,9 +55,10 @@ symptom of the proxied choice is a wallet that reconnects every hundred seconds
 and nothing that says why.
 
 The chain: 120 second blocks, RandomX proof of work, an initial difficulty of
-5 000, one endowed account at genesis (the faucet's), no treasury, no vesting,
-no tech collective and no sudo. `chain/runtime/src/genesis_config_presets/mod.rs`
-carries the reasoning for each of those; the short version is in section 4.
+5 000, one endowed account at genesis (the faucet's), no treasury, no vesting
+and no privileged origin of any kind. `chain/runtime/src/genesis_config_presets/mod.rs`
+carries the reasoning for the genesis; `docs/DESIGN.md` section 7.6 carries the
+reasoning for the last of those. The short version is in section 4.
 
 ## 2. Prerequisites
 
@@ -173,10 +174,14 @@ What is in it, and what is deliberately not:
 - **No vesting table.** The dev and Heisenberg example table pays three public keys.
 - **No mainnet placeholder.** That allocation is 2% of the supply to an address nobody holds
   a key for, and it reaches a chain only through the mainnet preset.
-- **No treasury and no tech collective.** A collective is five real key holders or none;
-  with none, nobody can pass the tech-referenda origin, so **there is no runtime upgrade by
-  referendum on this chain** and the recovery for a runtime bug is a relaunch. On a testnet
-  that is the cheaper side of the trade.
+- **No treasury**, because there is nothing for one to hold and nothing to spend from it.
+- **No admin keys, as a property of the runtime rather than of this genesis.** The tech
+  collective, its referenda instance and the fast-upgrade origin were removed from the
+  binary, and with them every `frame-system` dispatchable that could write `:code`,
+  `:heappages` or a raw storage key. No chain this binary launches has an origin that can
+  change its own rules, so **there is no runtime upgrade on this chain** and the recovery
+  for a runtime bug is a relaunch. `docs/DESIGN.md` section 7.6 carries the decision and
+  its cost; on a testnet it is the cheaper side of the trade.
 - **No sudo.** There is no sudo pallet in this runtime.
 - **A 120 000 ms target block time**, written into `pallet_qpow::TargetBlockTimeMs` at
   genesis. There is no setter and no extrinsic that moves it afterwards; clients read it
@@ -781,9 +786,9 @@ There is exactly one generation of this: a second deploy overwrites
 deploying again, or keep a dated copy of your own.
 
 A rollback across a runtime change is not a rollback: the chain's state was
-produced by whichever runtime executed it. Under v1 there is no runtime upgrade
-by referendum on this chain anyway, so the runtime in the genesis wasm is the
-runtime for the chain's life.
+produced by whichever runtime executed it. No dispatchable on this chain can
+replace `:code`, so the runtime in the genesis wasm is the runtime for the
+chain's life, and a runtime change is a new chain.
 
 **A bad static deploy.** `git checkout` the previous commit of `site/`,
 `wallet-web/` or `explorer/` and run that stage again. `--delete` means the

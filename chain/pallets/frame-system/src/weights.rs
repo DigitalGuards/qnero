@@ -52,13 +52,6 @@ use core::marker::PhantomData;
 pub trait WeightInfo {
 	fn remark(b: u32, ) -> Weight;
 	fn remark_with_event(b: u32, ) -> Weight;
-	fn set_heap_pages() -> Weight;
-	fn set_code() -> Weight;
-	fn set_storage(i: u32, ) -> Weight;
-	fn kill_storage(i: u32, ) -> Weight;
-	fn kill_prefix(p: u32, ) -> Weight;
-	fn authorize_upgrade() -> Weight;
-	fn apply_authorized_upgrade() -> Weight;
 }
 
 /// Weights for `frame_system` using the Substrate node and recommended hardware.
@@ -84,90 +77,6 @@ impl<T: crate::Config> WeightInfo for SubstrateWeight<T> {
 			// Standard Error: 5
 			.saturating_add(Weight::from_parts(1_093, 0).saturating_mul(b.into()))
 	}
-	/// Storage: UNKNOWN KEY `0x3a686561707061676573` (r:0 w:1)
-	/// Proof: UNKNOWN KEY `0x3a686561707061676573` (r:0 w:1)
-	fn set_heap_pages() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
-		// Minimum execution time: 1_000_000 picoseconds.
-		Weight::from_parts(2_000_000, 0)
-			.saturating_add(T::DbWeight::get().writes(1_u64))
-	}
-	/// Storage: UNKNOWN KEY `0x3a636f6465` (r:0 w:1)
-	/// Proof: UNKNOWN KEY `0x3a636f6465` (r:0 w:1)
-	fn set_code() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
-		// Minimum execution time: 49_792_000_000 picoseconds.
-		Weight::from_parts(50_395_000_000, 0)
-			.saturating_add(T::DbWeight::get().writes(1_u64))
-	}
-	/// Storage: `Skipped::Metadata` (r:0 w:0)
-	/// Proof: `Skipped::Metadata` (`max_values`: None, `max_size`: None, mode: `Measured`)
-	/// The range of component `i` is `[0, 1000]`.
-	fn set_storage(i: u32, ) -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
-		// Minimum execution time: 1_000_000 picoseconds.
-		Weight::from_parts(1_000_000, 0)
-			// Standard Error: 666
-			.saturating_add(Weight::from_parts(539_374, 0).saturating_mul(i.into()))
-			.saturating_add(T::DbWeight::get().writes((1_u64).saturating_mul(i.into())))
-	}
-	/// Storage: `Skipped::Metadata` (r:0 w:0)
-	/// Proof: `Skipped::Metadata` (`max_values`: None, `max_size`: None, mode: `Measured`)
-	/// The range of component `i` is `[0, 1000]`.
-	fn kill_storage(i: u32, ) -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
-		// Minimum execution time: 1_000_000 picoseconds.
-		Weight::from_parts(1_000_000, 0)
-			// Standard Error: 611
-			.saturating_add(Weight::from_parts(400_042, 0).saturating_mul(i.into()))
-			.saturating_add(T::DbWeight::get().writes((1_u64).saturating_mul(i.into())))
-	}
-	/// Storage: `Skipped::Metadata` (r:0 w:0)
-	/// Proof: `Skipped::Metadata` (`max_values`: None, `max_size`: None, mode: `Measured`)
-	/// The range of component `p` is `[0, 1000]`.
-	fn kill_prefix(p: u32, ) -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `49 + p * (69 ±0)`
-		//  Estimated: `56 + p * (70 ±0)`
-		// Minimum execution time: 2_000_000 picoseconds.
-		Weight::from_parts(3_000_000, 56)
-			// Standard Error: 641
-			.saturating_add(Weight::from_parts(741_672, 0).saturating_mul(p.into()))
-			.saturating_add(T::DbWeight::get().reads((1_u64).saturating_mul(p.into())))
-			.saturating_add(T::DbWeight::get().writes((1_u64).saturating_mul(p.into())))
-			.saturating_add(Weight::from_parts(0, 70).saturating_mul(p.into()))
-	}
-	/// Storage: `System::AuthorizedUpgrade` (r:0 w:1)
-	/// Proof: `System::AuthorizedUpgrade` (`max_values`: Some(1), `max_size`: Some(33), added: 528, mode: `MaxEncodedLen`)
-	fn authorize_upgrade() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
-		// Minimum execution time: 4_000_000 picoseconds.
-		Weight::from_parts(4_000_000, 0)
-			.saturating_add(T::DbWeight::get().writes(1_u64))
-	}
-	/// Storage: `System::AuthorizedUpgrade` (r:1 w:1)
-	/// Proof: `System::AuthorizedUpgrade` (`max_values`: Some(1), `max_size`: Some(33), added: 528, mode: `MaxEncodedLen`)
-	/// Storage: UNKNOWN KEY `0x3a636f6465` (r:0 w:1)
-	/// Proof: UNKNOWN KEY `0x3a636f6465` (r:0 w:1)
-	fn apply_authorized_upgrade() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `22`
-		//  Estimated: `1518`
-		// Minimum execution time: 53_277_000_000 picoseconds.
-		Weight::from_parts(54_122_000_000, 1518)
-			.saturating_add(T::DbWeight::get().reads(1_u64))
-			.saturating_add(T::DbWeight::get().writes(2_u64))
-	}
 }
 
 // For backwards compatibility and tests.
@@ -191,89 +100,5 @@ impl WeightInfo for () {
 		Weight::from_parts(3_000_000, 0)
 			// Standard Error: 5
 			.saturating_add(Weight::from_parts(1_093, 0).saturating_mul(b.into()))
-	}
-	/// Storage: UNKNOWN KEY `0x3a686561707061676573` (r:0 w:1)
-	/// Proof: UNKNOWN KEY `0x3a686561707061676573` (r:0 w:1)
-	fn set_heap_pages() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
-		// Minimum execution time: 1_000_000 picoseconds.
-		Weight::from_parts(2_000_000, 0)
-			.saturating_add(RocksDbWeight::get().writes(1_u64))
-	}
-	/// Storage: UNKNOWN KEY `0x3a636f6465` (r:0 w:1)
-	/// Proof: UNKNOWN KEY `0x3a636f6465` (r:0 w:1)
-	fn set_code() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
-		// Minimum execution time: 49_792_000_000 picoseconds.
-		Weight::from_parts(50_395_000_000, 0)
-			.saturating_add(RocksDbWeight::get().writes(1_u64))
-	}
-	/// Storage: `Skipped::Metadata` (r:0 w:0)
-	/// Proof: `Skipped::Metadata` (`max_values`: None, `max_size`: None, mode: `Measured`)
-	/// The range of component `i` is `[0, 1000]`.
-	fn set_storage(i: u32, ) -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
-		// Minimum execution time: 1_000_000 picoseconds.
-		Weight::from_parts(1_000_000, 0)
-			// Standard Error: 666
-			.saturating_add(Weight::from_parts(539_374, 0).saturating_mul(i.into()))
-			.saturating_add(RocksDbWeight::get().writes((1_u64).saturating_mul(i.into())))
-	}
-	/// Storage: `Skipped::Metadata` (r:0 w:0)
-	/// Proof: `Skipped::Metadata` (`max_values`: None, `max_size`: None, mode: `Measured`)
-	/// The range of component `i` is `[0, 1000]`.
-	fn kill_storage(i: u32, ) -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
-		// Minimum execution time: 1_000_000 picoseconds.
-		Weight::from_parts(1_000_000, 0)
-			// Standard Error: 611
-			.saturating_add(Weight::from_parts(400_042, 0).saturating_mul(i.into()))
-			.saturating_add(RocksDbWeight::get().writes((1_u64).saturating_mul(i.into())))
-	}
-	/// Storage: `Skipped::Metadata` (r:0 w:0)
-	/// Proof: `Skipped::Metadata` (`max_values`: None, `max_size`: None, mode: `Measured`)
-	/// The range of component `p` is `[0, 1000]`.
-	fn kill_prefix(p: u32, ) -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `49 + p * (69 ±0)`
-		//  Estimated: `56 + p * (70 ±0)`
-		// Minimum execution time: 2_000_000 picoseconds.
-		Weight::from_parts(3_000_000, 56)
-			// Standard Error: 641
-			.saturating_add(Weight::from_parts(741_672, 0).saturating_mul(p.into()))
-			.saturating_add(RocksDbWeight::get().reads((1_u64).saturating_mul(p.into())))
-			.saturating_add(RocksDbWeight::get().writes((1_u64).saturating_mul(p.into())))
-			.saturating_add(Weight::from_parts(0, 70).saturating_mul(p.into()))
-	}
-	/// Storage: `System::AuthorizedUpgrade` (r:0 w:1)
-	/// Proof: `System::AuthorizedUpgrade` (`max_values`: Some(1), `max_size`: Some(33), added: 528, mode: `MaxEncodedLen`)
-	fn authorize_upgrade() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
-		// Minimum execution time: 4_000_000 picoseconds.
-		Weight::from_parts(4_000_000, 0)
-			.saturating_add(RocksDbWeight::get().writes(1_u64))
-	}
-	/// Storage: `System::AuthorizedUpgrade` (r:1 w:1)
-	/// Proof: `System::AuthorizedUpgrade` (`max_values`: Some(1), `max_size`: Some(33), added: 528, mode: `MaxEncodedLen`)
-	/// Storage: UNKNOWN KEY `0x3a636f6465` (r:0 w:1)
-	/// Proof: UNKNOWN KEY `0x3a636f6465` (r:0 w:1)
-	fn apply_authorized_upgrade() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `22`
-		//  Estimated: `1518`
-		// Minimum execution time: 53_277_000_000 picoseconds.
-		Weight::from_parts(54_122_000_000, 1518)
-			.saturating_add(RocksDbWeight::get().reads(1_u64))
-			.saturating_add(RocksDbWeight::get().writes(2_u64))
 	}
 }

@@ -3,8 +3,7 @@
 //! The public chain targets 120 000 ms, Monero's interval. `docs/DESIGN.md`
 //! carries the decision and the rationale; what this file carries is every
 //! number that moved with it, so a future edit to `TARGET_BLOCK_TIME_MS` cannot
-//! silently change what a governance period, a reversal window or a quota
-//! window means.
+//! silently change what a reversal window or a quota window means.
 //!
 //! Since the retarget's divisor became `target * ln 2` (DESIGN 7.6) the chain
 //! averages the interval it declares, so every duration below is the wall clock
@@ -23,7 +22,6 @@ use qnero_runtime::{
 	configs::{
 		ChainTargetBlockTime, DefaultDelay, HighSecurityTxWindowBlocks, MaxExpiryDuration,
 		MinDelayPeriodBlocks, ShieldedBlockHashWindow, TargetBlockTime, TimestampBucketSize,
-		UndecidingTimeout,
 	},
 	DAYS, HOURS, MINUTES, TARGET_BLOCK_TIME_MS,
 };
@@ -38,8 +36,8 @@ fn the_public_target_is_two_minutes() {
 
 /// Each unit is derived from milliseconds on its own. Chaining `HOURS` off
 /// `MINUTES` would make both zero at a target longer than a minute, and every
-/// governance period denominated in them would collapse to the next block with
-/// nothing to say so.
+/// window denominated in them would collapse to the next block with nothing to
+/// say so.
 #[test]
 fn the_time_units_are_derived_from_milliseconds() {
 	assert_eq!(MINUTES, 1, "one block, the shortest period a block count can express: 2 minutes");
@@ -53,8 +51,6 @@ fn the_time_units_are_derived_from_milliseconds() {
 /// duration does not.
 #[test]
 fn duration_denominated_constants_keep_their_durations() {
-	assert_eq!(UndecidingTimeout::get(), 45 * DAYS);
-	assert_eq!(UndecidingTimeout::get(), 32_400, "still 45 days");
 	assert_eq!(
 		DefaultDelay::get(),
 		BlockNumberOrTimestamp::BlockNumber(DAYS),
@@ -115,7 +111,7 @@ fn the_timestamp_bucket_follows_the_chain_target() {
 /// at another cadence. On the 12 s `dev` chain that makes each of them mean a
 /// tenth of the wall clock its name claims, and the emission divisor is the
 /// same kind of constant for the same reason. All three are metadata: a client
-/// reads a governance period and a supply schedule out of metadata, and a value
+/// reads a reversal delay and a supply schedule out of metadata, and a value
 /// that changed with a storage read is a value no metadata could state.
 /// `docs/DESIGN.md` 7.4 and `docs/OPS-DEV.md` carry the same sentence.
 #[test]
@@ -130,7 +126,6 @@ fn the_storage_target_does_not_reach_the_day_denominated_windows() {
 			"the quota window keeps the public chain's block count, which at 12 s is 2.4 hours"
 		);
 		assert_eq!(DefaultDelay::get(), BlockNumberOrTimestamp::BlockNumber(720));
-		assert_eq!(UndecidingTimeout::get(), 32_400);
 		assert_eq!(MaxExpiryDuration::get(), 10_080);
 		assert_eq!(DAYS, 720, "`DAYS` is the compile-time constant's day, on every chain");
 	});

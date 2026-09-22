@@ -25,7 +25,7 @@ use crate as utility;
 use frame_support::{
 	assert_err_ignore_postinfo, assert_noop, assert_ok, derive_impl,
 	dispatch::{DispatchErrorWithPostInfo, Pays},
-	parameter_types, storage,
+	parameter_types,
 	traits::{ConstU64, Contains},
 	weights::Weight,
 };
@@ -312,24 +312,29 @@ fn batch_all_works() {
 
 #[test]
 fn batch_all_with_root_works() {
+	use sp_runtime::Perbill;
 	new_test_ext().execute_with(|| {
-		let k = b"a".to_vec();
-		let k2 = b"b".to_vec();
-		let call = RuntimeCall::System(frame_system::Call::set_storage {
-			items: vec![(k.clone(), k.clone())],
-		});
-		assert!(!TestBaseCallFilter::contains(&call));
-		assert_ok!(Utility::batch_all(
-			RuntimeOrigin::root(),
-			vec![
-				RuntimeCall::System(frame_system::Call::set_storage {
-					items: vec![(k2.clone(), k2.clone())],
-				}),
-				call, // Check filters are correctly bypassed
-			]
-		));
-		assert_eq!(storage::unhashed::get_raw(&k2), Some(k2));
-		assert_eq!(storage::unhashed::get_raw(&k), Some(k));
+		// This used `System::set_storage` and checked the two raw keys it wrote.
+		// That call is deleted from this fork along with every other
+		// `frame-system` dispatchable that can write `:code`, `:heappages` or a
+		// raw storage key, so the stand-in is `RootTesting::fill_block`: the
+		// test filter refuses it and only Root can dispatch it, which is the
+		// pair this test needs. What it observes is the refusal and its absence.
+		let call = || {
+			RuntimeCall::RootTesting(RootTestingCall::fill_block {
+				ratio: Perbill::from_percent(1),
+			})
+		};
+		assert!(!TestBaseCallFilter::contains(&call()));
+
+		// A signed batch meets the filter on the way in.
+		assert_err_ignore_postinfo!(
+			Utility::batch_all(RuntimeOrigin::signed(1), vec![call()]),
+			frame_system::Error::<Test>::CallFiltered
+		);
+
+		// Root bypasses it, which is what `dispatch_bypass_filter` is for.
+		assert_ok!(Utility::batch_all(RuntimeOrigin::root(), vec![call(), call()]));
 	});
 }
 
