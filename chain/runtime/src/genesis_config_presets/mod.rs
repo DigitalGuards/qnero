@@ -567,7 +567,12 @@ pub fn mainnet_config_genesis() -> Value {
 	let treasury_account = mainnet_vesting::treasury_account();
 	let extra_balances = mainnet_vesting::seed_balances();
 	let seeded: Vec<AccountId> = extra_balances.iter().map(|(who, _)| who.clone()).collect();
-	log_genesis_accounts(MAINNET_RUNTIME_PRESET, &seeded, Some(&treasury_account), &treasury_signers);
+	log_genesis_accounts(
+		MAINNET_RUNTIME_PRESET,
+		&seeded,
+		Some(&treasury_account),
+		&treasury_signers,
+	);
 	let vesting_schedules = mainnet_vesting::schedules();
 	log_vesting_schedules(MAINNET_RUNTIME_PRESET, &vesting_schedules);
 	let treasury = TreasuryGenesis { account: Some(treasury_account) };
@@ -725,8 +730,7 @@ mod tests {
 		// `[3u8; 32]` and `[4u8; 32]` went with the collective they padded.
 		let known: Vec<AccountId> = (0u8..3).map(|i| ml_dsa_87([i; 32])).collect();
 
-		for account in
-			dilithium_default_accounts().into_iter().chain(heisenberg_treasury_signers())
+		for account in dilithium_default_accounts().into_iter().chain(heisenberg_treasury_signers())
 		{
 			assert!(
 				known.contains(&account),
@@ -808,8 +812,7 @@ mod tests {
 	fn each_preset_starts_at_the_difficulty_its_chain_needs() {
 		let difficulty_of = |name: &str| {
 			let raw = get_preset(&PresetId::from(name)).expect("listed preset must resolve");
-			let config: RuntimeGenesisConfig =
-				serde_json::from_slice(&raw).expect("deserializes");
+			let config: RuntimeGenesisConfig = serde_json::from_slice(&raw).expect("deserializes");
 			config.q_po_w.initial_difficulty
 		};
 		assert_eq!(difficulty_of(sp_genesis_builder::DEV_RUNTIME_PRESET), dev_initial_difficulty());
@@ -847,8 +850,7 @@ mod tests {
 	fn the_dev_preset_keeps_the_fast_block_time() {
 		let target_of = |name: &str| {
 			let raw = get_preset(&PresetId::from(name)).expect("listed preset must resolve");
-			let config: RuntimeGenesisConfig =
-				serde_json::from_slice(&raw).expect("deserializes");
+			let config: RuntimeGenesisConfig = serde_json::from_slice(&raw).expect("deserializes");
 			config.q_po_w.target_block_time
 		};
 		assert_eq!(
@@ -997,8 +999,7 @@ mod tests {
 
 		for id in preset_names() {
 			let raw = get_preset(&id).expect("listed preset must resolve");
-			let config: RuntimeGenesisConfig =
-				serde_json::from_slice(&raw).expect("deserializes");
+			let config: RuntimeGenesisConfig = serde_json::from_slice(&raw).expect("deserializes");
 			let schedule_sum: u128 =
 				config.vesting.schedules.iter().map(|(_, _, _, _, total)| *total).sum();
 
@@ -1098,8 +1099,7 @@ mod tests {
 		for &(name, expected_count) in &expected {
 			let id = PresetId::from(name);
 			let raw = get_preset(&id).expect("listed preset must resolve");
-			let config: RuntimeGenesisConfig =
-				serde_json::from_slice(&raw).expect("deserializes");
+			let config: RuntimeGenesisConfig = serde_json::from_slice(&raw).expect("deserializes");
 			assert_eq!(
 				config.vesting.schedules.len(),
 				expected_count,
@@ -1190,8 +1190,7 @@ mod tests {
 		let minted_total = mainnet_vesting::GENESIS_ALLOCATION + EXISTENTIAL_DEPOSIT;
 		if mainnet_vesting::FINALIZED && mainnet_security_qualified() {
 			let raw = get_preset(&PresetId::from(MAINNET_RUNTIME_PRESET)).expect("preset exists");
-			let config: RuntimeGenesisConfig =
-				serde_json::from_slice(&raw).expect("deserializes");
+			let config: RuntimeGenesisConfig = serde_json::from_slice(&raw).expect("deserializes");
 			let treasury = config.treasury_pallet.treasury_account.clone().expect("treasury");
 			assert_eq!(treasury, mainnet_vesting::treasury_account());
 			assert!(

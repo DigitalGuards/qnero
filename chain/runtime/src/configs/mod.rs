@@ -27,8 +27,9 @@
 use crate::MILLI_UNIT;
 use codec::{Decode, Encode, MaxEncodedLen};
 use frame_support::{
-	derive_impl, parameter_types,
+	derive_impl,
 	pallet_prelude::TypeInfo,
+	parameter_types,
 	traits::{
 		Consideration, ConstU128, ConstU32, ConstU8, Footprint, Get, NeverEnsureOrigin,
 		ReservableCurrency, VariantCountOf,

@@ -17,8 +17,8 @@
 //! 4. Each of [`TREASURERS`] is endowed with [`SEED`] as free balance so they can pay fees and
 //!    deposits from block 1. They hold no vesting schedule. The vesting pot additionally receives
 //!    its existential deposit from `genesis_template`, the only issuance outside the 2%. A second
-//!    table of ten, the tech collective, was endowed here too until the governance removal; its
-//!    30 QNR went back into the placeholder row.
+//!    table of ten, the tech collective, was endowed here too until the governance removal; its 30
+//!    QNR went back into the placeholder row.
 //! 5. The treasury multisig is derived from [`TREASURERS`] and holds no genesis balance at all.
 //! 6. Accounts are SS58 addresses only, and carry no personal names.
 //! 7. Every address below must be an ML-DSA-87 account, minted with `qnero-node key qnero`. An SS58
@@ -265,11 +265,7 @@ mod tests {
 		let total = accounts.len();
 		accounts.sort_unstable();
 		accounts.dedup();
-		assert_eq!(
-			accounts.len(),
-			total,
-			"allocation and treasurer addresses must be distinct"
-		);
+		assert_eq!(accounts.len(), total, "allocation and treasurer addresses must be distinct");
 	}
 
 	/// The referendum half of this went with the collective: a submission

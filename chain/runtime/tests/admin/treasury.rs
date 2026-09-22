@@ -3,7 +3,9 @@
 #[cfg(test)]
 mod tests {
 	use crate::common::call_names;
-	use qnero_runtime::{configs::TreasuryPalletId, AccountId, Runtime, System, TreasuryPallet, UNIT};
+	use qnero_runtime::{
+		configs::TreasuryPalletId, AccountId, Runtime, System, TreasuryPallet, UNIT,
+	};
 	use sp_runtime::{traits::AccountIdConversion, BuildStorage};
 
 	fn treasury_account_id() -> AccountId {
@@ -48,7 +50,9 @@ mod tests {
 	#[test]
 	fn the_treasury_account_cannot_be_changed_after_genesis() {
 		assert!(
-			!call_names::<qnero_runtime::RuntimeCall>().iter().any(|name| name == "TreasuryPallet"),
+			!call_names::<qnero_runtime::RuntimeCall>()
+				.iter()
+				.any(|name| name == "TreasuryPallet"),
 			"TreasuryPallet is dispatchable again; `set_treasury_account` is `ensure_root` \
 			 inside the pallet and this runtime must have no way to reach it"
 		);

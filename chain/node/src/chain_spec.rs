@@ -56,8 +56,8 @@ pub fn development_chain_spec() -> Result<ChainSpec, String> {
 /// `[1]` / `[2]`) and uses them as treasury signers. Those private keys are
 /// public by design so integrators and CI can exercise treasury and transfer
 /// flows without distributing secrets. They used to seed a tech collective
-/// too, which the runtime no longer has. Tokens have no monetary value; the network may be reset. Do not
-/// treat Heisenberg key material, balances, or authority as production-grade.
+/// too, which the runtime no longer has. Tokens have no monetary value; the network may be reset.
+/// Do not treat Heisenberg key material, balances, or authority as production-grade.
 ///
 /// The upstream telemetry endpoint and bootnodes are gone. This builder emits
 /// this tree's genesis, so upstream's peers refuse it on genesis hash, and an

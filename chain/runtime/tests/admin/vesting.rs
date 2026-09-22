@@ -193,14 +193,7 @@ mod tests {
 				];
 				for origin in origins {
 					assert_noop!(
-						Vesting::create_schedule(
-							origin.clone(),
-							account(7),
-							0,
-							0,
-							END_MS,
-							GRANT,
-						),
+						Vesting::create_schedule(origin.clone(), account(7), 0, 0, END_MS, GRANT,),
 						DispatchError::BadOrigin
 					);
 					assert_noop!(

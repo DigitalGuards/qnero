@@ -13,9 +13,7 @@
 //! still seeds a collective, or adding a dispatchable that writes the code key.
 
 use frame_support::traits::{EnsureOrigin, UnfilteredDispatchable};
-use qnero_runtime::{
-	AccountId, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin, UNIT,
-};
+use qnero_runtime::{AccountId, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin, UNIT};
 use sp_core::crypto::AccountId32;
 use sp_runtime::MultiAddress;
 
@@ -70,9 +68,7 @@ fn every_leaf_call() -> Vec<RuntimeCall> {
 		// Utility (1). The inner call is a `remark`, so what this dispatches is
 		// the wrapper itself rather than a second copy of something above.
 		RuntimeCall::Utility(pallet_utility::Call::batch_all {
-			calls: vec![RuntimeCall::System(frame_system::Call::remark {
-				remark: Vec::new(),
-			})],
+			calls: vec![RuntimeCall::System(frame_system::Call::remark { remark: Vec::new() })],
 		}),
 		// ReversibleTransfers (6)
 		RuntimeCall::ReversibleTransfers(pallet_reversible_transfers::Call::set_high_security {
@@ -129,9 +125,7 @@ fn every_leaf_call() -> Vec<RuntimeCall> {
 		RuntimeCall::Multisig(pallet_multisig::Call::execute {
 			multisig_address: account(9),
 			proposal_id: 0,
-			call: Box::new(RuntimeCall::System(frame_system::Call::remark {
-				remark: Vec::new(),
-			})),
+			call: Box::new(RuntimeCall::System(frame_system::Call::remark { remark: Vec::new() })),
 		}),
 		// Vesting (4)
 		RuntimeCall::Vesting(pallet_vesting::Call::claim { schedule_id: 0 }),
@@ -352,10 +346,8 @@ fn a_stale_collective_seed_is_refused_at_genesis() {
 
 	sp_io::TestExternalities::default().execute_with(|| {
 		assert!(
-			build_state::<RuntimeGenesisConfig>(
-				serde_json::to_vec(&value).expect("serializes")
-			)
-			.is_err(),
+			build_state::<RuntimeGenesisConfig>(serde_json::to_vec(&value).expect("serializes"))
+				.is_err(),
 			"a genesis still carrying tech_collective_seed_members was accepted"
 		);
 	});

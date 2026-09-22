@@ -120,17 +120,15 @@ impl_opaque_keys! {
 // change; signed extrinsic encoding remains at transaction_version 7.
 // 106 is the pre-genesis relaunch bundle, one bump for every item in it
 // because the chain it ships on has no predecessor to upgrade from.
-// - The ciphertext capacity check moves ahead of the ZK verify in `pre_dispatch`
-//   and answers `ExhaustsResources` instead of `Call` for a full block, so the
-//   block builder defers the settlement and keeps it in the pool.
-// - The inherited governance is removed. `TechCollective` (13), `TechReferenda`
-//   (14) and `Origins` (23) leave the pallet table, `Preimage` and
-//   `TreasuryPallet` lose their call enums to `#[runtime::disable_call]`,
-//   `frame-system` loses the nine dispatchables that could write `:code`,
-//   `:heappages` or a raw storage key, and every referenda and collective
-//   constant leaves the constant tables. Root survives as a type and nothing in
-//   the runtime can produce it. `docs/DESIGN.md` section 7.6 carries the
-//   decision; `tests/no_admin_keys.rs` carries the proof.
+// - The ciphertext capacity check moves ahead of the ZK verify in `pre_dispatch` and answers
+//   `ExhaustsResources` instead of `Call` for a full block, so the block builder defers the
+//   settlement and keeps it in the pool.
+// - The inherited governance is removed. `TechCollective` (13), `TechReferenda` (14) and `Origins`
+//   (23) leave the pallet table, `Preimage` and `TreasuryPallet` lose their call enums to
+//   `#[runtime::disable_call]`, `frame-system` loses the nine dispatchables that could write
+//   `:code`, `:heappages` or a raw storage key, and every referenda and collective constant leaves
+//   the constant tables. Root survives as a type and nothing in the runtime can produce it.
+//   `docs/DESIGN.md` section 7.6 carries the decision; `tests/no_admin_keys.rs` carries the proof.
 // That is a long metadata move and no signed-payload move: `TxExtension`
 // (`lib.rs` below) keeps its eleven members and the payload layout is
 // untouched, so `transaction_version` stays at 7.
