@@ -28,7 +28,7 @@
 //!   free to grow with the batch size;
 //! - the index structure of the artifact against its own gate list, so a
 //!   corrupted selector range cannot turn verification into an unbounded loop
-//!   (see [`crate::ensure_common_data_is_structurally_sound`]).
+//!   (see `ensure_common_data_is_structurally_sound` in this crate's root).
 //!
 //! Requiring the recomputed `FriParams` to match is also what makes the
 //! artifact's two copies of the FRI configuration agree. An artifact carries
