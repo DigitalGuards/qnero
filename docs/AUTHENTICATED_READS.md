@@ -55,6 +55,15 @@ so there is no retention window and no historical state to fall back to. The
 wallet fetches one body per block that appended a leaf, through `chain_getBlock`
 at that block's hash, and roots it against the header it has already rehashed.
 
+The runtime keeps no note ciphertext in state. `CiphertextRetentionBlocks` is a
+`#[pallet::constant]` pinned at 0 that nothing in the runtime reads, published
+so that a wallet reading the pallet's metadata is told where the payload lives,
+and protocol profile byte 76 says the same thing inside the profile a wallet
+already authenticates against the header state root. A payload rides in the
+extrinsic that created its note: a settlement carries every settled slot's pair
+in `outputs`, a `shield` carries its own, and a coinbase note carries none
+under v1.
+
 Restoring an old wallet therefore needs a node that serves historical block
 bodies rather than historical state proofs. A node pruning state can still
 answer; a node that has dropped bodies cannot. The refusal is by name: a block

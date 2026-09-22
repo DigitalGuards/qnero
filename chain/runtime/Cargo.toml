@@ -72,6 +72,7 @@ env_logger.workspace = true
 qp-dilithium-crypto.workspace = true
 qp-poseidon-core.workspace = true
 sp-io.workspace = true
+sp-trie = { workspace = true, default-features = true }
 
 [features]
 default = ["std"]

@@ -1,8 +1,9 @@
 # Qnero design (draft v0.1, 2026-09-11)
 
 **Current native architecture:** [NATIVE-UPGRADE.md](NATIVE-UPGRADE.md) describes
-runtime 105, reversible work-based consensus, authenticated wallet state and
-bounded live ciphertext retention. [CRYPTOGRAPHY.md](CRYPTOGRAPHY.md) records the
+runtime 105, reversible work-based consensus and authenticated wallet state.
+The note ciphertexts left the state trie for block bodies in the relaunch
+bundle; 12.9 is that decision as built. [CRYPTOGRAPHY.md](CRYPTOGRAPHY.md) records the
 experimental proof-system profile and independent qualification still required.
 The dated design and milestone entries below retain their historical context.
 
@@ -1384,6 +1385,11 @@ median floor, 175 B of public inputs.
 length limit and 3.16 s of the 4.5 s weight budget, so any capacity change is a two-constant
 change.
 
+**Recomputed after the bundle.** Q3 gives back two state writes and a queue update per slot,
+and the depth-20 leaf circuit spends none of it back, because it kept `degree_bits = 9`. The
+weight ceiling moves to 940 to 945 settlements per block and the length ceiling does not move,
+so length is now the one that binds. 12.9 carries the arithmetic.
+
 ### 12.1 Q1, the change output
 
 **Decision: keep two full-length ML-KEM-1024 ciphertexts per transfer. Reject the
@@ -1542,10 +1548,11 @@ One `spec_version` bump, one artifact regeneration, one KAT pass, one review. Ea
 constant today and a hard fork after genesis.
 
 1. Q5, circuit depth 16 to 20, gated on the depth-20 build.
-2. Q3, ciphertexts out of state into bodies, with the settlement and weight changes.
-3. `CiphertextRetentionBlocks = 0` plus the no-op prune branch, so the constant is in
-   metadata at genesis and both wallets implement "absent below the retention window is
-   expected" before it is ever non-zero. Taken whichever way Q3 goes.
+2. Q3, ciphertexts out of state into bodies, with the settlement and weight changes. Built;
+   12.9 is the shape it took.
+3. `CiphertextRetentionBlocks = 0`, so the constant is in metadata at genesis. Built with the
+   prune deleted rather than left as a no-op branch: with the queue gone the branch had
+   nothing to do, and the constant says so in its own doc comment.
 4. Q1, the per-suite exact-length settlement rule.
 5. RandomX seed lag 64 to 128. Decided at 128 on 2026-09-22 and closed in open question 3.
    It carries no `spec_version` bump of its own and rides the bundle's move to 106.
@@ -1573,9 +1580,9 @@ limits.
 
 ### Step 3, how M13 changes (open question 6)
 
-M13 today reads every per-leaf storage value with `state_getReadProof` against the header
-`stateRoot`. Under Q3 it splits in two against that same header, and open question 6 is
-rewritten to say ciphertexts are no longer state.
+Built with Q3; 12.9 records it. M13 read every per-leaf storage value with
+`state_getReadProof` against the header `stateRoot`. Under Q3 it splits in two against that
+same header, and open question 6 is rewritten to say ciphertexts are no longer state.
 
 **Part one, against `stateRoot`, unchanged:** `ZkTree::LeafCount`, `ZkTree::Leaves(i)`,
 `Shielded::LeafBlocks(i)`, `Shielded::CoinbaseValues(i)`, `Shielded::EntryCount` and the
@@ -1705,3 +1712,119 @@ the shielded pallet's test module, which is where nearly all the work is. Leaks 
 nothing. The one thing it makes harder is adding a second suite later, because a second length
 is now a hard on-chain label rather than a soft convention, and the decision to pad a shorter
 suite up has to be taken before that suite exists.
+
+### 12.9 Q3 as built: the ciphertexts move into block bodies (2026-09-22)
+
+The decision is 12.3 and it rides in the pre-genesis bundle of 12.7 Step 1 as items 2 and 3,
+which are one change and were never separable: a runtime that stops writing the payload and a
+constant that says it stopped are the same release. This is the shape it takes in the code.
+
+**What the chain keeps.** `Shielded::Ciphertexts`, the FIFO that expired it, its head and tail,
+the cleanup cursor for pre-upgrade history and the prune pass that drained both are removed.
+`UsedNullifiers`, `LeafBlocks`, `EntryCount`, `CoinbaseValues`, `PoolValue`, `PendingCoinbase`,
+`PendingCoinbaseFee` and `ActiveProtocolProfile` stay. Storage version moves 2 to 3 with no
+migration, because this chain's genesis is version 3.
+
+**What the numbers turned out to be.** M16 in `docs/BENCH.md` measured the layout rather than
+projecting it, and both of 12.3's figures survive with the ratio moving the right way:
+
+| Per transfer | 12.3 quoted | M16 measured |
+|---|---|---|
+| Raw state, ciphertexts in state | 4.1 to 4.3 KB | 4 060 B |
+| Raw state, ciphertexts in bodies | 600 to 750 B | 392 B |
+| Ratio | 8 to 9x | 10.4x |
+
+The ciphertext share of that state is 3 668 B, and the measured RocksDB write-ahead multiplier
+on state is about 4x, so the disk it costs is about 14 600 B. The same bytes as block body cost
+3 588 B at a measured multiplier of 1.0. The block itself grows by nothing, because the
+ciphertexts already rode in the settlement extrinsic. The unmeasured multiplier 12.3 flagged is
+now measured and it is the term that made the case stronger.
+
+**The events had to move with the map.** `System::Events` is a state value at every block and
+an archive node keeps every historical state value forever, so `SlotSettled` carrying
+`(Vec<u8>, Vec<u8>)` would have held the whole 3584 bytes in state under a different key and
+the saving would not have happened. `SlotSettled.ciphertext_bytes` is `(u32, u32)` and
+`Shielded.ciphertext_bytes` is `u32`. `CoinbaseMinted.has_ciphertext` was already the right
+shape; its doc comment named the map as the reason and now names the inherent.
+
+**The per-block cap counts what it always wrote.** `MaxCiphertextsPerBlock` becomes
+`MaxOutputsPerBlock` and the counter behind it becomes `OutputsWrittenThisBlock`, with
+`record_outputs` as its only writer: two per settling slot, one per shield. Deleting
+`store_ciphertext` without moving that increment would have left the cap comparing every
+submission against zero and the settlement-deferral gate that answers
+`InvalidTransaction::ExhaustsResources` unreachable, which is a silently unbounded block.
+`integrity_test` keeps the assertion that the cap is positive and asks retention for zero.
+
+**`CiphertextRetentionBlocks` stays in metadata at 0.** Nothing in the runtime reads it. It is
+published so that a wallet reading the pallet's metadata is told where the payload lives rather
+than inferring it from a storage item that is not there, which is what 12.7 Step 1 item 3 asked
+for, taken the way Q3 went.
+
+**The capability probe is the profile.** Byte 76 moves 1 to 2, bytes 80..84 read 0, 84..88 are
+the renamed output cap and 88..92 become a reserved zero. `ensure_supported` is strict equality
+over all 192 bytes, so a wallet built against the state copy refuses this chain by name instead
+of syncing and finding no payment. That refusal is the whole safety argument for a change with
+no overlap window: there is no upgrade path on this chain, so a runtime that stops writing the
+map at block 1 beside a wallet that still reads it is a wallet that finds nothing.
+
+**What authenticates a body.** The header carries `extrinsics_root` beside `state_root` and
+both wallets already feed it into the Poseidon header preimage. A wallet recomputes it with
+`sp_trie::LayoutV0<Blake2Hasher>::ordered_trie_root` over the encoded extrinsics of the block,
+which is the construction `frame_system` makes while `system_version` is 1.
+`chain/runtime/tests/extrinsics_root.rs` pins that version and carries the known-answer vector
+both implementations check against. A bump of `system_version` to 2 switches the construction
+to V1 silently and breaks every wallet's recomputation, which is why the pin exists.
+
+**The binding is not `ct_digest`.** A wallet decrypts a carried ciphertext, derives the note,
+computes `H(CM, inner, value)` and requires that commitment at a leaf index inside the block's
+folded leaf range, which `zkTreeRoot` already authenticates. That test is position independent,
+so it closes the bound-A hole where a node moved an incoming payment to another position. What
+stays open, narrowed: a fold reported at the wrong height, which presents identically to a
+skipped segment's carried payload.
+
+**Weights.** `SLOT_DB_OPS` moves (4, 6) to (4, 4) and `MINT_COINBASE_DB_OPS` (3, 6) to (3, 5);
+`shield` loses one write; the queue and pruning terms are deleted. `ct_digest_ref_time` stays
+and the payload stays in every `proof_size` term, because the extrinsic bytes are validation
+input for every node whether or not anything stores them.
+
+**Versioning.** No spec bump of its own: it rides the bundle's single move to 106.
+`transaction_version` is untouched, because `submit_private_batch`, `submit_public_batch` and
+`shield` keep their signatures and their encodings byte for byte. What moves is storage layout,
+metadata and the profile, all of which the bundle's one coordinated wallet release covers.
+
+**The 12.0 weight ceiling, recomputed once with the depth decision in hand.** Every figure
+below is the declaration the code makes, at `RocksDbWeight`, for a full public batch of 318
+real slots carrying the one reachable payload of 3584 bytes each.
+
+| Term, full public batch | Before Q3 | After Q3 |
+|---|---|---|
+| Verify and parse, both charged twice | 0.3169 s | 0.3169 s |
+| Storage | 0.5255 s | 0.4619 s |
+| Ciphertext queue bookkeeping | 0.2393 s | gone |
+| `ct_digest` sponge, charged twice | 0.7229 s | 0.7229 s |
+| Tree hashing | 0.0127 s | 0.0127 s |
+| **Total** | **1.8173 s** | **1.5144 s** |
+
+12.0's 1.578 s is that column without the queue term, which is where its 893 to 907 came
+from. Against the 4.5 s normal-class budget, and counting the fixed per-extrinsic verify
+separately from the per-slot marginal cost the way 12.0 did, three public batches now fit 940
+settlements where they fit 893 on 12.0's own basis and 751 against what the code actually
+declared. The flat ratio 4.5 / 1.5144 x 318 gives 945 where it gave 907.
+
+**So length binds first now.** The length ceiling is unchanged at about 908 settlements per
+block, because Q3 moves no byte onto the wire: the ciphertexts already rode in the settlement
+extrinsic. A capacity change is a one-constant change again, and the constant is
+`RuntimeBlockLength`.
+
+**Q5 spends none of it back.** The depth-20 build kept the leaf circuit at `degree_bits = 9`
+(`crates/qnero-circuit/src/params.rs`), so the leaf proof did not grow, the `MAX_PROOF_BYTES`
+margin did not shrink, and the body does not grow on the axis Q3 makes load bearing. What
+depth 20 does move is `pallet-zk-tree`'s once-per-block fold, `FINALIZE_BASE_DB_OPS` from
+(56, 22) to (68, 26) and `FINALIZE_BASE_POSEIDON_EVALS` from 19 to 23, which is about 0.74 ms
+in the Mandatory class and does not touch the normal budget settlements are drawn from.
+
+**And the block's mandatory reservation drops by 0.927 s.** `on_initialize` reserved the whole
+bounded pruning pass, 4096 prunes at 2048 bytes, which `docs/BENCH.md` records as a declared
+927.376 ms against a measured 10.372 ms. That reservation is gone with the prune. It never
+bound settlements, which are drawn from the normal class, and it was most of the distance
+between the block's mandatory floor and its 6 s ceiling.

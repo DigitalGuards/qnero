@@ -16,6 +16,11 @@ use qnero_runtime::VERSION;
 /// recompute it as `LayoutV0`. A bump here would change every block hash on the
 /// chain and break that recomputation with nothing in the build to say so, so
 /// the number is pinned rather than inherited.
+///
+/// `extrinsics_root.rs` pins the construction itself, against `sp_trie`'s
+/// `LayoutV0` named directly and against a known-answer vector both wallets
+/// check. This assertion stays because it belongs with the other identity
+/// fields and costs nothing.
 #[test]
 fn the_extrinsics_root_construction_is_pinned() {
 	assert_eq!(

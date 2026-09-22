@@ -1,9 +1,9 @@
 //! Canonical release identity, encoded independently of Rust and SCALE versions.
 //!
 //! A profile is 192 bytes. Integers are unsigned little endian. Bytes 0..8
-//! identify the format; 8..92 describe the protocol; 92..94 carry the exact
-//! serialized length of a suite-1 note ciphertext, which settlement requires;
-//! 94..96 are zero; the last
+//! identify the format; 8..88 describe the protocol; 88..92 are reserved zero;
+//! 92..94 carry the exact serialized length of a suite-1 note ciphertext, which
+//! settlement requires; 94..96 are zero; the last
 //! 96 bytes are Blake2b-256 hashes of the exact serialized leaf, private-batch
 //! and public-batch verifier files, including the public-batch dimension header.
 //! Padding proofs are randomized and are deliberately excluded.
@@ -20,10 +20,11 @@ pub type ProtocolProfile = [u8; PROFILE_LEN];
 pub const PROFILE_VERSION: u16 = 1;
 /// Proof parameters remain experimental pending independent qualification.
 pub const EXPERIMENTAL_PROOF_SYSTEM: bool = true;
-/// Creation-state snapshots are required after this live ciphertext window.
-pub const CIPHERTEXT_RETENTION_BLOCKS: u32 = 64;
-pub const MAX_CIPHERTEXTS_PER_BLOCK: u32 = 2048;
-pub const MAX_CIPHERTEXT_PRUNES_PER_BLOCK: u32 = 4096;
+/// Blocks of note ciphertext the chain retains in state. Zero: the payload
+/// lives in block bodies, authenticated against the header's extrinsics root.
+pub const CIPHERTEXT_RETENTION_BLOCKS: u32 = 0;
+/// Output notes one block may create.
+pub const MAX_OUTPUTS_PER_BLOCK: u32 = 2048;
 pub const RELEASE_NUM_LEAVES: usize = 6;
 pub const RELEASE_NUM_PRIVATE_BATCHES: usize = 53;
 pub const LEAF_DIGEST_OFFSET: usize = 96;
@@ -122,11 +123,12 @@ pub const fn protocol_profile(
         72,
         (batch_layout::public_batch_pi_len(num_private_batches, num_leaves) as u32).to_le_bytes(),
     );
-    out[76] = 1; // Live ciphertext cache plus authenticated historical state.
+    out[76] = 2; // Ciphertexts in block bodies, authenticated against extrinsicsRoot.
     out[77] = EXPERIMENTAL_PROOF_SYSTEM as u8;
     out = put(out, 80, CIPHERTEXT_RETENTION_BLOCKS.to_le_bytes());
-    out = put(out, 84, MAX_CIPHERTEXTS_PER_BLOCK.to_le_bytes());
-    out = put(out, 88, MAX_CIPHERTEXT_PRUNES_PER_BLOCK.to_le_bytes());
+    out = put(out, 84, MAX_OUTPUTS_PER_BLOCK.to_le_bytes());
+    // 88..92 is reserved zero. It carried the per-block ciphertext prune
+    // budget until the prune itself went with the state copy of the payload.
     // The length every note ciphertext a settlement carries must have, so a
     // wallet reads the consensus rule out of the profile it already fetches and
     // authenticates instead of trusting its own compiled copy of the number.
@@ -192,6 +194,24 @@ mod tests {
         );
         assert_eq!(&SUPPORTED_PROFILE[92..94], &1792u16.to_le_bytes());
         assert_eq!(&SUPPORTED_PROFILE[94..96], &[0, 0]);
+    }
+
+    /// Byte 76 is the payload-location byte and it reads 2: the ciphertexts
+    /// ride in block bodies and a wallet authenticates them against the
+    /// header's extrinsics root. Bytes 80..84 are the retention window, zero
+    /// because the chain keeps no copy in state, and 88..92 are the reserved
+    /// zero the retired prune budget left behind. `ensure_supported` is strict
+    /// equality, so a wallet built against the state copy refuses this chain
+    /// by name rather than syncing and finding no payment.
+    #[test]
+    fn the_profile_says_the_payload_lives_in_block_bodies() {
+        assert_eq!(SUPPORTED_PROFILE[76], 2);
+        assert_eq!(&SUPPORTED_PROFILE[80..84], &0u32.to_le_bytes());
+        assert_eq!(
+            &SUPPORTED_PROFILE[84..88],
+            &MAX_OUTPUTS_PER_BLOCK.to_le_bytes()
+        );
+        assert_eq!(&SUPPORTED_PROFILE[88..92], &[0, 0, 0, 0]);
     }
 
     #[test]
