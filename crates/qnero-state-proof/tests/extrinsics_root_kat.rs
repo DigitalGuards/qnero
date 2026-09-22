@@ -158,7 +158,7 @@ fn the_runtimes_own_fixture_roots_to_the_root_it_recorded() {
     );
 }
 
-/// The two fixtures are two bodies, not one body written down twice.
+/// The two fixtures carry two different bodies.
 ///
 /// A cross-check is only a cross-check while the answers are independent: if
 /// this crate's fixture were ever regenerated from the runtime's, both tests
