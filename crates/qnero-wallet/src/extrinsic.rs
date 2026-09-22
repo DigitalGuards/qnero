@@ -2,7 +2,7 @@
 //!
 //! Two shapes. A settlement is bare: no signature, no nonce, no tip, admitted
 //! by `ValidateUnsigned` and free. A `shield` is signed with ML-DSA-87 under
-//! the FIPS 204 context `QUANTUS_EXTRINSIC`, with the runtime's twelve
+//! the FIPS 204 context `QUANTUS_EXTRINSIC`, with the runtime's eleven
 //! transaction extensions laid out by hand.
 //!
 //! The layout is checked against the runtime's own metadata before anything is
@@ -121,7 +121,7 @@ pub struct SigningContext {
 /// The explicit half of the transaction extensions: what rides in the
 /// extrinsic.
 ///
-/// Only four of the twelve encode anything. `CheckMortality` is immortal here,
+/// Only four of the eleven encode anything. `CheckMortality` is immortal here,
 /// so the era is one zero byte and its implicit hash is the genesis hash: a
 /// mortal era would need the block hash its period starts at, and a wallet
 /// that has to resubmit a `shield` gains nothing from the shorter window.
@@ -297,7 +297,7 @@ mod tests {
 
     /// The two preamble bytes are compiled in and the runtime publishes the
     /// format version they have to match. A runtime that drops the legacy
-    /// signed variant declares version 5 with the twelve extension identifiers
+    /// signed variant declares version 5 with the eleven extension identifiers
     /// unchanged, so the extension check passes and the signature dies inside
     /// the node's `Preamble::decode` with `Invalid transaction version`.
     #[test]

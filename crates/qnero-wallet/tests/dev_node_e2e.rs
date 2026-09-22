@@ -497,9 +497,13 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
     let nonce = chain.account_nonce(&alice.account_id()).expect("a nonce");
     let transfer = sign(&call, nonce);
 
-    // `Ok(Err(DispatchError::Module { index: 0, error: [5, 0, 0, 0] }))`:
-    // frame_system is pallet 0 and `CallFiltered` is its sixth error.
-    const CALL_FILTERED: &str = "0x0001030005000000";
+    // `Err(TransactionValidityError::Invalid(InvalidTransaction::Call))`: the
+    // outer `Err` is 0x01, `Invalid` is the first variant of
+    // `TransactionValidityError` and `Call` the first of `InvalidTransaction`.
+    // The runtime refuses the call in `Checkable::check`, so the answer is an
+    // invalid transaction: nothing is admitted, nothing is included and nothing
+    // pays a fee.
+    const CALL_REFUSED_AT_VALIDATION: &str = "0x010000";
     let mut skipped_dry_run = false;
     match rpc.call_as::<String>(
         "system_dryRun",
@@ -508,28 +512,29 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
         Ok(dry_run) => {
             println!("system_dryRun of a transparent transfer: {dry_run}");
             assert_eq!(
-                dry_run, CALL_FILTERED,
-                "a transparent transfer must be refused with CallFiltered"
+                dry_run, CALL_REFUSED_AT_VALIDATION,
+                "a transparent transfer must be refused before the pool admits it"
             );
         }
         Err(error) => {
             // The node is serving safe RPC methods only. Submit it instead:
-            // the filter refuses at dispatch, so the extrinsic is admitted and
-            // included and the transfer does not happen.
+            // the pool runs the same check, so submission is what is refused.
             println!("system_dryRun unavailable ({error}); submitting instead");
             skipped_dry_run = true;
             let before = free_balance(&rpc, &bob_account);
-            chain
+            let refusal = chain
                 .submit_extrinsic(&transfer)
-                .expect("the pool admits it");
-            let head = chain.head().expect("a head").number;
-            while chain.head().expect("a head").number < head + 3 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
+                .expect_err("the pool refuses a transparent transfer")
+                .to_string();
+            println!("author_submitExtrinsic of a transparent transfer: {refusal}");
+            assert!(
+                refusal.to_lowercase().contains("call"),
+                "the pool's refusal must name the invalid call: {refusal}"
+            );
             assert_eq!(
                 free_balance(&rpc, &bob_account),
                 before,
-                "a transparent transfer must move nothing"
+                "a refused transfer moves nothing, and it is not in a block to move it"
             );
         }
     }
@@ -554,8 +559,8 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
         .expect("the node dry-runs");
     println!("system_dryRun of set_high_security: {dry_run}");
     assert_eq!(
-        dry_run, CALL_FILTERED,
-        "enrolling in high security must be refused with CallFiltered"
+        dry_run, CALL_REFUSED_AT_VALIDATION,
+        "enrolling in high security must be refused before the pool admits it"
     );
 
     // A vesting claim is not refused. It is the genesis distribution channel:

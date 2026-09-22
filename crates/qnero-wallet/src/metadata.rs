@@ -102,7 +102,7 @@ pub struct ChainMetadata {
     /// (`Preamble::decode`, `generic/unchecked_extrinsic.rs`), and metadata
     /// v14 and v15 publish the runtime's own version byte, so the deciding
     /// value is already in the blob the wallet parses. A future `sp_runtime`
-    /// that drops the legacy signed variant publishes 5 here while the twelve
+    /// that drops the legacy signed variant publishes 5 here while the eleven
     /// extension identifiers stay exactly as they are, so
     /// `ensure_known_signed_extensions` would still pass and every signed
     /// `shield` would die inside the node's decode with nothing said about
@@ -288,7 +288,7 @@ impl ChainMetadata {
     /// accepts the signed type bits at
     /// `LEGACY_EXTRINSIC_FORMAT_VERSION` alone, because version 5 replaced the
     /// signed transaction with the general one. A runtime that drops the
-    /// legacy variant publishes 5 here with the twelve extension identifiers
+    /// legacy variant publishes 5 here with the eleven extension identifiers
     /// unchanged, so `ensure_known_signed_extensions` passes and only this
     /// check stands between a `shield` and an opaque rejection.
     pub fn ensure_signed_preamble_decodes(&self) -> Result<()> {
