@@ -9,7 +9,6 @@
  */
 
 import { decodeU512 } from './difficulty';
-import { hexByteLength } from './hex';
 
 export type EventPhase =
   | { kind: 'applyExtrinsic'; index: number }
@@ -134,6 +133,13 @@ export function decodeCoinbase(records: readonly EventRecord[]): CoinbaseNote | 
 export interface SettlementOutput {
   leafIndex: number;
   commitment: string;
+  /**
+   * How many bytes of note ciphertext this output published.
+   *
+   * The length and not the payload. `SlotSettled` publishes the two lengths
+   * and the payloads themselves ride in the block body, where the settlement
+   * extrinsic that appended the leaves carries them.
+   */
   ciphertextBytes: number;
 }
 
@@ -187,19 +193,22 @@ export function decodeSettlements(records: readonly EventRecord[]): Settlement[]
       const nullifiers = pairOfHex(field(record, 'nullifiers'), 'SlotSettled.nullifiers');
       const commitments = pairOfHex(field(record, 'commitments'), 'SlotSettled.commitments');
       const leafIndices = pairOfNumbers(field(record, 'leaf_indices'), 'SlotSettled.leaf_indices');
-      const ciphertexts = pairOfHex(field(record, 'ciphertexts'), 'SlotSettled.ciphertexts');
+      const ciphertextBytes = pairOfNumbers(
+        field(record, 'ciphertext_bytes'),
+        'SlotSettled.ciphertext_bytes',
+      );
       settlementFor(record.phase).slots.push({
         nullifiers,
         outputs: [
           {
             leafIndex: leafIndices[0],
             commitment: commitments[0],
-            ciphertextBytes: hexByteLength(ciphertexts[0]),
+            ciphertextBytes: ciphertextBytes[0],
           },
           {
             leafIndex: leafIndices[1],
             commitment: commitments[1],
-            ciphertextBytes: hexByteLength(ciphertexts[1]),
+            ciphertextBytes: ciphertextBytes[1],
           },
         ],
       });
@@ -229,6 +238,7 @@ export interface ShieldEntry {
   commitment: string;
   leafIndex: number;
   entryIndex: number;
+  /** How many bytes of note ciphertext this shield published. The payload is in the block body. */
   ciphertextBytes: number;
 }
 
@@ -240,7 +250,7 @@ export function decodeShieldEntries(records: readonly EventRecord[]): ShieldEntr
     commitment: asHex(field(record, 'commitment'), 'Shielded.commitment'),
     leafIndex: asNumber(field(record, 'leaf_index'), 'Shielded.leaf_index'),
     entryIndex: asNumber(field(record, 'entry_index'), 'Shielded.entry_index'),
-    ciphertextBytes: hexByteLength(asHex(field(record, 'ciphertext'), 'Shielded.ciphertext')),
+    ciphertextBytes: asNumber(field(record, 'ciphertext_bytes'), 'Shielded.ciphertext_bytes'),
   }));
 }
 
