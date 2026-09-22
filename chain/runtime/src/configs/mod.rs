@@ -400,10 +400,13 @@ parameter_types! {
 	/// CPUs actually has. Difficulty is expected hashes per block, so it scales
 	/// with the target: 100 000 was about a minute of one modern core in full
 	/// mode against the old 12 s target, and 1 000 000 is the same network
-	/// against a 120 s one. The retarget takes it from there. The old value
-	/// here was 10^11, which was calibrated for Poseidon over a 512-bit space
-	/// and would be days per block on RandomX. The `dev` preset overrides this
-	/// with the pallet's floor.
+	/// against a 120 s one. Since the retarget's divisor became `target * ln 2`
+	/// the chain's stationary mean block time *is* its target, so that sentence
+	/// is now arithmetic rather than an approximation: 1 000 000 expected hashes
+	/// a block at a 120 s mean is exactly 8 333 H/s. The retarget takes it from
+	/// there. The old value here was 10^11, which was calibrated for Poseidon
+	/// over a 512-bit space and would be days per block on RandomX. The `dev`
+	/// preset overrides this with the pallet's floor.
 	pub const QPoWInitialDifficulty: U512 = U512([1_000_000, 0, 0, 0, 0, 0, 0, 0]);
 }
 

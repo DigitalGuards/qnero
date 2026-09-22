@@ -54,10 +54,15 @@ use std::time::{Duration, Instant};
 /// The retarget moves at most 99/2048 (4.8%) down and 1/2048 up per block, so
 /// a branch needs about 42 consecutive maximum-decrease steps (the integer
 /// retarget makes the exact count difficulty-dependent), each of which needs
-/// a claimed 10000 s gap, to fall to an eighth of the tip: a branch starved of
-/// hashrate for about five days. Honest short forks never get near it. Above
-/// the line the number is the amplification a spammer gets for free: up to
-/// eight executed side-branch blocks per honest block's worth of hashing.
+/// a claimed gap of 100 retarget divisors, to fall to an eighth of the tip.
+/// The divisor is `target * ln 2` (`pallet-qpow`), 83 177 ms at the public
+/// 120 s target, so the gap is 8 318 s and the fall is a branch starved of
+/// hashrate for about four days. `pallet-qpow`'s own tests pin the step count
+/// and that wall clock, because both are arithmetic in its constants and this
+/// crate reads the chain through the runtime API rather than through the
+/// pallet. Honest short forks never get near it. Above the line the number is
+/// the amplification a spammer gets for free: up to eight executed side-branch
+/// blocks per honest block's worth of hashing.
 pub const SIDE_BRANCH_DIFFICULTY_FRACTION: u64 = 8;
 
 /// Cheap side-branch blocks admitted in one burst before the refill rate

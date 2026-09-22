@@ -589,13 +589,14 @@ value to get there. `pallets/qpow` carries the same note beside the constant.
 
 **The retarget is calmer on a small network.** The Homestead adjustment reads
 one block time and moves difficulty by at most +1/2048 or -99/2048. At a 12 s
-target one slow block inside a 10 s bucket is a real signal about a network with
-a handful of CPUs on it; at 120 s the same absolute timestamp noise is a tenth
-of the bucket and the retarget stops chasing it. The 15 s of legal timestamp
-drift a miner may claim used to push an honest block into the next bucket and
-cost a single -1 step, and at a 100 s divisor it does not leave the neutral band
-at all. The algorithm is unchanged: only its divisor is denominated in time, and
-that scales with the target.
+target one slow block inside an 8.3 s bucket is a real signal about a network
+with a handful of CPUs on it; at 120 s the same absolute timestamp noise is a
+tenth of the bucket and the retarget stops chasing it. The 15 s of legal
+timestamp drift a miner may claim used to push an honest block into the next
+bucket and cost a single -1 step, and at an 83.2 s divisor the inflated gap
+stays in the band and the forced catch-up block pays the step back, so the cycle
+books nothing. The algorithm is unchanged: only its divisor is denominated in
+time, and that scales with the target. 7.6 is where the divisor itself moved.
 
 **A light wallet walks ten times fewer headers a day.** Both wallets
 authenticate a block's leaf range by walking headers down from the head, one
@@ -712,13 +713,159 @@ at its own height would let a child of an old canonical block pass at ratio one
 however far the chain's difficulty has risen since.
 
 **Two numbers to keep.** The retarget's stationary mean block time under
-Poisson arrival is `divisor / ln 2` = 144 s at the public 100 s divisor, which
-is the measured 137 to 150 s and is a property of the Homestead shape rather
-than of the seed node's hashrate (it is the open retarget decision in 12.7). And
-a partition holding a fraction `p` of the hash settles at a difficulty ratio of
-`p / (1 - p)` to the majority's, so one under a ninth of the hash sits below the
-free line within about three days and is charged from then on. Both are stated
-in `docs/NATIVE-UPGRADE.md` with the operator flags and the four counters.
+Poisson arrival is `divisor / ln 2`, which was 144 s at the 100 s divisor the
+old `target * 10 / 12` rule gave and is the measured 137 to 150 s this chain
+ran at for its whole first life. 7.6 sets the divisor to `target * ln 2`, which
+makes that mean the target. And a partition holding a fraction `p` of the hash
+settles at a difficulty ratio of `p / (1 - p)` to the majority's, so one under a
+ninth of the hash sits below the free line within about two and a half days and
+is charged from then on. Both are stated in `docs/NATIVE-UPGRADE.md` with the
+operator flags and the four counters.
+
+### 7.6 Centring the retarget on the target (consensus, 2026-09-22)
+
+**The chain has never run at the interval it declares.** 7.4 chose 120 000 ms
+and every constant derived from it, and the public testnet measured 137 to 150 s
+a block from the day it launched. That is not the seed node's hashrate and it is
+not noise. It is a property of the Homestead shape, it is exactly predictable,
+and 7.5 named it and left it open. This closes it.
+
+**Why 144 s.** The adjustment in `pallets/qpow` is
+`max(1 - floor(block_time / divisor), -99)` in units of `parent / 2048`, with
+`divisor = target * 10 / 12`, which was 100 000 ms at a 120 s target. Block
+arrival under a constant hashrate is Poisson, so the inter-arrival time `T` is
+exponential with some mean `tau`, and `N = floor(T / divisor)` is geometric with
+`P(N >= k) = e^(-k * divisor / tau)`. Writing `q = e^(-divisor / tau)`, its mean
+is `E[N] = q / (1 - q)`, so the expected adjustment is
+
+    E[a] = 1 - q / (1 - q)
+
+and the `-99` clamp changes this by `e^(-100 ln 2)`, about `1e-30`. Difficulty
+is stationary when that expectation is zero, which happens at `q = 1/2`, which
+is
+
+    tau = divisor / ln 2
+
+and nowhere else. At a 100 s divisor that is 144.2 s, which is the measurement.
+The old ratio 10/12 was inherited from Geth, where the 10 s bucket sat against a
+12 to 15 s target and the same 1.2019 factor was equally present and equally
+unremarked.
+
+**The change is the divisor.** Set
+
+    divisor = target * ln 2
+
+as the integer `target_time_ms * 693_147 / 1_000_000`, which is 83 177 ms at a
+120 s target and gives a stationary mean of 119 999 ms, an error of 0.0008%. At
+the 12 s `dev` target it is 8 317 ms and 11 999 ms. Everything else about the
+rule is kept: integer, per block, a pure function of the parent difficulty and
+one block time, the minimum increment of one that M7 added so a chain can leave
+the floor, the 128 floor itself, the bounded maximum decrease of 99 units, and
+the 15 s of legal timestamp drift.
+
+**The neutral band still contains the target, and always will.** The band is one
+divisor wide by construction, `[divisor, 2 * divisor)`, which is 83.2 s to
+166.4 s at a 120 s target. The stationary mean is `1 / ln 2 = 1.4427` divisors,
+and 1.4427 lies inside `[1, 2)`, so a settled chain feels no retarget pressure at
+the interval it is aiming for. That is a structural property of the shape rather
+than a coincidence of these numbers, and `the_target_sits_inside_the_neutral_band`
+asserts it across a sweep of targets.
+
+| Quantity at a 120 s target | Divisor `target * 10 / 12` | Divisor `target * ln 2` |
+|---|---|---|
+| Divisor | 100 000 ms | 83 177 ms |
+| Neutral band | 100 s to 200 s | 83.2 s to 166.4 s |
+| Stationary mean block time | 144.2 s | 120.0 s |
+| Deterministic settle, climbing | 100 s | 83.2 s |
+| Deterministic settle, falling | 200 s | 166.4 s |
+| Claimed gap for the full decrease | 10 000 s | 8 318 s |
+| Decay time constant, `unit * divisor` | 56.9 h per e-fold | 47.3 h per e-fold |
+
+**What it fixes beyond the number.** Three claims elsewhere in this document
+rest on the cadence and have been wrong by the same 20%. The RandomX seed epoch
+of 2048 blocks is 2.84 days, Monero's own rotation interval, which 7.4 gives as
+the first reason for the 120 s target; at 144 s it was 3.41 days. The 256-block
+anchor window is 8.5 hours, the figure behind the claim that a phone can start a
+proof, lock its screen and finish later; it was 10.2 hours. And
+`EmissionDivisor` is a per-block schedule sized for a 120 s cadence, so the
+chain was issuing at 83.3% of its designed per-second curve. All three come
+right with the divisor and none of them needs its own change.
+
+**The unit stays at 1/2048.** The step size `parent / 2048` sets how fast
+difficulty moves and the divisor sets where it settles; the stationary mean is
+independent of the unit to within 0.14%. The asymmetry worth naming is that the
+rule can subtract up to 99 units in one block and can add only one, so a
+difficulty overshoot decays with a time constant of `2048 * divisor`, 47.3 hours
+per e-fold, while a tenfold hashrate arrival takes about 7 100 blocks and about
+five days to absorb. Widening the unit to `parent / 512` would move both caps
+together and keep the 1 to 99 ratio, bringing those to 11.8 hours and about
+1 780 blocks, at the cost of noise: the stationary standard deviation of log
+difficulty is `0.7215 / unit_divisor`, so 1.88% would become 3.75% and the
+autocorrelation time would fall from about two days to about twelve hours. That
+is a separate decision with its own set of climb and fall figures, and it is
+deferred rather than taken here. Neither figure threatens the mean.
+
+**A symmetric numerator is refused.** Making the fast side as strong as the slow
+side needs a reciprocal term, `floor(divisor / block_time) - 1` capped at +99,
+and that hands a miner with a hashrate burst a ratchet: blocks 500 ms apart raise
+difficulty 4.8% each, ten times in 48 blocks for roughly 204 block-equivalents of
+work, about seven hours of the whole network's output, after which the network
+grinds through 4.6 e-folds of decay. The timestamp floor and the monotone-clock
+rule bound the step size and force the blocks to be real, and the trade is still
+bad for the chain. The asymmetry stays, and the answer to slow upward tracking is
+the unit.
+
+**What it costs the side-branch budgets.** Nothing in the code, and one number
+in the reasoning. 7.5 admits a side-branch block free while its difficulty is
+within an eighth of the tip's, on the ground that reaching an eighth needs about
+42 consecutive maximum decreases, each needing a claimed gap of 100 divisors.
+The gap becomes 8 318 s, so the fall takes about four days rather than five. The
+free line itself does not move, because what it prices is the equilibrium
+difficulty ratio a partition holding a fraction `p` of the hash settles at,
+`p / (1 - p)`, and neither the divisor nor the unit touches that ratio. Only the
+time to arrive there changes. The step count and that wall clock are pinned in
+`pallets/qpow`'s own tests, where the constants live, so the client crate keeps
+its distance from the pallet and the coupling is still something a test breaks.
+The integer replay measures 43 steps at a 4 096 000 tip against a continuous
+estimate of 42.0, the extra one being the floor on `parent / 2048`, which is the
+difficulty-dependence the client's comment already names.
+
+**The one thing that gets worse.** The legal timestamp drift is an absolute 15 s,
+and the harm a miner can do by concentrating claimed time into one long gap
+scales as `drift / divisor`. A narrower divisor makes that lever longer. The
+cycle is three gaps against three honest ones at the target, so it books no
+deficit exactly while
+
+    floor((T + drift) / d) + floor((2T - drift - 100) / d) <= 3
+
+At the public target that is `1 + 2 = 3`: the inflated 135 s gap stays inside the
+band and the compressed follow-up costs the step the forced 100 ms block already
+paid, so the cycle books nothing, the same as the old rule. **Safety is not
+monotone in the target.** Both floors land on 2 for every target from about
+24.5 s to about 38.8 s, and the 12 s `dev` chain books one unit of deficit per
+cycle because 15 s is 1.8 divisors there. No single threshold separates the safe
+targets from the unsafe ones, so the invariant is asserted at the public target
+and the dev value is pinned beside it as a documented exception. The dev chain is
+a test harness with no adversarial miners, and it cleared the old rule by
+coincidence rather than by margin, its third gap of 8.9 s happening to fall under
+the 10 s divisor.
+
+**How it is verified.** `pallets/qpow` gains a simulation over the pure
+`calculate_difficulty`: exponential inter-arrival times from a pinned SplitMix64,
+a constant hashrate, 5 000 warmup blocks discarded and 20 000 measured,
+asserting the mean is within 3% of the target at both the public and the dev
+cadence. The sample mean's own standard deviation there is about 0.9%, and both
+arms measure inside 0.1%. A third arm runs the same harness at a 144 270 ms
+target, whose divisor is the old rule's 100 000 ms, and asserts it reproduces
+144 s: the measurement that started this is derived from the constant, and the
+test fails if anyone restores the old ratio. The deterministic climb and fall
+test is replayed rather than estimated: the climb from the 128 floor at 3 500 H/s
+takes 13 250 blocks and 48.1 hours against the old rule's 13 628 and 57.7, and
+the fall after losing nine tenths of the hashrate takes 1 558 monotonic steps and
+settles at 166.3 s. That 48.1 hours is two days with seven minutes to spare, a
+margin of 0.2%, so the day count in that test is worth reading as a tripwire on
+the seed hashrate and the `ln 2` precision rather than as a property of the
+retarget.
 
 ## 8. Milestones
 

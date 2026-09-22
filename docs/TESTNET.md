@@ -181,13 +181,13 @@ What is in it, and what is deliberately not:
 - **A 120 000 ms target block time**, written into `pallet_qpow::TargetBlockTimeMs` at
   genesis. There is no setter and no extrinsic that moves it afterwards; clients read it
   with `QPoWApi_get_target_block_time`.
-- **An initial difficulty of 5 000**, set rather than inherited. Difficulty is expected
-  hashes per block and the retarget's equilibrium is the divisor, so a chain settles between
-  `100 * H` and `200 * H` for a hash rate of `H`. The rate this chain is certain of is its
-  own node's single light-mode RandomX thread, about 33 H/s, which puts that band at 3 300
-  to 6 600 and its middle at one block every 152 seconds with no retarget pressure at all.
-  The inherited constant is 1 000 000, sized for 8 300 H/s, which would be 8.4 hours to the
-  first block.
+- **An initial difficulty of 4 000**, set rather than inherited. Difficulty is expected
+  hashes per block and the retarget's equilibrium is the target, so a chain settles at about
+  `120 * H` for a hash rate of `H`, inside a deterministic band of `83.2 * H` to `166.4 * H`.
+  The rate this chain is certain of is its own node's single light-mode RandomX thread, about
+  33 H/s, which puts that band at 2 737 to 5 473 and 4 000 at one block every 122 seconds
+  with no retarget pressure at all. The inherited constant is 1 000 000, which is 8 333 H/s
+  at the target, and would be 8.4 hours to the first block.
 - **There is no difficulty floor field.** `get_min_difficulty()` is a hard-coded 128; genesis
   validates against it and cannot move it. Do not go looking for a knob.
 - **The seed epoch is 2 048 blocks and the lag is 128.** Both are runtime constants a chain
@@ -798,7 +798,7 @@ the old one is gone with it. Say so before doing it.
 stopped authoring. Check `journalctl -u qnero-node` for "Mining paused", and
 check that `--force-authoring` is still on the command line if this node is the
 only authority. If the difficulty has run far above the available hash rate, the
-retarget will come back down at one 2048th per step, which is about 57 hours per
+retarget will come back down at one 2048th per step, which is about 47 hours per
 e-fold; pointing a rig at the stratum port is faster than waiting.
 
 **Refused blocks in the log.** Two warn lines are policy and self-healing:

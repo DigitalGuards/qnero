@@ -4983,23 +4983,24 @@ costs is named in the runbook: nobody can pass
 `RootOrMemberForTechReferendaOrigin`, so there is no runtime upgrade by
 referendum on this chain and the recovery for a runtime bug is a relaunch.
 
-**The initial difficulty is 5 000, and it is the one number in the spec that
+**The initial difficulty is 4 000, and it is the one number in the spec that
 cannot be corrected afterwards.** Difficulty is expected hashes per block, and
-the retarget's equilibrium is the divisor rather than the target:
-`divisor = target * 10 / 12` is 100 000 ms at a 120 s target and the neutral
-band is one to two divisors wide, so a chain settles between `100 * H` and
-`200 * H`. The hash rate this chain is certain of is its own node's single
-light-mode RandomX thread, 32.9 H/s from the M7 measurements, which puts that
-band at 3 300 to 6 600 and its middle at one block every 152 seconds with no
-retarget pressure at all.
+the retarget's equilibrium is the target itself: the divisor is `target * ln 2`,
+83 177 ms at a 120 s target, which is the value that puts the stationary mean
+block time on the target, and the band is one divisor wide. So a chain settles
+at about `120 * H`, inside a deterministic band of `83.2 * H` to `166.4 * H`.
+The hash rate this chain is certain of is its own node's single light-mode
+RandomX thread, 32.9 H/s from the M7 measurements, which puts that band at
+2 737 to 5 473 and 4 000 at one block every 122 seconds with no retarget
+pressure at all.
 
 Low on purpose, and the asymmetry is the argument. The Homestead retarget moves
 by one 2048th of the difficulty per step, which works out as linear growth at
 `H / 2048` per second upward and exponential decay with a time constant of
-`100 * 2048` seconds downward: 57 hours per e-fold whatever the numbers are. A
+`2048 * divisor` seconds downward: 47.3 hours per e-fold at the public target. A
 difficulty above the available hash rate is days of a chain that looks dead; one
 below it is hours of fast blocks that fix themselves. Inheriting
-`QPoWInitialDifficulty`, 1 000 000 and sized for about 8 300 H/s, would have
+`QPoWInitialDifficulty`, 1 000 000 and 8 333 H/s at the target, would have
 been 8.4 hours to the first block on the node alone and about a week to
 converge. There is no floor field to set beside it: `get_min_difficulty()` is a
 hard-coded 128 and genesis only validates against it.
@@ -5099,11 +5100,12 @@ within a second of it:
 ```
 
 Block 1 took **199 seconds** on one in-process light-mode thread at difficulty
-5 000. The expectation at 32.9 H/s is 152 seconds and block times are
-exponentially distributed, so 199 is an ordinary draw; block 2 took 5 seconds,
-which is the other tail of the same distribution. Both are inside the neutral
-band the difficulty was chosen for, which is what the spec's 5 000 was meant to
-produce and is the whole reason the number is not 1 000 000.
+5 000. The expectation at that difficulty and 32.9 H/s is 152 seconds and block
+times are exponentially distributed, so 199 is an ordinary draw; block 2 took 5
+seconds, which is the other tail of the same distribution. The relaunch spec
+sets 4 000 instead, whose expectation is 122 seconds, the target itself: that is
+what the divisor change in DESIGN 7.6 buys, and it is the whole reason the
+number is not 1 000 000.
 
 `scripts/probe-node.sh` against both nodes:
 

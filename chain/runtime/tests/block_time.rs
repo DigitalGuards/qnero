@@ -6,6 +6,10 @@
 //! silently change what a governance period, a reversal window or a quota
 //! window means.
 //!
+//! Since the retarget's divisor became `target * ln 2` (DESIGN 7.6) the chain
+//! averages the interval it declares, so every duration below is the wall clock
+//! it claims to be. Under the old divisor they were all 20% longer.
+//!
 //! Two kinds of constant live here and they are audited differently:
 //!
 //! - Derived durations keep their meaning and change their block count. `DAYS` is one day at any
