@@ -56,14 +56,28 @@ function extrinsic(body: Uint8Array): string {
   return bytesToHex(concatBytes([encodeCompact(body.length), body]));
 }
 
+/**
+ * The two preamble bytes a real body is a mixture of.
+ *
+ * The runtime builds its inherents with `EXTRINSIC_FORMAT_VERSION` 5, so
+ * everything a node put in a block itself carries `0x05`, while a wallet signs
+ * and settles at version 4 and its own extrinsics carry `0x04`.
+ * `Preamble::decode` admits both, so both are in every block:
+ * `chain/runtime/tests/fixtures/extrinsics_root_kat.json` is one such body,
+ * captured out of a block the runtime executed. The walk keys off the top two
+ * bits and reads no version out of the low six.
+ */
+export const BARE_PREAMBLE_V5 = 0x05;
+export const BARE_PREAMBLE_V4 = 0x04;
+
 /** The timestamp inherent: bare, and carrying nothing this wallet reads. */
-export function timestampExtrinsic(millis = 0): string {
-  return extrinsic(concatBytes([new Uint8Array([0x04, 1, 0]), encodeCompact(millis)]));
+export function timestampExtrinsic(millis = 0, preamble = BARE_PREAMBLE_V5): string {
+  return extrinsic(concatBytes([new Uint8Array([preamble, 1, 0]), encodeCompact(millis)]));
 }
 
 /** The coinbase inherent: bare, and under v1 it carries no payload at all. */
-export function coinbaseExtrinsic(): string {
-  return extrinsic(new Uint8Array([0x04, TEST_BODY_LAYOUT.shieldedPallet, 3]));
+export function coinbaseExtrinsic(preamble = BARE_PREAMBLE_V5): string {
+  return extrinsic(new Uint8Array([preamble, TEST_BODY_LAYOUT.shieldedPallet, 3]));
 }
 
 /**
@@ -75,10 +89,11 @@ export function coinbaseExtrinsic(): string {
 export function settlementExtrinsic(
   slots: readonly (readonly [Uint8Array, Uint8Array])[],
   proof = new Uint8Array([9, 9, 9]),
+  preamble = BARE_PREAMBLE_V4,
 ): string {
   return extrinsic(
     concatBytes([
-      new Uint8Array([0x04, TEST_BODY_LAYOUT.shieldedPallet, TEST_BODY_LAYOUT.submitPrivateBatch]),
+      new Uint8Array([preamble, TEST_BODY_LAYOUT.shieldedPallet, TEST_BODY_LAYOUT.submitPrivateBatch]),
       bytes(proof),
       encodeCompact(slots.length),
       ...slots.flatMap(([first, second]) => [bytes(first), bytes(second)]),

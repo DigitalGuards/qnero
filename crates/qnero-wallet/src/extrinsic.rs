@@ -546,4 +546,69 @@ mod tests {
         assert!(encode_submit_private_batch(&runtime(), b"proof", &outputs).is_ok());
         assert!(encode_signed(&runtime(), &key, &call, &context).is_ok());
     }
+
+    /// One extrinsic, length prefix and all, out of a preamble and a call.
+    fn bare_extrinsic(preamble: u8, call: &[u8]) -> Vec<u8> {
+        let mut body = vec![preamble];
+        body.extend_from_slice(call);
+        let mut out = crate::scale::compact_len(body.len());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A real block body is a mixture of preamble bytes, and the walk reads
+    /// no version out of either.
+    ///
+    /// The runtime builds its inherents at `EXTRINSIC_FORMAT_VERSION` 5, so a
+    /// node-built inherent carries preamble `0x05`, while this wallet signs
+    /// and settles at version 4 and its own extrinsics carry `0x04`.
+    /// `Preamble::decode` admits both, so both are in every block. The walk
+    /// keys off the top two bits alone: a wallet that pinned the low six
+    /// would refuse half of every body, and a scan that refuses a body cannot
+    /// say the block carried no payment of its owner's.
+    #[test]
+    fn a_body_mixing_version_5_and_version_4_preambles_walks() {
+        let metadata = runtime();
+        let outputs = vec![ShieldedOutput {
+            ct_1: vec![0xaa, 0xbb],
+            ct_2: vec![0xcc],
+        }];
+        let payloads = vec![vec![0xaa, 0xbb], vec![0xcc]];
+
+        // A node-built inherent at version 5: `Timestamp::set(now)`, a call on
+        // a pallet that is not `Shielded`, so the walk stops at the index.
+        let inherent = bare_extrinsic(0x05, &[1, 0, 0x0b, 0x00, 0x8a, 0x35, 0xd7, 0x9a, 0x01]);
+        assert!(extrinsic_payloads(&metadata, &inherent)
+            .expect("a version 5 inherent walks")
+            .is_empty());
+
+        // And this wallet's settlement at version 4, beside it.
+        let mut settlement =
+            encode_submit_private_batch(&metadata, &[0x01, 0x02], &outputs).expect("it encodes");
+        let (_, preamble_at) = read_compact(&settlement, 0).expect("it has a length prefix");
+        assert_eq!(settlement[preamble_at], BARE_PREAMBLE);
+        assert_eq!(
+            extrinsic_payloads(&metadata, &settlement).expect("a version 4 settlement walks"),
+            payloads
+        );
+
+        // The same settlement with the version the runtime's own builder
+        // would stamp on it: the same two ciphertexts come back, which is
+        // what says the version byte is not read.
+        settlement[preamble_at] = 0x05;
+        assert_eq!(
+            extrinsic_payloads(&metadata, &settlement).expect("a version 5 settlement walks"),
+            payloads
+        );
+
+        // A transaction type this wallet cannot walk still refuses, so the
+        // tolerance is in the version bits and nowhere else.
+        settlement[preamble_at] = 0b1100_0000 | 0x04;
+        let refused = extrinsic_payloads(&metadata, &settlement)
+            .expect_err("an unknown transaction type is refused");
+        assert!(
+            refused.to_string().contains("transaction type"),
+            "{refused}"
+        );
+    }
 }
