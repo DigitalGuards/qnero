@@ -681,23 +681,34 @@ pub mod pallet {
 	pub enum Event<T: Config> {
 		/// A note was created from transparent value. `entry_index` and the
 		/// block this event is in are what the recipient derives the note's
-		/// `rho` from, and the ciphertext is what it decrypts.
+		/// `rho` from, and the ciphertext it decrypts is in the `shield` call
+		/// this event came from.
+		///
+		/// `ciphertext_bytes` is the length of that payload and not the
+		/// payload. `System::Events` is a state value at every block, so an
+		/// event carrying the bytes would put them back in the state an
+		/// archive node keeps forever, which is the copy this release exists
+		/// to remove.
 		Shielded {
 			who: T::AccountId,
 			value: BalanceOf<T>,
 			commitment: Hash256,
 			leaf_index: u64,
 			entry_index: u64,
-			ciphertext: Vec<u8>,
+			ciphertext_bytes: u32,
 		},
 		/// One real leaf slot settled: two nullifiers spent, two notes created.
-		/// The ciphertexts are in output order, so `ciphertexts.0` belongs to
-		/// the note at `leaf_indices.0`.
+		///
+		/// `ciphertext_bytes` is the length of each payload, in output order,
+		/// so `ciphertext_bytes.0` belongs to the note at `leaf_indices.0`.
+		/// The payloads themselves are in the settlement extrinsic this event
+		/// came from, which the header's `extrinsics_root` authenticates, and
+		/// they are not repeated here for the reason `Shielded` gives.
 		SlotSettled {
 			nullifiers: [Hash256; 2],
 			commitments: [Hash256; 2],
 			leaf_indices: (u64, u64),
-			ciphertexts: (Vec<u8>, Vec<u8>),
+			ciphertext_bytes: (u32, u32),
 		},
 		/// A settlement was accepted. `slots` counts the real leaf slots and
 		/// `fee` is their summed fee in planck.
@@ -1001,6 +1012,11 @@ pub mod pallet {
 		/// publishes in its event. The chain cannot check it, because `inner` is
 		/// opaque by construction; what it owes is the identifier, and a
 		/// shielder who ignores the rule can only strand its own note.
+		///
+		/// `ciphertext` is what the recipient decrypts and it is kept nowhere
+		/// but this extrinsic. A wallet reads it out of the block body, which
+		/// the header's `extrinsics_root` authenticates; the event publishes
+		/// its length alone.
 		#[pallet::call_index(2)]
 		#[pallet::weight(T::WeightInfo::shield(ciphertext.len() as u32))]
 		pub fn shield(
@@ -1026,8 +1042,17 @@ pub mod pallet {
 
 			let commitment = qnero_circuit::chain::commitment(&inner, steps)
 				.ok_or(Error::<T>::NonCanonicalInner)?;
-			let stored: BoundedVec<u8, T::MaxCiphertextBytes> =
-				ciphertext.clone().try_into().map_err(|_| Error::<T>::CiphertextTooLarge)?;
+			// The cap still binds an entry. The bytes are not written to state
+			// any more, and the settlement path's exact-length rule does not
+			// reach this call, so `MaxCiphertextBytes` is the whole bound on
+			// what one entry note publishes. A zero-length payload stays
+			// legal: an entry's recipient may be the shielder itself.
+			let ciphertext_bytes =
+				u32::try_from(ciphertext.len()).map_err(|_| Error::<T>::CiphertextTooLarge)?;
+			ensure!(
+				ciphertext_bytes <= T::MaxCiphertextBytes::get(),
+				Error::<T>::CiphertextTooLarge
+			);
 
 			ensure!(T::ZkTree::remaining_capacity() >= 1, Error::<T>::TreeFull);
 			Self::ensure_output_capacity(1)?;
@@ -1062,7 +1087,7 @@ pub mod pallet {
 				commitment,
 				leaf_index,
 				entry_index,
-				ciphertext,
+				ciphertext_bytes,
 			});
 			Ok(())
 		}
@@ -2055,7 +2080,10 @@ pub mod pallet {
 						nullifiers: slot.nullifiers,
 						commitments: slot.commitments,
 						leaf_indices: (first, second),
-						ciphertexts: (output.ct_1.to_vec(), output.ct_2.to_vec()),
+						ciphertext_bytes: (
+							output.ct_1.len() as u32,
+							output.ct_2.len() as u32,
+						),
 					});
 				}
 			}

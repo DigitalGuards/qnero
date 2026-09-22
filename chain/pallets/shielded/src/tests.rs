@@ -165,8 +165,7 @@ fn a_settled_slot_writes_no_ciphertext_to_state() {
 /// `integrity_test` refuses any other value.
 #[test]
 fn the_retention_constant_is_zero_and_the_prune_is_gone() {
-	use crate::weights::WeightInfo as _;
-	use frame_support::traits::Hooks;
+	use frame_support::traits::{Get as _, Hooks};
 
 	new_test_ext().execute_with(|| {
 		assert_eq!(CiphertextRetentionBlocks::get(), 0);
@@ -215,6 +214,69 @@ fn a_second_submission_in_a_full_block_still_returns_too_many_outputs_in_block()
 			System::set_block_number(11);
 			assert_ok!(plan(&second, &outputs));
 		});
+	});
+}
+
+/// The payload is not in the event either.
+///
+/// `System::Events` is a state value at every block, so an archive node keeps
+/// every historical one forever. An event that republished the ciphertexts
+/// would hold the whole 3584 bytes a transfer publishes in exactly the state
+/// this release removed them from, and the saving would not happen. What the
+/// event publishes is the two lengths, which is what an indexer needs and what
+/// a reader needs in order to know a payload was carried at all.
+#[test]
+fn a_settlement_event_publishes_lengths_and_not_payloads() {
+	use codec::Encode as _;
+
+	new_test_ext().execute_with(|| {
+		fund_pool(100);
+		let ct_1 = suite_ciphertext(0xf1);
+		let ct_2 = suite_ciphertext(0xf2);
+		let bundle = one_segment(10, vec![slot("lengths", &ct_1, &ct_2, 9)]);
+		let settled = bundle.segments[0].slots[0].clone();
+		assert_ok!(Shielded::settle(bundle, vec![output(&ct_1, &ct_2)]));
+
+		let event = Event::<Test>::SlotSettled {
+			nullifiers: settled.nullifiers,
+			commitments: settled.commitments,
+			leaf_indices: (0, 1),
+			ciphertext_bytes: (SUITE_CIPHERTEXT_BYTES as u32, SUITE_CIPHERTEXT_BYTES as u32),
+		};
+		System::assert_has_event(event.clone().into());
+		// One variant byte, two nullifiers, two commitments, two leaf indices
+		// and two lengths. That, and no payload, is what an archive node keeps
+		// forever for every settled slot on the chain.
+		assert_eq!(event.encode().len(), 1 + 2 * 32 + 2 * 32 + 2 * 8 + 2 * 4);
+		assert!(event.encode().len() < 200);
+	});
+}
+
+/// Same shape for an entry note, and the bytes it names are still reachable:
+/// they are the `shield` call's own third argument, in the block body.
+#[test]
+fn a_shield_event_publishes_its_ciphertext_length() {
+	use codec::Encode as _;
+
+	new_test_ext_with_endowments(vec![(alice(), 100 * UNIT)]).execute_with(|| {
+		let payload = suite_ciphertext(0x5e);
+		assert_ok!(Shielded::shield(
+			RuntimeOrigin::signed(alice()),
+			POOL_STEP,
+			[0; 32],
+			payload.clone(),
+		));
+		let event = Event::<Test>::Shielded {
+			who: alice(),
+			value: POOL_STEP,
+			commitment: qnero_circuit::chain::commitment(&[0; 32], 1).expect("canonical inner"),
+			leaf_index: 0,
+			entry_index: 0,
+			ciphertext_bytes: payload.len() as u32,
+		};
+		System::assert_has_event(event.clone().into());
+		assert!(event.encode().len() < 200);
+		assert!(no_ciphertext_key_exists(), "a shield wrote a ciphertext into state");
 	});
 }
 
@@ -1904,9 +1966,10 @@ fn shield_burns_the_value_and_appends_the_commitment() {
 		assert_eq!(Shielded::entry_count(), 1);
 		assert_eq!(Balances::total_issuance(), issuance_before - 100 * POOL_STEP);
 
-		// The event carries everything a recipient needs: the ciphertext to
-		// decrypt, and the `entry_index` half of the identifier its `rho` is
-		// derived from. The other half is the block this event is in.
+		// The event carries the `entry_index` half of the identifier the note's
+		// `rho` is derived from; the other half is the block this event is in.
+		// The ciphertext the recipient decrypts is in the call, and the event
+		// publishes its length.
 		System::assert_has_event(
 			Event::Shielded {
 				who: alice(),
@@ -1914,7 +1977,7 @@ fn shield_burns_the_value_and_appends_the_commitment() {
 				commitment: note.commitment().to_bytes(),
 				leaf_index: 0,
 				entry_index: 0,
-				ciphertext: b"a note ciphertext".to_vec(),
+				ciphertext_bytes: b"a note ciphertext".len() as u32,
 			}
 			.into(),
 		);
