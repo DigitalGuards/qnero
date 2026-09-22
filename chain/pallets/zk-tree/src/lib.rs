@@ -43,26 +43,27 @@ mod tests;
 /// A tree of depth 32 can hold 4^32 leaves.
 ///
 /// NOTE (known, accepted limitation): this is intentionally *larger* than the depth the
-/// wormhole circuits accept. The circuits fix `MAX_DEPTH = 16` (`qp-zk-circuits-common`,
+/// wormhole circuits accept. The circuits fix `MAX_DEPTH = 20` (`qp-zk-circuits-common`,
 /// `zk_merkle.rs`) because every leaf proof pays the proving cost of a full
 /// `MAX_DEPTH`-level Merkle path regardless of the tree's current depth, so keeping it at
-/// 16 keeps proving fast for everyone. If the tree ever grows past depth 16
-/// (4^16 ≈ 4.3 billion leaves), Merkle proofs gain a 17th sibling level and the prover
+/// 20 keeps proving fast for everyone. If the tree ever grows past depth 20
+/// (4^20 ≈ 1.1 trillion leaves), Merkle proofs gain a 21st sibling level and the prover
 /// and verifier reject them, so wormhole proof generation halts until a circuit update
 /// raises `MAX_DEPTH` and a runtime upgrade embeds the regenerated verifiers.
 ///
 /// This is a deliberate "fix it when we get close" trade-off, and the timeline is the argument:
-/// - Timeline, one leaf per transfer, against 4^16 = 4.3 billion leaves. Two of these three terms
+/// - Timeline, one leaf per transfer, against 4^20 = 1.1 trillion leaves. Two of these three terms
 ///   are rates and one is a block count, which is the distinction that matters when the target
-///   block time moves. A block count: at one leaf per block, the mining-reward floor, depth 16
-///   lasts ~16,000 years at the 120 s target where it lasted ~1,600 at 12 s. A rate, unchanged by
-///   the target: a sustained 10 transfers/sec chain-wide exhausts it in ~13 years. And the ceiling
-///   is both, because it is a per-block ceiling read as a rate: `docs/DESIGN.md` 7.4 puts
-///   permanently saturated blocks at 318 settlements each, which is ~2.6/sec at 120 s where it was
-///   ~26/sec at 12 s, so saturation now gives ~52 years where the 12 s figure was ~5.1. Each +1 of
-///   circuit depth quadruples capacity.
+///   block time moves. A block count: at one leaf per block, the mining-reward floor, depth 20
+///   lasts ~4.2 million years at the 120 s target where it would last ~418,000 at 12 s. A rate,
+///   unchanged by the target: a sustained 10 transfers/sec chain-wide exhausts it in ~3,500 years.
+///   And the ceiling is both, because it is a per-block ceiling read as a rate: `docs/DESIGN.md`
+///   7.4 puts permanently saturated blocks at 318 settlements each, which is ~2.6/sec at 120 s
+///   where it was ~26/sec at 12 s, so saturation gives ~13,000 years where the 12 s figure was
+///   ~1,300. Each +1 of circuit depth quadruples capacity, and the depth-16 numbers this
+///   paragraph carried before the relaunch were these divided by 256.
 /// - Observability: `LeafCount` is public storage, so exhaustion is visible years in advance; alert
-///   well before 4^16 leaves.
+///   well before 4^20 leaves.
 /// - The update itself: bump `MAX_DEPTH` in `qp-zk-circuits-common`, release the circuit crates,
 ///   let `pallets/wormhole/build.rs` regenerate the embedded verifier binaries, regenerate proof
 ///   fixtures, re-benchmark, and ship a runtime upgrade: days of engineering inside a normal
@@ -72,8 +73,15 @@ pub const MAX_TREE_DEPTH: u8 = 32;
 
 /// The deepest tree the wormhole circuits accept (`qp-zk-circuits-common`,
 /// `zk_merkle::MAX_DEPTH`). All insert-cost metering below is a constant priced at
-/// this depth — see [`INSERT_LEAF_DB_OPS`].
-pub const CIRCUIT_MAX_TREE_DEPTH: u8 = 16;
+/// this depth: see [`INSERT_LEAF_DB_OPS`].
+///
+/// It must equal `qnero_circuit::chain::MAX_TREE_DEPTH`, which `pallet-shielded`
+/// const-asserts. Moving it from 16 to 20 before the relaunch genesis moves
+/// [`FINALIZE_BASE_DB_OPS`] from (56, 22) to (68, 26) and
+/// [`FINALIZE_BASE_POSEIDON_EVALS`] from 19 to 23, both through the formulas
+/// below, and it moves the pinned verifier digests in
+/// `qnero_circuit::profile`, because a deeper tree is a different circuit.
+pub const CIRCUIT_MAX_TREE_DEPTH: u8 = 20;
 
 /// Worst-case `ref_time` (picoseconds) of one Poseidon evaluation
 /// ([`tree::hash_node`] / [`tree::hash_leaf`]).
@@ -134,7 +142,7 @@ pub const INSERT_LEAF_HASH_REF_TIME_PS: u64 =
 ///   `frame_system` header root + the `≤ d` per-level path tail of node writes not covered by the
 ///   amortized per-leaf share.
 ///
-/// Out-deepening the circuit ceiling would take ~4.3 billion leaves — see
+/// Out-deepening the circuit ceiling would take ~1.1 trillion leaves, see
 /// [`CIRCUIT_MAX_TREE_DEPTH`]; the trade-off is a modest overcharge while the tree
 /// is young.
 pub const FINALIZE_BASE_DB_OPS: (u64, u64) = {
@@ -369,7 +377,7 @@ pub mod pallet {
 		/// real: nothing stops wormhole inserts alone taking `LeafCount` past
 		/// `capacity_at_depth(CIRCUIT_MAX_TREE_DEPTH)`, at which point
 		/// [`Self::process_pending_leaves`] reports the condition and the
-		/// shielded pool refuses every settlement. Reaching it needs 4^16
+		/// shielded pool refuses every settlement. Reaching it needs 4^20
 		/// wormhole transfers.
 		pub fn insert_leaf(
 			to: AccountIdOf<T>,

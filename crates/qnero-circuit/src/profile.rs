@@ -154,6 +154,10 @@ mod tests {
     #[test]
     fn release_profile_encodes_dimensions_and_security_parameters() {
         assert_eq!(&SUPPORTED_PROFILE[..8], b"QNRPRF01");
+        // The commitment-tree depth. It is the one bundle constant the
+        // profile carries that no other test names, and a wallet proving
+        // against a chain at another depth builds paths the verifier refuses.
+        assert_eq!(&SUPPORTED_PROFILE[20..22], &20u16.to_le_bytes());
         assert_eq!(&SUPPORTED_PROFILE[40..42], &100u16.to_le_bytes());
         assert_eq!(&SUPPORTED_PROFILE[60..64], &[6, 0, 53, 0]);
         assert!(ensure_supported(&SUPPORTED_PROFILE, RELEASE_NUM_LEAVES).is_ok());

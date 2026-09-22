@@ -1374,7 +1374,10 @@ fn leaf_gate_count() {
     data.verify(proof.clone()).unwrap();
     let verify = verify_start.elapsed();
 
-    println!("qnero leaf circuit (2 inputs, 2 outputs, MAX_DEPTH=16)");
+    println!(
+        "qnero leaf circuit (2 inputs, 2 outputs, MAX_DEPTH={})",
+        qnero_circuit::MAX_DEPTH
+    );
     // Which configuration produced these numbers. The leaf is meant to be
     // single threaded, but `parallel` is a real feature of this crate and
     // feature unification can turn it on from a workspace-wide invocation, so

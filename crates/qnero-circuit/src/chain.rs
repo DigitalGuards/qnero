@@ -51,18 +51,23 @@ pub mod domain {
 
 /// Maximum commitment-tree depth the spend circuit can prove.
 ///
-/// A depth-16 4-ary tree holds 4^16, about 4.3 billion, commitments. The
-/// circuit pays for all sixteen levels on every proof regardless of the tree's
+/// A depth-20 4-ary tree holds 4^20, about 1.1 trillion, commitments. The
+/// circuit pays for all twenty levels on every proof regardless of the tree's
 /// real depth, so raising it costs every prover, and changing it at all is a
 /// coordinated release of new circuit crates plus a runtime upgrade carrying
 /// the regenerated verifier.
+///
+/// It was 16 through the pre-relaunch runtimes. `docs/BENCH.md` measured the
+/// leaf at 20 before the move: 387 gates against 320, the same 512 padded
+/// rows, the same `degree_bits = 9`, the same 26 public inputs and the same
+/// proof size, which is the condition `docs/DESIGN.md` 12.5 set for taking it.
 ///
 /// It lives here, in the layout-only surface, because it is a value the chain
 /// has to agree on and `pallet-zk-tree` links no prover stack:
 /// `CIRCUIT_MAX_TREE_DEPTH` there must equal this, and `pallet-shielded`
 /// const-asserts the two. [`crate::merkle::MAX_DEPTH`] is this same constant
 /// under the name the circuit code uses.
-pub const MAX_TREE_DEPTH: usize = 16;
+pub const MAX_TREE_DEPTH: usize = 20;
 
 /// Bits a note value is range checked to.
 ///
