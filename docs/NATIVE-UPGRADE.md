@@ -162,8 +162,8 @@ burst then one per 150 s. An honest chain that carries `N` cheap blocks (a
 minority partition whose hashrate returned) imports `min(N, 1024)` at once and
 the rest at the budgeted rate, each exhausted batch costing the serving peer one
 drop and the node one sync restart; a partition holding under a ninth of the
-hash settles below the free line within a few days and is charged from then
-on. Two follow-ups remain open: an ancestor search
+hash settles below the free line within about two and a half days and is charged
+from then on. Two follow-ups remain open: an ancestor search
 that recognises a known side-branch block, so budgeted recovery re-downloads
 nothing it already holds; and headers-first admission, which would verify
 seals only and execute a branch's bodies once its header work is competitive.

@@ -107,31 +107,35 @@ Difficulty adjusts per block toward the target block time, floored so a chain
 at the floor can climb. A devnet starts at the floor and retargets within the
 first minute of a rig attaching. Measured figures are in `docs/BENCH.md`.
 
-The adjustment is Homestead's and its buckets scale with the target, so at 120
-seconds the neutral band is 100 to 200 seconds: an honest block leaves
+The adjustment is Homestead's and its bucket is the target times `ln 2`, so at
+120 seconds the neutral band is 83 to 166 seconds: an honest block leaves
 difficulty flat, a faster one raises it by 1/2048 and a much slower one lowers
 it by up to 99/2048.
 
-A chain climbing from the floor of 128 to a live difficulty costs about 13 600
-blocks and about 2.4 days for one 900 H/s rig, against about 8 900 blocks and
-0.25 days at a 12 second target. Both numbers grow, and for different reasons.
+That divisor is what makes the average land on the target. Block arrival is
+Poisson, so a chain's mean block time settles at `divisor / ln 2`; with a
+divisor of `target * ln 2` that is the target itself, 120.0 seconds against the
+120 declared. The chain's first life ran on Geth's `target * 10 / 12` and
+averaged 144 seconds for exactly this reason.
+
+A chain climbing from the floor of 128 to a live difficulty costs about 13 250
+blocks and about 2.0 days for one 3 500 H/s rig, against about 8 470 blocks and
+5.1 hours at a 12 second target. Both numbers grow, and for different reasons.
 The block count grows by half because the difficulty it has to reach is ten
-times higher and every step is a fixed 1/2048 of where it already is. The days
-grow by ten because of that same difficulty: the whole climb runs far below the
-target, so multiplying the block count by 120 seconds would overstate the
-bootstrap by a factor of eight. `pallets/qpow`'s own test pins both.
+times higher and every step is a fixed 1/2048 of where it already is. The wall
+clock grows by ten because of that same difficulty: the whole climb runs far
+below the target, so multiplying the block count by 120 seconds would overstate
+the bootstrap by a factor of eight. `pallets/qpow`'s own test pins both.
 
 The band is dead in both directions, and a chain settles at whichever edge it
-arrives from. Climbing, it stops at the bottom and sits at about 100 second
-blocks. Falling, it stops at the top and sits at about 200: take nine tenths of
+arrives from. Climbing, it stops at the bottom and sits at about 83 second
+blocks. Falling, it stops at the top and sits at about 166: take nine tenths of
 the hash rate off a settled chain and difficulty drops monotonically over about
-1 550 blocks and then holds, with block times steady at 200 seconds and no
-oscillation. So a network that has lost its miners runs at double the target
-until hash rate comes back. That ratio is Homestead's and is unchanged from 12
-seconds, where the band was 10 to 20; what is new is that the overshoot is 80
-seconds of wall clock. The knob is the divisor, `target * 10 / 12` in
-`calculate_difficulty`, for the day the average is meant to land on the target
-itself.
+1 558 blocks and then holds, with block times steady at 166 seconds and no
+oscillation. So a network that has lost its miners runs at 1.39 times the target
+until hash rate comes back. That ratio is the shape's: the band is one divisor
+wide and the target sits at 1.4427 divisors inside it, so the overshoot is 46
+seconds of wall clock whatever the target is.
 
 ## Numbers from one workstation
 
