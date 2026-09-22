@@ -71,13 +71,15 @@ into a branch the node refuses for ever.
    archive database using the new client. Replay executes the historical runtime
    stored in chain state. Check block hashes, state roots, accumulated work,
    balances and recoverable wallet history against the preserved chain.
-3. Coordinate adoption of the native client, then qualify and activate runtime
-   105 through the chain's authorized upgrade mechanism. The deployed testnet's
-   empty governance configuration must be accounted for before choosing this
-   route. A fresh genesis may be required if it has no authorized upgrade path.
+3. Coordinate adoption of the native client. There is no second step here, and
+   this is where the route ends: no Qnero chain has an authorized upgrade
+   mechanism. The runtime deleted every dispatchable that could write `:code`,
+   so the runtime in a chain's genesis wasm is the runtime for that chain's
+   life. Keeping an existing chain therefore means keeping its existing
+   runtime; a runtime change is the next section.
 4. Publish the exact protocol manifest and matching wallets. New wallets require
-   the authenticated profile and therefore refuse the previous runtime until
-   its profile has been installed by the upgrade.
+   the authenticated profile, so a wallet release that moves the profile is a
+   wallet release for the next chain rather than for this one.
 
 ### Starting a new testnet
 

@@ -306,8 +306,8 @@ and still collects transaction fees, and it no longer mints anything to an
 account. It hands the credit to a sink, and the sink is the shielded pool.
 
 Genesis is the exception: `mainnet_vesting` mints 2% of `MAX_SUPPLY` at genesis
-as transparent balances, a keyless vesting pot plus a seed to each treasurer and
-each collective member. None of it is a note, all of it is inside
+as transparent balances, a keyless vesting pot plus a seed to each treasurer.
+None of it is a note, all of it is inside
 `Balances::total_issuance()`, and it reaches its holders through
 `Vesting::claim`, which publishes the beneficiary and the amount. Section 7.2
 is why that call is the one transparent payout v1 keeps.
@@ -317,10 +317,11 @@ minted 27% across 48 vesting rows to the upstream project's own allocation
 sheet, which is not an allocation this project can defend: those addresses have
 no relationship with Qnero and 27% of the supply is a claim on every miner who
 ever runs it. Every one of those rows is gone. What is there now is one vesting
-row to one placeholder ML-DSA-87 account, 419 940 QNR on the same one-year lock
-and three-year linear unlock, plus the 60 QNR of seed endowments that let the
-treasurers and the tech collective pay their first deposits. The treasury holds
-no schedule at all. Before mainnet genesis this is replaced with a real
+row to one placeholder ML-DSA-87 account, 419 970 QNR on the same one-year lock
+and three-year linear unlock, plus the 30 QNR of seed endowments that let the
+treasurers pay their first deposits. A second table of ten was seeded here too,
+the tech collective, and its 30 QNR went back into the placeholder row when
+section 7.6 removed the collective. The treasury holds no schedule at all. Before mainnet genesis this is replaced with a real
 allocation or deleted outright, and deleting it is a live option: a chain whose
 entire supply is mined is the cleanest thing this project could launch. Section
 7.3's pre-mainnet check carries the line.
@@ -432,7 +433,7 @@ Allowed, and load bearing:
 - `Shielded::submit_private_batch` and `submit_public_batch`, which are unsigned and fee free, and
   `Shielded::coinbase`, which is an inherent. A filtered inherent is a mandatory dispatch failure,
   which is a dead chain rather than a dropped reward.
-- `Timestamp::set`, every `System` call, and the whole governance lane.
+- `Timestamp::set` and every `System` call, which after section 7.6 is `remark` and `remark_with_event`.
 - `Balances::burn`, which destroys the caller's own balance and moves nothing to anyone.
 - The fee path. `ChargeTransactionPayment` is a transaction extension and never reaches a `Contains`
   check, which is what lets a filtered runtime still charge for the calls it allows.
@@ -456,12 +457,16 @@ is, the enrolment is refused, and no v1-genesis chain reaches the freeze: no
 non-benchmark preset seeds `HighSecurityAccounts` either.
 `the_high_security_whitelist_admits_only_reversible_calls` is the test and
 `chain/docs/RUNTIME_SURFACE.md` section 5 is the surface.
-Two things the filter does not reach, both by design in `frame_system` and both
+Two things about the filter's reach, both by design in `frame_system` and both
 stated here so they are decisions rather than discoveries:
 
-- **Root bypasses it.** `dispatch_bypass_filter` is how a privileged origin dispatches, so a tech
-  referendum can still move transparent value. The calls exist and the collective can enact them;
-  the filter is what keeps them out of ordinary use.
+- **Root bypasses it, and nothing can produce Root.** `dispatch_bypass_filter` is how a
+  privileged origin dispatches, and after section 7.6 this runtime has no privileged origin to
+  dispatch with: `OriginCaller` is `system` and `Void`, and every Root-gated config item is
+  `NeverEnsureOrigin`. The filter is therefore the whole rule for every dispatch this chain can
+  execute. The two callers `dispatch_bypass_filter` keeps are `pallet_utility::batch_all` under a
+  Root origin nothing can produce, and the benchmarking harness.
+  `runtime/tests/no_admin_keys.rs` is the test.
 - **The scheduler is not an exemption**, which is worth stating because it reads like one. Its own
   extrinsics are disabled, and it dispatches a due task with the origin that task carries. Only
   Root is exempt from `filter_call`, so a scheduled call under a signed or non-Root custom origin
@@ -537,8 +542,7 @@ literals could never sign: its vesting claim, its treasury approval and its
 faucet drip would each answer `BadSigner` at the entry, and whatever genesis
 vested to it would be stranded for good. Before mainnet genesis, confirm that
 every beneficiary key in `genesis_config_presets/mainnet_vesting.rs` (the ten
-treasurers, the ten tech collective members, and the account of every `VESTING`
-row) and every literal in `genesis_config_presets/mod.rs` was minted with
+treasurers and the account of every `VESTING` row) and every literal in `genesis_config_presets/mod.rs` was minted with
 `qnero-node key qnero`, which builds an ML-DSA-87 pair and has no other mode.
 `account_from_ss58` carries the same instruction beside the code.
 
@@ -644,11 +648,11 @@ list: the retarget in `pallets/qpow`, `TimestampBucketSize` in the scheduler, an
 `MinDelayPeriodMoment` in reversible transfers. Everything else that is
 denominated in the interval reads `TARGET_BLOCK_TIME_MS`, the compile-time
 constant. That means `MINUTES`, `HOURS` and `DAYS` and every window built on
-them, `UndecidingTimeout`, `DefaultDelay`, `HighSecurityTxWindowBlocks`,
-`MaxExpiryDuration` and the governance tracks, and it means `EmissionDivisor`.
-The line is drawn at metadata. Each of those is a `#[pallet::constant]` whose
-purpose is to be readable out of metadata by a client deciding what a governance
-period costs or what the supply schedule is, and a value that changed with a
+them, `DefaultDelay`, `HighSecurityTxWindowBlocks` and `MaxExpiryDuration`, and
+it means `EmissionDivisor`. The line is drawn at metadata. Each of those is a
+`#[pallet::constant]` whose purpose is to be readable out of metadata by a
+client deciding what a reversal delay costs or what the supply schedule is, and
+a value that changed with a
 storage read is a value no metadata could state. The consequence is that a chain
 running at another cadence keeps the public chain's block counts: on the 12 s
 `dev` chain `DAYS` is 720 blocks, which is 2.4 hours, the quota window and the
@@ -718,6 +722,155 @@ a partition holding a fraction `p` of the hash settles at a difficulty ratio of
 `p / (1 - p)` to the majority's, so one under a ninth of the hash sits below the
 free line within about three days and is charged from then on. Both are stated
 in `docs/NATIVE-UPGRADE.md` with the operator flags and the four counters.
+
+### 7.6 No admin keys, and upgrade by node release (2026-09-22)
+
+**The decision.** The runtime ships with no privileged origin. The tech
+collective, the referenda instance it voted in and the custom origin its
+fast-upgrade track dispatched are removed; every `frame-system` dispatchable
+that can write `:code`, `:heappages` or a raw storage key is deleted from the
+fork; and `Root` becomes an origin nothing in the runtime can produce. "No admin
+keys" then reads literally. There is no key, no threshold of keys and no origin
+that can change this chain's rules after its genesis. A consensus change ships
+as a node release with a new genesis.
+
+**Why now.** The lane came from the project this chain forked and it has been
+dead on the public chain since the day that chain launched.
+`qnero_testnet_config_genesis` seeded no collective, `seed_tech_collective` was
+the only way a member ever entered, and `AddOrigin` was Root, which only a
+passed referendum could be. So no referendum has ever been submittable there
+and no upgrade has ever been authorizable, and the sentence in
+`docs/NATIVE-UPGRADE.md` about activating a runtime "through the chain's
+authorized upgrade mechanism" had been describing a mechanism that chain does
+not have. The relaunch is a fresh genesis, so nothing has to be migrated and
+this is the cheapest moment the decision will ever have.
+
+The cost is worth stating plainly rather than discovering later: a consensus bug
+found after genesis is a relaunch, and a relaunch discards the pool. A shielded
+balance is a commitment set, and no new genesis can re-mint it; only transparent
+allocations can be carried across. That raises Step 0 of section 12.7 from
+prudent to mandatory. Every measurement and every item of the pre-genesis bundle
+has to be finished before the genesis is cut, because after it there is no
+second bundle.
+
+**What goes.** `TechCollective` (`pallet-ranked-collective`, index 13) and
+`TechReferenda` (`pallet-referenda::Instance1`, index 14), with their configs
+and their parameter blocks. `Origins` (index 23), whose only variant
+`Origin::FastUpgrade` existed to be dispatched by the fast-upgrade track. The
+whole of `runtime/src/governance/`: `TechCollectiveTracksInfo`,
+`RootOrMemberForTechReferendaOrigin`, `EnsureRootRemoveKeepsMemberFloor`, the
+rank converters and `apply_test_timing` with the `fast-governance` cargo feature
+it hid behind. `PreimageDeposit` and `preimage_amount` are the one thing in that
+directory that was never governance, and they move to `configs/`.
+
+Nine `frame-system` dispatchables go with them: `set_heap_pages`, `set_code`,
+`set_code_without_checks`, `set_storage`, `kill_storage`, `kill_prefix`,
+`authorize_upgrade`, `authorize_upgrade_without_checks` and
+`apply_authorized_upgrade`, together with the `AuthorizedUpgrade` storage item,
+`CodeUpgradeAuthorization`, `can_set_code`, `do_authorize_upgrade`,
+`validate_code_is_authorized`, `update_code_in_storage` and the
+`apply_authorized_upgrade` arm of `validate_unsigned`. `Config::OnSetCode` and
+`Config::AuthorizeUpgradeOrigin` stay in the trait, defaulting to `()` and
+`NeverEnsureOrigin`, because twelve vendored mocks and benchmarking test
+runtimes assign them and neither item has a caller left. What the pallet still
+dispatches is `remark` and `remark_with_event`.
+
+The Root-gated origins on pallets that stay go the same way.
+`Preimage::ManagerOrigin`, `Scheduler::ScheduleOrigin` and
+`Vesting::AdminOrigin` become `NeverEnsureOrigin`, `EnsureTreasury` goes with
+the last of those, and `TreasuryPallet` takes `#[runtime::disable_call]` because
+its one call is `ensure_root` inside the pallet. `Preimage` takes `disable_call`
+too: its extrinsics existed for referenda submitters.
+
+**What stays, and why none of it is authority.** `Scheduler` stays because a
+reversible transfer is a scheduled task; its extrinsics were already disabled
+and it dispatches a due task with the origin that task carries, which after this
+change is only ever a signed one. `Preimage` stays because `Scheduler` and
+`ReversibleTransfers` store bounded calls through it, and that path is a Rust
+call rather than a dispatch. `Utility` stays because `batch_all` is the one
+wrapper the call filter and the high-security whitelist both already reason
+about, and one signature over several `shield` calls is a convenience with no
+privilege in it. `Multisig` stays because a multisig address is an ordinary
+account: every preset treasury is one, and `Multisig::execute` dispatches its
+inner call under the multisig's own signed origin, which meets the call filter
+like any other. The treasury's storage stays because `pallet-vesting` reads the
+account when a schedule ends. `Vesting::claim` stays, still the genesis
+distribution channel of section 7.2.
+
+**The code key.** No dispatchable can mutate `:code`, and the enforcement is
+structural rather than origin based, which is the point. The only writer in the
+tree was `Pallet::update_code_in_storage`, reached from `SetCode for ()`,
+reached from `set_code`, `set_code_without_checks` and
+`apply_authorized_upgrade`. All of those names are deleted, so the write does
+not exist to be reached. The raw-key route is deleted with `set_storage`,
+`kill_storage` and `kill_prefix`. The authorization route is deleted with the
+storage item that held it, and `frame_system::GenesisConfig` has no field for
+that item, so no chain spec can seed one either.
+
+Five tests in `runtime/tests/no_admin_keys.rs` carry the claim.
+`frame_system_dispatchables_are_remark_only` pins the call list read off the
+call enum's own type information, so a subtree merge that restores `set_code`
+fails there. `no_dispatchable_can_replace_the_runtime_code` constructs every
+remaining leaf call, dispatches each one with `dispatch_bypass_filter` under
+`RawOrigin::Root`, which is the strongest origin the type system can express,
+and asserts `:code` and `:heappages` are byte identical afterwards.
+`the_runtime_declares_no_custom_origin` pins `OriginCaller` to `system` and
+`Void`, which is the typed statement that no pallet can mint a privileged
+origin. `the_root_gated_config_origins_never_succeed` is defence in depth: even
+a reachable Root could not schedule a task, pin a preimage or create a vesting
+schedule. `a_stale_collective_seed_is_refused_at_genesis` covers the operator's
+half, below.
+
+**Genesis.** The collective seed channel disappears with the collective:
+`TECH_COLLECTIVE_SEED_MEMBERS_KEY`, `prepare_genesis_build_input`,
+`seed_tech_collective`, `MIN_TECH_COLLECTIVE_MEMBERS`, the three per-preset seed
+helpers and `tech_referendum_cost`. `genesis_template` loses its
+`tech_collective_members` parameter and the JSON injection, and
+`GenesisBuilder::build_state` goes back to the plain helper. That last one has a
+consequence worth naming: `RuntimeGenesisConfig` is generated with
+`#[serde(deny_unknown_fields)]`, so a chain spec still carrying
+`tech_collective_seed_members` is refused at deserialization instead of ignored,
+which is the failure an operator wants. `mainnet_vesting` loses
+`TECH_COLLECTIVE` and ten of its twenty seed endowments, so `SEEDED_ACCOUNTS *
+SEED` falls from 60 QNR to 30 and the placeholder row moves with it; that
+allocation is under review either way (section 7.1).
+
+**Versions.** `spec_version` moves, and the pre-genesis bundle already moves it
+to 106, so this rides that bump. The metadata moves a long way: three pallets
+leave the pallet table, `frame-system` loses nine calls, a storage item and two
+events, `Preimage` and `TreasuryPallet` lose their call enums, and every
+referenda and collective constant leaves the constant tables.
+`transaction_version` stays at 7, because the extension tuple and the signed
+payload layout are untouched and every surviving pallet keeps its index: 13, 14
+and 23 join the existing vacancies at 4, 10, 12, 16, 17, 18 and 20 rather than
+being compacted. Compacting would move `Shielded` off index 24 for no benefit on
+a chain whose indices no upgrade can ever change again. The RFC-0078 metadata
+hash does change, since `RuntimeCall` is inside the extrinsic's type tree; both
+wallets sign with `CheckMetadataHash` in `Mode::Disabled`, so nothing they
+encode moves.
+
+**What upgrade by node release means.** A consensus change is a new runtime
+compiled into a new node binary, a new chain spec generated by
+`scripts/build-testnet-spec.sh`, a new genesis hash, a new network identity, a
+fresh database and a coordinated restart. Balances do not carry over unless a
+preset re-mints them, and pool notes cannot be re-minted at all. A node that
+runs the new binary against the old spec runs the old rules, because the runtime
+a chain executes is the one in its own state, written once at genesis. The
+practical shape of a release is therefore: publish the binary, publish the spec,
+announce the switch, and let the old chain stop. `CheckGenesis` already refuses
+a transaction signed for one chain on the other, so the two cannot be confused
+by an extrinsic replay. `chain/docs/RUNTIME_UPDATE.md` is the runbook.
+
+**What still looks like authority and is not.** Three things, and each is an
+operator's own choice rather than a power over anybody else. A chain spec is the
+chain: whoever hands you the file picks the genesis you join, which is true of
+every chain and is why the file is published with its hash. `codeSubstitutes`,
+honoured by the client and empty in the shipped spec, lets a node execute
+different code for a given block; `--wasm-runtime-overrides` does the same from
+a directory. Both change one node's execution, and a node that executes
+different rules from its peers leaves the chain rather than steering it. The
+shipped spec's empty `codeSubstitutes` is pinned by a test, so the field is a
+decision rather than a default.
 
 ## 8. Milestones
 

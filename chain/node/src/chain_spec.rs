@@ -53,10 +53,10 @@ pub fn development_chain_spec() -> Result<ChainSpec, String> {
 ///
 /// Genesis intentionally endows the well-known Dilithium accounts
 /// (`crystal_alice` / `dilithium_bob` / `crystal_charlie`, seeds `[0]/` /
-/// `[1]` / `[2]`) and uses them as treasury signers and tech-collective
-/// members. Those private keys are public by design so integrators and CI can
-/// exercise governance, treasury, and transfer flows without distributing
-/// secrets. Tokens have no monetary value; the network may be reset. Do not
+/// `[1]` / `[2]`) and uses them as treasury signers. Those private keys are
+/// public by design so integrators and CI can exercise treasury and transfer
+/// flows without distributing secrets. They used to seed a tech collective
+/// too, which the runtime no longer has. Tokens have no monetary value; the network may be reset. Do not
 /// treat Heisenberg key material, balances, or authority as production-grade.
 ///
 /// The upstream telemetry endpoint and bootnodes are gone. This builder emits
