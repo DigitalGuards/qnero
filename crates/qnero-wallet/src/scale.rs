@@ -85,6 +85,20 @@ pub fn compact_len(len: usize) -> Vec<u8> {
     Compact(len as u64).encode()
 }
 
+/// Read one compact integer, answering the value and where it ended.
+///
+/// The read direction of [`compact_len`], and the one SCALE primitive the
+/// extrinsic walk in [`crate::extrinsic`] needs that `codec` will not give a
+/// width for on its own: `Compact::decode` takes a cursor and says nothing
+/// about how far it moved, so the cursor's own remaining length is measured
+/// on both sides of the call.
+pub fn read_compact(bytes: &[u8], offset: usize) -> Option<(u64, usize)> {
+    let mut cursor = bytes.get(offset..)?;
+    let before = cursor.len();
+    let Compact(value) = <Compact<u64> as codec::Decode>::decode(&mut cursor).ok()?;
+    Some((value, offset + (before - cursor.len())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

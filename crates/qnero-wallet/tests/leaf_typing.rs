@@ -5,12 +5,10 @@
 //! open the leaf, the scan reads it as somebody else's, and the pass commits a
 //! watermark above it, so nothing reads that leaf again without a rescan.
 //!
-//! The kind used to be decided by which per-leaf keys a node chose to answer,
-//! and both directions of that were exploitable. Eight invented bytes at
-//! `Shielded::CoinbaseValues` sent an incoming payment down the coinbase
-//! rebuild, which cannot open it. An invented `Shielded::Ciphertexts` beside a
-//! withheld coinbase value silenced the rule that was supposed to catch the
-//! withholding, and hid a mined reward. Neither is a key the chain wrote.
+//! The kind used to be decided by which per-leaf keys a node chose to answer.
+//! Eight invented bytes at `Shielded::CoinbaseValues` sent an incoming payment
+//! down the coinbase rebuild, which cannot open it, and that is not a key the
+//! chain wrote.
 //!
 //! What decides now is position, and position is what the headers commit to:
 //! the header chain itself, the `zkTreeRoot` each block published, and the
@@ -40,7 +38,7 @@ use qnero_wallet::keys::create_seed;
 use qnero_wallet::memo::pad_memo;
 use qnero_wallet::rpc::RpcClient;
 use qnero_wallet::scale::{identity_map_key, storage_prefix};
-use qnero_wallet::wallet::{SyncOptions, Wallet, WARNED_LEAVES_PER_PASS};
+use qnero_wallet::wallet::{SyncOptions, Wallet};
 use std::collections::BTreeSet;
 
 use support::{encode_u64, test_metadata, FakeNode, NodeState};
@@ -74,16 +72,20 @@ fn ct_for(address: &qnero_notes::Address, note: &Note, tag: u8) -> Vec<u8> {
         .to_bytes()
 }
 
+/// One leaf as the chain writes it: the commitment in the tree, the block
+/// beside it, and the payload in that block's body.
+///
+/// `ct` empty means the leaf carries no payload of anybody's, which is what a
+/// leaf looks like when its settlement emptied that position.
 fn put_leaf(state: &mut NodeState, index: u64, block: u32, cm: Digest, ct: &[u8]) {
     state.put_storage(&identity_map_key("ZkTree", "Leaves", index), &cm.to_bytes());
-    state.put_storage(
-        &identity_map_key("Shielded", "Ciphertexts", index),
-        &codec::Encode::encode(&ct.to_vec()),
-    );
     state.put_storage(
         &identity_map_key("Shielded", "LeafBlocks", index),
         &codec::Encode::encode(&block),
     );
+    if !ct.is_empty() {
+        support::put_payload(state, block, ct);
+    }
 }
 
 fn put_coinbase(state: &mut NodeState, index: u64, block: u32, cm: Digest, value: u64) {
@@ -212,13 +214,15 @@ fn an_invented_coinbase_value_below_a_blocks_last_leaf_refuses_the_pass() {
 }
 
 /// An invented coinbase value at the one position a coinbase can occupy, in
-/// somebody else's block, with the payment's ciphertext still there.
+/// somebody else's block, with the payment's ciphertext in the block's body.
 ///
 /// Nothing authenticates another author's coinbase value, so the claim is not
 /// refusable. What the rule does instead is refuse to let it decide: the
-/// ciphertext beside it is tried anyway, so the payment arrives. Under v1 a
-/// coinbase carries no ciphertext at all, so this costs nothing on an honest
-/// chain.
+/// block's payloads are tried whatever the position says, and the payment
+/// arrives at the leaf whose commitment it opens. This is the bound-A closure
+/// in its simplest shape, and
+/// `a_payment_at_the_coinbase_position_is_found` drives the same rule with
+/// the coinbase value the fixture fills in for itself.
 #[test]
 fn an_invented_coinbase_value_at_a_foreign_coinbase_position_still_pays() {
     let (_seed, mut wallet) = fresh("typing-foreign-position");
@@ -276,13 +280,6 @@ fn a_withheld_coinbase_value_under_this_wallets_own_label_refuses_the_pass() {
     let genesis = state.genesis_hash();
     let mined = miner_key.coinbase_note(&genesis, 7, 42).expect("a note");
     put_coinbase(&mut state, 0, 7, mined.commitment(), 42);
-    // A ciphertext nobody can open, written where the chain wrote none. It is
-    // what keeps the read layer's "neither key was answered" refusal off this
-    // pass, so the rule under test is the one that fires.
-    state.put_storage(
-        &identity_map_key("Shielded", "Ciphertexts", 0),
-        &codec::Encode::encode(&vec![9u8; 64]),
-    );
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
 
     let node = FakeNode::start(state);
@@ -334,13 +331,6 @@ fn a_withheld_coinbase_value_under_a_foreign_label_refuses_the_pass() {
     let genesis = state.genesis_hash();
     let mined = miner_key.coinbase_note(&genesis, 7, 42).expect("a note");
     put_coinbase(&mut state, 0, 7, mined.commitment(), 42);
-    // A ciphertext nobody can open, written where the chain wrote none. It is
-    // what keeps the read layer's "neither key was answered" refusal off this
-    // pass, so the rule under test is the one that fires.
-    state.put_storage(
-        &identity_map_key("Shielded", "Ciphertexts", 0),
-        &codec::Encode::encode(&vec![9u8; 64]),
-    );
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
 
     let node = FakeNode::start(state);
@@ -380,13 +370,6 @@ fn a_withheld_coinbase_value_under_no_label_at_all_refuses_the_pass() {
     let genesis = state.genesis_hash();
     let mined = miner_key.coinbase_note(&genesis, 7, 42).expect("a note");
     put_coinbase(&mut state, 0, 7, mined.commitment(), 42);
-    // A ciphertext nobody can open, written where the chain wrote none. It is
-    // what keeps the read layer's "neither key was answered" refusal off this
-    // pass, so the rule under test is the one that fires.
-    state.put_storage(
-        &identity_map_key("Shielded", "Ciphertexts", 0),
-        &codec::Encode::encode(&vec![9u8; 64]),
-    );
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
 
     let node = FakeNode::start(state);
@@ -723,13 +706,13 @@ fn a_pass_that_scans_no_leaf_still_authenticates_the_head_it_checkpoints() {
 ///
 /// This is the bound, and it is the one `docs/WALLET.md` states under "What a
 /// lying node can and cannot do". No per-leaf rule reaches this: the wallet
-/// verifies no proof of work, so above the newest checkpoint the node chooses
-/// every header field, which means it chooses where each block's leaf range
-/// ends, which leaf is a coinbase position and what label sits on each block.
-/// Here it puts an incoming payment at a coinbase position and withholds the
-/// ciphertext, and it publishes a wrong value under a foreign label over this
-/// wallet's own coinbase. Both leaves are stepped over and the watermark goes
-/// above them.
+/// verifies no proof of work, so above the newest checkpoint the node builds
+/// whatever branch it likes, and a branch that never carried a payment is a
+/// branch on which no rule can find one. Here its block 6 appends a leaf that
+/// is nobody's where the real chain appended this wallet's payment, and its
+/// block 7 publishes a wrong coinbase value under a foreign label over this
+/// wallet's own reward. Both notes are missing and the watermark goes above
+/// the leaves that replaced them.
 ///
 /// What it cannot do is make that branch survive contact with anyone else. The
 /// forged head is recorded only as a checkpoint, and the next pass against an
@@ -769,17 +752,15 @@ fn a_rebuilt_chain_hides_two_notes_until_an_honest_node_answers() {
     {
         let mut state = node.state();
         state.head_number = 9;
-        // The payment, at what this node's headers make the last leaf of block
-        // 6, with its ciphertext withheld. Under these headers the leaf is a
-        // coinbase position, so no rule asks for a ciphertext there.
+        // Where the real chain appended this wallet's payment, this branch
+        // appends a leaf nobody can open and carries no payload at all.
         put_leaf(
             &mut state,
             0,
             6,
-            mine.commitment(),
-            &ct_for(&address, &mine, 7),
+            Digest::hash_bytes(&[b"not the payment"]),
+            &[],
         );
-        state.withheld_ciphertexts.insert(0);
         // This wallet's own coinbase for block 7, under a foreign label and a
         // value that rebuilds to nothing.
         put_coinbase(&mut state, 1, 7, mined.commitment(), 999);
@@ -800,13 +781,19 @@ fn a_rebuilt_chain_hides_two_notes_until_an_honest_node_answers() {
     assert_eq!(forged.block_number, 9);
 
     // The honest node. It agrees with the branch below block 6 and disagrees
-    // above it: block 7 carries this wallet's own author label, block 6's leaf
-    // is an ordinary payment with its ciphertext answered for, and the coinbase
-    // value is the one the chain wrote.
+    // above it: block 6 appended this wallet's payment and its body carries
+    // the payload, block 7 carries this wallet's own author label, and the
+    // coinbase value is the one the chain wrote.
     {
         let mut state = node.state();
         state.authored = [7].into_iter().collect();
-        state.withheld_ciphertexts.clear();
+        put_leaf(
+            &mut state,
+            0,
+            6,
+            mine.commitment(),
+            &ct_for(&address, &mine, 7),
+        );
         state.put_storage(
             &identity_map_key("Shielded", "CoinbaseValues", 1),
             &encode_u64(42),
@@ -985,15 +972,6 @@ fn a_changed_leaf_count_refuses_the_pass_under_the_selected_header() {
         "a_changed_leaf_count_refuses_the_pass_under_the_selected_header",
         storage_prefix("ZkTree", "LeafCount"),
         encode_u64(4),
-    );
-}
-
-#[test]
-fn changed_ciphertext_bytes_refuse_the_pass_under_the_selected_header() {
-    assert_changed_state_refused(
-        "changed_ciphertext_bytes_refuse_the_pass_under_the_selected_header",
-        identity_map_key("Shielded", "Ciphertexts", 1),
-        codec::Encode::encode(&vec![9u8; 48]),
     );
 }
 
@@ -1217,173 +1195,6 @@ fn a_changed_creation_block_refuses_the_pass_under_the_selected_header() {
     );
 }
 
-/// How many leaves a pass writes one sentence about is a node's choice, so the
-/// sentences are capped and the rest are counted.
-///
-/// Both detector warnings are per leaf, and a node answers the leaves: it can
-/// put a commitment this wallet's payload does not open beside every
-/// ciphertext it serves. Uncapped that is one `String` per leaf on
-/// `SyncReport::warnings` and one printed line per leaf, out of an answer
-/// nothing has checked. Past `WARNED_LEAVES_PER_PASS` the pass counts instead
-/// and closes each kind with one sentence carrying the count, so the list is
-/// bounded at eighteen entries whatever a node answers.
-///
-/// `wallet-web/tests/leaf-typing.test.ts` drives the same two overflows
-/// against the browser wallet.
-#[test]
-fn the_per_leaf_warnings_are_capped_and_the_rest_are_counted() {
-    let (_seed, mut wallet) = fresh("warning-cap");
-    let address = wallet.address();
-    let mine = note_for(address.pk, 1_000, "capped-payment");
-    let mine_ct = ct_for(&address, &mine, 7);
-    // A second note of this wallet's, whose commitment the block never holds.
-    let elsewhere = note_for(address.pk, 5, "capped-elsewhere");
-    let elsewhere_ct = ct_for(&address, &elsewhere, 8);
-
-    let overflow: u64 = 2;
-    let each = WARNED_LEAVES_PER_PASS + overflow;
-    let coinbase_index = each * 2;
-
-    let mut state = NodeState {
-        head_number: 9,
-        ..Default::default()
-    };
-    // The first `each` leaves carry this wallet's payment ciphertext beside a
-    // stranger's commitment, and the block holds the payment's own commitment
-    // at its coinbase position, so each of them is a move the pass recovers.
-    for leaf in 0..each {
-        let stranger = Digest::hash_bytes(&[b"moved", &leaf.to_le_bytes()]);
-        put_leaf(&mut state, leaf, 8, stranger, &mine_ct);
-    }
-    // The next `each` carry a ciphertext of this wallet's whose commitment the
-    // block holds nowhere, so each of those is skipped.
-    for leaf in 0..each {
-        let stranger = Digest::hash_bytes(&[b"unplaceable", &leaf.to_le_bytes()]);
-        put_leaf(&mut state, each + leaf, 8, stranger, &elsewhere_ct);
-    }
-    put_coinbase(&mut state, coinbase_index, 8, mine.commitment(), 42);
-    state.put_storage(
-        &storage_prefix("ZkTree", "LeafCount"),
-        &encode_u64(coinbase_index + 1),
-    );
-
-    let node = FakeNode::start(state);
-    let rpc = RpcClient::new(&node.url);
-    let chain = Chain::new(&rpc);
-    let report = wallet
-        .sync(&chain, &test_metadata())
-        .expect("a capped pass still finishes");
-
-    // The payment still arrives, at the index inside the block that holds the
-    // commitment it opens. A cap on the sentences changes no decision.
-    assert_eq!(report.received, 1, "the payment arrives");
-    assert_eq!(
-        wallet
-            .store
-            .notes
-            .first()
-            .expect("the note is stored")
-            .leaf_index,
-        coinbase_index
-    );
-
-    let moved: Vec<&String> = report
-        .warnings
-        .iter()
-        .filter(|warning| warning.contains("tree entry answered beside it"))
-        .collect();
-    let skipped: Vec<&String> = report
-        .warnings
-        .iter()
-        .filter(|warning| warning.contains("at none of the leaves it appended"))
-        .collect();
-    assert_eq!(moved.len() as u64, WARNED_LEAVES_PER_PASS, "{moved:?}");
-    assert_eq!(skipped.len() as u64, WARNED_LEAVES_PER_PASS, "{skipped:?}");
-    // The ones written out are the first of each kind, named by their leaf.
-    assert!(moved[0].contains("leaf 0"), "{}", moved[0]);
-    assert!(
-        skipped[0].contains(&format!("leaf {each}")),
-        "{}",
-        skipped[0]
-    );
-
-    // And each kind closes with one sentence carrying what the cap held back.
-    let moved_more: Vec<&String> = report
-        .warnings
-        .iter()
-        .filter(|warning| {
-            warning.starts_with(&format!("and {overflow} more leaves"))
-                && warning.contains("each recorded")
-        })
-        .collect();
-    let skipped_more: Vec<&String> = report
-        .warnings
-        .iter()
-        .filter(|warning| {
-            warning.starts_with(&format!("and {overflow} more leaves"))
-                && warning.contains("each skipped")
-        })
-        .collect();
-    assert_eq!(moved_more.len(), 1, "{:?}", report.warnings);
-    assert_eq!(skipped_more.len(), 1, "{:?}", report.warnings);
-    assert!(moved_more[0].contains("second node"), "{}", moved_more[0]);
-    assert!(
-        skipped_more[0].contains("second node"),
-        "{}",
-        skipped_more[0]
-    );
-
-    // Eighteen, whatever a node answers: two kinds of eight plus one closing
-    // sentence each, and nothing else fired on this pass.
-    assert_eq!(
-        report.warnings.len() as u64,
-        WARNED_LEAVES_PER_PASS * 2 + 2,
-        "{:?}",
-        report.warnings
-    );
-}
-
-/// At the cap exactly, there is nothing left over to count.
-#[test]
-fn a_pass_at_the_warning_cap_writes_no_overflow_sentence() {
-    let (_seed, mut wallet) = fresh("warning-cap-exact");
-    let address = wallet.address();
-    let mine = note_for(address.pk, 1_000, "at-the-cap");
-    let mine_ct = ct_for(&address, &mine, 7);
-
-    let mut state = NodeState {
-        head_number: 9,
-        ..Default::default()
-    };
-    for leaf in 0..WARNED_LEAVES_PER_PASS {
-        let stranger = Digest::hash_bytes(&[b"moved", &leaf.to_le_bytes()]);
-        put_leaf(&mut state, leaf, 8, stranger, &mine_ct);
-    }
-    put_coinbase(&mut state, WARNED_LEAVES_PER_PASS, 8, mine.commitment(), 42);
-    state.put_storage(
-        &storage_prefix("ZkTree", "LeafCount"),
-        &encode_u64(WARNED_LEAVES_PER_PASS + 1),
-    );
-
-    let node = FakeNode::start(state);
-    let rpc = RpcClient::new(&node.url);
-    let chain = Chain::new(&rpc);
-    let report = wallet
-        .sync(&chain, &test_metadata())
-        .expect("a pass at the cap finishes");
-    assert_eq!(
-        report.warnings.len() as u64,
-        WARNED_LEAVES_PER_PASS,
-        "{:?}",
-        report.warnings
-    );
-    assert!(
-        !report.warnings.iter().any(|w| w.starts_with("and ")),
-        "{:?}",
-        report.warnings
-    );
-}
-
 #[test]
 fn a_changed_coinbase_value_refuses_the_pass_under_the_selected_header() {
     assert_changed_state_refused(
@@ -1411,23 +1222,26 @@ fn a_changed_tree_depth_refuses_the_pass_under_the_selected_header() {
     );
 }
 
-/// A ciphertext of this wallet's beside a commitment the block holds nowhere:
-/// warned, skipped, and the pass finishes.
+/// A payload of this wallet's whose commitment the block holds nowhere is
+/// discarded, and nothing is said about it.
 ///
-/// The detector's other arm, and it is a warning deliberately. Two things
-/// produce this reading and nothing local tells them apart: a node that moved
-/// a ciphertext across blocks, and a sender who encrypted a payload opening a
-/// commitment the sender never published. The circuit leaves `ct_digest`
-/// unconstrained (`docs/CIRCUIT.md` section 1), so no rule on chain ties a
-/// ciphertext's plaintext to the commitment beside it, and anyone holding this
-/// wallet's address can write such a leaf for the price of one transaction.
-/// Refusing the pass would hand that sender a permanent sync denial, because
-/// the leaf is read again on every later pass and on a rescan as well.
+/// The ordinary answer, now that the payload comes out of the body. A
+/// settlement publishes a ciphertext for every slot it carries, including the
+/// segments the chain skipped, so a block full of other people's settlements
+/// hands this wallet payloads that open nothing on every pass. A sender who
+/// encrypts a payload opening a commitment it never published reaches the same
+/// reading, and so does a node that reported a block's fold at the wrong
+/// height. None of the three is separable from the others locally and the
+/// first two are not faults at all, so the pass discards and carries on: a
+/// warning here would be noise on every honest block, and a refusal would hand
+/// any holder of this wallet's address a permanent sync denial for the price
+/// of one transaction.
 #[test]
-fn a_ciphertext_of_ours_beside_a_commitment_the_block_lacks_warns_and_keeps_scanning() {
-    let (_seed, mut wallet) = fresh("mismatch-nowhere");
+fn a_skipped_segments_ciphertext_matches_no_commitment_and_is_discarded() {
+    let (_seed, mut wallet) = fresh("skipped-segment");
     let address = wallet.address();
-    // The note this payload opens, whose commitment is at no leaf at all.
+    // The note this payload opens, whose commitment is at no leaf at all. It
+    // is what a skipped segment of a settlement leaves in the body.
     let orphan = note_for(address.pk, 1_000, "opens nothing on chain");
     let orphan_ct = ct_for(&address, &orphan, 7);
     let mine = note_for(address.pk, 25, "a real payment");
@@ -1449,26 +1263,295 @@ fn a_ciphertext_of_ours_beside_a_commitment_the_block_lacks_warns_and_keeps_scan
     let chain = Chain::new(&rpc);
     let report = wallet
         .sync(&chain, &test_metadata())
-        .expect("one unbindable leaf does not stop a sync");
+        .expect("one unbindable payload does not stop a sync");
     assert_eq!(report.leaves_scanned, 3);
     assert_eq!(
         report.received, 1,
-        "the leaf below it is read and the payment on it arrives"
+        "the payload the block does hold a commitment for arrives"
     );
     assert_eq!(wallet.store.unspent_total(), 25);
-    let warning = report
-        .warnings
-        .iter()
-        .find(|warning| warning.contains("at none of the leaves it appended"))
-        .expect("the unbindable leaf is warned about");
-    assert!(warning.contains("leaf 0"), "{warning}");
-    assert!(warning.contains("second node"), "{warning}");
+    assert!(
+        report.warnings.is_empty(),
+        "a payload that binds to nothing is the ordinary case: {:?}",
+        report.warnings
+    );
 
-    // And it is the same answer on every later pass, which is the point of
-    // keeping it a warning: a sender cannot brick this wallet's sync.
+    // And it is the same answer on every later pass, which is the point of not
+    // refusing: a sender cannot brick this wallet's sync.
     let again = wallet
         .sync_with(&chain, &test_metadata(), SyncOptions { rescan: true })
-        .expect("a rescan reads the same leaf and does not refuse either");
+        .expect("a rescan reads the same body and does not refuse either");
     assert_eq!(again.received, 0, "the payment is already held");
+    assert_eq!(again.warnings.len(), 0);
     assert_eq!(wallet.store.unspent_total(), 25);
+}
+
+/// One byte of a body, changed on the way out, refuses the pass before any
+/// decryption.
+///
+/// The body is what carries every note ciphertext, and the only thing that
+/// makes it the chain's is that it roots to the `extrinsicsRoot` in the header
+/// this pass already rehashed. Drop that comparison and a node hands over any
+/// payloads it likes, which is a payment invented at the wallet and a payment
+/// removed from it.
+#[test]
+fn a_block_body_that_does_not_root_to_the_header_is_refused() {
+    let (_seed, mut wallet) = fresh("body-root");
+    let address = wallet.address();
+    let mine = note_for(address.pk, 1_000, "rooted");
+
+    let mut state = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_leaf(&mut state, 0, 8, Digest::hash_bytes(&[b"leaf zero"]), &[]);
+    put_leaf(
+        &mut state,
+        1,
+        8,
+        mine.commitment(),
+        &ct_for(&address, &mine, 7),
+    );
+    put_coinbase(&mut state, 2, 8, Digest::hash_bytes(&[b"coinbase"]), 42);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+    state.tampered_bodies.insert(8);
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let refused = wallet
+        .sync(&chain, &test_metadata())
+        .expect_err("a body the header does not carry is refused");
+    let message = format!("{refused:#}");
+    assert!(message.contains("roots to"), "{message}");
+    assert!(message.contains("Nothing has been changed"), "{message}");
+    assert_eq!(wallet.store.next_leaf, 0, "no watermark was committed");
+    assert!(wallet.store.notes.is_empty());
+
+    // The same node serving the body it actually holds pays the payment.
+    node.state().tampered_bodies.clear();
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the honest body syncs");
+    assert_eq!(report.received, 1);
+    assert_eq!(wallet.store.unspent_total(), 1_000);
+}
+
+/// A node that will not serve a block's body refuses the pass by name, and
+/// commits no watermark.
+///
+/// The one way left to hide a payload: the body roots as a whole, so there is
+/// no single extrinsic to withhold. Read as a block that carried nothing it
+/// would step over every payment in that block and write a watermark above
+/// them, which is the silent skip this whole pass exists to close.
+#[test]
+fn a_withheld_body_refuses_the_pass_before_the_watermark() {
+    let (_seed, mut wallet) = fresh("body-withheld");
+    let address = wallet.address();
+    let mine = note_for(address.pk, 640, "withheld");
+
+    let mut state = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_leaf(
+        &mut state,
+        0,
+        8,
+        mine.commitment(),
+        &ct_for(&address, &mine, 7),
+    );
+    put_coinbase(&mut state, 1, 8, Digest::hash_bytes(&[b"coinbase"]), 42);
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
+    state.withheld_bodies.insert(8);
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let refused = wallet
+        .sync(&chain, &test_metadata())
+        .expect_err("a block with no body is refused");
+    let message = format!("{refused:#}");
+    assert!(message.contains("no body beside it"), "{message}");
+    assert!(message.contains("block 8"), "{message}");
+    assert_eq!(wallet.store.next_leaf, 0, "no watermark was committed");
+    assert!(wallet.store.notes.is_empty());
+    assert!(wallet.store.checkpoints.is_empty());
+
+    node.state().withheld_bodies.clear();
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the body answered for syncs");
+    assert_eq!(report.received, 1);
+    assert_eq!(wallet.store.unspent_total(), 640);
+}
+
+/// A payload found at whichever index its commitment sits at, both ways round.
+///
+/// The commitment search reads no index the node chose, so the same body and
+/// the same two commitments pay the same note whichever leaf holds it. This is
+/// what the body bought over the per-leaf read: there is no pair to take apart
+/// any more, because the payload is not beside a leaf at all.
+#[test]
+fn a_ciphertext_moved_between_two_positions_in_one_body_still_finds_its_note() {
+    let address_of = |tag: &str| {
+        let (_seed, wallet) = fresh(tag);
+        (wallet.address(), _seed)
+    };
+    let (address, seed) = address_of("body-position");
+    let mine = note_for(address.pk, 310, "either position");
+    let mine_ct = ct_for(&address, &mine, 7);
+    let stranger = Digest::hash_bytes(&[b"somebody else's leaf"]);
+
+    // Two fixtures over one body: the payment's commitment first, then second.
+    for (payment_at, stranger_at) in [(0u64, 1u64), (1, 0)] {
+        let mut wallet = Wallet::open(&seed).expect("the wallet opens");
+        wallet.store.notes.clear();
+        wallet.store.next_leaf = 0;
+        wallet.store.checkpoints.clear();
+
+        let mut state = NodeState {
+            head_number: 9,
+            ..Default::default()
+        };
+        put_leaf(&mut state, payment_at, 8, mine.commitment(), &[]);
+        put_leaf(&mut state, stranger_at, 8, stranger, &[]);
+        // One body, one payload, whichever way the leaves are ordered.
+        support::put_payload(&mut state, 8, &mine_ct);
+        put_coinbase(&mut state, 2, 8, Digest::hash_bytes(&[b"coinbase"]), 42);
+        state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(3));
+
+        let node = FakeNode::start(state);
+        let rpc = RpcClient::new(&node.url);
+        let chain = Chain::new(&rpc);
+        let report = wallet
+            .sync(&chain, &test_metadata())
+            .expect("the sync runs");
+        assert_eq!(report.received, 1, "the payment arrives at either position");
+        assert_eq!(
+            wallet.store.notes[0].leaf_index, payment_at,
+            "the note is recorded where its commitment sits"
+        );
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+}
+
+/// A payment at the coinbase position is found, which is the bound-A hole
+/// closed.
+///
+/// The leaf is the last one its block appended, so it types as a coinbase and
+/// the rebuild does not open it: under the per-leaf rule the payment was then
+/// skipped and the watermark committed above it, because a coinbase position
+/// owed no ciphertext. The body pass tries every payload against every
+/// commitment the block appended, so the position it was moved to decides
+/// nothing.
+#[test]
+fn a_payment_at_the_coinbase_position_is_found() {
+    let (_seed, mut wallet) = fresh("body-coinbase-position");
+    let address = wallet.address();
+    let mine = note_for(address.pk, 1_200, "at the coinbase position");
+
+    let mut state = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    put_leaf(&mut state, 0, 8, Digest::hash_bytes(&[b"leaf zero"]), &[]);
+    // The last leaf of block 8, which is the one index that block's coinbase
+    // can occupy. The fixture fills in a coinbase value there the way a chain
+    // that minted one would, so the leaf types as a coinbase and the rebuild
+    // is tried and fails.
+    put_leaf(
+        &mut state,
+        1,
+        8,
+        mine.commitment(),
+        &ct_for(&address, &mine, 7),
+    );
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(2));
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the sync runs");
+    assert_eq!(report.coinbase_leaves, 1, "the leaf typed as a coinbase");
+    assert_eq!(
+        report.coinbase_received, 0,
+        "and no coinbase rebuild opened it"
+    );
+    assert_eq!(report.received, 1, "the payment is found anyway");
+    assert_eq!(wallet.store.notes[0].leaf_index, 1);
+    assert_eq!(wallet.store.unspent_total(), 1_200);
+}
+
+/// A shield's ciphertext, read out of the signed extrinsic that carried it.
+///
+/// The other envelope shape, and the one a generic client cannot walk: past
+/// `MultiAddress::Id`, past a 7219-byte ML-DSA-87 signature and public key,
+/// past the four of the eleven transaction extensions that encode anything,
+/// and only then the call and its three arguments. An offset wrong anywhere in
+/// that walk is a shield nobody can find.
+#[test]
+fn a_shields_ciphertext_is_read_out_of_its_signed_extrinsic() {
+    let (_seed, mut wallet) = fresh("body-shield");
+    let address = wallet.address();
+    let mine = note_for(address.pk, 5_000, "shielded");
+    let ciphertext = ct_for(&address, &mine, 9);
+
+    let mut state = NodeState {
+        head_number: 9,
+        ..Default::default()
+    };
+    state.put_storage(
+        &identity_map_key("ZkTree", "Leaves", 0),
+        &mine.commitment().to_bytes(),
+    );
+    state.put_storage(
+        &identity_map_key("Shielded", "LeafBlocks", 0),
+        &codec::Encode::encode(&8u32),
+    );
+    state.blocks.entry(8).or_default().push(format!(
+        "0x{}",
+        hex::encode(support::shield_extrinsic(5_000, &[0x07; 32], &ciphertext))
+    ));
+    state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(1));
+
+    let node = FakeNode::start(state);
+    let rpc = RpcClient::new(&node.url);
+    let chain = Chain::new(&rpc);
+    let report = wallet
+        .sync(&chain, &test_metadata())
+        .expect("the sync runs");
+    assert_eq!(report.received, 1, "the shield's payload is read");
+    assert_eq!(wallet.store.unspent_total(), 5_000);
+}
+
+/// The profile byte that says where payloads live is checked before a scan,
+/// and a chain that disagrees is refused by name.
+///
+/// `ensure_supported` is strict equality over all 192 bytes and the wallets
+/// authenticate `ActiveProtocolProfile` from state, so a runtime still keeping
+/// ciphertexts in the state trie is a chain this build refuses to read rather
+/// than one it reads wrongly. Byte 76 is the payload location and it is what
+/// makes the coupling between this wallet and its runtime a fact the operator
+/// is told about.
+#[test]
+fn the_profile_byte_that_says_where_payloads_live_is_checked() {
+    let mut metadata = test_metadata();
+    // Whatever the shipped value is, a chain answering another one is a chain
+    // whose payloads are somewhere this build does not look.
+    metadata.protocol_profile[76] = metadata.protocol_profile[76].wrapping_add(1);
+    let refused = metadata
+        .ensure_supported_profile()
+        .expect_err("a profile this release does not carry is refused");
+    let message = format!("{refused:#}");
+    assert!(
+        message.to_lowercase().contains("profile"),
+        "the refusal names the profile: {message}"
+    );
+
+    // And the shipped one passes, so the test cannot go green on a broken
+    // check.
+    assert!(test_metadata().ensure_supported_profile().is_ok());
 }

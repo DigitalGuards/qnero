@@ -1,5 +1,5 @@
-//! Reads of chain state: headers, the commitment tree, ciphertexts,
-//! nullifiers.
+//! Reads of chain state: headers, the commitment tree, nullifiers, and the
+//! block bodies that carry the note ciphertexts.
 
 use std::collections::BTreeSet;
 
@@ -186,8 +186,6 @@ pub enum ListSupport {
 pub struct Chain<'a> {
     pub rpc: &'a RpcClient,
     hash_lists: std::cell::Cell<ListSupport>,
-    archive_ancestry:
-        std::cell::RefCell<Option<([u8; 32], std::collections::BTreeMap<u32, [u8; 32]>)>>,
 }
 
 impl<'a> Chain<'a> {
@@ -195,7 +193,6 @@ impl<'a> Chain<'a> {
         Self {
             rpc,
             hash_lists: std::cell::Cell::new(ListSupport::Unknown),
-            archive_ancestry: Default::default(),
         }
     }
 
@@ -757,51 +754,47 @@ impl<'a> Chain<'a> {
         Ok(out)
     }
 
-    /// The commitment and ciphertext of every leaf in `range`, at one block.
+    /// The commitment, block and coinbase value of every leaf in `range`, at
+    /// one block.
     ///
     /// Every map is `Identity`-hashed on the leaf index, so paging is by index
     /// alone and `state_getKeysPaged` is unnecessary.
     ///
-    /// Four keys per leaf. `CoinbaseValues` is the fourth and it is what makes
+    /// Three keys per leaf. `CoinbaseValues` is the third and it is what makes
     /// a coinbase note readable: its value is public, because the chain hashes
-    /// it into the commitment over an `inner` it cannot open, and the
-    /// ciphertext beside it carries `(rho, r)` and a value of zero. Presence in
-    /// that map is also what tells a coinbase leaf from a settled output.
+    /// it into the commitment over an `inner` it cannot open. The note
+    /// ciphertexts are not among these keys at all: the chain keeps them in
+    /// block bodies and this wallet reads them there, authenticated against
+    /// the header's `extrinsicsRoot` rather than its `stateRoot`. See
+    /// [`Chain::authenticated_body`].
     ///
     /// **A key the node withholds below `leaf_count` refuses the read.**
     /// `leaf_count` is `ZkTree::LeafCount` read at this same block hash, and
     /// every leaf under it was appended by one of the three writers in
     /// `pallet-shielded`, each of which writes its keys in the same call:
     ///
-    /// - `shield` writes `Leaves`, `Ciphertexts` and `LeafBlocks`;
-    /// - a settled slot writes `Leaves`, `Ciphertexts` and `LeafBlocks` for
-    ///   each of its two outputs;
-    /// - the coinbase writes `Leaves`, `LeafBlocks` and `CoinbaseValues`, and
-    ///   `Ciphertexts` only when the author encrypted a payload, which under
-    ///   v1 never happens.
+    /// - `shield` writes `Leaves` and `LeafBlocks`;
+    /// - a settled slot writes `Leaves` and `LeafBlocks` for each of its two
+    ///   outputs;
+    /// - the coinbase writes `Leaves`, `LeafBlocks` and `CoinbaseValues`.
     ///
     /// Nothing removes any of them. So below the count there is a commitment
-    /// and a block at every index, and a ciphertext at every index that is not
-    /// a coinbase, and an absent answer for one of those is a node withholding
-    /// it. Each of the three hides a leaf in its own way and every one of them
-    /// is permanent: without the commitment the leaf is skipped, without the
-    /// ciphertext it reads as a leaf nobody can open, and without the block a
-    /// coinbase leaf is stepped over, and in all three cases the pass commits
+    /// and a block at every index, and an absent answer for either is a node
+    /// withholding it. Each hides a leaf in its own way and both are
+    /// permanent: without the commitment the leaf is skipped, without the
+    /// block a coinbase leaf is stepped over, and either way the pass commits
     /// a watermark above it and nothing reads it again without a rescan. The
     /// read is refused instead, naming the key, the index, the count and the
     /// block. `fetchLeaves` in `wallet-web/src/chain/reads.ts` refuses the
     /// identical set.
     ///
-    /// The ciphertext rule here is the coarse half of a rule that is finished
-    /// one layer up. Presence of `CoinbaseValues` does **not** decide that a
-    /// leaf is a coinbase: presence is the node's to write, and eight invented
-    /// bytes beside an incoming transfer used to route it onto the coinbase
-    /// rebuild and hide the payment. What decides is where the block headers
-    /// put the leaf, in `crate::typing`, which refuses an invented coinbase
-    /// value below a block's last leaf and a withheld one at the coinbase
-    /// position of a block this wallet mined. So this function refuses only
-    /// the shape that is wrong whatever kind the leaf turns out to be, a leaf
-    /// carrying neither key, and the typed rules refuse the rest by name.
+    /// `CoinbaseValues` is the one key a leaf is allowed not to have, and its
+    /// presence does **not** decide that a leaf is a coinbase: presence is the
+    /// node's to write, and eight invented bytes beside an incoming transfer
+    /// used to route it onto the coinbase rebuild and hide the payment. What
+    /// decides is where the block headers put the leaf, in `crate::typing`,
+    /// which refuses an invented coinbase value below a block's last leaf and
+    /// a withheld one at every coinbase position.
     pub fn leaves(
         &self,
         range: std::ops::Range<u64>,
@@ -858,47 +851,109 @@ impl<'a> Chain<'a> {
         Ok(out)
     }
 
-    /// Find a creation block on this selected header chain. Every range is
-    /// linked to the already verified higher range, so a historical proof from
-    /// a competing branch cannot supply a pruned ciphertext.
-    pub fn authenticated_ancestor(&self, at: &[u8; 32], wanted: u32) -> Result<[u8; 32]> {
-        let mut cache = self.archive_ancestry.borrow_mut();
-        if cache.as_ref().is_none_or(|(tip, _)| tip != at) {
-            let raw = self.header_at(at)?;
-            if raw.to_header_inputs()?.block_hash().to_bytes() != *at {
-                bail!("archive header does not hash to the selected block");
-            }
-            let number = raw.block_number()?;
-            *cache = Some((*at, [(number, *at)].into_iter().collect()));
+    /// One block's body, authenticated against the `extrinsicsRoot` in its own
+    /// header.
+    ///
+    /// Note ciphertexts are in block bodies and in no state map, so this is
+    /// the read that makes an incoming payment readable at all. Three steps,
+    /// and the order of them is the whole authentication:
+    ///
+    /// 1. The header at `at` is fetched and rehashed from its own preimage. A
+    ///    header that does not hash to the name it was asked for carries
+    ///    nothing: its `extrinsicsRoot` is then a number a node chose.
+    /// 2. The body at `at` is fetched.
+    /// 3. The body is rooted with
+    ///    [`qnero_state_proof::extrinsics_root`], the construction
+    ///    `frame_system` makes while `system_version` is 1, and compared
+    ///    against the header's field.
+    ///
+    /// What that buys is completeness as well as integrity. A state read
+    /// authenticates one key at a time and an absent answer has to be caught
+    /// by a rule about which keys a leaf owes; a body roots as a whole, so a
+    /// node that drops one extrinsic, reorders two, or appends one reaches a
+    /// root no header carries. There is no per-payload absence left to detect.
+    ///
+    /// `at` must be a hash this caller already trusts, which in a scan is a
+    /// block of the header walk. This selects no chain and verifies no proof
+    /// of work.
+    pub fn authenticated_body(&self, at: &[u8; 32]) -> Result<Vec<Vec<u8>>> {
+        let raw = self.header_at(at)?;
+        let number = raw.block_number()?;
+        let header = raw.to_header_inputs()?;
+        if header.block_hash().to_bytes() != *at {
+            bail!(
+                "the header this node served for block {number} hashes to {} where the hash \
+                 asked for is {}. The preimage is what authenticates the extrinsicsRoot a body \
+                 is checked against, so a header that does not hash to its own name \
+                 authenticates no body. Nothing has been changed.",
+                hex::encode(header.block_hash().to_bytes()),
+                hex::encode(at)
+            );
         }
-        let (_, hashes) = cache.as_mut().expect("initialized above");
-        if let Some(hash) = hashes.get(&wanted) {
-            return Ok(*hash);
+        let expected = decode_hash(&raw.extrinsics_root)?;
+
+        let block: Value = self.rpc.call("chain_getBlock", json!([hex_0x(at)]))?;
+        let extrinsics = block
+            .get("block")
+            .and_then(|block| block.get("extrinsics"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| withheld_body(at, number))?;
+        let body = extrinsics
+            .iter()
+            .map(|extrinsic| {
+                extrinsic
+                    .as_str()
+                    .ok_or_else(|| anyhow!("chain_getBlock returned an extrinsic that is not hex"))
+                    .and_then(decode_hex)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let recomputed = qnero_state_proof::extrinsics_root(&body)
+            .map_err(|error| anyhow!("block {number}'s body cannot be rooted: {error}"))?;
+        if recomputed != expected {
+            bail!(
+                "the body this node served for block {number} roots to {} where the \
+                 extrinsicsRoot in the header it hashes to is {}. The body is what carries every \
+                 note ciphertext, so a body the header does not carry is a node answering with \
+                 extrinsics this chain did not include. Nothing has been changed.",
+                hex::encode(recomputed),
+                hex::encode(expected)
+            );
         }
-        let (&number, &hash) = hashes.first_key_value().expect("selected head present");
-        if wanted > number {
-            bail!("ciphertext creation height is outside the selected header chain");
-        }
-        let mut top = ChainHead { number, hash };
-        while top.number > wanted {
-            let lower = wanted.max(top.number.saturating_sub(1024));
-            let blocks = self.header_chain(&top, lower)?;
-            for block in &blocks {
-                hashes.insert(block.number, block.hash);
-            }
-            if hashes.len() > 1_000_000 {
-                bail!("archive ancestry exceeds the supported scan size");
-            }
-            let first = blocks.first().context("archive header range is empty")?;
-            top = ChainHead {
-                number: first.number,
-                hash: first.hash,
-            };
-        }
-        Ok(top.hash)
+        Ok(body)
     }
 
-    /// One read window of the four per-leaf maps.
+    /// Every note ciphertext one block's body carries, in body order.
+    ///
+    /// The body has already been rooted to its header by
+    /// [`Chain::authenticated_body`], so these bytes are the chain's. Which
+    /// leaf each one belongs to is decided nowhere here: the scan trial
+    /// decrypts every one of them and the note that comes out has to match a
+    /// commitment the block demonstrably appended. See `crate::typing`.
+    ///
+    /// A payload this walk cannot reach refuses rather than being skipped. The
+    /// body is the only copy, so an extrinsic this wallet cannot walk is one
+    /// it cannot say carried no payment of this wallet's.
+    pub fn block_payloads(
+        &self,
+        metadata: &crate::metadata::ChainMetadata,
+        body: &[Vec<u8>],
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut out = Vec::new();
+        for (position, extrinsic) in body.iter().enumerate() {
+            out.extend(
+                crate::extrinsic::extrinsic_payloads(metadata, extrinsic).with_context(|| {
+                    format!(
+                        "extrinsic {position} of this block cannot be walked; scan progress is \
+                         unchanged"
+                    )
+                })?,
+            );
+        }
+        Ok(out)
+    }
+
+    /// One read window of the three per-leaf maps.
     fn leaf_window(
         &self,
         range: std::ops::Range<u64>,
@@ -906,62 +961,24 @@ impl<'a> Chain<'a> {
         leaf_count: u64,
     ) -> Result<Vec<LeafRecord>> {
         let at_hash = hex_0x(at);
-        let mut keys = Vec::with_capacity(((range.end - range.start) * 4) as usize);
+        let mut keys = Vec::with_capacity(((range.end - range.start) * 3) as usize);
         for index in range.clone() {
             keys.push(identity_map_key(ZK_TREE_PALLET, "Leaves", index));
-            keys.push(identity_map_key(SHIELDED_PALLET, "Ciphertexts", index));
             keys.push(identity_map_key(SHIELDED_PALLET, "LeafBlocks", index));
             keys.push(identity_map_key(SHIELDED_PALLET, "CoinbaseValues", index));
         }
-        let mut values = self.rpc.storage_batch(&keys, &at_hash)?;
-        let mut archived: std::collections::BTreeMap<u32, Vec<usize>> = Default::default();
-        for (offset, index) in range.clone().enumerate() {
-            if index < leaf_count && values[offset * 4].is_none() {
-                return Err(withheld_key(index, leaf_count, at, "ZkTree::Leaves"));
-            }
-            if index < leaf_count
-                && values[offset * 4 + 1].is_none()
-                && values[offset * 4 + 3].is_none()
-            {
-                let block = values[offset * 4 + 2]
-                    .as_ref()
-                    .ok_or_else(|| withheld_key(index, leaf_count, at, "Shielded::LeafBlocks"))?;
-                archived
-                    .entry(decode_u32_exact(block, "Shielded::LeafBlocks")?)
-                    .or_default()
-                    .push(offset);
-            }
-        }
-        for (block, offsets) in archived {
-            let created_at = self.authenticated_ancestor(at, block)?;
-            let historical_keys: Vec<_> = offsets
-                .iter()
-                .map(|offset| keys[offset * 4 + 1].clone())
-                .collect();
-            let historical = self.rpc.storage_batch(&historical_keys, &hex_0x(&created_at))
-                .with_context(|| format!("ciphertext archive unavailable at creation block {block}; scan progress is unchanged"))?;
-            for (offset, value) in offsets.into_iter().zip(historical) {
-                if value.is_none() {
-                    bail!("Shielded::Ciphertexts archive has no authenticated payload for leaf {} at creation block {block}; scan progress is unchanged", range.start + offset as u64);
-                }
-                values[offset * 4 + 1] = value;
-            }
-        }
+        let values = self.rpc.storage_batch(&keys, &at_hash)?;
         let mut out = Vec::with_capacity((range.end - range.start) as usize);
         for (offset, index) in range.enumerate() {
-            let commitment = values[offset * 4].clone();
-            let ciphertext = values[offset * 4 + 1].clone();
-            let block = values[offset * 4 + 2].clone();
-            let coinbase_value = values[offset * 4 + 3].clone();
+            let commitment = values[offset * 3].clone();
+            let block = values[offset * 3 + 1].clone();
+            let coinbase_value = values[offset * 3 + 2].clone();
             let below_count = index < leaf_count;
             if below_count && commitment.is_none() {
                 return Err(withheld_key(index, leaf_count, at, "ZkTree::Leaves"));
             }
             if below_count && block.is_none() {
                 return Err(withheld_key(index, leaf_count, at, "Shielded::LeafBlocks"));
-            }
-            if below_count && ciphertext.is_none() && coinbase_value.is_none() {
-                return Err(withheld_key(index, leaf_count, at, "Shielded::Ciphertexts"));
             }
             let commitment = commitment
                 .map(|bytes| {
@@ -977,10 +994,6 @@ impl<'a> Chain<'a> {
             out.push(LeafRecord {
                 index,
                 commitment,
-                // `BoundedVec<u8, _>` encodes as a `Vec<u8>`.
-                ciphertext: ciphertext
-                    .map(|bytes| decode_stored_bytes(&bytes, "Shielded::Ciphertexts", index))
-                    .transpose()?,
                 block_number: block
                     .map(|bytes| {
                         decode_u32_exact(&bytes, &format!("Shielded::LeafBlocks({index})"))
@@ -1219,13 +1232,9 @@ pub(crate) fn withheld_key(index: u64, leaf_count: u64, at: &[u8; 32], key: &str
             "Scanning past it would step over whatever was on that leaf and then write a \
              watermark above it"
         }
-        "Shielded::LeafBlocks" => {
+        _ => {
             "A leaf with no block is stepped over where it is a coinbase, and dated by nothing \
              where it is not, and the pass would write a watermark above it"
-        }
-        _ => {
-            "A leaf with no ciphertext and no coinbase value reads as a leaf nobody can open, so \
-             a payment on it would be skipped and the pass would write a watermark above it"
         }
     };
     anyhow!(
@@ -1233,6 +1242,30 @@ pub(crate) fn withheld_key(index: u64, leaf_count: u64, at: &[u8; 32], key: &str
          leaves. `pallet-shielded` writes that key in the same call that appends the leaf and \
          nothing removes it, so below the count it is an answer withheld rather than an absent \
          one. {cost}, and nothing would read it again. Nothing has been changed.",
+        hex::encode(at)
+    )
+}
+
+/// A block whose body this node will not serve.
+///
+/// The one failure the body path has that the state path did not: a node that
+/// answers the header and refuses, or empties, the block beside it. There is
+/// no per-payload absence to detect any more, because a body roots as a whole,
+/// so this is the whole of it.
+///
+/// It is refused rather than read as a block that carried nothing. A block
+/// that appended leaves carried the extrinsics that appended them, so an
+/// answer with no body in it is an answer withheld, and scanning past it would
+/// step over every payment in that block and write a watermark above it. The
+/// discipline is the one `withheld_key` already applies: name the block, name
+/// the height, change nothing.
+pub(crate) fn withheld_body(at: &[u8; 32], number: u32) -> anyhow::Error {
+    anyhow!(
+        "this node served a header for block {number} at {} and no body beside it. The block \
+         body is where every note ciphertext this chain publishes lives, so a block with no body \
+         is a payment nobody can find, and a pass that stepped over it would write a watermark \
+         above the whole block. Nothing has been changed: scan progress and notes are unchanged, \
+         and another node, or this one once it has the block, answers the same pass.",
         hex::encode(at)
     )
 }
@@ -1266,30 +1299,6 @@ pub(crate) fn padding_sentinel(index: u64, leaf_count: u64, at: &[u8; 32]) -> an
          above indices the chain has not filled. Nothing has been changed.",
         hex::encode(at)
     )
-}
-
-/// A stored `Vec<u8>`: a compact length prefix, then exactly that many bytes.
-///
-/// The length is checked against what follows it rather than left to
-/// `Vec::<u8>::decode`, which stops at the declared length and ignores
-/// whatever trails it. `decodeBytes` in `wallet-web/src/chain/reads.ts`
-/// refuses the same disagreement, and a wallet that took the prefix's word for
-/// it would hand the ciphertext to `try_receive` at a length the chain did not
-/// store: the decryption fails, the leaf counts as somebody else's, and the
-/// pass reports a zero balance over a completed scan.
-fn decode_stored_bytes(bytes: &[u8], what: &str, index: u64) -> Result<Vec<u8>> {
-    let mut cursor = bytes;
-    let value = Vec::<u8>::decode(&mut cursor)
-        .with_context(|| format!("{what}({index}) is not a byte vector"))?;
-    if !cursor.is_empty() {
-        bail!(
-            "{what}({index}) declares {} bytes and carries {} more after them. This runtime \
-             stores it differently from what this build decodes.",
-            value.len(),
-            cursor.len()
-        );
-    }
-    Ok(value)
 }
 
 /// A `u64` storage value, refused by name at any other width.
@@ -1393,46 +1402,8 @@ fn ensure_le(anchor: u32, head: u32) -> Result<()> {
 pub struct LeafRecord {
     pub index: u64,
     pub commitment: Option<[u8; 32]>,
-    pub ciphertext: Option<Vec<u8>>,
     pub block_number: Option<u32>,
     /// The public value of a coinbase note, as a count of pool steps. `Some` for exactly
     /// the leaves a block's coinbase minted.
     pub coinbase_value: Option<u64>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A stored `Vec<u8>` whose length prefix and body disagree is refused.
-    ///
-    /// `Vec::<u8>::decode` stops at the declared length and ignores whatever
-    /// trails it, so without this check a wallet hands `try_receive` a
-    /// ciphertext at a length the chain did not store: the decryption fails,
-    /// the leaf counts as somebody else's, and the pass reports a zero balance
-    /// over a completed scan. `decodeBytes` in
-    /// `wallet-web/src/chain/reads.ts` refuses the same disagreement.
-    #[test]
-    fn a_stored_byte_vector_whose_prefix_and_body_disagree_is_refused() {
-        // Compact 3, then three bytes: the honest shape.
-        let honest = [0x0cu8, 1, 2, 3];
-        assert_eq!(
-            decode_stored_bytes(&honest, "Shielded::Ciphertexts", 7).expect("decodes"),
-            vec![1, 2, 3]
-        );
-
-        // The same prefix with a fourth byte trailing it.
-        let trailing = [0x0cu8, 1, 2, 3, 4];
-        let error = decode_stored_bytes(&trailing, "Shielded::Ciphertexts", 7)
-            .expect_err("a body longer than its prefix is refused");
-        let message = format!("{error:#}");
-        assert!(message.contains("Shielded::Ciphertexts(7)"), "{message}");
-        assert!(message.contains("declares 3 bytes"), "{message}");
-        assert!(message.contains("carries 1 more"), "{message}");
-
-        // And a prefix that promises more than the value carries, which
-        // `Vec::<u8>::decode` refuses on its own.
-        let short = [0x0cu8, 1, 2];
-        assert!(decode_stored_bytes(&short, "Shielded::Ciphertexts", 7).is_err());
-    }
 }

@@ -53,19 +53,18 @@ fn a_note_re_included_at_another_leaf_is_moved_rather_than_skipped() {
         head_number: 11,
         ..Default::default()
     };
+    // The commitment goes in the tree and the payload goes in the body of the
+    // block that appended it, which is where the chain puts both.
     let place = |state: &mut NodeState, index: u64, block: u32| {
         state.put_storage(
             &identity_map_key("ZkTree", "Leaves", index),
             &commitment.to_bytes(),
         );
         state.put_storage(
-            &identity_map_key("Shielded", "Ciphertexts", index),
-            &codec::Encode::encode(&ciphertext),
-        );
-        state.put_storage(
             &identity_map_key("Shielded", "LeafBlocks", index),
             &codec::Encode::encode(&block),
         );
+        support::put_payload(state, block, &ciphertext);
     };
     place(&mut state, 7, 11);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(8));
@@ -91,11 +90,11 @@ fn a_note_re_included_at_another_leaf_is_moved_rather_than_skipped() {
         let mut state = node.state();
         for key in [
             identity_map_key("ZkTree", "Leaves", 7),
-            identity_map_key("Shielded", "Ciphertexts", 7),
             identity_map_key("Shielded", "LeafBlocks", 7),
         ] {
             state.storage.remove(&format!("0x{}", hex::encode(key)));
         }
+        state.blocks.remove(&11);
         place(&mut state, 8, 12);
         state.head_number = 13;
         state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(9));
@@ -176,13 +175,10 @@ fn a_note_re_included_below_the_watermark_is_still_moved() {
     let put = |state: &mut NodeState, index: u64, block: u32, cm: Digest, ct: &[u8]| {
         state.put_storage(&identity_map_key("ZkTree", "Leaves", index), &cm.to_bytes());
         state.put_storage(
-            &identity_map_key("Shielded", "Ciphertexts", index),
-            &codec::Encode::encode(&ct.to_vec()),
-        );
-        state.put_storage(
             &identity_map_key("Shielded", "LeafBlocks", index),
             &codec::Encode::encode(&block),
         );
+        support::put_payload(state, block, ct);
     };
     let place = move |state: &mut NodeState, index: u64, block: u32| {
         put(state, index, block, commitment, &ciphertext);
@@ -226,11 +222,13 @@ fn a_note_re_included_below_the_watermark_is_still_moved() {
         let mut state = node.state();
         for key in [
             identity_map_key("ZkTree", "Leaves", 7),
-            identity_map_key("Shielded", "Ciphertexts", 7),
             identity_map_key("Shielded", "LeafBlocks", 7),
         ] {
             state.remove_storage(&key);
         }
+        // The replacement branch is a different block 11, so its body is the
+        // one the re-included extrinsic lands in and the old one goes.
+        state.blocks.remove(&11);
         place(&mut state, 5, 11);
         put(&mut state, 6, 11, fresh.commitment(), &fresh_ciphertext);
         state.fork_from = 11;
@@ -311,13 +309,10 @@ fn a_settlement_that_is_orphaned_out_puts_the_note_back_in_the_balance() {
         &commitment.to_bytes(),
     );
     state.put_storage(
-        &identity_map_key("Shielded", "Ciphertexts", 7),
-        &codec::Encode::encode(&ciphertext),
-    );
-    state.put_storage(
         &identity_map_key("Shielded", "LeafBlocks", 7),
         &codec::Encode::encode(&11u32),
     );
+    support::put_payload(&mut state, 11, &ciphertext);
     state.put_storage(&storage_prefix("ZkTree", "LeafCount"), &encode_u64(8));
     let node = FakeNode::start(state);
     let rpc = RpcClient::new(&node.url);
@@ -386,23 +381,25 @@ fn ct_for(address: &qnero_notes::Address, note: &Note, tag: u8) -> Vec<u8> {
 fn put_leaf(state: &mut NodeState, index: u64, block: u32, cm: Digest, ct: &[u8]) {
     state.put_storage(&identity_map_key("ZkTree", "Leaves", index), &cm.to_bytes());
     state.put_storage(
-        &identity_map_key("Shielded", "Ciphertexts", index),
-        &codec::Encode::encode(&ct.to_vec()),
-    );
-    state.put_storage(
         &identity_map_key("Shielded", "LeafBlocks", index),
         &codec::Encode::encode(&block),
     );
+    support::put_payload(state, block, ct);
 }
 
-fn drop_leaf(state: &mut NodeState, index: u64) {
+/// Take a leaf off the tree, and the block's body with it.
+///
+/// Both, because a reorg takes the extrinsic out of the block as well as the
+/// leaf out of the tree, and a body left behind would root to a header the
+/// replacement branch never published.
+fn drop_leaf(state: &mut NodeState, index: u64, block: u32) {
     for key in [
         identity_map_key("ZkTree", "Leaves", index),
-        identity_map_key("Shielded", "Ciphertexts", index),
         identity_map_key("Shielded", "LeafBlocks", index),
     ] {
         state.remove_storage(&key);
     }
+    state.blocks.remove(&block);
 }
 
 fn nullifier_key(store: &qnero_wallet::store::WalletStore, commitment: &str) -> Vec<u8> {
@@ -474,7 +471,7 @@ fn an_orphaned_settlement_leaves_the_balance_backed_by_the_chain() {
     // carries the input note at leaf 5 and nothing else.
     {
         let mut state = node.state();
-        drop_leaf(&mut state, 6);
+        drop_leaf(&mut state, 6, 11);
         state.remove_storage(&used_key);
         state.fork_from = 11;
         state.fork_tag = 1;
@@ -600,8 +597,8 @@ fn a_spent_note_whose_own_leaf_was_orphaned_is_reported_too() {
     // The chain is back to carrying `first` at leaf 5 and nothing else.
     {
         let mut state = node.state();
-        drop_leaf(&mut state, 6);
-        drop_leaf(&mut state, 7);
+        drop_leaf(&mut state, 6, 11);
+        drop_leaf(&mut state, 7, 12);
         state.remove_storage(&first_key);
         state.remove_storage(&second_key);
         state.fork_from = 11;
