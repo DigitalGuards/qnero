@@ -132,8 +132,9 @@
               <b>Private by default, every spend a proof.</b>
               A call that moves transparent value between accounts a user chooses is refused by the
               runtime. The one transparent payout that survives the filter is the genesis vesting
-              claim, whose payee and amount are both fixed at genesis. A tech referendum dispatches
-              as Root and the filter does not reach Root.
+              claim, whose payee and amount are both fixed at genesis. A tech referendum would
+              dispatch as Root, which the filter does not reach, and the public testnet seeds no
+              collective members, so none can be raised there.
             </li>
             <li>
               <b>Proof of work, with no stake and no validators.</b>
@@ -432,8 +433,9 @@
                 <tr>
                   <th scope="row">Privacy by default</th>
                   <td class="col-self">
-                    Mandatory for user transfers; a tech referendum dispatches as Root and the
-                    call filter does not reach Root; shields, coinbase values and fees public
+                    Mandatory for user transfers; the runtime's tech referenda would dispatch as
+                    Root, which the call filter does not reach, and the public testnet seeds no
+                    members; shields, coinbase values and fees public
                   </td>
                   <td>Optional; transfers transparent; rewards paid to wormhole addresses</td>
                   <td>Absent, fully transparent ledger</td>
