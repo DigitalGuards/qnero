@@ -238,7 +238,7 @@ export interface ChainShape {
    *
    * The chain carries the payload of every slot of a settlement, the segments
    * it skipped included, so a body full of payloads that match no commitment
-   * in that block is the ordinary case and not a fault.
+   * in that block is ordinary rather than a fault.
    */
   strayPayloads?: ReadonlyMap<number, readonly Uint8Array[]>;
   /** A block whose header this node serves with a field changed after the hash was fixed. */

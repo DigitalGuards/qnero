@@ -350,7 +350,7 @@ export interface SyncReport {
    * disagree with, so there is nothing to relocate and nothing to warn about.
    * A payload that opens and matches no commitment in its block is the
    * ordinary answer on a chain that skips settlement segments, and it is
-   * discarded in silence. The command-line wallet's `SyncReport::warnings`
+   * discarded in silence rather than reported. The command-line wallet's `SyncReport::warnings`
    * carries the same list.
    */
   warnings: string[];

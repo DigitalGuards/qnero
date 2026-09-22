@@ -482,7 +482,7 @@ describe('a leaf whose kind the headers decide', () => {
    * A payload of this wallet's whose commitment its own block holds nowhere:
    * discarded, and in silence.
    *
-   * This is the ordinary case and not a fault. A settlement publishes the
+   * This is the ordinary case rather than a fault. A settlement publishes the
    * payload of every slot it carries, the segments the chain skipped included,
    * so a block full of other people's settlements produces these by the
    * hundred. The old per-leaf reading warned about it, because a payload sat

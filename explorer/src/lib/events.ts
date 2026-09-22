@@ -136,9 +136,9 @@ export interface SettlementOutput {
   /**
    * How many bytes of note ciphertext this output published.
    *
-   * The length and not the payload. `SlotSettled` publishes the two lengths
-   * and the payloads themselves ride in the block body, where the settlement
-   * extrinsic that appended the leaves carries them.
+   * The length is what the event publishes. The payloads themselves ride in
+   * the block body, inside the settlement extrinsic that appended the leaves,
+   * and in no chain state.
    */
   ciphertextBytes: number;
 }

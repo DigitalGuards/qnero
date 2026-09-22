@@ -26,7 +26,7 @@
  * answer is read from the same fixture file the Rust test reads, so the
  * request this page makes is pinned to a body whose root is byte fixed.
  *
- * **Release check, not covered here:** that a rebuilt module answers
+ * **Release check, left to the release runbook:** that a rebuilt module answers
  * `KAT.root` for `KAT.extrinsics`. The `extrinsicsRoot` export exists in the
  * crate and the staged modules under `public/wasm` predate it, so it is a
  * runbook item for the release qualification, run against a module built on a

@@ -42,7 +42,8 @@ describe('shield entries', () => {
   it('reads the ciphertext length the event publishes, with no payload in it', () => {
     expect(decodeShieldEntries(shield)[0]?.ciphertextBytes).toBe(1792);
     // The whole point of the event change: an archive node's historical
-    // `System::Events` carries the number and not the 1,792 bytes.
+    // `System::Events` keeps the number forever, where it used to keep the
+    // 1,792 bytes.
     expect(JSON.stringify(shieldFixture)).not.toContain('"ciphertext"');
   });
 

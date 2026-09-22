@@ -547,7 +547,7 @@ describe('the hex a scan hands the prover', () => {
     // prefix makes the rebuild refuse, and a refusal is the ordinary answer
     // for a coinbase somebody else mined, so the wallet reads its own mining
     // reward as nobody's with no error anywhere. This was a real bug, found
-    // against a live node and not by any assertion over a balance.
+    // against a live node rather than by any assertion over a balance.
     //
     // One commitment still crosses the boundary and this is it. A body
     // payload crosses on its own, because nothing beside it says which leaf
