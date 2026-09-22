@@ -120,6 +120,9 @@ pub fn read_values(
         .collect()
 }
 
+/// One storage entry recovered from a proof: its full key and its value.
+pub type StorageEntry = (Vec<u8>, Vec<u8>);
+
 /// Reconstruct the entire prefix. Traversal proves completeness: an omitted
 /// hashed branch fails, and an inline entry is recovered even if an RPC key
 /// listing omitted it. No values outside the prefix need to be downloaded.
@@ -127,7 +130,7 @@ pub fn read_prefix(
     root: [u8; 32],
     nodes: Vec<Vec<u8>>,
     prefix: &[u8],
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+) -> Result<Vec<StorageEntry>, String> {
     let db = database(nodes)?;
     let root = H256::from(root);
     let trie = TrieDBBuilder::<Layout>::new(&db, &root).build();
