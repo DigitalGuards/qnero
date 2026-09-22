@@ -5,9 +5,10 @@
  * Note ciphertexts are in block bodies and in no state map, so a body is the
  * read that makes an incoming payment readable at all, and a node that can
  * choose what is in one can choose which payments this wallet sees. Three
- * steps decide it, in this order: the header at the hash asked for is rehashed
- * from its own preimage, the body beside it is fetched, and the body is rooted
- * and compared against that header's `extrinsicsRoot`.
+ * steps decide it, in this order: the caller's header walk rehashes the header
+ * at the hash asked for and keeps its `extrinsicsRoot`, the body beside it is
+ * fetched, and the body is rooted and compared against that field. The first
+ * step is the caller's, so a body costs one `chain_getBlock` and no header.
  *
  * # What is asserted here and what is not
  *
@@ -34,11 +35,13 @@
  *   bytes, root
  *   `0xf96118c62fc4f880fe70d20216dec4fc50c6d2e595620c12675e95c8554c1af2`.
  *
- * **Release check, left to the release runbook:** that a rebuilt module answers
- * `KAT.root` for `KAT.extrinsics`. The `extrinsicsRoot` export exists in the
- * crate and the staged modules under `public/wasm` predate it, so it is a
- * runbook item for the release qualification, run against a module built on a
- * machine that can build one.
+ * **That a built module answers those roots is asserted elsewhere**, in
+ * `crates/qnero-prover-wasm/www/run-extrinsics-root.mjs`: it loads the module
+ * as built, wasm-bindgen'd and optimised into headless Chromium, initialises
+ * it and asks it for both roots, handing in the vectors from the same two
+ * files, because a copy of a known answer beside the page is a second answer
+ * that can be edited to agree with a module that moved. This file stubs the
+ * module out on purpose, because what it covers is the wiring around it.
  */
 
 import { readFileSync } from 'node:fs';
@@ -53,10 +56,12 @@ import {
   MAX_BODY_EXTRINSICS,
 } from '../src/chain/authenticated';
 import { blockPayloads, extrinsicPayloads } from '../src/chain/body';
-import { hexToBytes } from '../src/lib/hex';
+import { hexToBytes, readCompact } from '../src/lib/hex';
+import { concatBytes, encodeCompact } from '../src/lib/scale';
 import {
   BARE_PREAMBLE_V4,
   BARE_PREAMBLE_V5,
+  SIGNATURE_PAYLOAD_BYTES,
   coinbaseExtrinsic,
   settlementExtrinsic,
   shieldExtrinsic,
@@ -111,17 +116,16 @@ const VECTORS = [
 const AT = `0x${'aa'.repeat(32)}`;
 
 /**
- * A node that serves one header and one body.
+ * A node that serves one body, and a header nothing here asks for.
  *
- * The header hashes to `AT` unless a test says otherwise, because a header
- * that does not is the first refusal and the `extrinsicsRoot` inside it is
- * then a number a node chose.
+ * The root a body is checked against is the caller's: it comes off a header
+ * the header walk fetched and rehashed, so `authenticatedBody` is handed the
+ * number and asks for no header of its own. The `chain_getHeader` arm stays
+ * here so a test can assert it is never reached.
  */
 function node(options: {
   body?: unknown;
-  headerRoot?: string;
   answersRoot?: string;
-  hashesTo?: string;
   vector?: { extrinsics: readonly string[]; root: string };
 }): { context: ChainContext; calls: { method: string; params: unknown[] }[] } {
   const calls: { method: string; params: unknown[] }[] = [];
@@ -134,7 +138,7 @@ function node(options: {
           parentHash: `0x${'00'.repeat(32)}`,
           number: '0x9',
           stateRoot: `0x${'11'.repeat(32)}`,
-          extrinsicsRoot: options.headerRoot ?? vector.root,
+          extrinsicsRoot: vector.root,
           zkTreeRoot: `0x${'33'.repeat(32)}`,
           digest: { logs: [] },
         } as T);
@@ -146,7 +150,7 @@ function node(options: {
     },
   } as unknown as ChainContext;
   bindStateProofVerifier(context, {
-    headerBlockHash: () => Promise.resolve(options.hashesTo ?? AT),
+    headerBlockHash: () => Promise.resolve(AT),
     // Stood in for. The construction is the module's and is covered in Rust;
     // what a test needs here is an answer it chose, so the comparison against
     // the header can be driven in both directions.
@@ -170,15 +174,18 @@ describe('the body a header carries', () => {
         readStatePrefix: () => Promise.resolve([]),
       });
 
-      expect(await authenticatedBody(context, AT)).toEqual(vector.extrinsics);
+      expect(await authenticatedBody(context, AT, vector.root)).toEqual(vector.extrinsics);
       // The request shape, pinned: one list of `0x` hex extrinsics, in body
       // order, with each one's compact length prefix still on it. The trie is
       // keyed by the index, so a page that reordered or re-encoded them would
       // reach a root no header carries.
       expect(asked).toHaveBeenCalledWith(vector.extrinsics);
-      // And the order of the three steps: the header first, because its
-      // `extrinsicsRoot` is what the body is checked against.
-      expect(calls.map((call) => call.method)).toEqual(['chain_getHeader', 'chain_getBlock']);
+      // And the request count, which is the whole of what the root being a
+      // parameter buys: one `chain_getBlock` for the block and no header
+      // beside it. `pallet-shielded` mints a coinbase leaf every block, so
+      // nearly every block of a scanned range is read here, and a second round
+      // trip per block is what a rate-limited front end refuses.
+      expect(calls.map((call) => call.method)).toEqual(['chain_getBlock']);
     },
   );
 
@@ -191,20 +198,32 @@ describe('the body a header carries', () => {
       // node would actually have a value for.
       const other = VECTORS.find((candidate) => candidate.root !== vector.root);
       const { context } = node({ vector, answersRoot: other?.root });
-      await expect(authenticatedBody(context, AT)).rejects.toThrow(
+      await expect(authenticatedBody(context, AT, vector.root)).rejects.toThrow(
         /where the extrinsicsRoot in the header it hashes to is/,
       );
     },
   );
 
-  it('refuses a header that does not hash to the block asked for', async () => {
-    // The first step, and everything rests on it: a header that does not hash
-    // to its own name authenticates no body, because its `extrinsicsRoot` is
-    // then a number the node picked to match whatever it was about to serve.
-    const { context, calls } = node({ hashesTo: `0x${'bb'.repeat(32)}` });
-    await expect(authenticatedBody(context, AT)).rejects.toThrow(/hashes to another block/);
-    // And no body was fetched at all.
-    expect(calls.map((call) => call.method)).toEqual(['chain_getHeader']);
+  it('refuses a body the walked header does not root, and asks the node for no header', async () => {
+    // The root is the caller's, out of a header it fetched and rehashed, so
+    // this is the substitution the refetch used to catch: the node serves a
+    // body that roots somewhere else, and the number it is compared against is
+    // one it never got to choose.
+    const { context, calls } = node({ answersRoot: `0x${'bb'.repeat(32)}` });
+    await expect(authenticatedBody(context, AT, KAT.root)).rejects.toThrow(
+      /roots to 0xbbbb.* where the extrinsicsRoot in the header it hashes to is/,
+    );
+    expect(calls.map((call) => call.method)).toEqual(['chain_getBlock']);
+  });
+
+  it('refuses a root that is not a 32-byte hash before it fetches anything', async () => {
+    // A caller with no root for the block has nothing to authenticate a body
+    // against, and reading one anyway is reading extrinsics nothing checked.
+    const { context, calls } = node({});
+    await expect(authenticatedBody(context, AT, '0xbeef')).rejects.toThrow(
+      /which is not a 32-byte extrinsics root/,
+    );
+    expect(calls).toEqual([]);
   });
 
   it('refuses a body one flipped byte from the one the header carries', async () => {
@@ -220,7 +239,7 @@ describe('the body a header carries', () => {
       body: flipped,
       answersRoot: `0x${'cd'.repeat(32)}`,
     });
-    await expect(authenticatedBody(context, AT)).rejects.toThrow(
+    await expect(authenticatedBody(context, AT, KAT.root)).rejects.toThrow(
       /roots to 0xcdcd.* where the extrinsicsRoot in the header it hashes to is/,
     );
   });
@@ -232,10 +251,10 @@ describe('the body a header carries', () => {
     // node's answer is copied across the worker boundary at all.
     const one = `0x${'00'.repeat(1024 * 1024)}`;
     const { context, calls } = node({ body: Array.from({ length: 7 }, () => one) });
-    await expect(authenticatedBody(context, AT)).rejects.toThrow(
+    await expect(authenticatedBody(context, AT, KAT.root)).rejects.toThrow(
       new RegExp(`above ${MAX_BODY_BYTES} bytes`),
     );
-    expect(calls.map((call) => call.method)).toEqual(['chain_getHeader', 'chain_getBlock']);
+    expect(calls.map((call) => call.method)).toEqual(['chain_getBlock']);
   });
 
   it('refuses a body above the extrinsic-count budget before anything is hashed', async () => {
@@ -245,7 +264,7 @@ describe('the body a header carries', () => {
     const { context } = node({
       body: Array.from({ length: MAX_BODY_EXTRINSICS + 1 }, () => '0x'),
     });
-    await expect(authenticatedBody(context, AT)).rejects.toThrow(
+    await expect(authenticatedBody(context, AT, KAT.root)).rejects.toThrow(
       new RegExp(`above the ${MAX_BODY_EXTRINSICS} this wallet will hash`),
     );
   });
@@ -270,7 +289,9 @@ describe('the body a header carries', () => {
         readStateProof: () => Promise.resolve([]),
         readStatePrefix: () => Promise.resolve([]),
       });
-      await expect(authenticatedBody(broken, AT)).rejects.toThrow(/and no body beside it/);
+      await expect(authenticatedBody(broken, AT, KAT.root)).rejects.toThrow(
+        /and no body beside it/,
+      );
     }
   });
 });
@@ -354,6 +375,27 @@ describe('the walk out of a body', () => {
         hexToBytes(shieldExtrinsic(payload)),
       ),
     ).toThrow(/transaction extension this wallet cannot lay out/);
+  });
+
+  it('refuses an extrinsic that ends inside its transaction extensions', () => {
+    // The era byte decides the era's width, and an extrinsic that ends before
+    // it used to read `undefined` there, take the mortal branch and walk on
+    // two bytes further, which puts the call index at an offset this wallet
+    // would be guessing at. Every prefix of a signed extrinsic that stops
+    // inside the extensions is refused by name.
+    const whole = hexToBytes(shieldExtrinsic(new Uint8Array([7, 7, 7, 7])));
+    // Past the compact length prefix the fixture writes, to the extrinsic
+    // itself: the envelope is 1 preamble byte, 1 MultiAddress variant, 32
+    // signer bytes, 1 scheme byte and the signature payload.
+    const { next } = readCompact(whole, 0);
+    const inner = whole.subarray(next);
+    const extensionsAt = 2 + 32 + SIGNATURE_PAYLOAD_BYTES;
+    for (let end = extensionsAt; end < extensionsAt + 4; end += 1) {
+      const cut = inner.subarray(0, end);
+      expect(() =>
+        extrinsicPayloads(TEST_BODY_LAYOUT, concatBytes([encodeCompact(cut.length), cut])),
+      ).toThrow(/ends before its|ends inside its|runs past the end/);
+    }
   });
 
   it('refuses a call whose arguments it decodes short, naming the whole body position', () => {

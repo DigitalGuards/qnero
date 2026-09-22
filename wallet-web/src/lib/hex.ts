@@ -54,9 +54,12 @@ export interface CompactRead {
 /**
  * SCALE compact integer at `offset`.
  *
- * The big-integer mode (the top two bits set) is refused: nothing this
- * explorer parses by hand carries one, and accepting it silently would mean
- * guessing at a length.
+ * All four modes are read, the big-integer mode included: it carries a
+ * length byte and that many little-endian bytes, and a length that runs past
+ * the end refuses. What refuses on top of the encoding is a value above
+ * `Number.MAX_SAFE_INTEGER`, because every caller here uses the answer as an
+ * offset or a length into a body this page holds, and a value that cannot be
+ * one exactly would be an offset this wallet is guessing at.
  */
 export function readCompact(bytes: Uint8Array, offset: number): CompactRead {
   const first = bytes[offset];

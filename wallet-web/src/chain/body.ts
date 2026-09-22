@@ -283,13 +283,30 @@ function skipExtensions(layout: BodyLayout, body: Uint8Array, offset: number): n
       );
     }
     if (width === 'byte') {
+      if (cursor >= body.length) {
+        throw new Error(`it ends before its ${identifier} extension`);
+      }
       cursor += 1;
     } else if (width === 'era') {
-      // `Era::Immortal` is one zero byte; a mortal era is two.
-      cursor += body[cursor] === 0 ? 1 : 2;
+      // `Era::Immortal` is one zero byte; a mortal era is two. Reading the era
+      // byte past the end used to take the mortal branch and walk on two bytes
+      // further, which puts the call index at an offset this wallet is
+      // guessing at. `skip_extensions` in
+      // `crates/qnero-wallet/src/extrinsic.rs` checks the byte the same way.
+      const era = body[cursor];
+      if (era === undefined) {
+        throw new Error('it ends before its era');
+      }
+      cursor += era === 0 ? 1 : 2;
+      if (cursor > body.length) {
+        throw new Error('it ends inside its era');
+      }
     } else if (width === 'compact') {
       cursor = readCompact(body, cursor).next;
     }
+  }
+  if (cursor > body.length) {
+    throw new Error('its transaction extensions run past the end of the extrinsic');
   }
   return cursor;
 }

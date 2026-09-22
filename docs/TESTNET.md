@@ -118,21 +118,40 @@ crate's surface is a wallet whose screens die on an export that is not there
 and nothing in the bundle can catch it: the module is fetched at runtime, never
 imported, never typed. On a machine that is not allowed to build wasm, build
 the two modules elsewhere, copy them into `crates/qnero-prover-wasm/www/pkg`
-and `www/pkg-threaded`, and set the flag:
+and `www/pkg-threaded`, write a SHA-256 manifest on the machine that built
+them, and set the flag:
 
 ```bash
+# on the machine that built the modules
+cd crates/qnero-prover-wasm/www
+sha256sum pkg/qnero_prover_wasm_bg.wasm \
+    pkg-threaded/qnero_prover_wasm_bg.wasm > wasm-prebuilt.sha256
+```
+
+```bash
+# on the deploying machine, with the manifest copied in beside the modules
 QNERO_WASM_PREBUILT=1 QNERO_HOST=<user>@<host> QNERO_DOMAIN=<domain> \
   ./scripts/deploy-testnet.sh wallet
 ```
 
 It skips `build-wasm.sh` and `build-threaded-wasm.sh` and stages what is
-already in those two directories. It does not skip `stage-wasm.sh`'s export
-check, which reads every `js_name` the crate declares and refuses a module that
-is missing one, so the flag trades a build for a copy and not for a weaker
-deploy. Build the modules with binaryen 116 or newer on `PATH`: the version
-some distributions package, 108, emits a module that fails to initialise in
-current Chromium with `WebAssembly.Table.grow(): failed to grow table`, and
-nothing before the browser says so. `cargo install wasm-opt --locked` is the
+already in those two directories. What it does instead is stricter than a local
+build, because these are bytes the deploy did not produce:
+
+- Both `.wasm` files are pinned against the manifest, read from
+  `wallet-web/wasm-prebuilt.sha256` or from wherever `QNERO_WASM_SHA256`
+  points. A manifest that is missing, unreadable or disagrees refuses the
+  stage. The export check alone does not cover this: it reads every `js_name`
+  the crate declares and refuses glue that is missing one, and the glue is
+  text, so a module with every export and other bytes in it passes it.
+- A missing `www/pkg-threaded` refuses as well, where a local build only warns
+  and falls back. Under the flag it is a copy that did not finish, and staging
+  it would ship a wallet proving a payment in 37.6 s where it takes 11.2 s.
+
+Build the modules with binaryen 116 or newer on `PATH`: the version some
+distributions package, 108, emits a module that fails to initialise in current
+Chromium with `WebAssembly.Table.grow(): failed to grow table`, and nothing
+before the browser says so. `cargo install wasm-opt --locked` is the
 version-pinned way to get one.
 
 **Deploying the faucet on its own.** `node` builds, copies and restarts both

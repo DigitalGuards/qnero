@@ -836,7 +836,7 @@ impl Wallet {
                     if !appended.contains(&block.number) {
                         continue;
                     }
-                    let body = chain.authenticated_body(&block.hash)?;
+                    let body = chain.authenticated_body(block)?;
                     for payload in chain.block_payloads(metadata, &body)? {
                         let Ok(parsed) = NoteCiphertext::from_bytes(&payload) else {
                             continue;
@@ -2393,11 +2393,15 @@ pub struct SyncReport {
 }
 
 /// The remaining trust boundary; the browser uses shorter phone-facing copy.
-/// State proofs authenticate values relative to the selected header chain;
-/// configured node and checkpoint policy still select that chain.
+///
+/// Two reads and one boundary. A storage value is proved against the
+/// `stateRoot` of a selected header and a payment is read out of a block body
+/// rooted to that header's `extrinsicsRoot`, so both are facts of the block.
+/// What neither authenticates is which chain those headers are: the configured
+/// node and the checkpoint policy select it, and no proof of work is verified.
 pub const CIPHERTEXT_SUBSTITUTION_HINT: &str =
-    "Storage reads are authenticated to the selected headers. This wallet trusts the configured \
-     node for chain selection and does not verify proof of work.";
+    "Payments and storage values are authenticated to the selected headers. This wallet trusts \
+     the configured node for chain selection and does not verify proof of work.";
 
 /// What a rescan does not do, in one line, for the report and the CLI.
 ///

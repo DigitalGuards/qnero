@@ -9,6 +9,7 @@ use qnero_circuit::chain::MAX_TREE_DEPTH;
 use qnero_circuit::header::{HeaderInputs, DIGEST_LOGS_SIZE};
 use qnero_circuit::merkle::{empty_digest, CommitmentTree, MerklePath, SIBLINGS_PER_LEVEL};
 use qnero_notes::Digest;
+use qnero_state_proof::{MAX_BODY_BYTES, MAX_BODY_EXTRINSICS};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -515,6 +516,7 @@ impl<'a> Chain<'a> {
                 number,
                 hash,
                 parent_hash,
+                extrinsics_root: decode_hash(&raw.extrinsics_root)?,
                 zk_tree_root: Digest::from_bytes(&decode_hash(&raw.zk_tree_root)?).map_err(
                     |_| anyhow!("block {number}'s zkTreeRoot is not a canonical digest"),
                 )?,
@@ -855,49 +857,79 @@ impl<'a> Chain<'a> {
     /// header.
     ///
     /// Note ciphertexts are in block bodies and in no state map, so this is
-    /// the read that makes an incoming payment readable at all. Three steps,
-    /// and the order of them is the whole authentication:
+    /// the read that makes an incoming payment readable at all. Two steps
+    /// here, and one the caller has already taken:
     ///
-    /// 1. The header at `at` is fetched and rehashed from its own preimage. A
-    ///    header that does not hash to the name it was asked for carries
-    ///    nothing: its `extrinsicsRoot` is then a number a node chose.
-    /// 2. The body at `at` is fetched.
-    /// 3. The body is rooted with
+    /// 0. `block.extrinsics_root` came off a header the header walk fetched
+    ///    and rehashed from its own preimage, and whose hash is
+    ///    `block.hash`. That is the step this function no longer takes for
+    ///    itself: a header that does not hash to the name it was asked for
+    ///    carries nothing, so its `extrinsicsRoot` is a number a node chose,
+    ///    and [`Chain::header_chain`] refuses such a header before any body
+    ///    is asked for.
+    /// 1. The body at `block.hash` is fetched.
+    /// 2. The body is rooted with
     ///    [`qnero_state_proof::extrinsics_root`], the construction
     ///    `frame_system` makes while `system_version` is 1, and compared
-    ///    against the header's field.
+    ///    against that field.
     ///
-    /// What that buys is completeness as well as integrity. A state read
-    /// authenticates one key at a time and an absent answer has to be caught
-    /// by a rule about which keys a leaf owes; a body roots as a whole, so a
-    /// node that drops one extrinsic, reorders two, or appends one reaches a
-    /// root no header carries. There is no per-payload absence left to detect.
+    /// **Why the root arrives with the block.** The walk already fetches and
+    /// rehashes every header in the range, and it kept the hash while
+    /// dropping the `extrinsicsRoot` beside it. Refetching the header here
+    /// was a second `chain_getHeader` per block on top of the body, and
+    /// `pallet-shielded` mints a coinbase leaf every block, so nearly every
+    /// block of a scanned range paid for the same header twice. The node's
+    /// front end answers `429 Too Many Requests` after about eighty requests
+    /// in a window, which is what makes the count per block decide whether a
+    /// scan finishes at all. What is trusted is unchanged: the root is the
+    /// number the old refetch was checking against.
     ///
-    /// `at` must be a hash this caller already trusts, which in a scan is a
-    /// block of the header walk. This selects no chain and verifies no proof
-    /// of work.
-    pub fn authenticated_body(&self, at: &[u8; 32]) -> Result<Vec<Vec<u8>>> {
-        let raw = self.header_at(at)?;
-        let number = raw.block_number()?;
-        let header = raw.to_header_inputs()?;
-        if header.block_hash().to_bytes() != *at {
-            bail!(
-                "the header this node served for block {number} hashes to {} where the hash \
-                 asked for is {}. The preimage is what authenticates the extrinsicsRoot a body \
-                 is checked against, so a header that does not hash to its own name \
-                 authenticates no body. Nothing has been changed.",
-                hex::encode(header.block_hash().to_bytes()),
-                hex::encode(at)
-            );
-        }
-        let expected = decode_hash(&raw.extrinsics_root)?;
+    /// What the root check buys is completeness as well as integrity. A state
+    /// read authenticates one key at a time and an absent answer has to be
+    /// caught by a rule about which keys a leaf owes; a body roots as a whole,
+    /// so a node that drops one extrinsic, reorders two, or appends one
+    /// reaches a root no header carries. There is no per-payload absence left
+    /// to detect.
+    ///
+    /// `block` must be a block of the header walk, which is a hash this caller
+    /// already trusts and the root of the header that hashes to it. This
+    /// selects no chain and verifies no proof of work.
+    pub fn authenticated_body(&self, block: &VerifiedBlock) -> Result<Vec<Vec<u8>>> {
+        let at = &block.hash;
+        let number = block.number;
+        let expected = block.extrinsics_root;
 
-        let block: Value = self.rpc.call("chain_getBlock", json!([hex_0x(at)]))?;
-        let extrinsics = block
+        let answer: Value = self.rpc.call("chain_getBlock", json!([hex_0x(at)]))?;
+        let extrinsics = answer
             .get("block")
             .and_then(|block| block.get("extrinsics"))
             .and_then(Value::as_array)
             .ok_or_else(|| withheld_body(at, number))?;
+        // The two budgets, applied to what the node handed over before any of
+        // it is decoded, which is the discipline the browser holds this read
+        // to: a body inside these and outside the runtime's own limit simply
+        // roots to a header no chain published.
+        if extrinsics.len() > MAX_BODY_EXTRINSICS {
+            bail!(
+                "this node served a body for block {number} carrying {} extrinsics, above the \
+                 {MAX_BODY_EXTRINSICS} this wallet will hash. Nothing has been read from it.",
+                extrinsics.len()
+            );
+        }
+        let mut bytes = 0usize;
+        for extrinsic in extrinsics {
+            let hex = extrinsic
+                .as_str()
+                .ok_or_else(|| anyhow!("chain_getBlock returned an extrinsic that is not hex"))?;
+            bytes = bytes.saturating_add(hex.len() / 2);
+            if bytes > MAX_BODY_BYTES {
+                bail!(
+                    "this node served a body for block {number} above {MAX_BODY_BYTES} bytes, \
+                     which is more than `RuntimeBlockLength` lets a block carry. Nothing has \
+                     been read from it."
+                );
+            }
+        }
         let body = extrinsics
             .iter()
             .map(|extrinsic| {
@@ -1383,6 +1415,13 @@ pub struct VerifiedBlock {
     pub number: u32,
     pub hash: [u8; 32],
     pub parent_hash: [u8; 32],
+    /// The root of this block's body, off the same rehashed header.
+    ///
+    /// Carrying it is what lets [`Chain::authenticated_body`] root a block
+    /// body without asking for that header a second time: a body costs one
+    /// `chain_getBlock` and no `chain_getHeader`, which against a
+    /// rate-limited front end is what decides whether a scan finishes.
+    pub extrinsics_root: [u8; 32],
     /// The commitment-tree root this block published, which is what a leaf
     /// range is checked against.
     pub zk_tree_root: Digest,

@@ -275,11 +275,20 @@ if has_stage wallet; then
     #
     # QNERO_WASM_PREBUILT=1 is the escape hatch for a machine that is not
     # allowed to build wasm: the two modules are built elsewhere and rsynced
-    # into www/pkg and www/pkg-threaded, and this stage only stages them. The
-    # export check below is what keeps that honest, so the flag trades a build
-    # for a copy and not for a weaker deploy.
+    # into www/pkg and www/pkg-threaded, and this stage only stages them.
+    #
+    # What keeps that honest is the digest. The export check says the names the
+    # crate declares appear in the generated glue, which a module with every
+    # export and other bytes in it also passes, and the glue is text. So
+    # stage-wasm.sh pins both `.wasm` files against a SHA-256 manifest under
+    # this flag and refuses a manifest that is missing or disagrees, and it
+    # refuses a missing threaded package, which would otherwise ship a wallet
+    # that proves a payment in 37.6 s where it takes 11.2 s. Write the manifest on
+    # the machine that built the modules and bring it with them; point
+    # QNERO_WASM_SHA256 at it, or put it at wallet-web/wasm-prebuilt.sha256.
     if [ "${QNERO_WASM_PREBUILT:-0}" = "1" ]; then
       echo "QNERO_WASM_PREBUILT=1: staging the prover modules already in the crate, building neither"
+      export QNERO_WASM_PREBUILT QNERO_WASM_SHA256
     else
       (
         cd "$here/crates/qnero-prover-wasm"

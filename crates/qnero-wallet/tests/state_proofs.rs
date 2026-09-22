@@ -91,20 +91,39 @@ fn a_body_is_authenticated_against_its_own_headers_extrinsics_root() {
     let node = FakeNode::start(state);
     let rpc = RpcClient::new(&node.url);
     let chain = Chain::new(&rpc);
-    let at = node.state().hash_at(2);
 
-    let body = chain.authenticated_body(&at).expect("the body roots");
+    // The block the body is read at comes out of the header walk, which
+    // rehashed its header and kept the `extrinsicsRoot` beside the hash. That
+    // is the whole of what authenticates the body, and it is why this read
+    // asks for no header of its own.
+    let head = chain.head().unwrap();
+    let walked = chain.header_chain(&head, 0).expect("the walk verifies");
+    let block = walked
+        .iter()
+        .find(|block| block.number == 2)
+        .expect("block 2 is in the walk")
+        .clone();
+    assert_eq!(block.hash, node.state().hash_at(2));
+    let headers_after_walk = node.state().calls("chain_getHeader");
+
+    let body = chain.authenticated_body(&block).expect("the body roots");
     assert_eq!(body.len(), 2);
     let payloads = chain
         .block_payloads(&support::test_metadata(), &body)
         .expect("the envelopes walk");
     assert_eq!(payloads, vec![vec![0x11u8; 96], vec![0x22u8; 96]]);
+    // One `chain_getBlock` for the block and no header beside it.
+    // `pallet-shielded` mints a coinbase leaf every block, so nearly every
+    // block of a scanned range is read here, and a second round trip per block
+    // is what a rate-limited front end refuses.
+    assert_eq!(node.state().calls("chain_getBlock"), 1);
+    assert_eq!(node.state().calls("chain_getHeader"), headers_after_walk);
 
-    // One byte, changed on the way out, so the header still carries the root
-    // of the body this node holds.
+    // One byte, changed on the way out, so the header the walk verified still
+    // carries the root of the body this node holds.
     node.state().tampered_bodies.insert(2);
     let refused = chain
-        .authenticated_body(&at)
+        .authenticated_body(&block)
         .expect_err("a body the header does not carry is refused");
     let message = format!("{refused:#}");
     assert!(message.contains("roots to"), "{message}");
@@ -114,8 +133,9 @@ fn a_body_is_authenticated_against_its_own_headers_extrinsics_root() {
     node.state().tampered_bodies.clear();
     node.state().withheld_bodies.insert(2);
     let refused = chain
-        .authenticated_body(&at)
+        .authenticated_body(&block)
         .expect_err("a withheld body is refused");
     let message = format!("{refused:#}");
     assert!(message.contains("no body beside it"), "{message}");
+    assert_eq!(node.state().calls("chain_getHeader"), headers_after_walk);
 }

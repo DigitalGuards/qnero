@@ -1756,16 +1756,15 @@ are cited at each site.
    blocks, which is latency M5 does not spend. See "What every chain reader
    learns".
 10. **A memo is capped at 61 bytes.** Every memo is padded to one size so the
-    published ciphertext lengths say nothing, and the fee bounds the pad ahead
-    of the ciphertext cap: it has to leave `2 * (1731 + pad)` a
-    `CiphertextBytesPerFeeQuantum` bucket below `2 * MaxCiphertextBytes`, or a
-    settler pads to the cap and writes permanent state for free. A longer memo
-    is refused, so nothing goes out at a length of its own. Raising the cap is
-    a coordinated change: the pad and the runtime's divisor move together, and
-    every wallet on the chain has to agree on the size or the padding buys
-    nothing. A runtime that merged the two buckets is a warning and not a
-    refusal, for the reason "What every chain reader learns" gives, so a wallet
-    can go on sending against a chain whose fee schedule it cannot fix.
+    published ciphertext lengths say nothing, and 61 is what
+    `MaxCiphertextBytes` leaves over a memoless ciphertext once the pad is in
+    it. A longer memo is refused, so nothing goes out at a length of its own.
+    The chain now refuses a ciphertext of any other length outright, so the
+    padded pair a fee bucket used to have to price is a state nobody can
+    reach: the fee-side bound on the pad, and the warning a runtime that
+    merged two buckets produced, are gone from both wallets. See "What it
+    replaces" above. Raising the cap stays a coordinated change: every wallet
+    on the chain has to agree on the size or the padding buys nothing.
 11. **A conflict set holds value the wallet can never reach.** Two notes
     sharing a nullifier are one spendable value, and the smaller members are
     dead weight that the store keeps and the balance does not count. Nothing in

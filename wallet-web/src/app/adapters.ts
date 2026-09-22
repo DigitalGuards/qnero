@@ -49,11 +49,13 @@ export function chainAdapter(context: ChainContext, limits: ProverLimits): SyncC
     treeShape: (at) => fetchTreeTotals(context, at, limits.max_tree_depth),
     leaves: (from, to, at, leafCount, onProgress) =>
       fetchLeaves(context, from, to, at, leafCount, onProgress),
-    // The body is fetched, rooted against the `extrinsicsRoot` of a header
-    // that hashes to `at`, and walked down to the payloads its calls carry.
-    // Composed here rather than in either half, so nothing can take a body
-    // without the root check that authenticates it.
-    payloads: async (at) => blockPayloads(context.bodyLayout, await authenticatedBody(context, at)),
+    // The body is fetched, rooted against the `extrinsicsRoot` the caller
+    // carried out of the header walk that rehashed the header hashing to `at`,
+    // and walked down to the payloads its calls carry. Composed here rather
+    // than in either half, so nothing can take a body without the root check
+    // that authenticates it.
+    payloads: async (at, extrinsicsRoot) =>
+      blockPayloads(context.bodyLayout, await authenticatedBody(context, at, extrinsicsRoot)),
     usedNullifiers: (at, onProgress) => fetchUsedNullifiers(context, at, undefined, onProgress),
     headers: (anchor, top, onHeader, onProgress) =>
       fetchHeaderRange(context, anchor, top, onHeader, onProgress),
