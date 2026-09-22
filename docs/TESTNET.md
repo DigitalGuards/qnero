@@ -354,16 +354,19 @@ are byte-identical and the stage is idempotent. The reproducibility test
 compares everything except `bootNodes` and validates the multiaddr shape, so a
 committed list keeps it green.
 
-One caveat, found 2026-09-21: the committed spec's runtime wasm was exported by
-a binary built in a checkout at another path (the worktree PR #5 came from),
-and a build of the same sources with the same compiler and lock file in this
-checkout produces a wasm that differs in symbol names and custom-section order.
-The likely cause is cargo's crate metadata hash, which for path dependencies
-includes the path. Until the spec is regenerated at the next relaunch the byte
-comparison fails here, and it must not be regenerated before then: a different
-wasm is a different genesis hash, which would cut new nodes off from the live
-chain. Nothing about a node release depends on it; the node stage copies the
-binary and the host keeps its spec.
+One property of that comparison is worth knowing before any regeneration. The
+exported runtime wasm is bound to the checkout the node was built in: the same
+sources, the same compiler and the same lock file at two different absolute
+paths produce two modules whose mangled symbol names carry different hash
+suffixes, because cargo's crate metadata hash includes the path of a path
+dependency. The wasm holds no literal path, which is what
+`runtime_wasm_uses_portable_source_paths` asserts, and it is still not
+byte-identical. Measured on 2026-09-22, two binaries built from an identical
+tree at two paths exported specs that differed in `:code` alone, by 377 bytes,
+with every other genesis key equal. So `--check` answers for the binary that
+wrote the file, and a regeneration from a second checkout is a second genesis
+hash. Regenerate once, in the tree the release binaries are built in, and ship
+that binary with it.
 
 A peer id is public and belongs in a public repository. The key that produces
 it is not, and it never leaves `/etc/qnero/node-key`.
