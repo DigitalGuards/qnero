@@ -831,8 +831,9 @@ impl Wallet {
                 // not fetched at all, because a block that appended nothing
                 // appended nothing of this wallet's either.
                 let mut by_commitment: Option<HashMap<(u32, Digest), u64>> = None;
+                let appended: BTreeSet<u32> = typed.iter().map(|leaf| leaf.block_number).collect();
                 for block in blocks.iter().skip(1) {
-                    if !typed.iter().any(|leaf| leaf.block_number == block.number) {
+                    if !appended.contains(&block.number) {
                         continue;
                     }
                     let body = chain.authenticated_body(&block.hash)?;
