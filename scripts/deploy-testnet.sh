@@ -11,6 +11,13 @@
 #   site      build nothing, rsync site/
 #   wallet    rebuild the wasm prover, build Qloak against wss://rpc.<domain>,
 #             rsync wallet-web/dist/
+#             QNERO_WASM_PREBUILT=1 skips the two prover builds and stages the
+#             modules already in crates/qnero-prover-wasm/www/pkg and
+#             www/pkg-threaded. It is for a workstation that does not build
+#             wasm: build the modules elsewhere, rsync them into those two
+#             directories, and deploy with the flag set. What it does not skip
+#             is stage-wasm.sh's export check, so a module older than the
+#             crate's surface still refuses the deploy.
 #   explorer  build silQ Road, rsync explorer/dist/
 #   config    write the two runtime config.json files
 #
@@ -265,11 +272,21 @@ if has_stage wallet; then
     # export that is not there, and the bundle cannot know: the module is
     # fetched at runtime, never imported, never typed. stage-wasm.sh also
     # refuses a module missing an export the crate declares, as the backstop.
-    (
-      cd "$here/crates/qnero-prover-wasm"
-      "${build_nice[@]}" ./scripts/build-wasm.sh
-      "${build_nice[@]}" ./scripts/build-threaded-wasm.sh
-    )
+    #
+    # QNERO_WASM_PREBUILT=1 is the escape hatch for a machine that is not
+    # allowed to build wasm: the two modules are built elsewhere and rsynced
+    # into www/pkg and www/pkg-threaded, and this stage only stages them. The
+    # export check below is what keeps that honest, so the flag trades a build
+    # for a copy and not for a weaker deploy.
+    if [ "${QNERO_WASM_PREBUILT:-0}" = "1" ]; then
+      echo "QNERO_WASM_PREBUILT=1: staging the prover modules already in the crate, building neither"
+    else
+      (
+        cd "$here/crates/qnero-prover-wasm"
+        "${build_nice[@]}" ./scripts/build-wasm.sh
+        "${build_nice[@]}" ./scripts/build-threaded-wasm.sh
+      )
+    fi
     ./scripts/stage-wasm.sh --threaded
     # Pinning the endpoint at build time narrows the bundle's own
     # content-security-policy from `connect-src 'self' ws: wss:` to this one
