@@ -236,7 +236,7 @@ benchmarks! {
 		let s in 0 .. (T::MaxScheduledPerBlock::get() - 1);
 		let when = BLOCK_NUMBER.into();
 		let priority = 0;
-		let call = Box::new(SystemCall::set_storage { items: vec![] }.into());
+		let call = Box::new(SystemCall::remark { remark: vec![] }.into());
 
 		fill_schedule::<T>(when, s)?;
 	}: _(RawOrigin::Root, when, priority, call)
@@ -277,7 +277,7 @@ benchmarks! {
 		let id = u32_to_name(s);
 		let when = BLOCK_NUMBER.into();
 		let priority = 0;
-		let call = Box::new(SystemCall::set_storage { items: vec![] }.into());
+		let call = Box::new(SystemCall::remark { remark: vec![] }.into());
 
 		fill_schedule::<T>(when, s)?;
 	}: _(RawOrigin::Root, id, when, priority, call)
