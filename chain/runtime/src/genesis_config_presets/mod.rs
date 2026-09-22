@@ -606,15 +606,15 @@ fn qnero_testnet_faucet_account() -> AccountId {
 /// Every absence here is deliberate, and each one costs something worth
 /// naming:
 ///
-/// - **No vesting table.** `GENESIS_VESTING_*` and [`testnet_vesting_schedules`] are the dev and
+/// - **No vesting table.** `GENESIS_VESTING_*` and `testnet_vesting_schedules` are the dev and
 ///   Heisenberg example table; a public chain that shipped them would vest real supply to the three
 ///   well-known public keys. The pot still receives its existential deposit from
-///   [`genesis_template`], which is what lets a schedule be created later.
+///   `genesis_template`, which is what lets a schedule be created later.
 /// - **No mainnet placeholder.** `mainnet_vesting::PLACEHOLDER` pays 2% of the supply to an address
 ///   nobody holds a key for. It reaches a chain only through [`mainnet_config_genesis`], so not
 ///   calling that is the whole defence, and `FINALIZED` is the backstop.
 /// - **No treasury.** There is nothing for one to hold and nothing to spend from it, so the field
-///   is `None` rather than an account picked to fill it in. See [`TreasuryGenesis`].
+///   is `None` rather than an account picked to fill it in. See `TreasuryGenesis`.
 /// - **No collective exists to seed.** The tech collective, its referenda instance and the
 ///   fast-upgrade origin were removed from the runtime itself, so this is a property of the binary
 ///   rather than of the preset. No chain this binary launches has an origin that can change its own
