@@ -21,13 +21,13 @@
  * by the next.
  */
 
-import { hexByteLength, hexToBytes, leBytesToBigInt, normaliseHash, readCompact } from '../lib/hex';
+import { hexByteLength, hexToBytes, leBytesToBigInt, normaliseHash } from '../lib/hex';
 import { birthdayEpochOf } from '../wallet/model';
 import { parseRawHeader, type RawChainHeader } from './anchor';
 import { storage, type ChainContext } from './api';
-import { authenticatedValues, authenticatedPrefix, authenticatedHeaderHash } from './authenticated';
+import { authenticatedValues, authenticatedPrefix } from './authenticated';
 
-/** Leaves per `state_getReadProof` when four items are read per leaf. */
+/** Leaves per `state_getReadProof` when three items are read per leaf. */
 export const LEAF_BATCH = 64;
 
 /** Leaves per call when one item is read per leaf, so the page is wider. */
@@ -477,7 +477,7 @@ export async function fetchBirthday(
  * authenticated block ranges are what decide, and this is what they are
  * checked against. Read on its own, one key per leaf, because the typing pass
  * needs every leaf's block before the windowed scan can say which leaf is a
- * block's last one, and a window carries kilobytes of ciphertext per leaf.
+ * block's last one, and the windowed read carries three keys per leaf.
  */
 export async function fetchLeafBlocks(
   context: ChainContext,
@@ -686,42 +686,22 @@ export async function fetchLeafHashes(
   return out;
 }
 
-/** One leaf, as the chain holds it. */
+/**
+ * One leaf, as the chain holds it.
+ *
+ * No ciphertext: the chain publishes note ciphertexts in block bodies and in
+ * no state map, and the scan reads them there
+ * (`chain/authenticated.ts`, `chain/body.ts`). Which leaf a payload belongs to
+ * is decided by the commitment it opens rather than by anything answered
+ * beside the leaf, so there is nothing here for a node to withhold per
+ * payment.
+ */
 export interface LeafRecord {
   index: number;
   commitment: string | null;
-  /** The ciphertext itself, decoded out of its `Vec<u8>` length prefix. */
-  ciphertext: Uint8Array | null;
   blockNumber: number | null;
   /** Set for exactly the leaves a block's coinbase minted, as a count of pool steps. */
   coinbaseSteps: bigint | null;
-}
-
-/**
- * A stored `Vec<u8>`: a compact length prefix, then exactly that many bytes.
- *
- * The length is checked against what follows it rather than skipped. The CLI
- * runs `Vec::<u8>::decode` here (`crates/qnero-wallet/src/chain.rs`), which
- * refuses a value whose prefix and body disagree. A reader that only skipped
- * the prefix would hand the worker a truncated ciphertext, that ciphertext
- * would fail to decrypt, and the leaf would be counted as somebody else's:
- * a zero balance over a completed sync, with nothing said anywhere.
- */
-function decodeBytes(value: string | undefined, what: string): Uint8Array | null {
-  if (value === undefined) {
-    return null;
-  }
-  const bytes = hexToBytes(value);
-  const { value: length, next } = readCompact(bytes, 0);
-  const carried = bytes.length - next;
-  if (carried !== length) {
-    throw new Error(
-      `${what} declares ${length} bytes and carries ${carried}. This runtime stores it ` +
-        'differently from what this build decodes, so the sync is refused rather than reading ' +
-        "every leaf as somebody else's.",
-    );
-  }
-  return bytes.slice(next);
 }
 
 /**
@@ -772,21 +752,18 @@ function decodeCommitment(value: string | undefined, index: number): string | nu
  * A key the node answered nothing for below the count it reports at the same
  * block.
  *
- * One sentence per key for what stepping over it costs, because the three hide
- * a leaf in three different ways and an operator reading the refusal is
- * reading about the one that happened. The rule behind all three, and the set
- * of keys it covers, is on [`fetchLeaves`].
+ * One sentence per key for what stepping over it costs, because the two hide a
+ * leaf in different ways and an operator reading the refusal is reading about
+ * the one that happened. The rule behind both, and the set of keys it covers,
+ * is on [`fetchLeaves`].
  */
 function withheld(key: string, index: number, leafCount: number, at: string): Error {
   const cost =
     key === 'ZkTree::Leaves'
       ? 'Scanning past it would step over whatever was on that leaf and then write a watermark ' +
         'above it'
-      : key === 'Shielded::LeafBlocks'
-        ? 'A leaf with no block is stepped over where it is a coinbase, and dated by nothing ' +
-          'where it is not, and the pass would write a watermark above it'
-        : 'A leaf with no ciphertext and no coinbase value reads as a leaf nobody can open, so a ' +
-          'payment on it would be skipped and the pass would write a watermark above it';
+      : 'A leaf with no block is stepped over where it is a coinbase, and dated by nothing ' +
+        'where it is not, and the pass would write a watermark above it';
   return new Error(
     `this node answered with no ${key}(${index}) at block ${at}, where it reports ${leafCount} ` +
       'leaves. `pallet-shielded` writes that key in the same call that appends the leaf and ' +
@@ -796,87 +773,35 @@ function withheld(key: string, index: number, leafCount: number, at: string): Er
 }
 
 /**
- * Four items for each leaf in `[from, to)`, at one block.
+ * Three items for each leaf in `[from, to)`, at one block.
  *
- * `CoinbaseValues` is the fourth and it is what makes a coinbase note
- * readable: presence marks a coinbase leaf, and the value is public because
- * the chain hashes it into a commitment over an `inner` it cannot open.
+ * `CoinbaseValues` is the third and it is what makes a coinbase note readable:
+ * the value is public, because the chain hashes it into a commitment over an
+ * `inner` it cannot open. The note ciphertexts are not among these keys at
+ * all: the chain keeps them in block bodies and this wallet reads them there,
+ * authenticated against the header's `extrinsicsRoot` rather than its
+ * `stateRoot`. See `authenticatedBody` in `chain/authenticated.ts`.
  *
  * `leafCount` is `ZkTree::LeafCount` read at this same block hash, and it is
  * what makes an absent answer mean something. Every leaf below it was appended
  * by one of `pallet-shielded`'s three writers, each of which writes its keys
  * in the same call:
  *
- * - `shield` writes `Leaves`, `Ciphertexts` and `LeafBlocks`;
- * - a settled slot writes `Leaves`, `Ciphertexts` and `LeafBlocks` for each of
- *   its two outputs;
- * - the coinbase writes `Leaves`, `LeafBlocks` and `CoinbaseValues`, and
- *   `Ciphertexts` only where the author encrypted a payload, which under v1
- *   never happens.
+ * - `shield` writes `Leaves` and `LeafBlocks`;
+ * - a settled slot writes `Leaves` and `LeafBlocks` for each of its two
+ *   outputs;
+ * - the coinbase writes `Leaves`, `LeafBlocks` and `CoinbaseValues`.
  *
- * Commitments and creation blocks remain in state. Ciphertexts have a bounded
- * retention window, so an absent transfer payload is recovered at its proven
- * creation block, linked to this selected head. Missing proof nodes or an
- * unavailable historical payload refuse the pass before progress is saved.
+ * Nothing removes any of them. So below the count there is a commitment and a
+ * block at every index, and an absent answer for either is a node withholding
+ * it, refused here by name.
  *
- * The state proof authenticates CoinbaseValues presence and absence. The
- * typing pass in `wallet/sync.ts` additionally checks that marker against the
- * leaf positions and roots in the header chain. A leaf carrying neither a
- * ciphertext nor a coinbase value after archive recovery is refused here;
- * the typing pass checks the remaining per-kind requirements.
- *
- * `Chain::leaves` and `Wallet::sync_with` in the command-line wallet refuse
- * the identical set.
+ * `CoinbaseValues` is the one key a leaf is allowed not to have, and its
+ * presence does not decide that a leaf is a coinbase: presence is the node's
+ * to write. What decides is where the block headers put the leaf, which the
+ * typing pass in `wallet/sync.ts` settles against the roots. `Chain::leaves`
+ * in the command-line wallet refuses the identical set.
  */
-const archiveAncestors = new WeakMap<ChainContext, { tip: string; oldest: number; hashes: Map<number, string> }>();
-
-/** Link a historical ciphertext proof to this selected scan head. */
-export async function authenticatedAncestor(context: ChainContext, at: string, wanted: number): Promise<string> {
-  let cache = archiveAncestors.get(context);
-  if (cache === undefined || normaliseHash(cache.tip) !== normaliseHash(at)) {
-    const head = parseRawHeader(await headerAt(context, at));
-    if (normaliseHash(await authenticatedHeaderHash(context, head)) !== normaliseHash(at)) {
-      throw new Error('archive header does not hash to the selected block');
-    }
-    cache = { tip: at, oldest: Number(BigInt(head.number)), hashes: new Map([[Number(BigInt(head.number)), at]]) };
-    archiveAncestors.set(context, cache);
-  }
-  const known = cache.hashes.get(wanted);
-  if (known !== undefined) return known;
-  let number = cache.oldest;
-  let hash = cache.hashes.get(number);
-  if (hash === undefined) throw new Error('archive ancestry cache has no selected head');
-  if (wanted > number) throw new Error('ciphertext creation height is outside the selected header chain');
-  while (number > wanted) {
-    const lower = Math.max(wanted, number - HEADER_SPAN_LIMIT);
-    const headers: RawChainHeader[] = [];
-    await fetchHeaderRange(context, lower, { number, hash }, (header) => headers.push(header));
-    const hashes = await Promise.all(headers.map((header) => authenticatedHeaderHash(context, header)));
-    const topHash = hashes.at(-1);
-    if (topHash === undefined || normaliseHash(topHash) !== normaliseHash(hash)) {
-      throw new Error('archive header range does not reach the selected chain');
-    }
-    for (let index = 1; index < headers.length; index += 1) {
-      const header = headers[index];
-      const parent = hashes[index - 1];
-      if (header === undefined || parent === undefined || normaliseHash(header.parentHash) !== normaliseHash(parent)) {
-        throw new Error('archive header range contains an unauthenticated ancestor');
-      }
-    }
-    for (let index = 0; index < hashes.length; index += 1) {
-      const value = hashes[index];
-      if (value === undefined) throw new Error('archive header range is incomplete');
-      cache.hashes.set(lower + index, value.startsWith('0x') ? value : `0x${value}`);
-    }
-    if (cache.hashes.size > 1_000_000) throw new Error('archive ancestry exceeds the supported scan size');
-    number = lower;
-    cache.oldest = lower;
-    hash = cache.hashes.get(number);
-    if (hash === undefined) throw new Error('archive header range has no ancestor');
-  }
-  return hash;
-}
-
 export async function fetchLeaves(
   context: ChainContext,
   from: number,
@@ -886,22 +811,16 @@ export async function fetchLeaves(
   onProgress?: (done: number) => void,
 ): Promise<LeafRecord[]> {
   const leaves = storage(context, 'zkTree', 'leaves');
-  const ciphertexts = storage(context, 'shielded', 'ciphertexts');
   const leafBlocks = storage(context, 'shielded', 'leafBlocks');
   const coinbaseValues = storage(context, 'shielded', 'coinbaseValues');
   const out: LeafRecord[] = [];
   for (let start = from; start < to; start += LEAF_BATCH) {
     const end = Math.min(start + LEAF_BATCH, to);
-    const rows: { index: number; keys: [string, string, string, string] }[] = [];
+    const rows: { index: number; keys: [string, string, string] }[] = [];
     for (let index = start; index < end; index += 1) {
       rows.push({
         index,
-        keys: [
-          leaves.key(index),
-          ciphertexts.key(index),
-          leafBlocks.key(index),
-          coinbaseValues.key(index),
-        ],
+        keys: [leaves.key(index), leafBlocks.key(index), coinbaseValues.key(index)],
       });
     }
     const values = await queryAt(
@@ -909,47 +828,16 @@ export async function fetchLeaves(
       rows.flatMap((row) => row.keys),
       at,
     );
-    const archived = new Map<number, typeof rows>();
-    for (const row of rows) {
-      if (row.index < leafCount && !values.has(row.keys[0])) throw withheld('ZkTree::Leaves', row.index, leafCount, at);
-      if (row.index < leafCount && !values.has(row.keys[1]) && !values.has(row.keys[3])) {
-        const block = decodeInteger(values.get(row.keys[2]), `Shielded::LeafBlocks(${row.index})`, 4);
-        if (block === null) throw withheld('Shielded::LeafBlocks', row.index, leafCount, at);
-        const group = archived.get(Number(block)) ?? [];
-        group.push(row);
-        archived.set(Number(block), group);
-      }
-    }
-    for (const [block, group] of [...archived].sort(([a], [b]) => a - b)) {
-      const createdAt = await authenticatedAncestor(context, at, block);
-      const keys = group.map((row) => row.keys[1]);
-      let historical: (string | null)[];
-      try {
-        historical = await authenticatedValues(context, keys, createdAt);
-      } catch (error) {
-        throw new Error(`ciphertext archive unavailable at creation block ${block}; scan progress is unchanged: ${(error as Error).message}`);
-      }
-      historical.forEach((value, index) => {
-        if (value === null) throw new Error(`Shielded::Ciphertexts archive has no authenticated payload at creation block ${block}; scan progress is unchanged`);
-        const key = keys[index];
-        if (key === undefined) throw new Error('archive proof returned an unexpected value count');
-        values.set(key, value);
-      });
-    }
     for (const row of rows) {
       const rawCommitment = values.get(row.keys[0]);
-      const rawCiphertext = values.get(row.keys[1]);
-      const block = values.get(row.keys[2]);
-      const coinbase = values.get(row.keys[3]);
+      const block = values.get(row.keys[1]);
+      const coinbase = values.get(row.keys[2]);
       const belowCount = row.index < leafCount;
       if (belowCount && rawCommitment === undefined) {
         throw withheld('ZkTree::Leaves', row.index, leafCount, at);
       }
       if (belowCount && block === undefined) {
         throw withheld('Shielded::LeafBlocks', row.index, leafCount, at);
-      }
-      if (belowCount && rawCiphertext === undefined && coinbase === undefined) {
-        throw withheld('Shielded::Ciphertexts', row.index, leafCount, at);
       }
       if (belowCount && rawCommitment !== undefined && normaliseHash(rawCommitment) === PADDING_SENTINEL) {
         throw paddingSentinel(row.index, leafCount, at);
@@ -958,7 +846,6 @@ export async function fetchLeaves(
       out.push({
         index: row.index,
         commitment: decodeCommitment(rawCommitment, row.index),
-        ciphertext: decodeBytes(rawCiphertext, `Shielded::Ciphertexts(${row.index})`),
         blockNumber: height === null ? null : Number(height),
         coinbaseSteps: decodeInteger(coinbase, `Shielded::CoinbaseValues(${row.index})`, 8),
       });

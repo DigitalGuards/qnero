@@ -27,7 +27,15 @@ import {
 import { STORE_VERSION, type NoteSecret, type StoreMeta, type StoredNote } from '../src/wallet/model';
 import { ENTRY_WALK_LIMIT } from '../src/worker/protocol';
 
-import { chainParts, cryptoParts, GENESIS, hashAtHeight, type ChainShape } from './fixtures/chain';
+import {
+  chainParts,
+  cryptoParts,
+  GENESIS,
+  hashAtHeight,
+  payloadFor,
+  payloadLeaf,
+  type ChainShape,
+} from './fixtures/chain';
 
 /**
  * The chain behind a fixture's leaves.
@@ -65,6 +73,12 @@ function shapeOf(options: {
     ours: options.ours,
     withheldBlocks: options.withheldBlocks,
     misdated: options.misdated,
+    // A leaf a fixture named a coinbase carries no payload in any block body:
+    // the inherent refuses a non-empty one by name. Every other leaf's
+    // ciphertext is in the body of the block that appended it, tagged with the
+    // leaf a fixture means it for.
+    payloadAt: (index) =>
+      declared.get(index)?.coinbaseSteps === undefined ? payloadFor(index) : null,
   };
 }
 
@@ -96,11 +110,11 @@ interface FakeLeaf {
 /** The runtime's `BlockHashWindow`, which is 256 on this chain. */
 const ANCHOR_WINDOW = 256;
 
-/** The four per-leaf keys a node can answer with nothing. */
-type LeafKey = 'commitment' | 'ciphertext' | 'blockNumber' | 'coinbaseSteps';
+/** The three per-leaf keys a node can answer with nothing. */
+type LeafKey = 'commitment' | 'blockNumber' | 'coinbaseSteps';
 
 /**
- * Every leaf below the count, with all four of its keys.
+ * Every leaf below the count, with all three of its keys.
  *
  * `pallet-zk-tree` appends a leaf and raises `LeafCount` in one call and
  * `pallet-shielded` writes the leaf's other keys in that same call, so a chain
@@ -111,7 +125,7 @@ type LeafKey = 'commitment' | 'ciphertext' | 'blockNumber' | 'coinbaseSteps';
  * belong to nobody.
  *
  * `withheld` is the hook a test takes one key away with, per key and per
- * index, because each of the four hides a leaf in its own way.
+ * index, because each of the three hides a leaf in its own way.
  */
 function fakeChain(options: {
   head: number;
@@ -169,13 +183,6 @@ function fakeChain(options: {
         rows.push({
           index,
           commitment: withheld('commitment', index) ? null : shape.commitmentAt(index),
-          // A coinbase a fixture named carries no ciphertext under v1, and
-          // every other leaf carries one: an unnamed leaf gets bytes nothing
-          // can open.
-          ciphertext:
-            declaredSteps !== undefined || withheld('ciphertext', index)
-              ? null
-              : new Uint8Array([1, 2, 3]),
           blockNumber: withheld('blockNumber', index)
             ? null
             : (options.misdated?.get(index) ?? shape.blockOf(index)),
@@ -199,7 +206,12 @@ function fakeCrypto(leaves: readonly FakeLeaf[], shape?: ChainShape): SyncCrypto
           leaves,
         }),
     ),
-    decryptBatch: (items) => Promise.resolve(items.map((item) => byIndex.get(item.index) ?? null)),
+    // Every payload the bodies carry, tried. The tag inside the bytes is the
+    // leaf a fixture meant the payload for, and the note that comes back
+    // carries its own commitment: which leaf it lands on is decided by the
+    // commitment search in `runSync` and by nothing here.
+    decryptBatch: (items) =>
+      Promise.resolve(items.map((item) => byIndex.get(payloadLeaf(item.ciphertext)) ?? null)),
     // Only a leaf a fixture named a coinbase rebuilds, and `mined` is what
     // says the miner key opened it: ownership at a coinbase position is the
     // rebuild's to decide and the author label's to be compared against.
@@ -392,14 +404,14 @@ describe('a key the node withholds inside the scanned range', () => {
    * the report.
    *
    * The refusal covered the commitment alone, which left the keys beside it as
-   * three more ways to hide the same payment. One test each.
+   * more ways to hide the same payment. One test each. No note ciphertext is
+   * owed per leaf at all any more: the payloads are in the block bodies, the
+   * body roots as a whole, and a body a node will not serve is refused in
+   * `chain/authenticated.ts`.
    */
   const mine = note(1000n, 'a1');
-  // Three leaves in one block, so the payment sits below the block's last one.
-  // A leaf at the last index owes a coinbase value rather than a ciphertext, so
-  // a withheld ciphertext there is the shape a coinbase has and hides nothing;
-  // the withholding these tests are about is the one at a position that cannot
-  // be a coinbase.
+  // Three leaves in one block, so the payment sits below the block's last one,
+  // which is the one position that cannot be a coinbase.
   const leaves: FakeLeaf[] = [
     { index: 0, commitment: 'cd'.repeat(32), blockNumber: 1, note: null },
     { index: 1, commitment: mine.commitment, blockNumber: 1, note: mine },
@@ -424,19 +436,6 @@ describe('a key the node withholds inside the scanned range', () => {
         fakeCrypto(leaves),
       ),
     ).rejects.toThrow(/no ZkTree::Leaves\(1\)/);
-  });
-
-  it('refuses an absent ciphertext on a leaf that is not a coinbase', async () => {
-    // The leaf is answered for and its ciphertext is not, so the scan reads it
-    // as a leaf nobody can open: the same payment hidden through the key
-    // beside the commitment.
-    await expect(
-      runSync(
-        { meta: meta(), held: [], rejected: [], checkpoints: [], pending: [] },
-        fakeChain({ head: 5, leaves, leafCount: 3, withheld: { ciphertext: [1] } }),
-        fakeCrypto(leaves),
-      ),
-    ).rejects.toThrow(/no Shielded::Ciphertexts\(1\)/);
   });
 
   it('refuses an absent block height', async () => {
@@ -481,7 +480,7 @@ describe('a key the node withholds inside the scanned range', () => {
   });
 
   it('is a node refusal, so the caller leaves the store alone', async () => {
-    for (const key of ['commitment', 'ciphertext', 'blockNumber'] as const) {
+    for (const key of ['commitment', 'blockNumber'] as const) {
       await expect(
         runSync(
           { meta: meta({ nextLeaf: 0 }), held: [], rejected: [], checkpoints: [], pending: [] },
@@ -496,7 +495,7 @@ describe('a key the node withholds inside the scanned range', () => {
 describe('a scan over more leaves than one window', () => {
   it('reads the range in contiguous windows and misses nothing between them', async () => {
     // The range used to be materialised whole before anything was decrypted,
-    // and a `LeafRecord` carries the leaf's ciphertext: 1,792 bytes per leaf
+    // and a `LeafRecord` carried the leaf's ciphertext: 1,792 bytes per leaf
     // on the chain, in the page, beside the worker's 918 MiB. It is read in
     // windows now, which is a change to what is resident and has to be no
     // change at all to what is found or to what the node is asked.
@@ -545,21 +544,25 @@ describe('a scan over more leaves than one window', () => {
 describe('the hex a scan hands the prover', () => {
   it('carries no 0x prefix, which the module would refuse as not-hex', async () => {
     // The chain answers with `0x`-prefixed hex and the module parses hex. A
-    // prefix makes every ciphertext refuse, and a refusal is the ordinary
-    // answer for a ciphertext that is not this wallet's, so the wallet reads
-    // its own payments as nobody's with no error anywhere. This was a real
-    // bug, found against a live node and not by any assertion over a balance.
-    const mine = note(1000n, 'a0');
+    // prefix makes the rebuild refuse, and a refusal is the ordinary answer
+    // for a coinbase somebody else mined, so the wallet reads its own mining
+    // reward as nobody's with no error anywhere. This was a real bug, found
+    // against a live node and not by any assertion over a balance.
+    //
+    // One commitment still crosses the boundary and this is it. A body
+    // payload crosses on its own, because nothing beside it says which leaf
+    // it belongs to.
+    const mined = note(25n, 'a0');
     const leaves: FakeLeaf[] = [
-      { index: 0, commitment: `0x${mine.commitment}`, blockNumber: 1, note: mine },
+      { index: 0, commitment: `0x${mined.commitment}`, blockNumber: 1, note: mined, coinbaseSteps: 25n },
     ];
     const seen: string[] = [];
     const crypto = fakeCrypto(leaves);
     const recording: SyncCrypto = {
       ...crypto,
-      decryptBatch: (items) => {
+      coinbaseBatch: (items) => {
         seen.push(...items.map((item) => item.commitment));
-        return crypto.decryptBatch(items);
+        return crypto.coinbaseBatch(items);
       },
     };
     await runSync(
@@ -567,7 +570,7 @@ describe('the hex a scan hands the prover', () => {
       fakeChain({ head: 5, leaves }),
       recording,
     );
-    expect(seen).toEqual([mine.commitment]);
+    expect(seen).toEqual([mined.commitment]);
   });
 });
 

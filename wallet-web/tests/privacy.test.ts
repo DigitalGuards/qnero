@@ -22,7 +22,10 @@ import { TEST_PROTOCOL_PROFILE } from './fixtures/protocol-profile';
  *    syncing the same chain asks the identical question.
  * 3. `zkTree_getMerkleProof` is never called. It is the one RPC that is only
  *    ever asked about a leaf the caller is spending.
- * 4. Nothing but the methods a public read needs is called at all.
+ * 4. Nothing but the methods a public read needs is called at all. A block
+ *    body is one of those: `chain_getBlock` names a block and never a leaf,
+ *    every viewer of the chain gets the identical bytes, and the note
+ *    ciphertexts a payment is found by are in there and in no state map.
  *
  * Both paths that talk to a node are driven here, because the property is
  * about requests and the two paths make different ones. A spend rebuilds the
@@ -38,6 +41,7 @@ import { describe, expect, it } from 'vitest';
 import { chainAdapter } from '../src/app/adapters';
 import { canonicalStorage, type ChainContext } from '../src/chain/api';
 import { storagePrefix, indexKey, indexOfKey } from './fixtures/storage-key';
+import { coinbaseExtrinsic, settlementExtrinsic, TEST_BODY_LAYOUT, timestampExtrinsic } from './fixtures/body';
 import { bindFixtureProofs, fixtureProof } from './fixtures/state-proof';
 import { ACTIVE_PROFILE_KEY } from '../src/chain/profile';
 import { watchHead } from '../src/chain/reads';
@@ -116,12 +120,6 @@ function le(value: bigint, bytes: number): string {
   return out;
 }
 
-/** A `Vec<u8>` of fewer than 64 bytes: a one-byte compact prefix, then bytes. */
-function vecU8(body: string): string {
-  const length = body.length / 2;
-  return `0x${(length << 2).toString(16).padStart(2, '0')}${body}`;
-}
-
 /**
  * A storage entry whose keys this test can read back.
  *
@@ -141,7 +139,6 @@ const KEYS = {
   leaves: storagePrefix('ZkTree', 'Leaves'),
   leafCount: storagePrefix('ZkTree', 'LeafCount'),
   depth: storagePrefix('ZkTree', 'Depth'),
-  ciphertexts: storagePrefix('Shielded', 'Ciphertexts'),
   leafBlocks: storagePrefix('Shielded', 'LeafBlocks'),
   coinbaseValues: storagePrefix('Shielded', 'CoinbaseValues'),
   entryCount: storagePrefix('Shielded', 'EntryCount'),
@@ -158,11 +155,10 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
     values.set(`${KEYS.leaves}${indexKey(index)}`, `0x${(index === OUR_LEAF ? OUR_COMMITMENT : 'cd'.repeat(32))}`);
     values.set(`${KEYS.leafBlocks}${indexKey(index)}`, le(BigInt(blockOfLeaf(index)), 4));
     if (isCoinbaseLeaf(index)) {
-      // Its block's last leaf: a value and no payload, which is what the
-      // inherent writes under v1.
+      // Its block's last leaf: a public value, which is what the inherent
+      // writes. No leaf carries a payload in state at all: the note
+      // ciphertexts are in the block bodies this fixture serves below.
       values.set(`${KEYS.coinbaseValues}${indexKey(index)}`, le(BigInt(index + 1), 8));
-    } else {
-      values.set(`${KEYS.ciphertexts}${indexKey(index)}`, vecU8('00112233'));
     }
   }
 
@@ -193,7 +189,10 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
         parentHash: hashAt(number - 1),
         number: `0x${number.toString(16)}`,
         stateRoot: `0x${'22'.repeat(32)}`,
-        extrinsicsRoot: `0x${'33'.repeat(32)}`,
+        // The same value `bindFixtureProofs` answers for a body's root, so
+        // `authenticatedBody` gets past the comparison and what this test
+        // records is the request the body pass made.
+        extrinsicsRoot: `0x${'22'.repeat(32)}`,
         zkTreeRoot: rootFor(countAt(number)),
         // One pre-runtime item, the author label of somebody else.
         digest: { logs: [`0x06706f775f80${'9a'.repeat(32)}`] },
@@ -204,6 +203,26 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
       entries.push([canonicalStorage('shielded', 'usedNullifiers').key(`0x${'12'.repeat(32)}`), '0x']);
       entries.push([canonicalStorage('shielded', 'usedNullifiers').key(`0x${'34'.repeat(32)}`), '0x']);
       return Promise.resolve(fixtureProof(String(params[1]), entries) as T);
+    }
+    if (method === 'chain_getBlock') {
+      // One block body per block, with one settled slot in it. A public read:
+      // every wallet syncing this chain asks for the same bodies, and the
+      // payloads inside them are what a payment is found by.
+      const number = Number(String(params[0]).replace(/^0x0*/, '') || '0');
+      const first = (number - 1) * 2;
+      return Promise.resolve({
+        block: {
+          extrinsics: [
+            timestampExtrinsic(number * 1000),
+            // The first byte is the leaf this fixture means the payload for,
+            // which is all the stub prover reads: the real module decides by
+            // decapsulating, and the commitment it answers with is what places
+            // the note.
+            settlementExtrinsic([[new Uint8Array([first, 1, 2]), new Uint8Array([first, 3, 4])]]),
+            coinbaseExtrinsic(),
+          ],
+        },
+      } as T);
     }
     if (method === 'state_getKeysPaged') {
       // Two settled nullifiers, neither of them this wallet's, returned as one
@@ -230,7 +249,6 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
           depth: entry(KEYS.depth),
         },
         shielded: {
-          ciphertexts: entry(KEYS.ciphertexts),
           leafBlocks: entry(KEYS.leafBlocks),
           coinbaseValues: entry(KEYS.coinbaseValues),
           entryCount: entry(KEYS.entryCount),
@@ -238,6 +256,7 @@ function recordingContext(): { context: ChainContext; calls: Call[] } {
         },
       },
     },
+    bodyLayout: TEST_BODY_LAYOUT,
     storageDrift: [],
     // The two facts the sync rules now read off the chain rather than off the
     // screen: the drift list above, and the anchor window a pending row is
@@ -264,8 +283,14 @@ function crypto(): SyncCrypto {
     memo: 'lunch',
   };
   return {
+    // One payload per block in this fixture, and the one in the block that
+    // appended `OUR_LEAF` opens. Which leaf it lands on is decided by the
+    // commitment it carries, which `runSync` searches that block's own folded
+    // range for.
     decryptBatch: (items) =>
-      Promise.resolve(items.map((item) => (item.index === OUR_LEAF ? ours : null))),
+      Promise.resolve(
+        items.map((item) => (item.ciphertext[0] === OUR_LEAF ? ours : null)),
+      ),
     // Somebody else's coinbases: the label in this fixture's headers is not
     // this wallet's and no value rebuilds its own note over those commitments.
     coinbaseBatch: (items) => Promise.resolve(items.map(() => null)),
@@ -365,11 +390,16 @@ describe('the request stream a sync makes', () => {
     expect(calls.map((call) => call.method)).not.toContain('zkTree_getMerkleProof');
   });
 
-  it('calls nothing but the four methods a public read needs', async () => {
+  it('calls nothing but the five methods a public read needs', async () => {
     const { calls } = await syncOnce();
     const allowed = new Set([
       'chain_getBlockHash',
       'chain_getHeader',
+      // A public read like the other four. A body is the same bytes for every
+      // viewer of the chain, it is asked for by block and never by leaf, and
+      // it is the one place the note ciphertexts are: a wallet that did not
+      // fetch it could not receive a payment at all.
+      'chain_getBlock',
       'state_getReadProof',
       'state_getKeysPaged',
     ]);
@@ -550,7 +580,6 @@ function spendContext(options: { refuseSubmission?: boolean; leafCount?: number 
           depth: entry(KEYS.depth),
         },
         shielded: {
-          ciphertexts: entry(KEYS.ciphertexts),
           leafBlocks: entry(KEYS.leafBlocks),
           coinbaseValues: entry(KEYS.coinbaseValues),
           entryCount: entry(KEYS.entryCount),
@@ -558,6 +587,7 @@ function spendContext(options: { refuseSubmission?: boolean; leafCount?: number 
         },
       },
     },
+    bodyLayout: TEST_BODY_LAYOUT,
     storageDrift: [],
     // The `dev` preset's cadence. `send` sizes its inclusion wait at six block
     // intervals read from here, so a context without it waits `NaN` ms and

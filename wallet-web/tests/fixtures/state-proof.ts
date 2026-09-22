@@ -27,6 +27,12 @@ export function bindFixtureProofs(context: ChainContext, hash: (anchor: Anchor) 
   };
   bindStateProofVerifier(context, {
     headerBlockHash: (anchor) => Promise.resolve(hash(anchor)),
+    // The trie construction is the module's and is covered against the
+    // runtime's own answer in Rust (`crates/qnero-state-proof`). What a
+    // read-layer test needs is a root that agrees with the header these
+    // fixtures serve, so `authenticatedBody` gets past the comparison and the
+    // walk behind it is what is being exercised.
+    extrinsicsRoot: () => Promise.resolve(`0x${'22'.repeat(32)}`),
     readStateProof: (_root, nodes, keys) => Promise.resolve(keys.map((key) => entries(nodes).get(key) ?? null)),
     readStatePrefix: (_root, nodes, prefix) => Promise.resolve(
       [...entries(nodes)].filter((entry): entry is [string, string] =>

@@ -53,6 +53,7 @@ export interface WasmModule {
   entropySelfCheck: () => void;
   walletLimits: () => string;
   readStateProof: (requestJson: string) => string;
+  extrinsicsRoot: (requestJson: string) => string;
   deriveAccount: (seedHex: string) => string;
   minerKey: (seedHex: string) => string;
   decryptNote: (seedHex: string, ciphertext: Uint8Array, expected: string) => string;
@@ -153,6 +154,19 @@ export class ProverCore {
     switch (request.kind) {
       case 'readStateProof':
         return { value: JSON.parse(this.requireWasm().readStateProof(JSON.stringify(request))) };
+      case 'extrinsicsRoot':
+        // The construction a block header commits its body with, which is a
+        // Blake2 trie over SCALE-encoded keys and belongs in the module that
+        // already links sp-trie. Two implementations of one consensus
+        // construction would be two ways to disagree with the chain. The
+        // module applies its own byte and count budgets to the body before it
+        // builds anything; `chain/authenticated.ts` applies the same ones
+        // before the body crosses this boundary at all.
+        return {
+          value: this.requireWasm().extrinsicsRoot(
+            JSON.stringify({ extrinsics: request.extrinsics }),
+          ),
+        };
       case 'init': {
         const started = performance.now();
         progress('module', 'fetching and instantiating the prover');
@@ -261,14 +275,11 @@ export class ProverCore {
         const out: (DecryptedNote | null)[] = [];
         for (const item of request.items) {
           try {
-            // Opened without the commitment beside it, and compared here. The
-            // module refuses on a mismatch when it is handed one, which folds
-            // "this wallet's note, moved" into "somebody else's" and loses the
-            // one reading a wallet can tell apart on its own: a stranger's
-            // bytes do not open at all, while these did. The comparison is the
-            // same one `try_receive` makes, kept in this worker so the page
-            // never holds a rule the seed decides. See `OpenedLeaf` in
-            // `crates/qnero-wallet/src/wallet.rs`.
+            // Opened with no expected commitment, because there is none to
+            // expect: these bytes came out of a block body and the body says
+            // nothing about which leaf any of them belongs to. The commitment
+            // the note opens is returned and the page matches it against the
+            // leaves that block's own root folded. See `wallet/sync.ts`.
             const decrypted = JSON.parse(module.decryptNote(seed, item.ciphertext, '')) as {
               value: number;
               rho: string;
@@ -279,8 +290,6 @@ export class ProverCore {
             const digests = JSON.parse(
               module.noteDigests(seed, BigInt(decrypted.value), decrypted.rho, decrypted.r),
             ) as { commitment: string; nullifier: string };
-            const opened = normaliseDigest(digests.commitment);
-            const moved = opened !== normaliseDigest(item.commitment);
             out.push({
               value: String(decrypted.value),
               rho: decrypted.rho,
@@ -288,12 +297,11 @@ export class ProverCore {
               commitment: digests.commitment,
               nullifier: digests.nullifier,
               memo: decrypted.memo,
-              ...(moved ? { moved: true } : {}),
             });
           } catch {
-            // Not this wallet's ciphertext, which is the ordinary answer for
-            // almost every leaf on the chain. The refusal says nothing about
-            // what was inside it and neither does this.
+            // Not this wallet's payload, which is the ordinary answer for
+            // almost every ciphertext on the chain. The refusal says nothing
+            // about what was inside it and neither does this.
             out.push(null);
           }
         }
@@ -500,10 +508,26 @@ export class ProverCore {
    * rebuild at the payload's value, fail the check, and read this wallet's own
    * coinbase as nobody's with no error anywhere.
    */
+  /**
+   * One coinbase leaf, decided against this wallet.
+   *
+   * One way in, and the chain is what narrowed it to one. A block author's
+   * node cannot encrypt to an ML-KEM key, so it derives the note from the
+   * miner key the operator configured it with and publishes only `inner`.
+   *
+   * The encrypted coinbase, for a recipient whose coinbase viewing key the
+   * author does not hold, is not a shape any Qnero chain produces:
+   * `pallet-shielded`'s coinbase inherent refuses a non-empty payload by name
+   * (`CoinbasePayloadNotSupported`), because an inherent pays no fee and those
+   * bytes would be the one place on the chain where permanent storage is free.
+   * So there is no coinbase payload in any block body and the derived rebuild
+   * is the whole coinbase rule. `receive_coinbase` in
+   * `crates/qnero-wallet/src/wallet.rs` is the same rule.
+   */
   private receiveCoinbase(
     module: WasmModule,
     seed: string,
-    item: { blockNumber: number; value: string; genesisHash: string; commitment: string; ciphertext: Uint8Array | null },
+    item: { blockNumber: number; value: string; genesisHash: string; commitment: string },
   ): DecryptedNote | null {
     const expected = item.commitment.toLowerCase().replace(/^0x/, '');
     try {
@@ -527,36 +551,9 @@ export class ProverCore {
         };
       }
     } catch {
-      // A miner key that derives nothing for this block. The ciphertext, if
-      // there is one, is the other way in.
+      // A miner key that derives nothing for this block, which is every
+      // coinbase somebody else mined.
     }
-    if (item.ciphertext === null) {
-      return null;
-    }
-    try {
-      // No expected commitment: the check below is against the chain's value
-      // rather than the payload's, and `try_receive` would apply the payload's.
-      const opened = JSON.parse(module.decryptNote(seed, item.ciphertext, '')) as {
-        rho: string;
-        r: string;
-        memo: string;
-      };
-      const digests = JSON.parse(
-        module.noteDigests(seed, BigInt(item.value), opened.rho, opened.r),
-      ) as { commitment: string; nullifier: string };
-      if (digests.commitment.toLowerCase().replace(/^0x/, '') !== expected) {
-        return null;
-      }
-      return {
-        value: item.value,
-        rho: opened.rho,
-        r: opened.r,
-        commitment: digests.commitment,
-        nullifier: digests.nullifier,
-        memo: opened.memo,
-      };
-    } catch {
-      return null;
-    }
+    return null;
   }
 }

@@ -54,7 +54,6 @@ function entry(prefix: string): unknown {
 
 const KEYS = {
   leaves: storagePrefix('ZkTree', 'Leaves'),
-  ciphertexts: storagePrefix('Shielded', 'Ciphertexts'),
   leafBlocks: storagePrefix('Shielded', 'LeafBlocks'),
   coinbaseValues: storagePrefix('Shielded', 'CoinbaseValues'),
   leafCount: storagePrefix('ZkTree', 'LeafCount'),
@@ -83,7 +82,6 @@ function nodeWith(values: Map<string, string>): ChainContext {
           depth: entry(KEYS.depth),
         },
         shielded: {
-          ciphertexts: entry(KEYS.ciphertexts),
           leafBlocks: entry(KEYS.leafBlocks),
           coinbaseValues: entry(KEYS.coinbaseValues),
           entryCount: entry(KEYS.entryCount),
@@ -107,17 +105,12 @@ function recordingNode(values: Map<string, string>, asked: string[][]): ChainCon
   }, () => AT);
 }
 
-/** A `Vec<u8>` whose one-byte compact prefix is written by hand. */
-function vec(lengthByte: number, body: string): string {
-  return `0x${(lengthByte << 2).toString(16).padStart(2, '0')}${body}`;
-}
-
 /**
  * Every key of one leaf row, as a chain carries it.
  *
  * `pallet-shielded` writes a leaf's keys in the call that appends it: a shield
- * and a settled output write `Ciphertexts` and `LeafBlocks`, a coinbase writes
- * `LeafBlocks` and `CoinbaseValues`, and nothing removes any of them. So a
+ * and a settled output write `Leaves` and `LeafBlocks`, a coinbase writes
+ * those two and `CoinbaseValues`, and nothing removes any of them. So a
  * fixture that fills one key and leaves the rest is describing a chain no node
  * can serve, and a test written over one is asserting on a refusal that a real
  * answer would have reached first. Every row here is complete, and a test that
@@ -128,7 +121,6 @@ function leafRow(
   index: number,
   row: {
     commitment?: string | null;
-    ciphertext?: string | null;
     leafBlock?: string | null;
     coinbaseValue?: string | null;
   } = {},
@@ -140,7 +132,6 @@ function leafRow(
     }
   };
   set(`${KEYS.leaves}${indexKey(index)}`, row.commitment, `0x${'cd'.repeat(32)}`);
-  set(`${KEYS.ciphertexts}${indexKey(index)}`, row.ciphertext, vec(4, '00112233'));
   set(`${KEYS.leafBlocks}${indexKey(index)}`, row.leafBlock, '0x09000000');
   set(`${KEYS.coinbaseValues}${indexKey(index)}`, row.coinbaseValue, null);
   return values;
@@ -153,7 +144,6 @@ describe('a leaf row', () => {
     });
     const [row] = await fetchLeaves(nodeWith(values), 0, 1, AT, 1);
     expect(row?.commitment).toBe(`0x${'cd'.repeat(32)}`);
-    expect(row?.ciphertext).toEqual(new Uint8Array([0x00, 0x11, 0x22, 0x33]));
     expect(row?.blockNumber).toBe(9);
     expect(row?.coinbaseSteps).toBe(10n);
   });
@@ -164,16 +154,6 @@ describe('a leaf row', () => {
     });
     await expect(fetchLeaves(nodeWith(values), 3, 4, AT, 4)).rejects.toThrow(
       /ZkTree::Leaves\(3\) is 31 bytes, expected 32/,
-    );
-  });
-
-  it('refuses a ciphertext whose length prefix and body disagree', async () => {
-    // The failure this replaces is silent: a truncated ciphertext decrypts as
-    // nobody's, so every leaf on the chain reads as somebody else's and the
-    // sync reports zero notes received over a completed pass.
-    const values = leafRow(new Map<string, string>(), 0, { ciphertext: vec(4, '001122') });
-    await expect(fetchLeaves(nodeWith(values), 0, 1, AT, 1)).rejects.toThrow(
-      /Shielded::Ciphertexts\(0\) declares 4 bytes and carries 3/,
     );
   });
 
@@ -202,8 +182,8 @@ describe('a leaf row', () => {
  * and reading it as "nothing here" is silent and permanent in every case: the
  * scan steps over the leaf, the pass writes a watermark above it, and a
  * payment on that leaf is never read again without a rescan. The refusal used
- * to cover the commitment alone, which left the three keys beside it as three
- * ways to hide the same payment.
+ * to cover the commitment alone, which left the key beside it as a second way
+ * to hide the same payment.
  */
 describe('a key the node withholds below its own leaf count', () => {
   it('refuses an absent commitment, and names the leaf, the count and the block', async () => {
@@ -241,16 +221,6 @@ describe('a key the node withholds below its own leaf count', () => {
     );
   });
 
-  it('refuses an absent ciphertext on a leaf that is not a coinbase', async () => {
-    // A settled output's ciphertext is written by the call that appends its
-    // leaf. Without it the leaf reads as one nobody can open, which is the
-    // same payment hidden through the key beside the commitment.
-    const values = leafRow(new Map<string, string>(), 0, { ciphertext: null });
-    await expect(fetchLeaves(nodeWith(values), 0, 1, AT, 1)).rejects.toThrow(
-      /Shielded::Ciphertexts archive has no authenticated payload/,
-    );
-  });
-
   it('refuses an absent block height', async () => {
     // `LeafBlocks` is what a coinbase note's `rho` and `r` are derived from
     // and what the shield-origin rule is checked against, so a leaf without it
@@ -261,31 +231,15 @@ describe('a key the node withholds below its own leaf count', () => {
     );
   });
 
-  it('refuses a coinbase leaf whose value and ciphertext are both withheld', async () => {
-    // `CoinbaseValues` is the one key of the four a leaf is allowed not to
-    // have: presence is what marks a coinbase. So a withheld one is caught by
-    // the ciphertext rule beside it, since a v1 coinbase carries no ciphertext
-    // either, and what is left below the count is a leaf with neither.
+  it('reads a coinbase leaf, which owes no payload at all', async () => {
+    // Nothing is owed per leaf beyond the commitment and the block. The note
+    // ciphertexts are in the block bodies, the body roots as a whole, and a
+    // coinbase carries none of its own: the inherent refuses a payload by
+    // name.
     const values = leafRow(new Map<string, string>(), 0, {
-      ciphertext: null,
-      coinbaseValue: null,
-    });
-    await expect(fetchLeaves(nodeWith(values), 0, 1, AT, 1)).rejects.toThrow(
-      /Shielded::Ciphertexts archive has no authenticated payload/,
-    );
-  });
-
-  it('reads a coinbase leaf with no ciphertext, which is every coinbase under v1', async () => {
-    // The rule has to leave this one alone: the inherent refuses a payload, so
-    // a coinbase leaf carries `Leaves`, `LeafBlocks` and `CoinbaseValues` and
-    // nothing else, and a rule that demanded a ciphertext of every leaf would
-    // refuse every block reward on the chain.
-    const values = leafRow(new Map<string, string>(), 0, {
-      ciphertext: null,
       coinbaseValue: '0x0a00000000000000',
     });
     const [row] = await fetchLeaves(nodeWith(values), 0, 1, AT, 1);
-    expect(row?.ciphertext).toBeNull();
     expect(row?.coinbaseSteps).toBe(10n);
   });
 
@@ -295,7 +249,7 @@ describe('a key the node withholds below its own leaf count', () => {
     const values = leafRow(new Map<string, string>(), 0);
     const rows = await fetchLeaves(nodeWith(values), 0, 2, AT, 1);
     expect(rows[1]?.commitment).toBeNull();
-    expect(rows[1]?.ciphertext).toBeNull();
+    expect(rows[1]?.blockNumber).toBeNull();
   });
 });
 

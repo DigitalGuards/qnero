@@ -99,19 +99,30 @@ export interface ProverAccount {
   address: string;
 }
 
+/**
+ * One note ciphertext out of a block body, offered to this wallet's key.
+ *
+ * No leaf index and no commitment beside it. The payloads a block carries sit
+ * in its extrinsics and nothing in the body says which leaf any of them
+ * belongs to, so what decides is the commitment the note opens, compared
+ * against the leaves the block's own `zkTreeRoot` folded. `wallet/sync.ts`
+ * makes that comparison and `crates/qnero-wallet/src/wallet.rs` makes the
+ * identical one.
+ */
 export interface DecryptItem {
-  index: number;
   ciphertext: Uint8Array;
-  commitment: string;
 }
 
 /**
  * One coinbase leaf to rebuild.
  *
  * `value` is the chain's, out of `Shielded::CoinbaseValues`, and it is the one
- * that decides: a coinbase payload carries a value of zero, because the chain
- * hashed its own arithmetic into the commitment. The ciphertext is the second
- * way in, for a coinbase this wallet's miner key did not mint.
+ * that decides: the chain hashed its own arithmetic into the commitment. There
+ * is no payload beside it, because `pallet-shielded`'s coinbase inherent
+ * refuses a non-empty one by name, so the derived rebuild is the whole
+ * coinbase rule. A payload that does open a commitment at a coinbase position
+ * is found by the body pass instead, which is what makes that position no
+ * longer a place to hide a payment.
  */
 export interface CoinbaseItem {
   index: number;
@@ -119,7 +130,6 @@ export interface CoinbaseItem {
   value: string;
   genesisHash: string;
   commitment: string;
-  ciphertext: Uint8Array | null;
 }
 
 export interface DecryptedNote {
@@ -138,19 +148,6 @@ export interface DecryptedNote {
    * `coinbaseBatch` sets it; `decryptBatch` never does.
    */
   mined?: boolean;
-  /**
-   * Set when the payload opened under this wallet's key and the commitment
-   * answered beside it is one the note does not open.
-   *
-   * The opening is authenticated: the ML-KEM ciphertext decapsulated under
-   * this wallet's key and the AEAD verified with this wallet's own `pk` as
-   * associated data, so the note is this wallet's whatever sits beside it. A
-   * commitment that the note does not open is therefore a pair taken apart,
-   * and `runSync` searches the block's own authenticated leaf range for the
-   * commitment the note does open. `decryptBatch` sets it; the command-line
-   * wallet's `OpenedLeaf::Elsewhere` is the same answer.
-   */
-  moved?: boolean;
 }
 
 export interface PathAnswer {
@@ -232,6 +229,7 @@ export type WorkerRequest =
   | { kind: 'init'; wasmBase: string; numLeaves: number; maxThreads: number }
   | { kind: 'limits' }
   | { kind: 'readStateProof'; root: string; nodes: string[]; keys: string[]; prefix?: string }
+  | { kind: 'extrinsicsRoot'; extrinsics: string[] }
   | { kind: 'minerKey' }
   | { kind: 'unlock'; seed: Uint8Array }
   | { kind: 'lock' }
