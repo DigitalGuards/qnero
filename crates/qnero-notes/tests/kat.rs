@@ -2,9 +2,7 @@
 //! qnero-notes --test kat` and review the diff; any change here is a
 //! consensus-breaking change to key or note derivation.
 
-use qnero_notes::{
-    dummy_nullifier, encrypt_note, output_rho, pad_memo, Digest, Note, SpendingKey,
-};
+use qnero_notes::{dummy_nullifier, encrypt_note, output_rho, pad_memo, Digest, Note, SpendingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 

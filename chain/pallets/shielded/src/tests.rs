@@ -360,7 +360,8 @@ fn a_valid_single_segment_bundle_passes_and_counts_its_fee() {
 		fund_pool(100);
 		// Nine steps against a per-slot floor of eight: the flat minimum plus
 		// the seven the one reachable payload costs.
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
 		let outputs = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))];
 		let plan = check(&bundle, &outputs).expect("valid");
 		assert_eq!(plan.fee_steps, 9);
@@ -372,7 +373,8 @@ fn a_valid_single_segment_bundle_passes_and_counts_its_fee() {
 fn a_nullifier_already_settled_is_refused() {
 	new_test_ext().execute_with(|| {
 		fund_pool(100);
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
 		let outputs = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))];
 		assert_ok!(check(&bundle, &outputs));
 
@@ -394,7 +396,8 @@ fn a_nullifier_already_settled_is_refused() {
 fn both_nullifiers_of_a_slot_are_checked_and_settled() {
 	new_test_ext().execute_with(|| {
 		fund_pool(100);
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
 		let outputs = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))];
 		assert_ok!(Shielded::settle(bundle.clone(), outputs.clone()));
 
@@ -433,7 +436,10 @@ fn a_nullifier_repeated_across_two_segments_skips_the_later_one() {
 				Segment { block_hash, block_number: 10, slots: vec![second.clone()] },
 			],
 		};
-		let outputs = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)), output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2))];
+		let outputs = vec![
+			output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)),
+			output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2)),
+		];
 
 		let plan = check(&bundle, &outputs).expect("the first segment settles");
 		assert_eq!(plan.settles, vec![true, false]);
@@ -469,14 +475,18 @@ fn the_zero_nullifier_never_enters_the_set() {
 		let mut only = slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 3);
 		only.nullifiers[0] = [0u8; 32];
 		let bundle = one_segment(10, vec![only]);
-		assert_noop!(check(&bundle, &[output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]), Error::<Test>::ZeroNullifier);
+		assert_noop!(
+			check(&bundle, &[output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]),
+			Error::<Test>::ZeroNullifier
+		);
 	});
 }
 
 #[test]
 fn a_segment_anchored_at_the_wrong_block_hash_is_refused() {
 	new_test_ext().execute_with(|| {
-		let mut bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 3)]);
+		let mut bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 3)]);
 		bundle.segments[0].block_hash = digest_bytes_of("some other block");
 		assert_noop!(
 			check(&bundle, &[output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]),
@@ -496,7 +506,10 @@ fn a_segment_anchored_at_a_height_with_no_block_is_refused() {
 				slots: vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 3)],
 			}],
 		};
-		assert_noop!(check(&bundle, &[output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]), Error::<Test>::BlockNotFound);
+		assert_noop!(
+			check(&bundle, &[output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]),
+			Error::<Test>::BlockNotFound
+		);
 	});
 }
 
@@ -549,7 +562,8 @@ fn a_ciphertext_that_does_not_hash_to_the_slots_digest_is_refused() {
 		// The binding runs behind the cheap pass, so the pool has to stand
 		// behind the fee for the submission to reach it at all.
 		fund_pool(100);
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
 		assert_noop!(
 			check(&bundle, &[output(&suite_ciphertext(0xa1), &suite_ciphertext(0xff))]),
 			Error::<Test>::CiphertextDigestMismatch
@@ -566,7 +580,8 @@ fn a_ciphertext_that_does_not_hash_to_the_slots_digest_is_refused() {
 #[test]
 fn the_output_count_must_equal_the_real_slot_count() {
 	new_test_ext().execute_with(|| {
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
 		assert_noop!(check(&bundle, &[]), Error::<Test>::CiphertextCountMismatch);
 		assert_noop!(
 			check(
@@ -587,8 +602,12 @@ fn the_output_count_must_equal_the_real_slot_count() {
 #[test]
 fn a_slot_below_the_minimum_fee_is_refused() {
 	new_test_ext().execute_with(|| {
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 0)]);
-		assert_noop!(check(&bundle, &[output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]), Error::<Test>::FeeBelowMinimum);
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 0)]);
+		assert_noop!(
+			check(&bundle, &[output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]),
+			Error::<Test>::FeeBelowMinimum
+		);
 	});
 }
 
@@ -598,9 +617,15 @@ fn settling_appends_two_leaves_per_slot_and_stores_their_ciphertexts() {
 		fund_pool(100);
 		let bundle = one_segment(
 			10,
-			vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 8), slot("b", &suite_ciphertext(0xb1), &suite_ciphertext(0xb2), 8)],
+			vec![
+				slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 8),
+				slot("b", &suite_ciphertext(0xb1), &suite_ciphertext(0xb2), 8),
+			],
 		);
-		let outputs = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)), output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2))];
+		let outputs = vec![
+			output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)),
+			output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2)),
+		];
 		assert_ok!(Shielded::settle(bundle.clone(), outputs));
 
 		assert_eq!(ZkTree::leaf_count(), 4);
@@ -643,8 +668,12 @@ fn the_block_author_fee_share_is_held_for_the_blocks_coinbase_note() {
 		));
 		let issuance_before = Balances::total_issuance();
 
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
-		assert_ok!(Shielded::settle(bundle, vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]));
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
+		assert_ok!(Shielded::settle(
+			bundle,
+			vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]
+		));
 
 		// Nine steps, burn rounds up against the author: five burned, four
 		// held for the coinbase note. The author's transparent account is not
@@ -672,7 +701,8 @@ fn the_block_author_fee_share_is_held_for_the_blocks_coinbase_note() {
 fn a_fee_larger_than_the_pool_is_refused_with_nothing_written() {
 	new_test_ext().execute_with(|| {
 		fund_pool(2);
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 3)]);
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 3)]);
 		let outputs = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))];
 		assert_noop!(check(&bundle, &outputs), Error::<Test>::PoolUnderflow);
 		assert_noop!(Shielded::settle(bundle, outputs), Error::<Test>::PoolUnderflow);
@@ -699,8 +729,12 @@ fn a_settled_fee_moves_no_transparent_balance() {
 		set_author_preimage(preimage);
 
 		System::reset_events();
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
-		assert_ok!(Shielded::settle(bundle, vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]));
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
+		assert_ok!(Shielded::settle(
+			bundle,
+			vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]
+		));
 		assert_eq!(Balances::balance(&author), 0, "the author holds no transparent balance");
 		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_STEP, "the credit did happen");
 
@@ -739,7 +773,11 @@ fn a_padding_slot_is_dropped_at_the_parse() {
 	write_digest(&mut felts, slot_commitment_index(0, 0), &digest_bytes_of("real-cm1"));
 	write_digest(&mut felts, slot_commitment_index(0, 1), &digest_bytes_of("real-cm2"));
 	felts[slot_fee_index(0)] = F::from_canonical_u64(3);
-	write_digest(&mut felts, slot_ct_digest_index(0), &ct_digest(&[&suite_ciphertext(0x01), &suite_ciphertext(0x02)]));
+	write_digest(
+		&mut felts,
+		slot_ct_digest_index(0),
+		&ct_digest(&[&suite_ciphertext(0x01), &suite_ciphertext(0x02)]),
+	);
 	write_digest(&mut felts, slot_nullifier_index(1, 0), &digest_bytes_of("padding-nf1"));
 	write_digest(&mut felts, slot_nullifier_index(1, 1), &digest_bytes_of("padding-nf2"));
 
@@ -802,7 +840,11 @@ fn an_out_of_range_block_number_saturates_and_is_then_refused() {
 	write_digest(&mut felts, slot_commitment_index(0, 0), &digest_bytes_of("cm1"));
 	write_digest(&mut felts, slot_commitment_index(0, 1), &digest_bytes_of("cm2"));
 	felts[slot_fee_index(0)] = F::from_canonical_u64(1);
-	write_digest(&mut felts, slot_ct_digest_index(0), &ct_digest(&[&suite_ciphertext(0x01), &suite_ciphertext(0x02)]));
+	write_digest(
+		&mut felts,
+		slot_ct_digest_index(0),
+		&ct_digest(&[&suite_ciphertext(0x01), &suite_ciphertext(0x02)]),
+	);
 
 	let inputs = parse_private_batch_public_input_felts(&felts, 1).expect("the layout parses");
 	let bundle = SettlementBundle::from_private_batch(&inputs);
@@ -835,7 +877,10 @@ fn a_segment_settled_by_an_earlier_submission_is_skipped_not_fatal() {
 		// fourteen steps the two payloads cost.
 		let first = slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 8);
 		let second = slot("b", &suite_ciphertext(0xb1), &suite_ciphertext(0xb2), 16);
-		let outputs = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)), output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2))];
+		let outputs = vec![
+			output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)),
+			output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2)),
+		];
 
 		// The first segment settles on its own.
 		assert_ok!(Shielded::settle(
@@ -969,10 +1014,16 @@ fn the_ciphertexts_of_a_skipped_segment_are_still_bound_to_the_proof() {
 
 		// The same position padded to the ciphertext cap does not reach the
 		// binding at all now: the length rule refuses it in front.
-		let padded = vec![output(&[9u8; 2_048], &[9u8; 2_048]), output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2))];
+		let padded = vec![
+			output(&[9u8; 2_048], &[9u8; 2_048]),
+			output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2)),
+		];
 		assert_noop!(check(&batch, &padded), Error::<Test>::CiphertextLengthMismatch);
 
-		let honest = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)), output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2))];
+		let honest = vec![
+			output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)),
+			output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2)),
+		];
 		assert_ok!(check(&batch, &honest));
 	});
 }
@@ -997,7 +1048,10 @@ fn a_segment_whose_anchor_no_longer_resolves_is_skipped_not_fatal() {
 		// Sixteen steps: both positions carry their payload, and the settling
 		// slot owes the submission floor over both.
 		let fresh = slot("b", &suite_ciphertext(0xb1), &suite_ciphertext(0xb2), 16);
-		let outputs = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)), output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2))];
+		let outputs = vec![
+			output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)),
+			output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2)),
+		];
 
 		// The first segment is anchored at height 10 on a hash that is no
 		// longer the canonical one there, which is what a one-block reorg
@@ -1073,7 +1127,10 @@ fn a_submission_with_no_live_anchor_is_refused_by_the_anchor_rule() {
 			],
 		};
 		assert_noop!(
-			check(&mixed, &[outputs[0].clone(), output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2))]),
+			check(
+				&mixed,
+				&[outputs[0].clone(), output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2))]
+			),
 			Error::<Test>::BlockHashMismatch
 		);
 	});
@@ -1434,7 +1491,10 @@ fn a_segment_anchored_above_the_current_height_is_skipped_not_fatal() {
 		// Sixteen steps: both positions carry their payload, so the settling
 		// slot owes the submission floor over both.
 		let fresh = slot("b", &suite_ciphertext(0xb1), &suite_ciphertext(0xb2), 16);
-		let outputs = vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)), output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2))];
+		let outputs = vec![
+			output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2)),
+			output(&suite_ciphertext(0xb1), &suite_ciphertext(0xb2)),
+		];
 
 		let bundle = SettlementBundle {
 			segments: vec![
@@ -1702,10 +1762,7 @@ fn the_reachable_carried_bytes_are_one_value_per_position() {
 		let ct_2 = suite_ciphertext(0x92);
 
 		// A private batch: one segment, every position carried.
-		let private = one_segment(
-			10,
-			vec![slot("a", &ct_1, &ct_2, 8), slot("b", &ct_1, &ct_2, 8)],
-		);
+		let private = one_segment(10, vec![slot("a", &ct_1, &ct_2, 8), slot("b", &ct_1, &ct_2, 8)]);
 		let outputs = vec![output(&ct_1, &ct_2), output(&ct_1, &ct_2)];
 		let plan = check(&private, &outputs).expect("two carried positions");
 		assert_eq!(plan.carried_bytes, 2 * 2 * SUITE_CIPHERTEXT_BYTES);
@@ -1725,8 +1782,7 @@ fn the_reachable_carried_bytes_are_one_value_per_position() {
 				},
 			],
 		};
-		let mixed =
-			vec![output(b"", b""), output(&ct_1, &ct_2), output(&ct_1, &ct_2)];
+		let mixed = vec![output(b"", b""), output(&ct_1, &ct_2), output(&ct_1, &ct_2)];
 		let plan = check(&public, &mixed).expect("one emptied position and two carried");
 		assert_eq!(plan.carried_bytes, 2 * 2 * SUITE_CIPHERTEXT_BYTES);
 		assert_eq!(plan.skipped_slots, 1);
@@ -2498,11 +2554,7 @@ fn a_wrong_length_payload_is_a_permanent_call_refusal() {
 			.is_err());
 			// The dispatch body names the error the unsigned gates flatten.
 			assert_noop!(
-				Shielded::submit_private_batch(
-					RuntimeOrigin::none(),
-					spend.proof.clone(),
-					outputs,
-				),
+				Shielded::submit_private_batch(RuntimeOrigin::none(), spend.proof.clone(), outputs,),
 				expected
 			);
 			assert_eq!(ZkTree::leaf_count(), 1);
@@ -2830,8 +2882,12 @@ fn the_coinbase_note_carries_the_block_reward_and_the_author_fee_share() {
 		let inner = record_coinbase(block);
 
 		// Nine steps of fee: five burned, four to the author.
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
-		assert_ok!(Shielded::settle(bundle, vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]));
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
+		assert_ok!(Shielded::settle(
+			bundle,
+			vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]
+		));
 		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_STEP);
 
 		assert_ok!(deposit_coinbase(7 * POOL_STEP));
@@ -2865,8 +2921,12 @@ fn a_zero_reward_still_mints_the_author_fee_already_in_the_pool() {
 		let inner = record_coinbase(block);
 
 		// Nine steps of fee: five burned, four to the author.
-		let bundle = one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
-		assert_ok!(Shielded::settle(bundle, vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]));
+		let bundle =
+			one_segment(10, vec![slot("a", &suite_ciphertext(0xa1), &suite_ciphertext(0xa2), 9)]);
+		assert_ok!(Shielded::settle(
+			bundle,
+			vec![output(&suite_ciphertext(0xa1), &suite_ciphertext(0xa2))]
+		));
 		assert_eq!(Shielded::pending_coinbase_fee(), 4 * POOL_STEP);
 
 		// No emission and no collected fees: exactly what a late-life block

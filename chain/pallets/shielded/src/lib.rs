@@ -2027,8 +2027,8 @@ pub mod pallet {
 		fn ensure_exact_ciphertext(bytes: &[u8]) -> Result<(), Error<T>> {
 			let suite = qnero_circuit::chain::declared_crypto_suite(bytes)
 				.ok_or(Error::<T>::CiphertextLengthMismatch)?;
-			let expected =
-				qnero_circuit::chain::ciphertext_len(suite).ok_or(Error::<T>::UnknownCryptoSuite)?;
+			let expected = qnero_circuit::chain::ciphertext_len(suite)
+				.ok_or(Error::<T>::UnknownCryptoSuite)?;
 			ensure!(bytes.len() == expected, Error::<T>::CiphertextLengthMismatch);
 			Ok(())
 		}

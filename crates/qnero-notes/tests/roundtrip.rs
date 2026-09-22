@@ -248,7 +248,12 @@ fn the_suite_table_matches_the_serializer() {
 
     // Every memo the pad accepts produces the same length, which is the whole
     // point of padding and is also what makes one table row enough.
-    for memo in ["", "x", "payment to B", &"m".repeat(qnero_notes::MEMO_BYTES)] {
+    for memo in [
+        "",
+        "x",
+        "payment to B",
+        &"m".repeat(qnero_notes::MEMO_BYTES),
+    ] {
         let padded = qnero_notes::pad_memo(memo).expect("it fits");
         let ct = encrypt_note(&addr.ek, &note, &padded, &[4u8; 32]).unwrap();
         assert_eq!(
