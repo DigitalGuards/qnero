@@ -696,7 +696,7 @@ where it roots, so a floor bounds nothing about difficulty.
 block on another parent is free while its difficulty is at least the tip's
 divided by 8, because an honest short fork or competing tip differs from the
 tip by a few retarget steps and an eighth needs about 42 consecutive maximum
-decreases, each of which needs a claimed 10000 s gap. Anything cheaper draws a
+decreases, each of which needs a claimed 8 318 s gap under the centred retarget. Anything cheaper draws a
 token from a bucket of 1024 refilling at 900 an hour, and draws it once its
 seal has met the branch difficulty, so a junk seal drains nothing. A block that does not
 extend the tip and needs a cache fill for a seed that is neither pinned nor
