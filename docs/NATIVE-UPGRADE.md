@@ -100,7 +100,10 @@ activating this candidate.
 Runtime `spec_version` is 105; `transaction_version` remains 7. The signed SCALE
 encoding and extension tuple are unchanged. Unsupported transparent calls become
 invalid at extrinsic checking, before inclusion, fees, nonce updates or body
-recording. The dispatch filter remains in place. Historical blocks use their
+recording. That now covers a `Multisig::propose` payload: the check decodes the
+opaque bytes and holds them to the same rule, so a proposal carrying a refused
+call is invalid too. The dispatch filter remains in place for internal
+dispatch. Historical blocks use their
 historical runtime; importing them under a replacement genesis is a different
 chain and is unsupported.
 
