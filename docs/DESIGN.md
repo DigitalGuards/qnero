@@ -1079,6 +1079,8 @@ Cost: 1568 bytes per transfer kept forever, plus a few lines beside the `ct_dige
 comparison. Leaks or forecloses nothing. The rule is only available while the bytes are in
 hand, at settlement.
 
+Built in the pre-genesis bundle. Section 12.8 is the shape it took in the code.
+
 Dissent, resolved: a flat length rule would refuse a later ML-KEM-768 suite, so it is keyed
 to the suite id. The cryptography review refutes two supporting arguments, that ML-KEM
 ciphertexts are distinguishable from uniform (operator-first) and that the short variant
@@ -1272,3 +1274,112 @@ ciphertext fails that test, and no append-order replay is needed.
 settlement block a scanning wallet would make anyway. Added: the commitment search, a
 capability probe, a retention-watermark failure, and an adversarial test matrix. All three
 bounds M13 closes, position, depth and ciphertext binding, still close.
+
+### 12.8 Q1 as built: the exact-length settlement rule (2026-09-22)
+
+The decision is 12.1. This is the shape it takes in the code, and it rides in the pre-genesis
+bundle of 12.7 Step 1 as item 4.
+
+**The rule.** Every position in a settlement's `outputs` is one of two things: a pair of
+zero-length ciphertexts, which is the exemption a skipped position may take and which binds
+and prices nothing, or a pair of ciphertexts each exactly the serialized length its declared
+`crypto_suite` id fixes. Anything else is refused. One suite exists:
+
+| Suite | Contents | Exact bytes |
+|---|---|---|
+| 1 | ML-KEM-1024 plus ChaCha20-Poly1305, vendored KDF | 1792 |
+
+1792 is 19 bytes of framing (a version byte, a two-byte suite, a four-byte diversifier index,
+and a `u32` length before each of three payloads), a 1568-byte ML-KEM-1024 encapsulation, the
+112-byte note payload under a ChaCha20-Poly1305 tag, and a 61-byte memo under its own tag.
+The pair a transfer publishes is 3584 bytes, which is the wire figure 12.0 is built on.
+
+**Where the id comes from.** `NoteCiphertext::to_bytes` puts the suite at bytes 1..3, little
+endian, immediately after the version byte. The chain reads those three bytes and nothing
+else. It still does not parse the payload, and a blob of the exact length behind a valid
+header still settles whatever it contains: the rule fixes how many bytes a settlement may
+publish, and `ct_digest` fixes which bytes they are. Neither authenticates a note. The
+version byte at offset 0 stays unchecked on purpose, because it is an address version and the
+length is fixed by the suite alone.
+
+**Where it is enforced.** One flat pass at the head of `Pallet::plan_settlement`, after the
+`NothingToSettle` guard and ahead of the segment walk. That single site covers all three
+gates, because `plan_settlement` is what `validate_unsigned` runs before the ZK verify, what
+`pre_dispatch` runs before the verify, and what `check_settlement` runs inside the dispatch
+body before `settle` writes anything. The pass reads no storage and hashes nothing, so it is
+cheaper than the two `UsedNullifiers` probes per slot behind it and it belongs in front of
+them. 12.1 put the rule beside the `ct_digest` comparison; `bind_payload` sits behind the
+verify on purpose, and a length comparison in front of it would let a fabricated blob cost a
+node a verify first.
+
+**Errors.** `CiphertextLengthMismatch` for a length that does not match the declared suite,
+for a blob too short to carry a header, and for a position with one empty field and one full
+one. `UnknownCryptoSuite` for an id this release has no length for, which is the message a
+wallet one release ahead of the runtime is owed. Both are permanent, so both map to
+`InvalidTransaction::Call` and neither may join the `ExhaustsResources` arm the
+ciphertext-cap deferral added: a permanent failure answered as a full block is re-skipped
+every block until its longevity runs out.
+
+**The payload fee term.** `carried_bytes` keeps its arithmetic and loses its range. The only
+reachable value per non-emptied position is 3584 bytes, so the per-slot floor is a flat eight
+pool steps and the submission floor is the carried slot count times `MinLeafFee` plus seven
+steps per carried position. `CiphertextBytesPerFeeQuantum` stays 512 and keeps pricing those
+bytes; what it loses is its stated purpose. It was sized so that an honest pair and a pair
+padded to `MaxCiphertextBytes` land in different fee buckets, because the chain never parsed
+the bytes and nothing held a submission to a real ciphertext shape. The rule refuses that
+grind outright, so the separation it was tuned for prices a state nobody can reach.
+`MaxCiphertextBytes` stays 2048 and keeps bounding the entry path and the encoded length;
+lowering it would move `MaxEncodedLen` on `ShieldedOutput`, which is a metadata-visible type
+change and belongs in no bundle that also moves the settlement rules.
+
+**Scope.** Settlement only. `shield` keeps the cap rule, which preserves the legal zero-length
+entry ciphertext and the `shield(0)` weight fixture, and leaves the entry note's size the one
+place a length still says which wallet wrote it.
+
+**What it costs the ceiling.** An honest batch declares exactly what it declared before,
+because the weight is computed from the submitted vector. What falls is the adversarial
+ceiling: the worst payload a full 318-slot public batch can carry drops from 1 302 528 bytes
+to 1 139 712, about 12.5 percent off the `ct_digest` term of a maximally padded batch. The
+honest figures in 12.0 do not move.
+
+**The wallets.** Both already produce 1792 and both already refuse locally before submitting
+a pair that came out at another length, so no wallet changes what it sends. Three things
+change anyway. The memo pad inverts: it stops being the largest pad that separates two fee
+buckets and becomes the consensus length minus the serializer's fixed part, which also
+removes the coordination hazard that every wallet on the chain had to move the pad together.
+The machinery that reasons about padding to the cap goes, in both wallets and in their tests.
+And the local check names the consensus length, which matters because the pool answers a
+wrong-length submission with a bare `Call` rejection that names nothing, after the wallet has
+already paid for the proof. The explorer's per-leaf marking of a size other than 1792 turns
+from a documented open leak into an invariant violation on a settlement output, and stays a
+non-reference notice on a shield entry note.
+
+**Where the constant lives.** `qnero_circuit::chain`, beside `ct_digest`, which is the module
+for rules a runtime evaluates natively and the one crate the pallet, the CLI wallet and the
+browser prover can all link. Its value also goes into the protocol profile at bytes 92..94,
+previously reserved zeros, so it reaches both wallets inside `ActiveProtocolProfile`,
+authenticated against the header state root, with no new metadata surface. `MEMO_BYTES` stays
+a literal 61 in `qnero-notes`, held to the consensus length by a cross-check test rather than
+by a new crate edge, which is the pattern `qnero_circuit::chain` already uses for the restated
+`CM` tag.
+
+**Versioning.** No spec bump of its own: it rides the bundle's single bump.
+`transaction_version` is untouched, since the call signatures and the SCALE shape of
+`ShieldedOutput` are unchanged. Storage version and layout are unchanged. The profile change
+forces a coordinated release of every wallet binary and the wasm prover, which this bundle
+forces anyway. After genesis this is a hard fork with no upgrade path, because there are no
+admin keys and a runtime bump cannot reach a running chain, so it lands before the relaunch or
+not at all.
+
+**Independent of the depth gate.** Nothing in this item changes with the depth-20 outcome. The
+ciphertext length has no term in any circuit and `ct_digest` stays a free public input at
+depth 16 and at depth 20 alike, so the table, the helpers, the errors, the enforcement site
+and every test here are the same either way. What the depth decision moves is the shared cost
+this item already rides on: the profile's depth field, the three artifact digests, and the
+regeneration of the proof-carrying pallet fixtures.
+
+**Cost.** Roughly 60 lines of consensus code across two crates, against a fixture rewrite in
+the shielded pallet's test module, which is where nearly all the work is. Leaks or forecloses
+nothing. The one thing it makes harder is adding a second suite later, because a second length
+is now a hard on-chain label rather than a soft convention, and the decision to pad a shorter
+suite up has to be taken before that suite exists.

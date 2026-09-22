@@ -115,8 +115,12 @@ Current state keeps ordinary ciphertexts for 64 blocks, with at most 2048 new
 ciphertexts per block and at most 4096 cleanup steps per block. A FIFO queue
 tracks only stored ciphertexts, so unrelated commitment-tree leaves cannot make
 that queue grow. At the 2048-byte runtime payload cap, the steady-state payload
-bound is 256 MiB, plus queue, map and database overhead. Real ordinary outputs
-currently use 1792 bytes. This bound concerns the live ciphertext map.
+bound is 256 MiB, plus queue, map and database overhead. That cap is still what
+bounds the entry path, so 256 MiB stays the number to plan against. What a
+settlement writes is now fixed rather than observed: an ordinary output is
+exactly 1792 bytes, because settlement requires the length the declared crypto
+suite fixes, so the settled share of the map is 224 MiB at the same block
+counts. This bound concerns the live ciphertext map.
 
 The storage-version-2 migration records a finite legacy leaf-index range and
 delays cleanup by 64 blocks. It removes at most the unused portion of the cleanup

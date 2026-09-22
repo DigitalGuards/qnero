@@ -1826,7 +1826,8 @@ what the memo pad costs the chain. The fix pass re-ran the whole end-to-end
 flow against a fresh `--dev --tmp` node, because one change moves numbers the
 run above recorded: the memo pad is 61 bytes where it was 256, so each output
 ciphertext is a uniform 1792 bytes and the submission floor is back to
-0.08 QNR.
+0.08 QNR. The pre-genesis bundle later made 1792 the length settlement
+requires, so the figures here describe the only settled payload there is.
 
 ### What changed
 
@@ -2005,9 +2006,13 @@ leaf 59: ciphertext 1792 bytes
 
 1792 is 1731 plus the 61-byte pad. The payment carried a 12-byte memo, the
 change carried none and the shield carried another, and all five are one
-length on chain. The pair per spend is 3584 bytes, which is `ceil(3584 / 512)
-= 7` quanta of payload where a pair padded to the cap is 8: the separation the
-divisor exists for is back.
+length on chain. The pair per spend is 3584 bytes, which is `3584 / 512 = 7`
+quanta of payload exactly, so a settling slot's floor is eight steps. At the
+time this run was taken that was a fee argument, with a pair padded to the cap
+at 8 quanta one bucket above. The pre-genesis bundle made it a rule: a
+settlement carries exactly the suite's length, so the four settled ciphertexts
+above are the only shape the chain now accepts and the capped pair is refused
+rather than priced. The shield's entry note still has the cap and not the rule.
 
 === 9. a hostile memo cannot drive the terminal, or widen the row ===
 

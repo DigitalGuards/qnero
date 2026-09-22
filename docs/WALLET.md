@@ -117,35 +117,33 @@ all reads it.
   and because this chain prices payload bytes. A memo over the pad is refused,
   at the top of the command.
 
-  The pad is bounded twice and the tighter bound picks it. `MaxCiphertextBytes`
-  leaves 317 bytes over a memoless ciphertext, and a pad over that fails the
-  extrinsic's SCALE decode after the proof exists. The fee is the tighter one:
-  `ShieldedCiphertextBytesPerFeeQuantum` (512) is sized so a real pair and a
-  pair padded to `MaxCiphertextBytes` fall in different buckets, since the
-  chain never parses those bytes and `Shielded::Ciphertexts` is never pruned,
-  and a pad of 61 is the largest that keeps `2 * (1731 + pad) = 3584` a bucket
-  below `2 * 2048 = 4096`. A 256-byte pad put the two in the same bucket, which
-  let a settler pad both ciphertexts to the cap, write 512 bytes of permanent
-  state per slot and pay exactly what an honest spend pays.
-  `fee::the_wallets_own_pair_stays_a_bucket_below_a_padded_one` is the gate on
-  this side and `a_slot_pays_for_the_ciphertext_bytes_it_publishes` is the one
-  on the chain's. `fee::ensure_memo_pad_fits` checks the compiled-in pad
-  against both of the runtime's own values once per command, because every
-  other chain value this wallet uses is read from metadata and this one cannot
-  be.
+  The pad is a consensus value now, and the wallet holds the number it derives
+  to. Settlement requires exactly 1792 bytes of every suite-1 ciphertext it
+  carries, which is `memo::CIPHERTEXT_FIXED_BYTES` plus `memo::MEMO_BYTES`, so
+  a pad of any other size produces a ciphertext the chain refuses and answers
+  with a bare `Invalid Transaction: Call` that names nothing, after the wallet
+  has paid for the proof. `memo::the_pad_is_the_consensus_length_minus_the_
+  serializers_fixed_part` holds the two together, and
+  `qnero_circuit::profile::ensure_supported` is what refuses a chain whose
+  length is not the one this build was made for: the profile carries it at
+  bytes 92..94 and the check is strict equality over all 192 bytes, run on the
+  spend path before anything else.
 
-  The two bounds get different answers. A pad the runtime's
-  `MaxCiphertextBytes` cannot take is a refusal, because the extrinsic would
-  fail to decode after the proof committing to those bytes exists. A runtime
-  whose divisor merged the two fee buckets is a warning printed once per
-  process, and the spend goes ahead. That second one is a property of the
-  chain: a settler pads to the cap whatever this wallet does, so refusing fixed
-  nothing and stopped every send and every shield this wallet makes. The
-  operator cannot change `CiphertextBytesPerFeeQuantum`, and this wallet
-  shrinking its own pad below what every other wallet on the chain uses would
-  publish its own ciphertext length, which is the leak the pad exists to close.
-  `fee::memo_pad_separation_warning` is the sentence and it names the pad that
-  would restore the separation, as a coordinated move.
+  What it replaces. The pad used to be bounded twice with the tighter bound
+  picking it. `MaxCiphertextBytes` leaves 317 bytes over a memoless ciphertext,
+  and a pad over that still fails the extrinsic's SCALE decode after the proof
+  exists, so `fee::ensure_memo_pad_fits` still checks it once per command. The
+  fee was the tighter one: `ShieldedCiphertextBytesPerFeeQuantum` (512) was
+  sized so a real pair and a pair padded to `MaxCiphertextBytes` fell in
+  different buckets, since the chain did not parse those bytes and nothing held
+  a submission to a real ciphertext shape, and 61 was the largest pad that kept
+  `2 * (1731 + pad) = 3584` a bucket below `2 * 2048 = 4096`. The exact-length
+  rule refuses the padded pair outright, so that bound priced a state nobody
+  can reach: `largest_separating_pad`, `memo_pad_separation_warning` and the
+  warning they produced are gone from both wallets, and
+  `a_pair_padded_to_the_cap_is_refused_not_priced` in the pallet is where the
+  endpoint went.
+
 - **A coinbase note's value and its block are public.** `Shielded::CoinbaseValues` holds each
   coinbase note's value keyed by leaf index and `Shielded::LeafBlocks` dates it, both readable by
   anyone with an RPC connection and no keys. What the chain hides about a coinbase is only whose it
@@ -1009,7 +1007,8 @@ refusal costs nothing:
    carry. A `NoteCiphertext` is 1731 bytes plus its padded memo and a note's
    value does not move that, so a probe encryption gives the exact size: 1792
    bytes for both outputs, and the two are asserted equal, since a difference
-   is the leak the padding closes. The floor is
+   is the leak the padding closes. 1792 is also the length settlement requires,
+   so the post-encryption comparison checks both at once and says so. The floor is
    `MinLeafFee + ceil(bytes / CiphertextBytesPerFeeQuantum)`, and for the
    single real slot a wallet submits it equals the whole-submission floor. At
    the current runtime that is 0.08 QNR for two outputs. `--fee`
