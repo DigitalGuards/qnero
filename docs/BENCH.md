@@ -232,14 +232,19 @@ marker for which output is the sender's change; `docs/WALLET.md` has the
 argument.
 
 The second review fix pass re-ran them again, with the memo pad cut from 256
-bytes to 61. The fee is what bounds the pad, ahead of
-`MaxCiphertextBytes`: `CiphertextBytesPerFeeQuantum` (512) is sized so that a
-real ciphertext pair and a pair padded to the cap fall in different buckets,
+bytes to 61. The fee was what bounded the pad at the time, ahead of
+`MaxCiphertextBytes`: `CiphertextBytesPerFeeQuantum` (512) was sized so that a
+real ciphertext pair and a pair padded to the cap fell in different buckets,
 and a 256-byte pad put `2 * (1731 + 256) = 3974` in the cap's own bucket, which
 let a settler pad to the cap and write 512 bytes of permanent state per slot
 for the same fee an honest spend pays. At 61 each output is 1792 bytes, the
 pair is 3584, and the floor is back to 0.08 QNR where the unpadded wallet paid
-0.08 and the 256-padded one paid 0.09. Circuit build 2.31 and 2.38 s, proving
+0.08 and the 256-padded one paid 0.09. The pre-genesis bundle then made that
+length a consensus rule rather than a fee argument: a settlement carries
+exactly the length its declared crypto suite fixes, so the padded-to-the-cap
+pair is refused instead of priced and 1792 is the only payload these figures
+can describe. The measurements below did not move, because the wallet already
+sent 1792. Circuit build 2.31 and 2.38 s, proving
 3.34 and 3.51 s, proof 150908 bytes unchanged, submit to inclusion 0.53 s both
 times, wall clock 6.47 and 6.56 s. Nothing in the proving path moved: the
 ciphertext rides in the extrinsic, and only its `ct_digest` reaches the

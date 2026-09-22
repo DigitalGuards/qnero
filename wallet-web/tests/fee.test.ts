@@ -14,8 +14,6 @@ import type { ShieldedConstants } from '../src/chain/api';
 import {
   ensureCiphertextFits,
   ensureMemoPadFits,
-  largestSeparatingPad,
-  memoPadSeparationWarning,
   slotFeeFloor,
   submissionFeeFloor,
 } from '../src/wallet/fee';
@@ -32,7 +30,9 @@ function runtime(): ShieldedConstants {
   };
 }
 
-/** What `qnero-notes` pins: a fixed ciphertext, a 61-byte pad. */
+/** What `qnero-notes` pins: a fixed ciphertext, a 61-byte pad. The padded
+ * total is the length settlement requires of a suite-1 ciphertext, so it is
+ * the only size a spend may publish. */
 const FIXED = 1731;
 const MEMO = 61;
 const PADDED = FIXED + MEMO;
@@ -68,20 +68,6 @@ describe('the fee floor', () => {
 });
 
 describe('the memo pad', () => {
-  it('keeps this wallet\'s own pair a fee bucket below a pair padded to the cap', () => {
-    const sent = slotFeeFloor(runtime(), PADDED, PADDED);
-    const capped = slotFeeFloor(runtime(), 2048, 2048);
-    expect(sent).toBeLessThan(capped);
-  });
-
-  it('is the largest pad the M4 runtime separates', () => {
-    expect(largestSeparatingPad(runtime(), FIXED)).toBe(MEMO);
-    // One byte more and the separation is gone, which is what "largest" means.
-    expect(slotFeeFloor(runtime(), PADDED + 1, PADDED + 1)).toBe(
-      slotFeeFloor(runtime(), 2048, 2048),
-    );
-  });
-
   it('refuses a runtime whose cap a padded ciphertext does not fit, naming the pad', () => {
     const narrow = { ...runtime(), maxCiphertextBytes: 1780 };
     expect(() => {
@@ -91,33 +77,6 @@ describe('the memo pad', () => {
     expect(() => {
       ensureMemoPadFits(narrow, PADDED, MEMO, FIXED);
     }).toThrow(/pad is what has to shrink/);
-  });
-
-  it('warns and still sends when a runtime merges the two fee buckets', () => {
-    expect(memoPadSeparationWarning(runtime(), PADDED, MEMO, FIXED)).toBeNull();
-
-    // The divisor doubled, the cap untouched. The cap check still passes,
-    // because 1792 is under 2048, and the separation the pad was chosen for is
-    // gone: a settler can pad both outputs to the cap and pay what an honest
-    // spend pays.
-    const widened = { ...runtime(), ciphertextBytesPerFeeQuantum: 1024 };
-    expect(slotFeeFloor(widened, PADDED, PADDED)).toBe(slotFeeFloor(widened, 2048, 2048));
-    const warning = memoPadSeparationWarning(widened, PADDED, MEMO, FIXED);
-    expect(warning).toMatch(/prices nothing/);
-    expect(warning).toMatch(/1024/);
-    expect(warning).toMatch(/divisor is what has to come down/);
-    // A chain-wide property is not this spend's refusal.
-    expect(() => {
-      ensureMemoPadFits(widened, PADDED, MEMO, FIXED);
-    }).not.toThrow();
-  });
-
-  it('names the smaller pad when one would restore the separation', () => {
-    // At 1160 bytes to the fee bucket a pair may reach 3480 bytes, so each
-    // ciphertext may reach 1740 and the pad is 9.
-    const slightly = { ...runtime(), ciphertextBytesPerFeeQuantum: 1160 };
-    expect(largestSeparatingPad(slightly, FIXED)).toBe(9);
-    expect(memoPadSeparationWarning(slightly, PADDED, MEMO, FIXED)).toMatch(/down to 9 bytes/);
   });
 
   it('refuses an oversized ciphertext before proving', () => {

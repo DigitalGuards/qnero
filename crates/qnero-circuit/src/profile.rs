@@ -1,7 +1,9 @@
 //! Canonical release identity, encoded independently of Rust and SCALE versions.
 //!
 //! A profile is 192 bytes. Integers are unsigned little endian. Bytes 0..8
-//! identify the format; 8..92 describe the protocol; 92..96 are zero; the last
+//! identify the format; 8..92 describe the protocol; 92..94 carry the exact
+//! serialized length of a suite-1 note ciphertext, which settlement requires;
+//! 94..96 are zero; the last
 //! 96 bytes are Blake2b-256 hashes of the exact serialized leaf, private-batch
 //! and public-batch verifier files, including the public-batch dimension header.
 //! Padding proofs are randomized and are deliberately excluded.
@@ -125,6 +127,14 @@ pub const fn protocol_profile(
     out = put(out, 80, CIPHERTEXT_RETENTION_BLOCKS.to_le_bytes());
     out = put(out, 84, MAX_CIPHERTEXTS_PER_BLOCK.to_le_bytes());
     out = put(out, 88, MAX_CIPHERTEXT_PRUNES_PER_BLOCK.to_le_bytes());
+    // The length every note ciphertext a settlement carries must have, so a
+    // wallet reads the consensus rule out of the profile it already fetches and
+    // authenticates instead of trusting its own compiled copy of the number.
+    out = put(
+        out,
+        92,
+        (crate::chain::SUITE_1_CIPHERTEXT_BYTES as u16).to_le_bytes(),
+    );
     out = put(out, LEAF_DIGEST_OFFSET, leaf);
     out = put(out, PRIVATE_DIGEST_OFFSET, private);
     put(out, PUBLIC_DIGEST_OFFSET, public)
@@ -168,6 +178,20 @@ mod tests {
         assert_eq!(&SUPPORTED_PROFILE[40..42], &100u16.to_le_bytes());
         assert_eq!(&SUPPORTED_PROFILE[60..64], &[6, 0, 53, 0]);
         assert!(ensure_supported(&SUPPORTED_PROFILE, RELEASE_NUM_LEAVES).is_ok());
+    }
+
+    /// Bytes 92..94 carry the settlement ciphertext length and 94..96 stay
+    /// reserved. `ensure_supported` is strict equality over all 192 bytes, so a
+    /// runtime that moved this number is refused at the profile check, before a
+    /// wallet ever pays for a proof it could not settle.
+    #[test]
+    fn the_profile_carries_the_suite_1_ciphertext_length() {
+        assert_eq!(
+            &SUPPORTED_PROFILE[92..94],
+            &(crate::chain::SUITE_1_CIPHERTEXT_BYTES as u16).to_le_bytes()
+        );
+        assert_eq!(&SUPPORTED_PROFILE[92..94], &1792u16.to_le_bytes());
+        assert_eq!(&SUPPORTED_PROFILE[94..96], &[0, 0]);
     }
 
     #[test]

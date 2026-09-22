@@ -41,6 +41,12 @@
 //!   aggregator either pays that floor or recomposes a batch without the conflicted inners.
 //! - **`ct_digest`.** The circuit leaves it a free public input. The chain recomputes it over the
 //!   ciphertexts in the extrinsic, in output order, and rejects the slot when it differs.
+//! - **An exact ciphertext length per declared crypto suite, on the settlement path.** Every
+//!   position in a settlement's `outputs` carries a pair of ciphertexts each exactly the serialized
+//!   length its declared suite fixes, 1792 bytes for the one suite v1 has, or is emptied to a
+//!   zero-length pair. The chain reads the three header bytes that carry the suite id and parses
+//!   nothing else. `ct_digest` fixes which bytes a settlement publishes; this fixes how many, which
+//!   is what forecloses padding to `MaxCiphertextBytes` for a fee bucket that never noticed.
 //! - **A minimum fee per real slot.** The leaf circuit's "at least one real input" constraint does
 //!   not bound how many leaves a prover can produce: one note of any value, zero included, spent
 //!   with a dummy in the other slot yields two spendable notes and can be repeated every block. The
@@ -469,7 +475,11 @@ pub mod pallet {
 	/// `qnero_circuit::chain::ct_digest` over these two, in this order, is what
 	/// the slot's `ct_digest` public input must equal. The bytes are
 	/// `qnero_pqcrypto::note_encryption::NoteCiphertext::to_bytes`: an ML-KEM
-	/// ciphertext plus two AEAD payloads. The chain never parses them.
+	/// ciphertext plus two AEAD payloads. On the settlement path the chain reads
+	/// three header bytes, the version byte and the two-byte `crypto_suite` id,
+	/// and nothing else: the suite fixes the exact length the pair must have
+	/// (see [`Pallet::plan_settlement`]) and a blob of that length behind a
+	/// valid header still settles whatever it contains.
 	#[derive(
 		Encode,
 		Decode,
@@ -847,6 +857,21 @@ pub mod pallet {
 		/// its recipient can never find, behind a `ct_digest` nothing
 		/// evaluated.
 		EmptyCiphertext,
+		/// A ciphertext a settlement carries is not the exact length its
+		/// declared `crypto_suite` fixes.
+		///
+		/// It also names a blob too short to carry a header at all, and a
+		/// position with one empty field and one full one: the zero-length
+		/// exemption is a whole pair or nothing.
+		CiphertextLengthMismatch,
+		/// A ciphertext a settlement carries declares a `crypto_suite` this
+		/// release has no length for.
+		///
+		/// It is what a wallet one release ahead of the runtime is owed. Folded
+		/// into [`Error::CiphertextLengthMismatch`] it would tell such a wallet
+		/// its bytes were the wrong length, when its bytes are right and this
+		/// chain is the one that has not caught up.
+		UnknownCryptoSuite,
 		/// The settling fees do not cover the slots and the bytes the
 		/// submission carries.
 		///
@@ -1596,7 +1621,8 @@ pub mod pallet {
 		///
 		/// This is the cheap half, and it is cheap on purpose. It reads
 		/// `UsedNullifiers` twice per slot, looks up one block hash per segment,
-		/// compares integers, and hashes nothing at all. The fee floors are
+		/// reads three header bytes of each submitted ciphertext, compares
+		/// integers, and hashes nothing at all. The fee floors are
 		/// evaluated here because they need only the slot counts and the
 		/// lengths of the submitted ciphertexts, where the binding needs their
 		/// bytes.
@@ -1615,6 +1641,34 @@ pub mod pallet {
 			// note. Accepting one as a no-op would let anyone spend a block's
 			// admission work for free.
 			ensure!(!bundle.segments.is_empty(), Error::<T>::NothingToSettle);
+
+			// The exact-length rule, one flat pass over the submitted
+			// positions. Every position is a pair of ciphertexts each exactly
+			// the length its declared suite fixes, or a zero-length pair, which
+			// is the exemption a skipped position may take and which
+			// `bind_payload` has nothing to bind.
+			//
+			// It reads no storage and hashes nothing: three header bytes and a
+			// length comparison per field. So it is cheaper than the two
+			// `UsedNullifiers` probes per slot the walk behind it makes, and it
+			// belongs in front of them. It also runs on all three gates at
+			// once, because this function is what `validate_unsigned` runs
+			// ahead of the ZK verify, what `pre_dispatch` runs ahead of it, and
+			// what `check_settlement` runs inside the dispatch body.
+			//
+			// What it buys: `MaxCiphertextBytes` becomes unreachable here, so
+			// the only payload a position can carry is the one every wallet
+			// already produces, and padding to the cap is refused rather than
+			// priced. What it does not buy: a blob of the exact length behind a
+			// valid header still settles whatever it contains. The header check
+			// authenticates nothing.
+			for output in outputs {
+				if output.ct_1.is_empty() && output.ct_2.is_empty() {
+					continue;
+				}
+				Self::ensure_exact_ciphertext(output.ct_1.as_slice())?;
+				Self::ensure_exact_ciphertext(output.ct_2.as_slice())?;
+			}
 
 			let current = frame_system::Pallet::<T>::block_number();
 			let window = T::BlockHashWindow::get();
@@ -1957,6 +2011,28 @@ pub mod pallet {
 			Ok(())
 		}
 
+		/// One settlement ciphertext is exactly the length its declared crypto
+		/// suite fixes.
+		///
+		/// The chain reads the three header bytes that carry the version and
+		/// the little-endian suite id, looks the suite up in
+		/// `qnero_circuit::chain::ciphertext_len`, and compares. It parses
+		/// nothing else, and it deliberately does not check the version byte:
+		/// that byte is an address version, and the length is fixed by the
+		/// suite alone.
+		///
+		/// A blob too short to carry a header is a length mismatch. A suite id
+		/// the table has no row for is [`Error::UnknownCryptoSuite`], which is
+		/// the answer a wallet a release ahead of this runtime is owed.
+		fn ensure_exact_ciphertext(bytes: &[u8]) -> Result<(), Error<T>> {
+			let suite = qnero_circuit::chain::declared_crypto_suite(bytes)
+				.ok_or(Error::<T>::CiphertextLengthMismatch)?;
+			let expected = qnero_circuit::chain::ciphertext_len(suite)
+				.ok_or(Error::<T>::UnknownCryptoSuite)?;
+			ensure!(bytes.len() == expected, Error::<T>::CiphertextLengthMismatch);
+			Ok(())
+		}
+
 		/// Ciphertext bytes one settlement output carries.
 		fn output_bytes(output: &ShieldedOutput<T>) -> u64 {
 			(output.ct_1.len() as u64).saturating_add(output.ct_2.len() as u64)
@@ -1990,10 +2066,13 @@ pub mod pallet {
 		/// [`Config::CiphertextBytesPerFeeQuantum`] bytes of ciphertext.
 		///
 		/// The payload term is what prices the archived payload a slot adds.
-		/// `Ciphertexts` has bounded live retention, the chain never parses these bytes,
-		/// and a settler can fill both fields to
-		/// [`Config::MaxCiphertextBytes`] with anything it likes, so a flat
-		/// floor buys as much state as the cap allows for one step.
+		/// `Ciphertexts` has bounded live retention and the chain does not
+		/// parse these bytes, so a flat floor would buy as much state as the
+		/// submitter cared to publish for one step. On the settlement path the
+		/// exact-length rule now leaves one reachable payload per position,
+		/// 3584 bytes, which is a flat seven steps over the minimum; the term
+		/// stays linear because it also prices a skipped position's carried
+		/// bytes and because a second suite would publish a second length.
 		fn fee_floor(min_fee: u64, ciphertext_bytes: u64) -> u64 {
 			min_fee.saturating_add(ciphertext_bytes.div_ceil(Self::bytes_per_fee_quantum()))
 		}

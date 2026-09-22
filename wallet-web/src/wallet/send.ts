@@ -68,12 +68,7 @@ import { blockHashAt, fetchHead, fetchLeafHashes, fetchTreeShape, headerAt } fro
 import { encodeSettlement, submitSettlement, waitForInclusion } from '../chain/submit';
 import type { ProverClient } from '../worker/client';
 import type { ProverLimits } from '../worker/protocol';
-import {
-  ensureCiphertextFits,
-  ensureMemoPadFits,
-  memoPadSeparationWarning,
-  slotFeeFloor,
-} from './fee';
+import { ensureCiphertextFits, ensureMemoPadFits, slotFeeFloor } from './fee';
 import { normaliseHash } from '../lib/hex';
 import { memoRefusal } from '../lib/memo';
 import { formatStepsAsQnr } from '../lib/units';
@@ -244,23 +239,15 @@ export async function spend(
   const profileHead = await fetchHead(context);
   await ensureActiveProfile(context, limits, profileHead.hash);
 
-  // The pad against both of the runtime's bounds. The cap is a refusal, the
-  // divisor is a warning: see `fee.ts`.
+  // The pad against the runtime's cap, which is the one bound left on it:
+  // see `fee.ts`. The length settlement requires is carried in the protocol
+  // profile `ensureActiveProfile` just checked.
   ensureMemoPadFits(
     context.constants,
     limits.padded_ciphertext_bytes,
     limits.memo_bytes,
     limits.ciphertext_fixed_bytes,
   );
-  const separation = memoPadSeparationWarning(
-    context.constants,
-    limits.padded_ciphertext_bytes,
-    limits.memo_bytes,
-    limits.ciphertext_fixed_bytes,
-  );
-  if (separation !== null) {
-    warnings.push(separation);
-  }
   ensureCiphertextFits(
     context.constants,
     limits.padded_ciphertext_bytes,
@@ -475,7 +462,10 @@ export async function spend(
   if (size1 !== limits.padded_ciphertext_bytes) {
     throw new Error(
       `the fee was computed from ${limits.padded_ciphertext_bytes}-byte ciphertexts and this ` +
-        `submission carries ${size1}. Nothing has been submitted.`,
+        `submission carries ${size1}, which is also not a length this chain settles: it takes ` +
+        `exactly ${limits.padded_ciphertext_bytes} bytes for a suite-1 ciphertext and answers ` +
+        'anything else with a bare pool rejection that names nothing. Nothing has been ' +
+        'submitted.',
     );
   }
 

@@ -5,13 +5,24 @@ import type { Settlement } from '../../lib/events';
 import { formatBytes, formatCount, formatQnr, REFERENCE_CIPHERTEXT_BYTES } from '../../lib/units';
 import { Field, Fields, Hash } from '../../components/ui';
 
+/**
+ * A settlement output's ciphertext size.
+ *
+ * The chain requires exactly `REFERENCE_CIPHERTEXT_BYTES` of every suite-1
+ * ciphertext a settlement carries, so on a settlement leaf any other size is
+ * unreachable rather than merely unusual. Saying so loudly is the point: a row
+ * that reads this way means a settlement got past a consensus rule, which is a
+ * node to report and not a wallet to identify.
+ */
 function ciphertextNote(bytes: number): ReactNode {
   if (bytes === REFERENCE_CIPHERTEXT_BYTES) {
     return `${formatBytes(bytes)} of ciphertext`;
   }
-  return `${formatBytes(bytes)} of ciphertext, which is not the ${formatCount(
-    REFERENCE_CIPHERTEXT_BYTES,
-  )} the reference wallet writes`;
+  return (
+    `${formatBytes(bytes)} of ciphertext, which the chain does not settle: a settlement carries ` +
+    `exactly ${formatCount(REFERENCE_CIPHERTEXT_BYTES)} bytes per output, so this is an ` +
+    'invariant violation'
+  );
 }
 
 /**

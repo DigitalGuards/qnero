@@ -38,31 +38,30 @@ pub const CIPHERTEXT_FIXED_BYTES: usize = 1731;
 
 /// Every memo Qnero encrypts is exactly this many bytes.
 ///
-/// Two bounds decide it, and the tighter one wins.
+/// It is a derived consensus value now, and the literal is what it derives to.
+/// `qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES` (1792) minus
+/// [`CIPHERTEXT_FIXED_BYTES`] (1731) is 61, and settlement requires exactly
+/// 1792 bytes per suite-1 ciphertext, so a pad of any other size produces a
+/// ciphertext the chain refuses. `the_pad_is_the_consensus_length_minus_the_
+/// serializers_fixed_part` below holds the two together; the constant stays a
+/// literal so this crate keeps compiling without an edge to `qnero-circuit`,
+/// which is the same reason `qnero_circuit::chain` restates the `CM` tag.
 ///
-/// The loose bound is `MaxCiphertextBytes` (2048 in the M4 runtime) minus
-/// [`CIPHERTEXT_FIXED_BYTES`], which leaves 317 bytes. A pad over that fails
-/// the extrinsic's SCALE decode, after the proof committing to those bytes
-/// exists.
+/// The reasoning it replaces. The pad used to be decided by two bounds with
+/// the tighter one winning. The loose bound was `MaxCiphertextBytes` (2048)
+/// minus [`CIPHERTEXT_FIXED_BYTES`], which leaves 317 bytes; a pad over that
+/// still fails the extrinsic's SCALE decode, after the proof committing to
+/// those bytes exists. The tight bound was the fee: the runtime sized
+/// `CiphertextBytesPerFeeQuantum` (512) so an honest pair and a pair padded to
+/// the cap landed in different buckets, because the chain did not parse these
+/// bytes and nothing held a submission to a real ciphertext shape, and 61 was
+/// the largest pad that kept the separation. The exact-length rule refuses the
+/// padded pair outright, so that bound now prices a state nobody can reach.
+/// It also removes the coordination hazard the derivation carried: the pad is
+/// no longer a number every wallet on the chain has to move together, because
+/// the chain publishes it.
 ///
-/// The tight bound is the fee. A slot's payload term is
-/// `ceil((len(ct_1) + len(ct_2)) / CiphertextBytesPerFeeQuantum)`, and the
-/// runtime sizes that divisor (512) so that an honest pair and a pair padded
-/// to the cap land in different buckets: the chain never parses these bytes
-/// and `Shielded::Ciphertexts` is never pruned, so without the separation a
-/// settler pads both ciphertexts to the cap and writes the extra bytes of
-/// permanent state for no extra fee. A pad of 256 put the pair at
-/// `2 * (1731 + 256) = 3974` bytes, in the same bucket as `2 * 2048 = 4096`,
-/// which voided that separation for every real spend on the chain. A pad of 61
-/// puts the pair at 3584 bytes, one bucket below the cap's, and 61 is the
-/// largest pad that does.
-///
-/// `qnero_wallet::fee::largest_separating_pad` is where the 61 is computed
-/// from the runtime's own constants, and
-/// `fee::ensure_memo_pad_fits` checks both bounds against the runtime a wallet
-/// is actually talking to, since this constant is compiled in while
-/// `MaxCiphertextBytes` and `CiphertextBytesPerFeeQuantum` are both read from
-/// metadata.
+/// The number itself does not move, so no wallet changes what it sends.
 ///
 /// Zcash's 512-byte memo field is the precedent for padding at all. The size
 /// differs because this ciphertext's fixed part is larger and because the
@@ -120,6 +119,24 @@ mod tests {
         }
         assert_eq!(unpad_memo(&[0u8; MEMO_BYTES]), b"");
         assert_eq!(unpad_memo(b"unpadded"), b"unpadded");
+    }
+
+    /// The pad is a derived consensus value, held to its derivation here
+    /// rather than by a dependency edge: this crate compiles without
+    /// `qnero-circuit`, which is the crate a runtime links, and the constant
+    /// stays a literal for that reason. `qnero-circuit` is a dev-dependency,
+    /// so the comparison is available exactly where it is needed.
+    ///
+    /// A `MEMO_BYTES` that drifted would make every ciphertext this wallet
+    /// produces the wrong length for settlement, and the chain would answer a
+    /// bare pool rejection naming nothing, after the proof was paid for.
+    #[test]
+    fn the_pad_is_the_consensus_length_minus_the_serializers_fixed_part() {
+        assert_eq!(
+            CIPHERTEXT_FIXED_BYTES + MEMO_BYTES,
+            qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES
+        );
+        assert_eq!(MEMO_BYTES, 61);
     }
 
     #[test]

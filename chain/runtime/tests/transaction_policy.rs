@@ -222,6 +222,74 @@ fn unsigned_settlements_continue_to_their_own_validity_checks() {
 	}
 }
 
+/// A settlement carrying a wrong-length ciphertext is a permanent refusal, so
+/// the real runtime answers `InvalidTransaction::Call` and never
+/// `ExhaustsResources`.
+///
+/// The two answers mean opposite things to a block builder. `ExhaustsResources`
+/// is "block full": the transaction is skipped and offered again for the next
+/// block. `Call` is "invalid": it is dropped. The ciphertext-cap deferral added
+/// the only `ExhaustsResources` arm this pallet has, for the one condition that
+/// really is temporary, and `CiphertextLengthMismatch` and `UnknownCryptoSuite`
+/// must not join it: a permanent failure answered as a full block would be
+/// re-skipped once a block until its longevity ran out.
+///
+/// What this pins is the answer the whole runtime gives, through the production
+/// extrinsic wrapper. Which check fires first is pinned in the pallet, over a
+/// real proof, by `a_wrong_length_payload_is_a_permanent_call_refusal`: this
+/// crate links no prover, so the proof here is empty and the parse refuses
+/// ahead of the length rule.
+#[test]
+fn a_wrong_length_settlement_payload_is_never_answered_as_a_full_block() {
+	// One byte short of `qnero_circuit::chain::SUITE_1_CIPHERTEXT_BYTES`. The
+	// literal is written out because this crate links `qnero-circuit` only
+	// behind an optional benchmark feature, and the pallet's own tests hold the
+	// number to the constant.
+	let short = vec![7u8; 1_791];
+	let outputs = vec![pallet_shielded::ShieldedOutput::<Runtime> {
+		ct_1: short.clone().try_into().expect("under MaxCiphertextBytes"),
+		ct_2: short.try_into().expect("under MaxCiphertextBytes"),
+	}];
+	for call in [
+		RuntimeCall::Shielded(pallet_shielded::Call::submit_private_batch {
+			proof: Vec::new(),
+			outputs: outputs.clone(),
+		}),
+		RuntimeCall::Shielded(pallet_shielded::Call::submit_public_batch {
+			proof: Vec::new(),
+			outputs: outputs.clone(),
+		}),
+	] {
+		test_ext().execute_with(|| {
+			let xt = UncheckedExtrinsic::new_bare(call);
+			assert_eq!(
+				Executive::validate_transaction(
+					TransactionSource::External,
+					xt.clone(),
+					H256::default(),
+				),
+				Err(INVALID_CALL),
+			);
+			assert_eq!(Executive::apply_extrinsic(xt), Err(INVALID_CALL));
+		});
+	}
+}
+
+/// Both errors the exact-length rule raises exist in the runtime's own
+/// `pallet-shielded` instance, so a wallet reading the metadata can name them
+/// and the rule is not a pallet-only build.
+#[test]
+fn the_runtime_carries_the_exact_length_errors() {
+	let names = [
+		pallet_shielded::Error::<Runtime>::CiphertextLengthMismatch,
+		pallet_shielded::Error::<Runtime>::UnknownCryptoSuite,
+	];
+	for error in names {
+		let dispatch: sp_runtime::DispatchError = error.into();
+		assert!(matches!(dispatch, sp_runtime::DispatchError::Module(_)));
+	}
+}
+
 #[test]
 fn timestamp_and_coinbase_inherents_still_apply() {
 	for call in [

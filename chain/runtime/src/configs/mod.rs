@@ -1121,6 +1121,12 @@ parameter_types! {
 	pub const ShieldedMinLeafFee: u64 = 1;
 	/// Bytes of note ciphertext one step of fee buys: 512 bytes.
 	///
+	/// Superseded in part: the exact-length settlement rule makes the padded
+	/// pair the only reachable settlement payload, so the separation argument
+	/// below prices a state nobody can reach. The doc is rewritten once, with
+	/// `ShieldedMaxCiphertextBytes` below it, when ciphertexts move into
+	/// extrinsic bodies.
+	///
 	/// A real slot carries two ciphertexts whose fixed part is 1731 bytes
 	/// each, plus whatever memo pad the wallet writing them uses; the v0
 	/// wallet pads to 61, so the pair it publishes is 3584 bytes and pays
@@ -1161,6 +1167,12 @@ parameter_types! {
 	/// coinbase note. The same split the wormhole applied to its volume fee.
 	pub const ShieldedFeeBurnRate: Permill = Permill::from_percent(50);
 	/// Size cap on one note ciphertext: 2048 bytes.
+	///
+	/// Superseded in part: on the settlement path the exact-length rule makes
+	/// this cap unreachable, and what it still bounds is the `shield` entry
+	/// note and the encoded length. Rewritten once, with
+	/// `ShieldedCiphertextBytesPerFeeQuantum` above it, when ciphertexts move
+	/// into extrinsic bodies.
 	///
 	/// A `NoteCiphertext` at the chain's parameter set serializes to 1731 bytes
 	/// with an empty memo: 19 bytes of framing (a version byte, a two-byte

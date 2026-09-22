@@ -1058,8 +1058,10 @@ keeps that mapping the only reading of `outputs`. A **settling** position may
 not be emptied: it is refused with `EmptyCiphertext`. A settling slot appends
 two commitments and stores two ciphertexts, so an empty field there would write
 an output note its recipient can never find, behind a digest nothing evaluated.
-A real `NoteCiphertext` is 1731 bytes, so the refusal costs nothing
-legitimate.
+A real `NoteCiphertext` is 1792 bytes at the wallet's pad, so the refusal costs
+nothing legitimate. Under the exact-length rule below, a half-emptied position
+is refused one step earlier, by length, because the zero-length exemption is a
+whole pair or nothing.
 
 **Each ciphertext is capped at `MaxCiphertextBytes`, 2048 bytes in the
 runtime.** A `NoteCiphertext` serializes to 1731 bytes at the chain's parameter
@@ -1071,16 +1073,47 @@ payload under a ChaCha20-Poly1305 tag, and the memo's own tag.
 that total against the serializer, so a wallet sizing a memo from these parts
 cannot be misled by prose that drifted. The cap leaves 317 bytes of memo.
 
-A settler can use the whole cap, and the 317 bytes of memo slack is the wrong
-figure to reason from: the chain never parses these bytes, so nothing holds a
-submission to a real `NoteCiphertext` shape, and `Ciphertexts` is never pruned
-and takes no storage deposit. Two mechanisms price that: the fee floor is
-linear in the payload (section 9.7), and the declared weight carries a per-byte
-term, because the per-slot `ct_digest` is a byte sponge over kilobytes. A
-wallet reads the bound from the pallet's metadata; a hardcoded copy drifts.
-Exceeding it fails the extrinsic's SCALE decode, after the proof that committed
-to those exact bytes has already been built, so a wallet checks before it
-proves.
+**On the settlement path the cap is unreachable, because the length is exact.**
+Every ciphertext a settlement carries is exactly the serialized length its
+declared `crypto_suite` id fixes, or is one half of a fully emptied position.
+One suite exists and its length is 1792 bytes, which is the 1731-byte fixed
+part plus the 61-byte memo pad, so the pair a slot publishes is 3584 bytes and
+that is the only payload a carried position can have. The table lives in
+`qnero_circuit::chain` beside `ct_digest`, and the chain applies it by reading
+three header bytes: the version byte, then the two-byte little-endian suite id
+at offsets 1..3. It parses nothing else, and the version byte is deliberately
+not checked, because it is an address version and the length is fixed by the
+suite alone.
+
+A blob of the exact length behind a valid header still settles whatever it
+contains. The rule fixes how many bytes a settlement may publish; `ct_digest`
+fixes which bytes they are. Neither authenticates a note. What the rule
+forecloses is the grind: the chain used to hold no submission to a real
+`NoteCiphertext` shape, so a settler could fill both fields to the cap and buy
+permanent, never-parsed state for whatever fee bucket the divisor reached. A
+wrong length is refused with `CiphertextLengthMismatch`, and a length behind a
+suite id this release has no row for with `UnknownCryptoSuite`, which is what a
+wallet one release ahead of the runtime is owed. Both are permanent and both
+answer `InvalidTransaction::Call`.
+
+The rule is enforced in one flat pass at the head of `plan_settlement`, after
+the `NothingToSettle` guard and ahead of the segment walk, so it covers pool
+admission, block inclusion and the dispatch body at once. It reads no storage
+and hashes nothing, which is why it belongs in front of the two
+`UsedNullifiers` probes per slot rather than behind them.
+
+**The cap still binds the entry path and the encoded length.** `shield` carries
+an arbitrary ciphertext up to `MaxCiphertextBytes`, zero included, and the
+exact-length rule is scoped to settlement. The 317 bytes of memo slack is
+therefore the figure to reason from for an entry note and no figure at all for
+a settlement output. Two mechanisms still price the settlement payload: the fee
+floor is linear in the payload (section 9.7), and the declared weight carries a
+per-byte term, because the per-slot `ct_digest` is a byte sponge over kilobytes
+and the weight is computed from the submitted vector before the length rule
+refuses it. A wallet reads the bound from the pallet's metadata; a hardcoded
+copy drifts. Exceeding it fails the extrinsic's SCALE decode, after the proof
+that committed to those exact bytes has already been built, so a wallet checks
+before it proves.
 
 ### 9.4 Padding
 
@@ -1249,22 +1282,26 @@ MinLeafFee + ceil(ciphertext_bytes / CiphertextBytesPerFeeQuantum)
 steps, where `ciphertext_bytes` is the two ciphertexts that slot publishes, and
 both of them have to carry bytes: an emptied position in a segment that settles
 is refused with `EmptyCiphertext` (section 9.3). The runtime sets
-`MinLeafFee = 1` and `CiphertextBytesPerFeeQuantum = 512`, so a
-slot carrying two real `NoteCiphertext`s (3462 bytes) pays eight steps and a
-slot padded to the cap (two ciphertexts of `MaxCiphertextBytes`, 4096 bytes)
-pays nine. This floor and the submission floor below it are the anti-spam
-mechanism, and they are the only one, for the reason section 8.6 gives.
+`MinLeafFee = 1` and `CiphertextBytesPerFeeQuantum = 512`, and the exact-length
+rule leaves one reachable payload per carried position, 3584 bytes, so a
+settling slot's floor is a flat eight steps: one flat, seven of payload, with
+nothing left over because 3584 divides by 512. This floor and the submission
+floor below it are the anti-spam mechanism, and they are the only one, for the
+reason section 8.6 gives.
 
 The payload term exists because the flat floor alone prices permanent state at
-whatever the ciphertext cap allows: one step, 0.01 QNR, would buy 4096 bytes
-of state that is never pruned and never parsed, and half of every fee comes back
-to a settler that is also the block author. The divisor has to sit below the
-slack between the real ciphertext size and the cap, or the term prices none of
-that slack: at one kilobyte, 3462 and 4096 bytes both round to four steps, so
-padding both ciphertexts to the cap buys 634 bytes of permanent state for
-nothing, which is the case the term exists to close.
-`a_slot_pays_for_the_ciphertext_bytes_it_publishes` pins the two endpoints
-apart. The floor is computable before proving, because the fee is a public input
+whatever a settler cares to publish: one step, 0.01 QNR, would buy 4096 bytes
+of state that is never parsed, and half of every fee comes back to a settler
+that is also the block author. The divisor was sized against that grind
+directly: it had to sit below the slack between the real ciphertext size and
+the cap, or the term priced none of that slack, and at one kilobyte 3462 and
+4096 bytes both round to four steps. The exact-length rule refuses the padded
+pair outright, so the separation the divisor was tuned for now prices a state
+nobody can reach, and `a_pair_padded_to_the_cap_is_refused_not_priced` is where
+that endpoint went. The term stays linear and the divisor keeps its value,
+because it also prices a skipped position's carried bytes and because a second
+suite would publish a second length. The floor is computable before proving,
+because the fee is a public input
 and the ciphertext sizes are known by then, so a wallet owes the arithmetic
 above at witness-building time. A slot this submission skips is exempt: a
 skipped segment writes no nullifier, appends no leaf and stores no ciphertext,

@@ -426,6 +426,10 @@ export function Block({ id }: { id: string }): ReactNode {
                       </td>
                       <td className="num col--wide">
                         {formatBytes(entry.ciphertextBytes)}
+                        {/* A shield entry note, where the cap is still the rule and the
+                            pad is still a convention: the exact-length rule is scoped to
+                            settlement. A settlement output that is not the reference size
+                            is an invariant violation, and `SettlementView` says so. */}
                         {entry.ciphertextBytes === REFERENCE_CIPHERTEXT_BYTES ? '' : ' (non-reference)'}
                       </td>
                     </tr>

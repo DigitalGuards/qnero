@@ -35,7 +35,8 @@
  *
  * The leaf proof, which is not returned by the module at all. And 910 MiB of
  * linear memory, which cannot be copied and does not need to be: a result is
- * one proof of 150,908 bytes and two ciphertexts of 1792 bytes each.
+ * one proof of 150,908 bytes and two ciphertexts of 1792 bytes each, which is
+ * the length the chain requires of a suite-1 ciphertext a settlement carries.
  *
  * The seed crosses exactly once, in `unlock`, as a transferred `Uint8Array`
  * whose page-side copy is detached by the transfer. Every other request that
