@@ -56,11 +56,55 @@ pub mod pallet {
 	/// Lower bound (ms) on the author-controlled block time fed into the difficulty
 	/// retarget. Flooring can only lower the adjustment, so it can never stall the chain.
 	///
-	/// It binds only below a 600 ms target, where the Homestead divisor drops to
-	/// 500 ms. At the public 120 s target the divisor is 100 s and at the 12 s
-	/// dev target it is 10 s, so this floor is a no-op on both and moving the
-	/// target does not ask for a different value here.
+	/// It binds where the divisor is no wider than the floor itself, which is a
+	/// target at or below `500 / ln 2 = 721 ms`. At the public 120 s target the
+	/// divisor is 83.177 s and at the 12 s dev target it is 8.317 s, so this
+	/// floor is a no-op on both and moving the target does not ask for a
+	/// different value here.
 	const MIN_RETARGET_BLOCK_TIME_MS: u64 = 500;
+
+	/// `ln 2` as an integer ratio, in millionths: the factor that turns the
+	/// target block time into the retarget's time bucket.
+	///
+	/// Six digits is an error of 0.0008% on the stationary mean at a 120 s
+	/// target, three orders of magnitude inside the 3% band the simulation
+	/// tests assert.
+	pub const RETARGET_LN2_NUM: u64 = 693_147;
+	/// Denominator of [`RETARGET_LN2_NUM`].
+	pub const RETARGET_LN2_DEN: u64 = 1_000_000;
+
+	/// The retarget's per-block step, as a fraction `1 / RETARGET_INCREMENT_DIVISOR`
+	/// of the parent difficulty. Homestead's, and unchanged by the divisor move.
+	pub const RETARGET_INCREMENT_DIVISOR: u64 = 2048;
+
+	/// The most units the retarget may subtract in one block.
+	///
+	/// The asymmetry with [`MAX_RETARGET_INCREASE_UNITS`] is a decision rather
+	/// than a consequence of the formula: a reciprocal fast side would let a
+	/// miner with a hashrate burst ratchet difficulty up and then abandon the
+	/// chain to days of decay. The answer to slow upward tracking is therefore
+	/// the step size.
+	pub const MAX_RETARGET_DECREASE_UNITS: i64 = 99;
+	/// The most units the retarget may add in one block.
+	pub const MAX_RETARGET_INCREASE_UNITS: i64 = 1;
+
+	/// The retarget's time bucket: `target * ln 2`.
+	///
+	/// Block arrival at a constant hash rate is Poisson, so the inter-arrival
+	/// time is exponential and `floor(block_time / divisor)` is geometric with
+	/// ratio `q = e^(-divisor / mean)`. Its expectation is `q / (1 - q)`, so the
+	/// expected adjustment `1 - q / (1 - q)` is zero exactly at `q = 1/2`, which
+	/// is a mean of `divisor / ln 2` and nowhere else. Setting the divisor to
+	/// `target * ln 2` therefore puts the chain's stationary mean block time on
+	/// the target itself: 83 177 ms at the public 120 s target, for a mean of
+	/// 119 999 ms.
+	pub fn retarget_divisor(target_time_ms: u64) -> u64 {
+		target_time_ms
+			.saturating_mul(RETARGET_LN2_NUM)
+			.checked_div(RETARGET_LN2_DEN)
+			.unwrap_or(1)
+			.max(1)
+	}
 
 	#[pallet::pallet]
 	pub struct Pallet<T>(_);
@@ -271,19 +315,26 @@ pub mod pallet {
 		}
 
 		/// Calculate new difficulty based on block time.
-		/// Uses the same formula as Ethereum PoW:
-		/// diff = parent_diff + (parent_diff / 2048) * max(1 - block_time / divisor, -99)
+		/// Uses Ethereum PoW's shape:
+		/// diff = parent_diff + (parent_diff / 2048) * clamp(1 - block_time / divisor, -99, +1)
 		///
-		/// Homestead used 10s buckets (`Δt // 10`) with Geth's 15s future slack.
-		/// Scaling 10/12 keeps those buckets proportional to the target, so a
-		/// max-drift inflate is a single -1 that forced +1 catch-up blocks repay
-		/// (or overshoot). The shape is scale free: at any target the neutral
-		/// band is one to two divisors wide.
-		/// Zones at the public 120s target (100s divisor):
-		/// - < 100s: difficulty increases by 1/2048 (~0.05%)
-		/// - 100s to 200s: no change
-		/// - 200s to 300s: difficulty decreases by 1/2048
-		/// - etc, up to max decrease of 99/2048 (~4.8%)
+		/// The divisor is [`retarget_divisor`], `target * ln 2`, which is what
+		/// centres the chain on the interval it declares: the stationary mean
+		/// block time under Poisson arrival is `divisor / ln 2`, so a divisor of
+		/// `target * ln 2` makes that mean the target. Homestead's own 10s
+		/// buckets against a 12 to 15s target carried the same 1.2019 factor
+		/// and the same 20% overshoot, unremarked.
+		/// Zones at the public 120s target (83.177s divisor):
+		/// - < 83.177s: difficulty increases by 1/2048 (~0.05%)
+		/// - 83.177s to 166.354s: no change
+		/// - 166.354s to 249.531s: difficulty decreases by 1/2048
+		/// - etc, down to the max decrease of 99/2048 (~4.8%), which needs a claimed gap of 100
+		///   divisors, 8 317.7s
+		///
+		/// The band is one divisor wide, `[divisor, 2 * divisor)`, and the
+		/// stationary mean is `1 / ln 2 = 1.4427` divisors, so the target always
+		/// sits inside it whatever the target is. A settled chain feels no
+		/// retarget pressure at the interval it is aiming for.
 		pub fn calculate_difficulty(
 			parent_difficulty: U512,
 			block_time_ms: u64,
@@ -295,12 +346,13 @@ pub mod pallet {
 			// delta cannot steer the retarget.
 			let block_time_ms = block_time_ms.max(MIN_RETARGET_BLOCK_TIME_MS);
 
-			// Homestead divisor was 10s on a ~12-15s target. Keep that ratio:
-			// divisor = target * 10 / 12, which is 100s at the public 120s
-			// target and 10s on a 12s dev chain.
-			let divisor_ms = (target_time_ms * 10 / 12).max(1);
+			// `target * ln 2`, which is 83.177s at the public 120s target and
+			// 8.317s on a 12s dev chain. This is the constant that decides
+			// where the chain settles; see `retarget_divisor`.
+			let divisor_ms = retarget_divisor(target_time_ms);
 			let time_factor = (block_time_ms / divisor_ms) as i64;
-			let adjustment = core::cmp::max(1i64 - time_factor, -99i64);
+			let adjustment = (1i64 - time_factor)
+				.clamp(-MAX_RETARGET_DECREASE_UNITS, MAX_RETARGET_INCREASE_UNITS);
 
 			log::debug!(target: "qpow", "Block time: {}ms, divisor: {}ms, time_factor: {}, adjustment: {}", 
 				block_time_ms, divisor_ms, time_factor, adjustment);
@@ -315,7 +367,8 @@ pub mod pallet {
 			// adjustment and add nothing. One is the smallest step that keeps
 			// the retarget monotonic at every difficulty, and it changes
 			// nothing above 2048, where the division already dominates.
-			let increment = (parent_difficulty / U512::from(2048u64)).max(U512::one());
+			let increment =
+				(parent_difficulty / U512::from(RETARGET_INCREMENT_DIVISOR)).max(U512::one());
 
 			// Calculate new difficulty
 			let new_difficulty = if adjustment >= 0 {
