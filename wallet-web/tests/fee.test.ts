@@ -13,7 +13,14 @@ import { describe, expect, it } from 'vitest';
 import type { ShieldedConstants } from '../src/chain/api';
 import {
   ensureCiphertextFits,
+  ensureFeeConstantsAreSane,
+  ensureFeeWithinCeiling,
   ensureMemoPadFits,
+  feeOutrunsAmount,
+  HIGH_FEE_ALLOWANCE,
+  MAX_TRUSTED_MIN_LEAF_FEE,
+  MAX_TRUSTED_SLOT_FEE,
+  MIN_TRUSTED_BYTES_PER_FEE_QUANTUM,
   slotFeeFloor,
   submissionFeeFloor,
 } from '../src/wallet/fee';
@@ -64,6 +71,89 @@ describe('the fee floor', () => {
     const broken = { ...runtime(), ciphertextBytesPerFeeQuantum: 0 };
     expect(slotFeeFloor(broken, FIXED, FIXED)).toBe(1n + 3462n);
     expect(submissionFeeFloor(broken, 1n, 3462n)).toBe(1n + 3462n);
+  });
+});
+
+/**
+ * The bounds on what a node may charge.
+ *
+ * `MinLeafFee` and `CiphertextBytesPerFeeQuantum` come out of runtime
+ * metadata, which no state root covers, and this wallet pays the floor those
+ * two compute. So an inflated constant is money handed to the block author,
+ * and every case here is a node that declared one.
+ * `crates/qnero-wallet/src/fee.rs` holds the counterparts.
+ */
+describe('the fee bounds', () => {
+  it('takes the constants the chain itself declares', () => {
+    expect(() => {
+      ensureFeeConstantsAreSane(runtime());
+    }).not.toThrow();
+    expect(() => {
+      ensureFeeWithinCeiling(slotFeeFloor(runtime(), PADDED, PADDED));
+    }).not.toThrow();
+  });
+
+  it('refuses an inflated MinLeafFee by name', () => {
+    const greedy = { ...runtime(), minLeafFee: MAX_TRUSTED_MIN_LEAF_FEE + 1n };
+    expect(() => {
+      ensureFeeConstantsAreSane(greedy);
+    }).toThrow(/MinLeafFee/);
+    // The whole point: nothing else would have stopped it. The floor these
+    // constants compute is the fee the wallet pays, because it sends no fee
+    // field of its own.
+    expect(slotFeeFloor(greedy, PADDED, PADDED)).toBe(MAX_TRUSTED_MIN_LEAF_FEE + 8n);
+  });
+
+  it('takes a MinLeafFee at the bound, so a real fee change still sends', () => {
+    expect(() => {
+      ensureFeeConstantsAreSane({ ...runtime(), minLeafFee: MAX_TRUSTED_MIN_LEAF_FEE });
+    }).not.toThrow();
+  });
+
+  it('refuses a divisor small enough to make a byte of payload dear', () => {
+    const greedy = {
+      ...runtime(),
+      ciphertextBytesPerFeeQuantum: MIN_TRUSTED_BYTES_PER_FEE_QUANTUM - 1,
+    };
+    expect(() => {
+      ensureFeeConstantsAreSane(greedy);
+    }).toThrow(/CiphertextBytesPerFeeQuantum/);
+    expect(() => {
+      ensureFeeConstantsAreSane({
+        ...runtime(),
+        ciphertextBytesPerFeeQuantum: MIN_TRUSTED_BYTES_PER_FEE_QUANTUM,
+      });
+    }).not.toThrow();
+  });
+
+  it('refuses a divisor of zero, which the clamp alone would have paid', () => {
+    const broken = { ...runtime(), ciphertextBytesPerFeeQuantum: 0 };
+    expect(() => {
+      ensureFeeConstantsAreSane(broken);
+    }).toThrow(/CiphertextBytesPerFeeQuantum/);
+  });
+
+  it('refuses a per-slot fee over the absolute ceiling', () => {
+    expect(() => {
+      ensureFeeWithinCeiling(MAX_TRUSTED_SLOT_FEE);
+    }).not.toThrow();
+    expect(() => {
+      ensureFeeWithinCeiling(MAX_TRUSTED_SLOT_FEE + 1n);
+    }).toThrow(/at most/);
+  });
+
+  it('refuses a fee that takes more than half of what is being sent', () => {
+    const fee = HIGH_FEE_ALLOWANCE + 1n;
+    expect(feeOutrunsAmount(fee, fee * 2n)).toBe(false);
+    expect(feeOutrunsAmount(fee, fee * 2n - 1n)).toBe(true);
+  });
+
+  it('leaves a genuinely small payment alone under an honest floor', () => {
+    // An honest slot costs eight steps, and a payment of five is a case the
+    // node e2e suite sends. The allowance is what keeps the share rule off it.
+    const floor = slotFeeFloor(runtime(), PADDED, PADDED);
+    expect(floor).toBeLessThanOrEqual(HIGH_FEE_ALLOWANCE);
+    expect(feeOutrunsAmount(floor, 5n)).toBe(false);
   });
 });
 
