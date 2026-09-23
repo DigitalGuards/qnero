@@ -70,6 +70,44 @@ if command -v taskset > /dev/null 2>&1; then
   build_nice=(taskset -c "0-$((cores > 8 ? 7 : cores - 1))" nice -n 19)
 fi
 
+# Copy files to a staging directory of the deploy account's own and check that
+# what arrived is what was built. Prints the directory; the caller installs out
+# of it and removes it.
+#
+# Every one of these files is then handed to `sudo install`, so the path it
+# comes from decides who can choose those bytes. A fixed `/tmp/qnero-node` is
+# predictable and /tmp is world-writable with the sticky bit, so another local
+# account can create that path first, keep it, and have the sudo'd install
+# write its contents into /usr/local/bin or /etc/qnero as root. `mktemp -d`
+# gives a 0700 directory named at random and owned by the deploy account, which
+# is the same reason `deploy_tree` stages into one.
+#
+# The digest is the second half. A file truncated by a full disk or a dropped
+# connection is a binary that installs and does not run, so the copy is read
+# back and compared before anything is installed. `deploy_tree` stages the same
+# way and leaves that half to rsync, which checksums every file it writes.
+stage_files() {
+  local stage
+  stage="$(ssh "$host" 'mktemp -d')"
+  if [ -z "$stage" ]; then
+    echo "the host would not make a staging directory" >&2
+    exit 1
+  fi
+  local source name want got
+  for source in "$@"; do
+    name="$(basename "$source")"
+    scp -q "$source" "$host:$stage/$name" >&2
+    want="$(sha256sum "$source" | cut -d' ' -f1)"
+    got="$(ssh "$host" "sha256sum $(printf '%q' "$stage/$name")" | cut -d' ' -f1)"
+    if [ "$want" != "$got" ]; then
+      ssh "$host" "rm -rf $(printf '%q' "$stage")"
+      echo "$name did not arrive intact: $want here, $got on the host" >&2
+      exit 1
+    fi
+  done
+  printf '%s' "$stage"
+}
+
 has_stage() {
   local wanted="$1"
   for stage in "${stages[@]}"; do
@@ -145,8 +183,8 @@ if has_stage node; then
   )
 
   step "copying the binaries"
-  scp "$here/chain/target/release/qnero-node" "$host:/tmp/qnero-node"
-  scp "$here/target/release/qnero-faucet" "$host:/tmp/qnero-faucet"
+  stage="$(stage_files "$here/chain/target/release/qnero-node" \
+    "$here/target/release/qnero-faucet")"
   # The binary that is about to be replaced is kept as `.previous`, here,
   # because this is the only moment it still exists. Rolling a bad node back
   # otherwise means rebuilding a release binary on the workstation, which is
@@ -157,19 +195,19 @@ if has_stage node; then
   # `install` rather than `cp` for the new one: the mode is set in the same
   # operation and the replace is atomic, so a running node is never reading a
   # half-written file.
-  ssh "$host" 'for binary in qnero-node qnero-faucet; do \
-      if sudo test -x "/usr/local/bin/$binary"; then \
-        sudo cp -a "/usr/local/bin/$binary" "/usr/local/bin/$binary.previous"; \
-        echo "kept /usr/local/bin/$binary.previous"; \
+  ssh "$host" "for binary in qnero-node qnero-faucet; do \
+      if sudo test -x \"/usr/local/bin/\$binary\"; then \
+        sudo cp -a \"/usr/local/bin/\$binary\" \"/usr/local/bin/\$binary.previous\"; \
+        echo \"kept /usr/local/bin/\$binary.previous\"; \
       fi; \
     done \
-    && sudo install -m 0755 /tmp/qnero-node /usr/local/bin/qnero-node \
-    && sudo install -m 0755 /tmp/qnero-faucet /usr/local/bin/qnero-faucet \
-    && rm -f /tmp/qnero-node /tmp/qnero-faucet \
+    && sudo install -m 0755 $(printf '%q' "$stage/qnero-node") /usr/local/bin/qnero-node \
+    && sudo install -m 0755 $(printf '%q' "$stage/qnero-faucet") /usr/local/bin/qnero-faucet \
+    && rm -rf $(printf '%q' "$stage") \
     && sudo systemctl restart qnero-node \
     && sleep 5 \
     && sudo systemctl restart qnero-faucet \
-    && systemctl is-active qnero-node qnero-faucet'
+    && systemctl is-active qnero-node qnero-faucet"
 fi
 
 # The faucet alone. Same build, same keep-the-previous-binary rule, and one
@@ -183,15 +221,15 @@ if has_stage faucet; then
   )
 
   step "copying the faucet binary"
-  scp "$here/target/release/qnero-faucet" "$host:/tmp/qnero-faucet"
-  ssh "$host" 'if sudo test -x /usr/local/bin/qnero-faucet; then \
+  stage="$(stage_files "$here/target/release/qnero-faucet")"
+  ssh "$host" "if sudo test -x /usr/local/bin/qnero-faucet; then \
       sudo cp -a /usr/local/bin/qnero-faucet /usr/local/bin/qnero-faucet.previous; \
-      echo "kept /usr/local/bin/qnero-faucet.previous"; \
+      echo \"kept /usr/local/bin/qnero-faucet.previous\"; \
     fi \
-    && sudo install -m 0755 /tmp/qnero-faucet /usr/local/bin/qnero-faucet \
-    && rm -f /tmp/qnero-faucet \
+    && sudo install -m 0755 $(printf '%q' "$stage/qnero-faucet") /usr/local/bin/qnero-faucet \
+    && rm -rf $(printf '%q' "$stage") \
     && sudo systemctl restart qnero-faucet \
-    && systemctl is-active qnero-faucet'
+    && systemctl is-active qnero-faucet"
 
   cat <<'MSG'
 
@@ -208,9 +246,9 @@ if has_stage spec; then
   echo "The spec is copied and NOTHING is restarted. A node already running on"
   echo "this genesis does not need it, and a node restarted onto a different"
   echo "genesis resyncs from block zero. Restart deliberately."
-  scp "$here/chain/node/chain-specs/qnero-testnet.json" "$host:/tmp/qnero-testnet.json"
-  ssh "$host" 'sudo install -m 0644 -o root -g root /tmp/qnero-testnet.json \
-    /etc/qnero/qnero-testnet.json && rm -f /tmp/qnero-testnet.json'
+  stage="$(stage_files "$here/chain/node/chain-specs/qnero-testnet.json")"
+  ssh "$host" "sudo install -m 0644 -o root -g root $(printf '%q' "$stage/qnero-testnet.json") \
+    /etc/qnero/qnero-testnet.json && rm -rf $(printf '%q' "$stage")"
   # What the copy just installed says about the network's entry point. The
   # committed spec carries the bootnode once a deployment has fed it through
   # build-testnet-spec.sh, and carries an empty list before that, so this
@@ -346,12 +384,21 @@ JSON
 }
 JSON
 )
-  printf '%s\n' "$wallet_config" | ssh "$host" "cat > /tmp/wallet-config.json \
-    && sudo install -m 0644 /tmp/wallet-config.json /var/www/wallet.$domain/config.json \
-    && rm -f /tmp/wallet-config.json"
-  printf '%s\n' "$explorer_config" | ssh "$host" "cat > /tmp/explorer-config.json \
-    && sudo install -m 0644 /tmp/explorer-config.json /var/www/explorer.$domain/config.json \
-    && rm -f /tmp/explorer-config.json"
+  # Written here and copied, so these two go through the same verified staging
+  # as the binaries and the spec. They are installed into the webroots the
+  # wallet and the explorer are served from, and a page that handles seeds is
+  # the last thing that should be readable out of a path any local account on
+  # the host can create first.
+  local_stage="$(mktemp -d)"
+  printf '%s\n' "$wallet_config" > "$local_stage/wallet-config.json"
+  printf '%s\n' "$explorer_config" > "$local_stage/explorer-config.json"
+  stage="$(stage_files "$local_stage/wallet-config.json" "$local_stage/explorer-config.json")"
+  rm -rf "$local_stage"
+  ssh "$host" "sudo install -m 0644 $(printf '%q' "$stage/wallet-config.json") \
+      /var/www/wallet.$domain/config.json \
+    && sudo install -m 0644 $(printf '%q' "$stage/explorer-config.json") \
+      /var/www/explorer.$domain/config.json \
+    && rm -rf $(printf '%q' "$stage")"
   echo "wallet and explorer config.json written, both pointing at $rpc_endpoint"
 fi
 
