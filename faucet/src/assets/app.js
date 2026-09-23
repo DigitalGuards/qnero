@@ -238,8 +238,8 @@ again.addEventListener('click', () => {
   refreshStatus();
 });
 
-async function poll(id, startedAt) {
-  const response = await fetch(`/drip/${id}`, { headers: { accept: 'application/json' } });
+async function poll(token, startedAt) {
+  const response = await fetch(`/drip/${token}`, { headers: { accept: 'application/json' } });
   const body = await response.json();
   if (body.status === 'sent') {
     showPhase('sent', 0);
@@ -275,7 +275,7 @@ async function poll(id, startedAt) {
   }
   showPhase(phaseOf(body, Date.now() - startedAt), body.ahead || 0);
   setTimeout(() => {
-    poll(id, startedAt).catch(lostContact);
+    poll(token, startedAt).catch(lostContact);
   }, POLL_MS);
 }
 
@@ -348,7 +348,7 @@ form.addEventListener('submit', async (event) => {
       say(body.message || 'The faucet refused that request.', 'bad');
       return;
     }
-    poll(body.id, startedAt).catch(lostContact);
+    poll(body.token, startedAt).catch(lostContact);
   } catch (error) {
     stopWorking();
     progress.hidden = true;

@@ -513,6 +513,8 @@ limit zones count the whole internet as one caller:
 - `limit_req zone=rpc_calls` becomes 240 calls a minute shared by everybody.
 - `limit_req zone=faucet_claim` becomes 6 claims a minute shared by everybody, so one
   abusive client locks every other claimant out.
+- `limit_req zone=faucet_read` becomes 120 reads a minute shared by everybody, which one
+  page load and one polling claim can use on their own.
 
 Measured on nginx 1.24.0 with these files: twelve callers carrying twelve
 distinct `CF-Connecting-IP` headers got eight 200s and four 429s with no list,
@@ -684,8 +686,8 @@ qnero-wallet keygen --file /tmp/probe.seed          # a throwaway wallet
 ADDR=$(qnero-wallet address --file /tmp/probe.seed | awk '{print $2}')
 curl -sS -X POST -H 'content-type: application/json' \
   -d "{\"address\":\"$ADDR\"}" https://faucet.<domain>/drip
-# -> {"status":"queued","id":N,...}
-curl -sS https://faucet.<domain>/drip/N              # poll until "sent"
+# -> {"status":"queued","token":"<32 hex characters>",...}
+curl -sS https://faucet.<domain>/drip/$TOKEN         # poll until "sent"
 qnero-wallet --node https://rpc.<domain> --file /tmp/probe.seed sync
 # -> received 1 note(s) worth 10.00 QNR
 ```

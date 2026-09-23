@@ -52,7 +52,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/drip", post(drip))
-        .route("/drip/{id}", get(claim_status))
+        .route("/drip/{token}", get(claim_status))
         .with_state(state)
 }
 
@@ -249,11 +249,15 @@ pub struct DripRequest {
     pub turnstile_token: Option<String>,
 }
 
+/// What a requester is handed for a claim that was accepted.
+///
+/// `token` is the whole handle: the ledger's rowid never leaves this process,
+/// so one requester's claim says nothing about anyone else's.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Queued {
     status: &'static str,
-    id: i64,
+    token: String,
     address: String,
     amount_quanta: u64,
     amount_qnr: String,
@@ -367,7 +371,7 @@ async fn drip(
     //    still spent its cooldown, which is the safe side of that trade for a
     //    faucet.
     let amount = state.config.drip_quanta;
-    let claim_id = {
+    let accepted = {
         let Ok(store) = state.store.lock() else {
             return internal("The claims ledger is unavailable.");
         };
@@ -385,7 +389,7 @@ async fn drip(
             return refuse(refusal);
         }
         match store.record_queued(&wanted, &hash, amount, now) {
-            Ok(id) => id,
+            Ok(claim) => claim,
             Err(error) => {
                 eprintln!("faucet      could not record a claim: {error:#}");
                 return internal("The claims ledger could not be written.");
@@ -394,13 +398,13 @@ async fn drip(
     };
 
     let job = Job {
-        claim_id,
+        claim_id: accepted.id,
         address: recipient,
         quanta: amount,
     };
     if let Err(error) = state.jobs.try_send(job) {
         if let Ok(store) = state.store.lock() {
-            let _ = store.mark_failed(claim_id, "queue-full", now);
+            let _ = store.mark_failed(accepted.id, "queue-full", now);
         }
         eprintln!("faucet      the worker queue refused a job: {error}");
         return refuse(Refusal::Busy {
@@ -412,7 +416,7 @@ async fn drip(
         StatusCode::ACCEPTED,
         Json(Queued {
             status: "queued",
-            id: claim_id,
+            token: accepted.token,
             address: wanted,
             amount_quanta: amount,
             amount_qnr: page::format_qnr(amount),
@@ -448,31 +452,39 @@ fn phase_of(claim: &crate::store::Claim, ahead: usize) -> &'static str {
     }
 }
 
-async fn claim_status(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
+async fn claim_status(State(state): State<AppState>, Path(token): Path<String>) -> Response {
+    // A path that is not a token is refused before the ledger is read, so the
+    // rowid path a requester used to be handed answers 404. A number anybody
+    // can count to is no longer a lookup.
+    if !crate::store::is_claim_token(&token) {
+        return unknown_claim();
+    }
     let (claim, ahead) = {
         let Ok(store) = state.store.lock() else {
             return internal("The claims ledger is unavailable.");
         };
-        let claim = store.claim(id).unwrap_or(None);
-        let ahead = store
-            .queued_claims()
-            .map(|claims| claims.iter().filter(|other| other.id < id).count())
+        let claim = store.claim_by_token(&token).unwrap_or(None);
+        let ahead = claim
+            .as_ref()
+            .and_then(|claim| {
+                store
+                    .queued_claims()
+                    .map(|queued| queued.iter().filter(|other| other.id < claim.id).count())
+                    .ok()
+            })
             .unwrap_or(0);
         (claim, ahead)
     };
     let Some(claim) = claim else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "status": "unknown", "message": "no such claim" })),
-        )
-            .into_response();
+        return unknown_claim();
     };
+    // No `address` and no `id`. The recipient is what the requester posted and
+    // already knows, and repeating it here made the status route a way to read
+    // who the faucet paid.
     Json(json!({
         "status": claim.status.as_str(),
         "phase": phase_of(&claim, ahead),
         "ahead": ahead,
-        "id": claim.id,
-        "address": claim.address,
         "amountQuanta": claim.amount_quanta,
         "amountQnr": page::format_qnr(claim.amount_quanta),
         "includedAt": claim.included_at,
@@ -492,6 +504,16 @@ async fn claim_status(State(state): State<AppState>, Path(id): Path<i64>) -> Res
         "settledAt": claim.settled_at,
     }))
     .into_response()
+}
+
+/// One answer for a token that names nothing and for a path that is not a
+/// token at all, so a probe cannot tell the two apart.
+fn unknown_claim() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "status": "unknown", "message": "no such claim" })),
+    )
+        .into_response()
 }
 
 fn internal(message: &str) -> Response {

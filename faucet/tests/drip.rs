@@ -271,19 +271,40 @@ async fn a_claim_is_queued_and_reaches_the_worker() {
     assert_eq!(body["status"], serde_json::json!("queued"));
     assert_eq!(body["amountQuanta"], serde_json::json!(1_000));
     assert_eq!(body["amountQnr"], serde_json::json!("10"));
-    let id = body["id"].as_i64().expect("a claim id");
+    let token = body["token"].as_str().expect("a claim token").to_string();
+    assert_eq!(
+        token.len(),
+        32,
+        "the token is 128 random bits, hex: {token}"
+    );
+    assert!(
+        body["id"].is_null(),
+        "the ledger's rowid stays inside the process: {body}"
+    );
 
     let job = harness
         .jobs
         .try_recv()
         .expect("the worker was handed the job");
-    assert_eq!(job.claim_id, id);
     assert_eq!(job.quanta, 1_000);
+    let id = job.claim_id;
 
-    // And the claim is readable while it waits.
-    let (status, body, _) = request("GET", format!("{}/drip/{id}", harness.base), None, None).await;
+    // And the claim is readable while it waits, by the token and by nothing
+    // else.
+    let (status, body, _) =
+        request("GET", format!("{}/drip/{token}", harness.base), None, None).await;
     assert_eq!(status, 200);
     assert_eq!(body["status"], serde_json::json!("queued"));
+    // The status body names no recipient. It used to, which made the route a
+    // way to read who the faucet had paid.
+    assert!(
+        body["address"].is_null(),
+        "the status body carries an address: {body}"
+    );
+    assert!(
+        body["id"].is_null(),
+        "the status body carries a rowid: {body}"
+    );
 
     // Once the worker settles it, the same route reports the block.
     harness
@@ -292,9 +313,40 @@ async fn a_claim_is_queued_and_reaches_the_worker() {
         .expect("the ledger")
         .mark_sent(id, 77, now_secs())
         .expect("mark sent");
-    let (_, body, _) = request("GET", format!("{}/drip/{id}", harness.base), None, None).await;
+    let (_, body, _) = request("GET", format!("{}/drip/{token}", harness.base), None, None).await;
     assert_eq!(body["status"], serde_json::json!("sent"));
     assert_eq!(body["includedAt"], serde_json::json!(77));
+}
+
+/// The rowid is not a handle any more. A claim exists, its row is the first in
+/// the ledger, and the path that names it is refused the way an unknown token
+/// is, so a requester holding one claim cannot count to anybody else's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_cannot_be_read_by_its_rowid() {
+    let dir = tempdir::TempDir::new("cfg");
+    let harness = start(config_in(dir.path())).await;
+
+    let (status, body, _) = request(
+        "POST",
+        format!("{}/drip", harness.base),
+        Some(serde_json::json!({ "address": an_address("enumerable") }).to_string()),
+        Some("203.0.113.30"),
+    )
+    .await;
+    assert_eq!(status, 202);
+    let token = body["token"].as_str().expect("a claim token").to_string();
+
+    for path in ["1", "0", "-1", "2", "01", &token.to_uppercase(), "zz"] {
+        let (status, body, _) =
+            request("GET", format!("{}/drip/{path}", harness.base), None, None).await;
+        assert_eq!(status, 404, "/drip/{path} answered {body}");
+        assert_eq!(body["status"], serde_json::json!("unknown"));
+    }
+
+    // The token itself still works, so the refusals above are about the shape
+    // of the path and not about the claim having gone.
+    let (status, _, _) = request("GET", format!("{}/drip/{token}", harness.base), None, None).await;
+    assert_eq!(status, 200);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -702,7 +754,7 @@ async fn a_claim_knows_which_step_it_is_on() {
     let dir = tempdir::TempDir::new("cfg");
     let harness = start(config_in(dir.path())).await;
 
-    let mut ids = Vec::new();
+    let mut tokens = Vec::new();
     for attempt in 0..2 {
         let (status, body, _) = request(
             "POST",
@@ -715,12 +767,27 @@ async fn a_claim_knows_which_step_it_is_on() {
         )
         .await;
         assert_eq!(status, 202);
-        ids.push(body["id"].as_i64().expect("a claim id"));
+        tokens.push(body["token"].as_str().expect("a claim token").to_string());
     }
+    // The rowid is the worker's half of a claim, and a test that drives the
+    // ledger directly reads it back through the token the way the route does.
+    let ids: Vec<i64> = tokens
+        .iter()
+        .map(|token| {
+            harness
+                .store
+                .lock()
+                .expect("the ledger")
+                .claim_by_token(token)
+                .expect("query")
+                .expect("the row the POST wrote")
+                .id
+        })
+        .collect();
 
     let (_, first, _) = request(
         "GET",
-        format!("{}/drip/{}", harness.base, ids[0]),
+        format!("{}/drip/{}", harness.base, tokens[0]),
         None,
         None,
     )
@@ -731,7 +798,7 @@ async fn a_claim_knows_which_step_it_is_on() {
 
     let (_, second, _) = request(
         "GET",
-        format!("{}/drip/{}", harness.base, ids[1]),
+        format!("{}/drip/{}", harness.base, tokens[1]),
         None,
         None,
     )
@@ -751,7 +818,7 @@ async fn a_claim_knows_which_step_it_is_on() {
         .expect("submitted");
     let (_, first, _) = request(
         "GET",
-        format!("{}/drip/{}", harness.base, ids[0]),
+        format!("{}/drip/{}", harness.base, tokens[0]),
         None,
         None,
     )
@@ -770,7 +837,7 @@ async fn a_claim_knows_which_step_it_is_on() {
         .expect("failed");
     let (_, failed, _) = request(
         "GET",
-        format!("{}/drip/{}", harness.base, ids[1]),
+        format!("{}/drip/{}", harness.base, tokens[1]),
         None,
         None,
     )
@@ -863,10 +930,12 @@ async fn an_interrupted_claim_is_never_paid_twice() {
         let hash = ledger.ip_hash("203.0.113.7");
         let first = ledger
             .record_queued(&untouched, &hash, 1_000, now_secs())
-            .expect("insert");
+            .expect("insert")
+            .id;
         let second = ledger
             .record_queued(&mid_flight, &hash, 1_000, now_secs())
-            .expect("insert");
+            .expect("insert")
+            .id;
         // The worker got as far as handing this one to the node.
         ledger
             .mark_submitted(second, now_secs())

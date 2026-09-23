@@ -5172,6 +5172,11 @@ and the page polls, because holding a request open across a proof and a block
 would be a two-minute socket per claim in front of a server that proves one at a
 time.
 
+This rehearsal, and the one further down, ran while a claim was polled by the
+ledger's rowid. Both transcripts are left as they were recorded. The handle is
+the random `token` that `POST /drip` answers with now, so the path to copy is
+`GET /drip/<32 hex characters>` and a numeric one answers 404.
+
 The recipient wallet, synced against **node B** rather than the miner:
 
 ```

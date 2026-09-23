@@ -1480,9 +1480,12 @@ it. The only note rule the chain evaluates is `cm = H(CM, inner, value)`, in
 
 The chain cannot check the rule, because `inner` is opaque by construction. What
 it owes is the identifier, and the pair `(block_number, entry_index)` never
-repeats. A shielder that ignores the rule can only strand its own note:
-computing anyone else's nullifier needs their `nk`. At M6 a coinbase note takes
-the same rule with the coinbase's own identifier.
+repeats. A shielder that ignores the rule can collide with a note somebody else
+holds: `nf = H(NF, nk, rho, r)` binds neither `pk` nor the value, so whoever
+sent a note and kept its `(pk, rho, r)` can shield a second note on the same
+triple and the chain settles it as an ordinary entry. That is the conflict set
+the recipient rule below counts. At M6 a coinbase note takes the same rule with
+the coinbase's own identifier.
 
 **What the recipient owes.** A sender picks `rho` and `r` for the note it
 creates, so a sender that repeats a pair hands over two notes sharing one

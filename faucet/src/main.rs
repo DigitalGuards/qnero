@@ -26,7 +26,7 @@ a systemd EnvironmentFile at mode 0600.
 
 A drip is a zero-knowledge proof. It takes about ten seconds to prove and then
 up to one block to settle, and this server proves one at a time, so POST /drip
-answers `queued` and GET /drip/{id} is how a caller learns what became of it."
+answers `queued` and GET /drip/{token} is how a caller learns what became of it."
 )]
 struct Cli {
     #[command(subcommand)]

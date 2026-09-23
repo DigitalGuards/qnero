@@ -68,6 +68,44 @@ const COUNTS_AS_CLAIMED: &str =
 /// The reason code a claim carries when the faucet stopped mid-drip.
 pub const INTERRUPTED: &str = "interrupted";
 
+/// How much randomness a claim's public handle carries, in bytes.
+pub const CLAIM_TOKEN_BYTES: usize = 16;
+
+/// A fresh claim token: 128 random bits from the operating system, hex.
+///
+/// The rowid is this process's own business. What a requester is handed is
+/// this, because the rowid is the previous one plus one: anybody holding a
+/// claim could read every other claim by counting down, and each answer named
+/// the address it paid and when. A token is unguessable, so the answer reaches
+/// the one requester who asked.
+pub fn new_claim_token() -> Result<String> {
+    let mut raw = [0u8; CLAIM_TOKEN_BYTES];
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut raw)
+        .context("the operating system's RNG refused")?;
+    Ok(hex::encode(raw))
+}
+
+/// Whether a path segment can be a claim token at all: 32 lowercase hex
+/// characters and nothing else.
+///
+/// A rowid fails this, which is what turns the enumerable path into a 404
+/// before the ledger is touched.
+pub fn is_claim_token(candidate: &str) -> bool {
+    candidate.len() == CLAIM_TOKEN_BYTES * 2
+        && candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// An accepted claim, as the requester and the worker each need it: the token
+/// answers the poll, the rowid stays inside.
+#[derive(Debug, Clone)]
+pub struct NewClaim {
+    pub id: i64,
+    pub token: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Claim {
     pub id: i64,
@@ -175,6 +213,37 @@ fn load_or_create_ip_key(path: &Path) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+/// Add one column to `claims`, treating "already there" as done.
+fn add_column(connection: &Connection, column: &str) -> Result<()> {
+    if let Err(error) = connection.execute(&format!("ALTER TABLE claims ADD COLUMN {column}"), []) {
+        let text = error.to_string();
+        if !text.contains("duplicate column name") {
+            return Err(error).with_context(|| format!("adding the {column} column"));
+        }
+    }
+    Ok(())
+}
+
+/// Give every row written before tokens existed one of its own.
+///
+/// A ledger that survived the upgrade keeps its history, and the claims in it
+/// are polled by nobody: a fresh token per row is what lets the column carry a
+/// unique index and what keeps the rowid out of every lookup path.
+fn backfill_tokens(connection: &Connection) -> Result<()> {
+    let ids: Vec<i64> = {
+        let mut statement = connection.prepare("SELECT id FROM claims WHERE token IS NULL")?;
+        let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for id in ids {
+        connection.execute(
+            "UPDATE claims SET token = ?2 WHERE id = ?1",
+            params![id, new_claim_token()?],
+        )?;
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn open(db_path: &Path, ip_key_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
@@ -198,23 +267,24 @@ impl Store {
                  detail         TEXT,
                  requested_at   INTEGER NOT NULL,
                  submitted_at   INTEGER,
-                 settled_at     INTEGER
+                 settled_at     INTEGER,
+                 token          TEXT
              );
              CREATE INDEX IF NOT EXISTS claims_by_address ON claims (address, requested_at);
              CREATE INDEX IF NOT EXISTS claims_by_ip      ON claims (ip_hash, requested_at);",
         )?;
-        // A ledger written before this column existed. ALTER TABLE is the
-        // whole migration story here: one table, one added column, and an
-        // error that says "duplicate column name" is the already-migrated
-        // case rather than a failure.
-        if let Err(error) =
-            connection.execute("ALTER TABLE claims ADD COLUMN submitted_at INTEGER", [])
-        {
-            let text = error.to_string();
-            if !text.contains("duplicate column name") {
-                return Err(error).context("adding the submitted_at column");
-            }
-        }
+        // A ledger written before these columns existed. ALTER TABLE is the
+        // whole migration story here: one table, one added column each time,
+        // and an error that says "duplicate column name" means the ledger is
+        // already migrated, which `add_column` treats as done.
+        add_column(&connection, "submitted_at INTEGER")?;
+        add_column(&connection, "token TEXT")?;
+        backfill_tokens(&connection)?;
+        // After the backfill, so the index is built once over a column that
+        // is already filled.
+        connection.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS claims_by_token ON claims (token);",
+        )?;
         let ip_key = load_or_create_ip_key(ip_key_path)?;
         Ok(Self { connection, ip_key })
     }
@@ -234,8 +304,10 @@ impl Store {
                  detail         TEXT,
                  requested_at   INTEGER NOT NULL,
                  submitted_at   INTEGER,
-                 settled_at     INTEGER
-             );",
+                 settled_at     INTEGER,
+                 token          TEXT
+             );
+             CREATE UNIQUE INDEX claims_by_token ON claims (token);",
         )?;
         Ok(Self {
             connection,
@@ -303,19 +375,32 @@ impl Store {
     /// The row exists first on purpose: a claim that is queued and then lost
     /// to a crash has still consumed its cooldown, which is the safe side of
     /// that trade for a faucet.
+    ///
+    /// The token comes back with the rowid and is the only half a requester is
+    /// given.
     pub fn record_queued(
         &self,
         address: &str,
         client_hash: &str,
         amount_quanta: u64,
         now: u64,
-    ) -> Result<i64> {
+    ) -> Result<NewClaim> {
+        let token = new_claim_token()?;
         self.connection.execute(
-            "INSERT INTO claims (address, ip_hash, amount_quanta, status, requested_at)
-             VALUES (?1, ?2, ?3, 'queued', ?4)",
-            params![address, client_hash, amount_quanta as i64, now as i64],
+            "INSERT INTO claims (address, ip_hash, amount_quanta, status, requested_at, token)
+             VALUES (?1, ?2, ?3, 'queued', ?4, ?5)",
+            params![
+                address,
+                client_hash,
+                amount_quanta as i64,
+                now as i64,
+                token
+            ],
         )?;
-        Ok(self.connection.last_insert_rowid())
+        Ok(NewClaim {
+            id: self.connection.last_insert_rowid(),
+            token,
+        })
     }
 
     /// Record that the worker is about to submit this drip.
@@ -353,14 +438,26 @@ impl Store {
         Ok(())
     }
 
+    /// The claim a requester polls, found by the token it was handed.
+    pub fn claim_by_token(&self, token: &str) -> Result<Option<Claim>> {
+        self.claim_where("token", &token)
+    }
+
+    /// The claim the worker is carrying, found by its rowid.
     pub fn claim(&self, id: i64) -> Result<Option<Claim>> {
+        self.claim_where("id", &id)
+    }
+
+    fn claim_where(&self, column: &str, key: &dyn rusqlite::ToSql) -> Result<Option<Claim>> {
         let row = self
             .connection
             .query_row(
-                "SELECT id, address, amount_quanta, status, included_at, detail, requested_at,
-                        submitted_at, settled_at
-                   FROM claims WHERE id = ?1",
-                params![id],
+                &format!(
+                    "SELECT id, address, amount_quanta, status, included_at, detail, requested_at,
+                            submitted_at, settled_at
+                       FROM claims WHERE {column} = ?1"
+                ),
+                params![key],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -446,6 +543,143 @@ impl Store {
 mod tests {
     use super::*;
 
+    /// A directory of this test's own, removed when it ends.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock is after 1970")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("qnero-faucet-store-{tag}-{unique}"));
+        fs::create_dir_all(&path).expect("a temporary directory");
+        path
+    }
+
+    /// The token is what a requester polls with, and it finds the one claim it
+    /// was written for.
+    #[test]
+    fn a_claim_is_found_by_its_token() {
+        let store = Store::in_memory().expect("in-memory ledger");
+        let hash = store.ip_hash("203.0.113.7");
+        let first = store
+            .record_queued("qn1a", &hash, 1000, 10)
+            .expect("insert");
+        let second = store
+            .record_queued("qn1b", &hash, 2000, 20)
+            .expect("insert");
+
+        assert_ne!(first.token, second.token, "two claims, two tokens");
+        assert!(is_claim_token(&first.token), "{}", first.token);
+        assert!(is_claim_token(&second.token), "{}", second.token);
+
+        let found = store
+            .claim_by_token(&first.token)
+            .expect("query")
+            .expect("the row the insert wrote");
+        assert_eq!(found.id, first.id);
+        assert_eq!(found.address, "qn1a");
+        assert_eq!(
+            store
+                .claim_by_token(&second.token)
+                .expect("query")
+                .expect("the second row")
+                .amount_quanta,
+            2000
+        );
+        assert!(store
+            .claim_by_token(&"0".repeat(32))
+            .expect("query")
+            .is_none());
+    }
+
+    /// The shape check is what keeps the rowid path out of the ledger: it is
+    /// the one thing between a counted-up path and a lookup.
+    #[test]
+    fn only_a_token_shaped_path_is_a_token() {
+        assert!(is_claim_token(&"a1b2c3d4".repeat(4)));
+        assert!(!is_claim_token("1"));
+        assert!(!is_claim_token("-1"));
+        assert!(!is_claim_token(&"1".repeat(31)));
+        assert!(!is_claim_token(&"1".repeat(33)));
+        assert!(!is_claim_token(&"A1B2C3D4".repeat(4)), "hex is lowercase");
+        assert!(!is_claim_token(&"g".repeat(32)), "g is not hex");
+        assert!(is_claim_token(&new_claim_token().expect("the system RNG")));
+    }
+
+    /// A ledger written before tokens existed keeps its rows and is given one
+    /// token per row on the next open. Without the backfill the unique index
+    /// would go on a half-empty column and the old rows would be unreachable
+    /// by the only route that reads them.
+    #[test]
+    fn an_existing_ledger_is_given_tokens_on_open() {
+        let dir = scratch("migrate");
+        let db = dir.join("claims.sqlite");
+        let key = dir.join("ip-hash.key");
+
+        // The oldest shape this ledger ever had: no submitted_at and no token.
+        {
+            let old = Connection::open(&db).expect("a ledger file");
+            old.execute_batch(
+                "CREATE TABLE claims (
+                     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                     address        TEXT    NOT NULL,
+                     ip_hash        TEXT    NOT NULL,
+                     amount_quanta  INTEGER NOT NULL,
+                     status         TEXT    NOT NULL,
+                     included_at    INTEGER,
+                     detail         TEXT,
+                     requested_at   INTEGER NOT NULL,
+                     settled_at     INTEGER
+                 );
+                 INSERT INTO claims (address, ip_hash, amount_quanta, status, requested_at)
+                      VALUES ('qn1old', 'hash', 1000, 'sent', 10),
+                             ('qn1older', 'hash', 2000, 'queued', 20);",
+            )
+            .expect("the old schema");
+        }
+
+        let store = Store::open(&db, &key).expect("the migrated ledger");
+        let mut tokens = Vec::new();
+        for id in [1_i64, 2] {
+            let claim = store
+                .claim(id)
+                .expect("query")
+                .expect("the row survived the migration");
+            let token: String = store
+                .connection
+                .query_row(
+                    "SELECT token FROM claims WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("the backfilled token");
+            assert!(is_claim_token(&token), "row {id} got {token:?}");
+            assert_eq!(
+                store
+                    .claim_by_token(&token)
+                    .expect("query")
+                    .expect("the row, by its new token")
+                    .id,
+                claim.id
+            );
+            tokens.push(token);
+        }
+        assert_ne!(tokens[0], tokens[1], "one token per row");
+
+        // A second open changes nothing: the columns are there, every row has
+        // a token, and the index already exists.
+        drop(store);
+        let store = Store::open(&db, &key).expect("a second open");
+        assert_eq!(
+            store
+                .claim_by_token(&tokens[0])
+                .expect("query")
+                .expect("the same row")
+                .address,
+            "qn1old"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_queued_claim_holds_the_address_cooldown() {
         let store = Store::in_memory().expect("in-memory ledger");
@@ -453,7 +687,8 @@ mod tests {
         assert_eq!(store.last_claim_for_address("qn1abc").expect("query"), None);
         let id = store
             .record_queued("qn1abc", &hash, 1000, 1_000_000)
-            .expect("insert");
+            .expect("insert")
+            .id;
         assert_eq!(
             store.last_claim_for_address("qn1abc").expect("query"),
             Some(1_000_000)
@@ -474,7 +709,8 @@ mod tests {
         let hash = store.ip_hash("203.0.113.7");
         let id = store
             .record_queued("qn1abc", &hash, 1000, 1_000_000)
-            .expect("insert");
+            .expect("insert")
+            .id;
         store
             .mark_failed(id, "the node refused the submission", 1_000_050)
             .expect("mark failed");
@@ -498,7 +734,8 @@ mod tests {
         let hash = store.ip_hash("203.0.113.7");
         let id = store
             .record_queued("qn1abc", &hash, 1000, 1_000_000)
-            .expect("insert");
+            .expect("insert")
+            .id;
         store.mark_submitted(id, 1_000_010).expect("mark submitted");
         assert_eq!(
             store
@@ -591,10 +828,12 @@ mod tests {
         let hash = store.ip_hash("203.0.113.7");
         let first = store
             .record_queued("qn1a", &hash, 1000, 10)
-            .expect("insert");
+            .expect("insert")
+            .id;
         let second = store
             .record_queued("qn1b", &hash, 1000, 20)
-            .expect("insert");
+            .expect("insert")
+            .id;
         store.mark_sent(first, 3, 30).expect("mark sent");
         let queued = store.queued_claims().expect("queued");
         assert_eq!(queued.len(), 1);

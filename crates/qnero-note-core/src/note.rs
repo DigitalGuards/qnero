@@ -96,6 +96,13 @@ pub fn note_inner(pk: &Digest, rho: &Digest, r: &Digest) -> Digest {
 /// decryption. `r` is known only to the note's sender and holder, which is the
 /// same role Orchard gives `psi`. It also means a leaked `nk` cannot be used
 /// to compute a victim's nullifier from public data alone.
+///
+/// **`pk` and the value are unbound here.** Two notes that differ in either
+/// and agree on `(nk, rho, r)` carry one nullifier, so whoever knows a note's
+/// `(pk, rho, r)`, which is its sender, can build a second note that collides
+/// with it. A repeated `(rho, r)` therefore reaches the recipient as a
+/// conflict set to be counted, under the rule [`entry_rho`] sets out, and it
+/// is why an entry's `rho` is derived from an on-chain identifier.
 pub fn nullifier(nk: &Digest, rho: &Digest, r: &Digest) -> Digest {
     Digest::hash_felts(domain::NF, &[nk.felts(), rho.felts(), r.felts()])
 }
@@ -168,10 +175,27 @@ pub fn output_rho(nf_1: &Digest, nf_2: &Digest, index: u64) -> Digest {
 /// while its value is public, so what the chain owes is the identifier:
 /// `pallet-shielded` publishes `block_number` and `entry_index` with every
 /// shield, and the recipient recomputes `rho` from them; reading it out of the
-/// ciphertext would trust the sender to have followed the rule. A shielder that ignores the rule can only strand its
-/// own note, since computing anyone else's nullifier needs their `nk`. A
-/// wallet should refuse a received note whose nullifier duplicates one it
-/// already holds or one already settled.
+/// ciphertext would trust the sender to have followed the rule.
+///
+/// A shielder that ignores it can collide with a note somebody else holds.
+/// [`nullifier`] is `H(NF, nk, rho, r)` and binds neither `pk` nor the value,
+/// so anyone who once sent a note and kept its `(pk, rho, r)` can shield a
+/// second note on the same triple: `pallet-shielded`'s `shield` takes `inner`
+/// opaque, the chain sees a well-formed entry, and the recipient holds two
+/// notes with one nullifier, of which at most one can ever settle.
+///
+/// What a wallet owes for such a conflict set is a counting rule
+/// (`docs/CIRCUIT.md` section 9.8). Hold every member: the plaintext is in the
+/// ciphertext the chain published, and a discarded member is a secret nothing
+/// recovers. Count the set once, at its largest member, which is the value a
+/// spend would use. Keep two members out of one leaf, which a private batch's
+/// pairwise-distinct nullifiers already enforce in circuit. Refusing a member
+/// on arrival decides by an order the sender chooses, so a sender that sends
+/// the large note second takes the difference away permanently and no rescan
+/// undoes it. The one refusal left is a nullifier already settled on chain,
+/// and even that is provisional, since a reorg can orphan the settlement and
+/// make the note holdable again. `WalletStore::spendable` in `qnero-wallet` is
+/// the reference.
 pub fn entry_rho(block_number: u32, entry_index: u64) -> Digest {
     // Two 32-bit limbs, high then low: the same split the chain's own
     // `u64_to_felts` makes, so a `u64` never reaches the field as one element
