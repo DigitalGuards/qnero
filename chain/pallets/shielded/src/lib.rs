@@ -1013,8 +1013,8 @@ pub mod pallet {
 		/// has no spent nullifier to derive from, so `rho` must be
 		/// `H(RHO_ENTRY, block_number, entry_index)` over the pair this call
 		/// publishes in its event. The chain cannot check it, because `inner` is
-		/// opaque by construction; what it owes is the identifier. A shielder
-		/// that ignores the rule collides with a note a recipient holds (9.8).
+		/// opaque by construction; what it owes is the identifier, and a
+		/// shielder who ignores the rule can only strand its own note.
 		///
 		/// `ciphertext` is what the recipient decrypts and it is kept nowhere
 		/// but this extrinsic. A wallet reads it out of the block body, which
