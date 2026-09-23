@@ -25,7 +25,18 @@ frame-metadata = { workspace = true }
 scale-info = { workspace = true }
 blake2 = { workspace = true }
 twox-hash = { workspace = true }
-ureq = { workspace = true }
+# `tls` is asked for here, because the workspace entry carries no features and
+# a crate is built on its own: `cargo build -p qnero-wallet --features
+# parallel`, which is the line README.md and docs/WALLET.md give, resolves this
+# manifest alone. Without the feature every https:// node answers "cannot make
+# HTTPS request because no TLS backend is configured", and the public testnet
+# is reached at https://rpc.<domain>. A whole-workspace build hid it: the
+# faucet asks for the same dependency with `tls` and Cargo unifies the features
+# across one build. The backend is rustls, the same one the faucet's entry
+# pulls, so the binary carries its own TLS stack and asks nothing of the host's
+# OpenSSL. `tests/https_backend.rs` is the guard. `json` stays off: this client
+# sends and reads strings.
+ureq = { workspace = true, features = ["tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
