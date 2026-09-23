@@ -146,15 +146,20 @@ pub enum Error<B: BlockT> {
 	/// A policy refusal, and a retryable one: the block may well be valid. It
 	/// sits on a side branch, its difficulty is below the tip's divided by
 	/// [`SIDE_BRANCH_DIFFICULTY_FRACTION`], and the side-branch budget has no
-	/// token for it right now. Sync drops the sending peer as for any
-	/// verification failure and offers the branch again later, when the
-	/// budget has refilled. Boxed so the error stays small on every path that
-	/// returns one.
+	/// token for it right now. Its seal is already proven when this is raised,
+	/// so the verifier passes the block on and `import_block` refuses it as an
+	/// import error: sync restarts without penalising or dropping the sender
+	/// and offers the branch again once the budget has refilled. Boxed so the
+	/// error stays small on every path that returns one.
 	#[error("{0}")]
 	SideBranchBudgetExhausted(Box<SideBranchRefusal<B::Hash>>),
 	/// The other policy refusal, equally retryable: the block does not extend
 	/// the tip, verifying it needs a 256 MiB RandomX cache fill for a seed
 	/// that is neither pinned nor resident, and the seed-fill budget is spent.
+	/// This one is raised before the seal is checked, where an honest block and
+	/// a junk one look alike, so it stays a verification failure and the sender
+	/// is penalised: a non-punitive seed-fill refusal would give a peer with no
+	/// hashrate unlimited sync restarts for free.
 	#[error("{0}")]
 	SeedFillBudgetExhausted(Box<SeedFillRefusal<B::Hash>>),
 	#[error("RandomX engine error: {0}")]
@@ -689,6 +694,13 @@ where
 		&self,
 		mut block_import_params: BlockImportParams<B>,
 	) -> Result<ImportResult, Self::Error> {
+		// A side-branch block the verifier proved and then refused on budget:
+		// refuse it here, before any further work, as an import error the sync
+		// layer does not punish. See `PowVerifier::verify`.
+		if let Ok(refusal) = block_import_params.remove_intermediate::<String>(SIDE_BRANCH_REFUSAL)
+		{
+			return Err(ConsensusError::ClientImport(refusal))
+		}
 		// The canonical post-seal digest must encode to exactly the window
 		// committed by `Header::hash()`, except for the one-byte
 		// `RuntimeEnvironmentUpdated` leftover on historical runtime-upgrade
@@ -913,6 +925,10 @@ where
 /// The PoW import queue type.
 pub type PowImportQueue<B> = BasicQueue<B>;
 
+/// Intermediate key the verifier sets on a proven block it refused on the
+/// side-branch budget, read and refused by `import_block`.
+const SIDE_BRANCH_REFUSAL: &[u8] = b"qnero-randomx/side-branch-refusal";
+
 /// Verifier that extracts the PoW seal from the header and checks the
 /// proof-of-work before the block reaches `import_block`.
 ///
@@ -956,7 +972,7 @@ where
 		let block_hash = block.post_hash();
 		let inner_seal = fetch_seal::<B>(block.post_digests.last(), pre_hash)?;
 
-		verify_pow::<B, _>(
+		let verdict = verify_pow::<B, _>(
 			&*self.client,
 			&self.engine,
 			parent_hash,
@@ -965,8 +981,37 @@ where
 			block_hash,
 			&inner_seal,
 			Some(&self.budgets),
-		)
-		.map_err(|error| {
+		);
+		// A side-branch refusal is only raised after the seal is proven, so the
+		// sender did real work and must not be treated as a forger. The block
+		// goes on to `import_block` carrying the refusal, where it is refused
+		// with an import error: the sync layer restarts without the
+		// reputation penalty and disconnect a verification failure carries, so
+		// the branch really can be offered again once the bucket refills. A
+		// seed-fill refusal comes before any seal check, where an honest block
+		// and a junk one look alike, so it stays a verification failure.
+		let mut block = block;
+		let verdict = match verdict {
+			Err(error @ Error::SideBranchBudgetExhausted(_)) => {
+				if let Some(suppressed) =
+					self.budgets.should_warn(Budget::SideBranch, std::time::Instant::now())
+				{
+					let hidden = if suppressed > 0 {
+						format!(" (+{suppressed} suppressed in the last 60 s)")
+					} else {
+						String::new()
+					};
+					log::warn!(
+						target: LOG_TARGET,
+						"randomx: budget refusal for block #{number} on parent {parent_hash:?}: {error}{hidden}"
+					);
+				}
+				block.insert_intermediate(SIDE_BRANCH_REFUSAL, String::from(error));
+				return Ok(block)
+			},
+			verdict => verdict,
+		};
+		verdict.map_err(|error| {
 			// A budget refusal is policy, and retryable; it is logged apart
 			// from a bad seal so an operator reading the journal does not take
 			// a throttled peer for a chain split. One line per budget per
