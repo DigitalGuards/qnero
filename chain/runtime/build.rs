@@ -63,5 +63,40 @@ fn runtime_builder() -> substrate_wasm_builder::WasmBuilder {
 			builder = builder.append_to_rust_flags(format!("--remap-path-prefix={prefix}={alias}"));
 		}
 	}
+	// The standard library's own sources. With the `rust-src` component
+	// installed, rustc resolves the library's virtual `/rustc/<commit>` paths to
+	// the local copy under the toolchain's sysroot, and those real paths reach
+	// panic locations in the wasm: a runner's `/home/runner/.rustup/...` did.
+	// Mapping them back to the virtual form makes the runtime the same bytes
+	// with or without the component.
+	if let Some((sysroot, commit)) = toolchain_sources() {
+		let library = sysroot.join("lib/rustlib/src/rust");
+		let prefix = library.to_str().expect("toolchain paths must be UTF-8");
+		assert!(
+			!prefix.chars().any(char::is_whitespace),
+			"WASM builder flags require build paths without whitespace"
+		);
+		builder =
+			builder.append_to_rust_flags(format!("--remap-path-prefix={prefix}=/rustc/{commit}"));
+	}
 	builder
+}
+
+/// The active toolchain's sysroot and the commit its library paths are
+/// virtualised under, read from the compiler cargo runs for this build.
+#[cfg(feature = "std")]
+fn toolchain_sources() -> Option<(std::path::PathBuf, String)> {
+	use std::process::Command;
+
+	let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+	let sysroot = Command::new(&rustc).args(["--print", "sysroot"]).output().ok()?;
+	let version = Command::new(&rustc).arg("-vV").output().ok()?;
+	let sysroot = String::from_utf8(sysroot.stdout).ok()?.trim().to_owned();
+	let commit = String::from_utf8(version.stdout)
+		.ok()?
+		.lines()
+		.find_map(|line| line.strip_prefix("commit-hash: "))?
+		.trim()
+		.to_owned();
+	Some((sysroot.into(), commit))
 }
