@@ -6,8 +6,106 @@
 //! `NoteCiphertext` is a fixed 1731 bytes plus the memo. So a wallet owes the
 //! arithmetic first and proves second, or it pays for a proof the chain
 //! refuses with `PayloadUnderpaid`.
+//!
+//! Both terms of the floor come from runtime metadata, which no state root
+//! covers, and an overpaid fee is credited to the block author. So each one is
+//! held inside a compiled-in bound before it prices anything:
+//! [`ensure_fee_constants_are_sane`].
 
 use crate::metadata::ChainMetadata;
+use crate::units::qnr;
+
+/// The widest `MinLeafFee` this wallet will price a spend against, in pool
+/// steps.
+///
+/// The chain declares 1 (`chain/runtime/src/configs/mod.rs`), so this leaves a
+/// runtime upgrade sixty-four times the room it uses today.
+pub const MAX_TRUSTED_MIN_LEAF_FEE: u64 = 64;
+
+/// The narrowest `CiphertextBytesPerFeeQuantum` this wallet will price a spend
+/// against, in bytes.
+///
+/// The chain declares 512, so this leaves an upgrade room to make a byte of
+/// payload eight times dearer.
+pub const MIN_TRUSTED_BYTES_PER_FEE_QUANTUM: u32 = 64;
+
+/// The widest fee this wallet pays for one slot, in pool steps.
+pub const MAX_TRUSTED_SLOT_FEE: u64 = 256;
+
+/// A fee at or under this is paid whatever the amount is, in pool steps.
+///
+/// An honest slot costs 8, and a payment may legitimately be smaller than a
+/// few times that: `dev_node_e2e` sends 5. Below the allowance there is
+/// nothing worth stopping a spend over.
+pub const HIGH_FEE_ALLOWANCE: u64 = 16;
+
+/// Above the allowance, a fee may take at most this share of the amount.
+pub const HIGH_FEE_AMOUNT_SHARE: u64 = 2;
+
+/// The bounds this wallet holds a runtime's fee constants inside.
+///
+/// `MinLeafFee` and `CiphertextBytesPerFeeQuantum` arrive in runtime metadata,
+/// which is the node's own word: no state root covers it, so a node answers
+/// what it likes. Those two decide the floor, a caller that names no `--fee`
+/// pays exactly the floor, and the chain credits an overpayment to the block
+/// author. A node that multiplied either constant by a thousand would be paid
+/// a thousandfold, and `fee_runs_away` would not see it: that bound is
+/// measured against the same floor.
+///
+/// The chain's real values price an honest settlement slot at 8 steps, and the
+/// bounds above are wide multiples of each term, so a fee change the chain
+/// makes on purpose is still taken and a fee change a node invents is refused
+/// by name. A runtime that wanted more than these would ship with a wallet
+/// that carries the new bound.
+///
+/// `wallet-web/src/wallet/fee.ts` holds the same three numbers.
+pub fn ensure_fee_constants_are_sane(metadata: &ChainMetadata) -> anyhow::Result<()> {
+    if metadata.min_leaf_fee > MAX_TRUSTED_MIN_LEAF_FEE {
+        anyhow::bail!(
+            "this node declares MinLeafFee as {} pool steps ({} QNR) and this wallet pays at \
+             most {} ({} QNR). Runtime metadata is the node's own word, no state root covers \
+             it, and the chain pays an overpaid fee to the block author. Nothing has been \
+             built and nothing has been submitted.",
+            metadata.min_leaf_fee,
+            qnr(metadata.min_leaf_fee),
+            MAX_TRUSTED_MIN_LEAF_FEE,
+            qnr(MAX_TRUSTED_MIN_LEAF_FEE)
+        );
+    }
+    if metadata.ciphertext_bytes_per_fee_quantum < MIN_TRUSTED_BYTES_PER_FEE_QUANTUM {
+        anyhow::bail!(
+            "this node declares CiphertextBytesPerFeeQuantum as {} bytes and this wallet prices \
+             a spend against at least {MIN_TRUSTED_BYTES_PER_FEE_QUANTUM}. The divisor is what a \
+             step of fee buys, so a small one is a large fee, and runtime metadata is the node's \
+             own word. Nothing has been built and nothing has been submitted.",
+            metadata.ciphertext_bytes_per_fee_quantum
+        );
+    }
+    Ok(())
+}
+
+/// The fee this spend would pay, against the absolute per-slot ceiling.
+pub fn ensure_fee_within_ceiling(fee: u64) -> anyhow::Result<()> {
+    if fee > MAX_TRUSTED_SLOT_FEE {
+        anyhow::bail!(
+            "this spend would pay {} QNR for one slot and this wallet pays at most {} QNR. The \
+             fee comes from constants the node declares and the chain credits an overpayment to \
+             the block author. Nothing has been built and nothing has been submitted.",
+            qnr(fee),
+            qnr(MAX_TRUSTED_SLOT_FEE)
+        );
+    }
+    Ok(())
+}
+
+/// The fee against the amount it is charged on.
+///
+/// The ceiling above bounds what a hostile node can take per spend; this
+/// bounds what it can take out of a small payment. The allowance is what keeps
+/// an honest floor from stopping a genuinely small one.
+pub fn fee_outruns_amount(fee: u64, amount: u64) -> bool {
+    fee > HIGH_FEE_ALLOWANCE && fee.saturating_mul(HIGH_FEE_AMOUNT_SHARE) > amount
+}
 
 /// The per-slot floor: `MinLeafFee + ceil(ciphertext bytes / the byte bucket)`.
 pub fn slot_fee_floor(metadata: &ChainMetadata, ct_1_len: usize, ct_2_len: usize) -> u64 {
@@ -203,6 +301,91 @@ mod tests {
         metadata.ciphertext_bytes_per_fee_quantum = 0;
         assert_eq!(slot_fee_floor(&metadata, 1731, 1731), 1 + 3462);
         assert_eq!(submission_fee_floor(&metadata, 1, 3462), 1 + 3462);
+    }
+
+    /// The bounds on what a node may charge.
+    ///
+    /// `MinLeafFee` and `CiphertextBytesPerFeeQuantum` come out of runtime
+    /// metadata, which no state root covers, and a caller that names no
+    /// `--fee` pays the floor those two compute. So an inflated constant is
+    /// money handed to the block author, and every case here is a node that
+    /// declared one. `wallet-web/tests/fee.test.ts` holds the counterparts.
+    #[test]
+    fn the_constants_the_chain_itself_declares_are_taken() {
+        assert!(ensure_fee_constants_are_sane(&runtime()).is_ok());
+        let sent = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
+        assert!(ensure_fee_within_ceiling(slot_fee_floor(&runtime(), sent, sent)).is_ok());
+    }
+
+    #[test]
+    fn an_inflated_min_leaf_fee_is_refused_by_name() {
+        let mut greedy = runtime();
+        greedy.min_leaf_fee = MAX_TRUSTED_MIN_LEAF_FEE + 1;
+        let refused = ensure_fee_constants_are_sane(&greedy)
+            .expect_err("a node may not price a slot at whatever it likes");
+        assert!(refused.to_string().contains("MinLeafFee"), "{refused}");
+
+        // The whole point: nothing else would have stopped it. The floor
+        // these constants compute is the fee the wallet pays, because
+        // `resolve_fee`'s `None` arm takes the floor unchanged.
+        let sent = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
+        assert_eq!(
+            slot_fee_floor(&greedy, sent, sent),
+            MAX_TRUSTED_MIN_LEAF_FEE + 8
+        );
+
+        // And a fee change the chain makes on purpose still sends.
+        let mut at_the_bound = runtime();
+        at_the_bound.min_leaf_fee = MAX_TRUSTED_MIN_LEAF_FEE;
+        assert!(ensure_fee_constants_are_sane(&at_the_bound).is_ok());
+    }
+
+    #[test]
+    fn a_divisor_small_enough_to_make_payload_dear_is_refused() {
+        let mut greedy = runtime();
+        greedy.ciphertext_bytes_per_fee_quantum = MIN_TRUSTED_BYTES_PER_FEE_QUANTUM - 1;
+        let refused = ensure_fee_constants_are_sane(&greedy)
+            .expect_err("a divisor below the bound prices a byte of payload too dearly");
+        assert!(
+            refused.to_string().contains("CiphertextBytesPerFeeQuantum"),
+            "{refused}"
+        );
+
+        let mut at_the_bound = runtime();
+        at_the_bound.ciphertext_bytes_per_fee_quantum = MIN_TRUSTED_BYTES_PER_FEE_QUANTUM;
+        assert!(ensure_fee_constants_are_sane(&at_the_bound).is_ok());
+    }
+
+    /// A zero divisor is clamped to one inside the arithmetic, and the clamp
+    /// alone would have paid 3463 steps for one slot. The bound refuses it.
+    #[test]
+    fn a_zero_divisor_is_refused_where_the_clamp_would_have_paid() {
+        let mut broken = runtime();
+        broken.ciphertext_bytes_per_fee_quantum = 0;
+        assert!(ensure_fee_constants_are_sane(&broken).is_err());
+    }
+
+    #[test]
+    fn a_slot_fee_over_the_absolute_ceiling_is_refused() {
+        assert!(ensure_fee_within_ceiling(MAX_TRUSTED_SLOT_FEE).is_ok());
+        assert!(ensure_fee_within_ceiling(MAX_TRUSTED_SLOT_FEE + 1).is_err());
+    }
+
+    #[test]
+    fn a_fee_taking_more_than_half_the_amount_outruns_it() {
+        let fee = HIGH_FEE_ALLOWANCE + 1;
+        assert!(!fee_outruns_amount(fee, fee * 2));
+        assert!(fee_outruns_amount(fee, fee * 2 - 1));
+    }
+
+    /// An honest slot costs eight steps, and `dev_node_e2e` sends five. The
+    /// allowance is what keeps the share rule off a genuinely small payment.
+    #[test]
+    fn an_honest_floor_does_not_outrun_a_small_payment() {
+        let sent = crate::memo::CIPHERTEXT_FIXED_BYTES + crate::memo::MEMO_BYTES;
+        let floor = slot_fee_floor(&runtime(), sent, sent);
+        assert!(floor <= HIGH_FEE_ALLOWANCE);
+        assert!(!fee_outruns_amount(floor, 5));
     }
 
     #[test]

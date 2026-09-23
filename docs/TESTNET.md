@@ -124,9 +124,14 @@ them, and set the flag:
 ```bash
 # on the machine that built the modules
 cd crates/qnero-prover-wasm/www
-sha256sum pkg/qnero_prover_wasm_bg.wasm \
-    pkg-threaded/qnero_prover_wasm_bg.wasm > wasm-prebuilt.sha256
+find pkg pkg-threaded -type f -print0 | sort -z \
+    | xargs -0 sha256sum > wasm-prebuilt.sha256
 ```
+
+The manifest covers the whole of both packages, because the stage copies more
+than the two `.wasm` files: both generated `qnero_prover_wasm.js` glue files
+and every file under `pkg-threaded/snippets/`. A manifest listing more than the
+stage copies is fine and is checked too.
 
 ```bash
 # on the deploying machine, with the manifest copied in beside the modules
@@ -138,12 +143,17 @@ It skips `build-wasm.sh` and `build-threaded-wasm.sh` and stages what is
 already in those two directories. What it does instead is stricter than a local
 build, because these are bytes the deploy did not produce:
 
-- Both `.wasm` files are pinned against the manifest, read from
+- Every file the stage copies is pinned against the manifest, read from
   `wallet-web/wasm-prebuilt.sha256` or from wherever `QNERO_WASM_SHA256`
-  points. A manifest that is missing, unreadable or disagrees refuses the
-  stage. The export check alone does not cover this: it reads every `js_name`
-  the crate declares and refuses glue that is missing one, and the glue is
-  text, so a module with every export and other bytes in it passes it.
+  points: the two `.wasm` modules, the two `qnero_prover_wasm.js` glue files
+  and everything under `pkg-threaded/snippets/`. A manifest that is missing,
+  unreadable, disagreeing, or silent about one of those files refuses the
+  stage and names what it left out. The export check alone does not cover
+  this: it reads every `js_name` the crate declares and refuses glue that is
+  missing one, and the glue is text, so a module with every export and other
+  bytes in it passes it. The glue is also what `deriveAccount` hands the seed
+  to, and the snippet is the worker entry point `initThreadPool` fetches at
+  run time, so those are the files worth editing.
 - A missing `www/pkg-threaded` refuses as well, where a local build only warns
   and falls back. Under the flag it is a copy that did not finish, and staging
   it would ship a wallet proving a payment in 37.6 s where it takes 11.2 s.

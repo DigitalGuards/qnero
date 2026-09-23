@@ -21,7 +21,8 @@ use crate::extrinsic::{
     encode_shield_call, encode_signed, encode_submit_private_batch, ShieldedOutput, SigningContext,
 };
 use crate::fee::{
-    ensure_ciphertext_fits, ensure_memo_pad_fits, slot_fee_floor, submission_fee_floor,
+    self, ensure_ciphertext_fits, ensure_fee_constants_are_sane, ensure_fee_within_ceiling,
+    ensure_memo_pad_fits, fee_outruns_amount, slot_fee_floor, submission_fee_floor,
 };
 use crate::keys::store_path_for;
 use crate::memo::{pad_memo, unpad_memo};
@@ -88,6 +89,21 @@ const FEE_CEILING_MULTIPLE: u64 = 10;
 /// ceiling rather than refusing every fee above nothing.
 fn fee_runs_away(fee: u64, floor: u64) -> bool {
     fee > floor.max(1).saturating_mul(FEE_CEILING_MULTIPLE)
+}
+
+/// Whether a caller has agreed to a fee that is large next to the amount.
+///
+/// The floor itself is the node's arithmetic, so the bound that catches an
+/// inflated one has to be measured against something the node does not
+/// control: the amount being sent. That bound refuses by default, and a caller
+/// who means it says so. See [`fee::fee_outruns_amount`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HighFee {
+    /// Refuse a fee large next to the amount.
+    #[default]
+    Refuse,
+    /// Take it: the caller asked for this on the command line.
+    Accept,
 }
 
 /// What [`Wallet::preflight`] settled before any circuit was built.
@@ -1463,10 +1479,11 @@ impl Wallet {
         amount: u64,
         requested_fee: Option<u64>,
         memo: &str,
+        high_fee: HighFee,
     ) -> Result<Preflight> {
         metadata.ensure_supported_profile()?;
         ensure_memo_pad_fits(metadata)?;
-        let plan = self.resolve_fee(metadata, to, memo, requested_fee)?;
+        let plan = self.resolve_fee(metadata, to, memo, amount, requested_fee, high_fee)?;
         let target = amount
             .checked_add(plan.fee)
             .ok_or_else(|| anyhow!("{amount} plus {} overflows", plan.fee))?;
@@ -1486,8 +1503,15 @@ impl Wallet {
         metadata: &ChainMetadata,
         to: &Address,
         memo: &str,
+        amount: u64,
         requested_fee: Option<u64>,
+        high_fee: HighFee,
     ) -> Result<Preflight> {
+        // The node's word about what a spend costs, held inside this wallet's
+        // own bounds first. Metadata carries no state proof, a caller that
+        // names no `--fee` pays the floor these constants compute, and the
+        // chain credits an overpayment to the block author.
+        ensure_fee_constants_are_sane(metadata)?;
         let (probe_payment, probe_change) = self.probe_lengths(to, memo)?;
         ensure_ciphertext_fits(metadata, probe_payment, "payment")?;
         ensure_ciphertext_fits(metadata, probe_change, "change")?;
@@ -1496,8 +1520,8 @@ impl Wallet {
             floor,
             submission_fee_floor(metadata, 1, (probe_payment + probe_change) as u64)
         );
-        match requested_fee {
-            None => Ok(Preflight { fee: floor, floor }),
+        let plan = match requested_fee {
+            None => Preflight { fee: floor, floor },
             Some(fee) if fee < floor => bail!(
                 "a fee of {} QNR is below this submission's floor of {}. The pallet asks \
                  MinLeafFee ({} QNR) plus 0.01 QNR per started {} bytes of ciphertext, and the \
@@ -1521,8 +1545,22 @@ impl Wallet {
                 qnr(floor),
                 qnr(floor)
             ),
-            Some(fee) => Ok(Preflight { fee, floor }),
+            Some(fee) => Preflight { fee, floor },
+        };
+        ensure_fee_within_ceiling(plan.fee)?;
+        if high_fee == HighFee::Refuse && fee_outruns_amount(plan.fee, amount) {
+            bail!(
+                "this spend would pay {} QNR of fee to move {} QNR, which is refused. The fee \
+                 comes from constants the node declares, metadata carries no state proof, and \
+                 the chain credits an overpayment to the block author. Send at least {} QNR, \
+                 connect to a node whose figures you trust, or pass --accept-high-fee if this \
+                 is what you meant. Nothing has been built and nothing has been submitted.",
+                qnr(plan.fee),
+                qnr(amount),
+                qnr(plan.fee.saturating_mul(fee::HIGH_FEE_AMOUNT_SHARE))
+            );
         }
+        Ok(plan)
     }
 
     /// The exact byte length of each output ciphertext this spend will carry.
@@ -1563,6 +1601,7 @@ impl Wallet {
         requested_fee: Option<u64>,
         memo: &str,
         merkle: MerkleSource,
+        high_fee: HighFee,
     ) -> Result<SendReport> {
         let prepared = match self.prepare_spend(
             chain,
@@ -1573,6 +1612,7 @@ impl Wallet {
             requested_fee,
             memo,
             merkle,
+            high_fee,
         ) {
             Ok(prepared) => prepared,
             // One error carries a fact about the chain worth writing down:
@@ -1600,6 +1640,7 @@ impl Wallet {
         requested_fee: Option<u64>,
         memo: &str,
         merkle: MerkleSource,
+        high_fee: HighFee,
     ) -> Result<PreparedSpend> {
         metadata.ensure_active_profile(chain.rpc, None)?;
         prover.ensure_supported_verifiers()?;
@@ -1609,7 +1650,9 @@ impl Wallet {
         // the path rebuild is an index into one chain's tree.
         self.store
             .ensure_genesis(&hex::encode(chain.genesis_hash()?))?;
-        let fee = self.resolve_fee(metadata, to, memo, requested_fee)?.fee;
+        let fee = self
+            .resolve_fee(metadata, to, memo, amount, requested_fee, high_fee)?
+            .fee;
         let (probe_payment, probe_change) = self.probe_lengths(to, memo)?;
 
         let target = amount

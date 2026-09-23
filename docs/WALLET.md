@@ -569,8 +569,21 @@ fallback.
 
 Runtime metadata is a separate compatibility surface. Storage namespaces and
 key encodings are fixed locally, and the active protocol profile is proven
-against the selected state root. Other metadata, including fee constants and
-call indices, remains node-supplied information.
+against the selected state root. Other metadata, including call indices,
+remains node-supplied information.
+
+**The fee constants are node-supplied and bounded.** `MinLeafFee` and
+`CiphertextBytesPerFeeQuantum` are runtime constants with no storage behind
+them, so no state root covers what a node answers for them, and those two
+decide the floor a spend pays. A wallet that names no fee pays exactly that
+floor, the chain accepts an overpayment and credits it to the block author, so
+an inflated constant is money taken by the node's own arithmetic. Both wallets
+therefore hold each constant inside a compiled-in bound, hold the resulting
+per-slot fee under an absolute ceiling, and refuse a fee that is large next to
+the amount being sent. `crates/qnero-wallet/src/fee.rs` and
+`wallet-web/src/wallet/fee.ts` carry the same three numbers, and a runtime that
+wanted to charge more than they allow would ship with wallets carrying the new
+bound.
 
 **Every integer read out of storage is decoded at its declared width**, and the
 leaf count is bounded as well as sized. `u64::decode` takes the first eight
@@ -1029,6 +1042,15 @@ refusal costs nothing:
    (`pallet_shielded::UNSIGNED_SETTLEMENT_PRIORITY`), deliberately, so there is
    no bidding for a ceiling to interfere with. A fee between the floor and that
    ceiling is accepted and printed with the floor beside it.
+
+   The floor itself is bounded too, because it is arithmetic over two
+   constants the node declares and nothing on chain covers. `MinLeafFee` above
+   64 steps and `CiphertextBytesPerFeeQuantum` below 64 bytes are refused by
+   name, a resolved per-slot fee above 256 steps is refused, and a fee over an
+   allowance of 16 steps that also takes more than half the amount being sent
+   is refused unless `--accept-high-fee` says it was meant. The browser wallet
+   applies the same three bounds and refuses outright, with no flag. Nothing is
+   built and nothing is submitted in any of these cases.
 2. **Selection.** Largest first, at most two notes, covering amount plus fee.
    The leaf circuit has two input slots, so a balance spread over three notes
    is not reachable in one spend and the wallet says so, naming what is
@@ -1041,6 +1063,16 @@ refusal costs nothing:
    logs and compares it against `chain_getBlockHash`. That check is the cheap
    way to catch a wrong digest re-encoding, which otherwise costs a proof and
    comes back as `BlockHashMismatch`.
+
+   `stateRoot` and `extrinsicsRoot` are Blake2-256 outputs and go into that
+   hash as raw bytes reduced mod p, which is what the chain does with them: an
+   8-byte little-endian limb of a Blake2 output lands at or above the
+   Goldilocks modulus about once in four billion, and the chain hashes such a
+   header like any other. `parentHash` and `zkTreeRoot` are Poseidon2 outputs
+   and take the strict decode, because a non-canonical limb there is a corrupt
+   header. The browser wallet reduces both Blake2 roots itself before handing
+   them to the prover module, so a module staged by digest from an earlier
+   build takes bytes it can decode either way.
 
    Head-anchoring is also a privacy policy, and it is written down here because
    nothing else would stop a later change from breaking it. The anchor block is

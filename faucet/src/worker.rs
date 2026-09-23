@@ -32,7 +32,7 @@ use qnero_wallet::dev_account::TransparentKey;
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::RpcClient;
 use qnero_wallet::units::qnr;
-use qnero_wallet::wallet::{MerkleSource, Wallet, NUM_LEAF_PROOFS};
+use qnero_wallet::wallet::{HighFee, MerkleSource, Wallet, NUM_LEAF_PROOFS};
 
 use crate::config::Config;
 use crate::store::{now_secs, Store, INTERRUPTED};
@@ -322,7 +322,14 @@ impl Worker {
         self.sync()?;
         let fee = self
             .wallet
-            .preflight(&self.metadata, &job.address, job.quanta, None, DRIP_MEMO)?
+            .preflight(
+                &self.metadata,
+                &job.address,
+                job.quanta,
+                None,
+                DRIP_MEMO,
+                HighFee::Refuse,
+            )?
             .fee;
         // The row is marked submitted BEFORE the send, because the window this
         // closes is between a drip landing in a block and `mark_sent` writing
@@ -345,6 +352,7 @@ impl Worker {
             Some(fee),
             DRIP_MEMO,
             MerkleSource::Local,
+            HighFee::Refuse,
         )?;
         println!(
             "faucet      drip {} QNR plus {} fee, proved in {:.2?}, block {}",

@@ -15,9 +15,13 @@
  *    a stale store. `Wallet::prepare_spend` opens with this check and so does
  *    this, before a fee is computed.
  * 1. **The fee floor first**, measured from the ciphertexts the submission
- *    will actually carry. The fee is a public input fixed at proving time, so
- *    a low one costs a whole 33-second proof and comes back as
- *    `PayloadUnderpaid`.
+ *    will actually carry, and held inside this wallet's own bounds. The fee is
+ *    a public input fixed at proving time, so a low one costs a whole
+ *    33-second proof and comes back as `PayloadUnderpaid`. A high one is paid:
+ *    the constants it is computed from are metadata, which carries no state
+ *    proof, and the chain credits an overpayment to the block author. So the
+ *    floor is checked against `fee.ts`'s compiled-in ceiling and against the
+ *    amount being sent, before anything is built.
  * 2. **The memo pad**, checked against both of the runtime's bounds. Over the
  *    cap is a refusal; a runtime whose divisor merged the two fee buckets is a
  *    warning and the spend goes ahead, because the operator cannot change the
@@ -68,7 +72,15 @@ import { blockHashAt, fetchHead, fetchLeafHashes, fetchTreeShape, headerAt } fro
 import { encodeSettlement, submitSettlement, waitForInclusion } from '../chain/submit';
 import type { ProverClient } from '../worker/client';
 import type { ProverLimits } from '../worker/protocol';
-import { ensureCiphertextFits, ensureMemoPadFits, slotFeeFloor } from './fee';
+import {
+  ensureCiphertextFits,
+  ensureFeeConstantsAreSane,
+  ensureFeeWithinCeiling,
+  ensureMemoPadFits,
+  feeOutrunsAmount,
+  HIGH_FEE_AMOUNT_SHARE,
+  slotFeeFloor,
+} from './fee';
 import { normaliseHash } from '../lib/hex';
 import { memoRefusal } from '../lib/memo';
 import { formatStepsAsQnr } from '../lib/units';
@@ -255,6 +267,11 @@ export async function spend(
     'payment',
   );
 
+  // The node's word about what a spend costs, held inside this wallet's own
+  // bounds first. Metadata carries no state proof and this wallet sends no
+  // `fee` field, so the floor a node declares is the fee it is paid.
+  ensureFeeConstantsAreSane(context.constants);
+
   const floor = feeFloorFor(context, limits);
   const fee = request.fee ?? floor;
   if (fee < floor) {
@@ -262,6 +279,16 @@ export async function spend(
       `this runtime's floor for one slot is ${formatStepsAsQnr(floor)} and this spend offers ` +
         `${formatStepsAsQnr(fee)}. The fee is a public input fixed at proving time, so an ` +
         'underpaid one costs the whole proof and comes back as PayloadUnderpaid.',
+    );
+  }
+  ensureFeeWithinCeiling(fee);
+  if (feeOutrunsAmount(fee, request.amount)) {
+    throw new Error(
+      `this spend would pay ${formatStepsAsQnr(fee)} of fee to move ` +
+        `${formatStepsAsQnr(request.amount)}, which this wallet refuses. The fee comes from ` +
+        'constants the node declares and the chain credits an overpayment to the block author. ' +
+        `Send at least ${formatStepsAsQnr(fee * HIGH_FEE_AMOUNT_SHARE)}, or connect to a node ` +
+        'whose figures you trust. Nothing has been built and nothing has been submitted.',
     );
   }
 

@@ -16,7 +16,7 @@ use qnero_wallet::store;
 use qnero_wallet::store::{NoteRow, PendingKind, StoredNote};
 use qnero_wallet::units::{qnr, steps_from_qnr};
 use qnero_wallet::wallet::{
-    full_scan_estimate, ChainBinding, EntryRhoCheck, MerkleSource, SyncOptions, Wallet,
+    full_scan_estimate, ChainBinding, EntryRhoCheck, HighFee, MerkleSource, SyncOptions, Wallet,
     ENTRY_WALK_LIMIT, NUM_LEAF_PROOFS,
 };
 use zeroize::Zeroize;
@@ -204,6 +204,15 @@ enum Command {
         /// seconds before the settlement that publishes their nullifiers.
         #[arg(long)]
         merkle_rpc: bool,
+        /// Take a fee that is large next to the amount being sent.
+        ///
+        /// The floor is arithmetic over two constants the node declares in its
+        /// metadata, which no state root covers, and the chain credits an
+        /// overpayment to the block author. So a fee over a fixed allowance
+        /// that also takes more than half the amount is refused, and this flag
+        /// is how a caller says it is what they meant.
+        #[arg(long)]
+        accept_high_fee: bool,
     },
     /// Chain head, last synced block and tree leaf count.
     Status,
@@ -762,6 +771,7 @@ fn main() -> Result<()> {
             memo,
             no_sync,
             merkle_rpc,
+            accept_high_fee,
         } => {
             let rpc = RpcClient::new(&cli.node);
             let chain = Chain::new(&rpc);
@@ -789,7 +799,12 @@ fn main() -> Result<()> {
             // The fee floor and the note selection are settled before any
             // circuit is built: both refuse spends that seconds of circuit
             // building and tens of seconds of proving would be spent on.
-            let plan = wallet.preflight(&metadata, &recipient, amount, fee, &memo)?;
+            let high_fee = if accept_high_fee {
+                HighFee::Accept
+            } else {
+                HighFee::Refuse
+            };
+            let plan = wallet.preflight(&metadata, &recipient, amount, fee, &memo, high_fee)?;
             let resolved_fee = plan.fee;
             // The floor is printed only when the caller asked for more than
             // it, because that is the only time the two are worth comparing
@@ -837,6 +852,7 @@ fn main() -> Result<()> {
                 Some(resolved_fee),
                 &memo,
                 merkle,
+                high_fee,
             )?;
             println!("anchor      block {}", report.anchor_block);
             println!(

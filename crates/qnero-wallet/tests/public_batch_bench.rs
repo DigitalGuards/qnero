@@ -39,7 +39,7 @@ use qnero_wallet::extrinsic::encode_submit_public_batch;
 use qnero_wallet::keys::create_seed;
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::{hex_0x, RpcClient};
-use qnero_wallet::wallet::{MerkleSource, Wallet, NUM_LEAF_PROOFS};
+use qnero_wallet::wallet::{HighFee, MerkleSource, Wallet, NUM_LEAF_PROOFS};
 
 /// The chain default: `chain/pallets/shielded/build.rs` reads it from the same
 /// constant.
@@ -121,6 +121,7 @@ fn public_batch_cost_at_the_chain_default() {
             None,
             "inner",
             MerkleSource::Local,
+            HighFee::Refuse,
         )
         .expect("the inner private batch proves");
     println!(

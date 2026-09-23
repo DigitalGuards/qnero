@@ -52,9 +52,11 @@ pub struct TransferRequest {
 pub struct AnchorRequest {
     pub parent_hash: String,
     pub block_number: u32,
-    /// Blake2-256, reduced mod p by [`HeaderInputs::new`].
+    /// Blake2-256, taken as raw bytes and reduced mod p by
+    /// [`HeaderInputs::new`], which is what the chain does with it.
     pub state_root: String,
-    /// Blake2-256, reduced mod p by [`HeaderInputs::new`].
+    /// Blake2-256, taken as raw bytes and reduced mod p by
+    /// [`HeaderInputs::new`], which is what the chain does with it.
     pub extrinsics_root: String,
     pub zk_tree_root: String,
     /// The digest logs the chain encodes, hex, exactly
@@ -119,12 +121,17 @@ pub struct SubmissionPublicInputs {
     pub ct_digest: String,
 }
 
-/// Parse a 32-byte digest from hex.
-pub fn digest_from_hex(what: &str, value: &str) -> Result<Digest> {
-    let bytes: [u8; 32] = hex::decode(value)
+/// Parse 32 raw bytes from hex, with no rule about what they encode.
+pub fn bytes32_from_hex(what: &str, value: &str) -> Result<[u8; 32]> {
+    hex::decode(value)
         .with_context(|| format!("{what} is not hex"))?
         .try_into()
-        .map_err(|_| anyhow::anyhow!("{what} is not 32 bytes"))?;
+        .map_err(|_| anyhow::anyhow!("{what} is not 32 bytes"))
+}
+
+/// Parse a 32-byte digest from hex.
+pub fn digest_from_hex(what: &str, value: &str) -> Result<Digest> {
+    let bytes = bytes32_from_hex(what, value)?;
     Digest::from_bytes(&bytes)
         .map_err(|_| anyhow::anyhow!("{what} is not four canonical Goldilocks limbs"))
 }
@@ -145,6 +152,17 @@ pub fn spending_key_from_hex(seed_hex: &str) -> Result<SpendingKey> {
 }
 
 impl AnchorRequest {
+    /// The circuit's view of this header.
+    ///
+    /// `parent_hash` and `zk_tree_root` are Poseidon2 outputs, so they take
+    /// the strict decode: four canonical Goldilocks limbs or a refusal.
+    /// `state_root` and `extrinsics_root` are Blake2-256 outputs and go in as
+    /// raw bytes, because the chain reduces them mod p and validates neither.
+    /// A Blake2 output has an 8-byte little-endian limb at or above p about
+    /// once every four billion blocks, and the strict decode used to refuse
+    /// those headers: a browser wallet that could not anchor at all until the
+    /// chain moved on, where the chain, the node and
+    /// `crates/qnero-wallet/src/chain.rs` all hash them happily.
     pub fn to_header(&self) -> Result<HeaderInputs> {
         let digest_logs = hex::decode(&self.digest_logs).context("digest_logs is not hex")?;
         ensure!(
@@ -155,8 +173,8 @@ impl AnchorRequest {
         HeaderInputs::new(
             digest_from_hex("anchor.parent_hash", &self.parent_hash)?,
             self.block_number,
-            digest_from_hex("anchor.state_root", &self.state_root)?.to_bytes(),
-            digest_from_hex("anchor.extrinsics_root", &self.extrinsics_root)?.to_bytes(),
+            bytes32_from_hex("anchor.state_root", &self.state_root)?,
+            bytes32_from_hex("anchor.extrinsics_root", &self.extrinsics_root)?,
             digest_from_hex("anchor.zk_tree_root", &self.zk_tree_root)?,
             &digest_logs,
         )
@@ -343,5 +361,109 @@ impl PreparedTransfer {
             fee: witness.fee,
             ct_digest: witness.ct_digest.to_hex(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Goldilocks modulus, `2^64 - 2^32 + 1`.
+    const P: u64 = 0xffff_ffff_0000_0001;
+
+    fn anchor(state_root: String) -> AnchorRequest {
+        AnchorRequest {
+            parent_hash: Digest::from_bytes(&[0u8; 32])
+                .expect("zero is canonical")
+                .to_hex(),
+            block_number: 7,
+            state_root,
+            extrinsics_root: Digest::from_bytes(&[0u8; 32])
+                .expect("zero is canonical")
+                .to_hex(),
+            zk_tree_root: Digest::from_bytes(&[1u8; 32])
+                .expect("one is canonical")
+                .to_hex(),
+            digest_logs: hex::encode([0u8; DIGEST_LOGS_SIZE]),
+        }
+    }
+
+    /// The parity vector `wallet-web/tests/anchor.test.ts` reduces in
+    /// TypeScript, one limb per case the reduction has: `p + 1`, `u64::MAX`,
+    /// `p - 1` and `p` itself.
+    const NON_CANONICAL_VECTOR: &str =
+        "02000000ffffffffffffffffffffffff00000000ffffffff01000000ffffffff";
+    const REDUCED_VECTOR: &str = "0100000000000000feffffff0000000000000000ffffffff0000000000000000";
+
+    /// A root whose first limb is `P + 1`, which the chain reduces to 1.
+    fn non_canonical_root() -> String {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&(P + 1).to_le_bytes());
+        hex::encode(bytes)
+    }
+
+    /// The same root with that limb already reduced.
+    fn reduced_root() -> String {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&1u64.to_le_bytes());
+        hex::encode(bytes)
+    }
+
+    /// A Blake2-256 output is not four canonical Goldilocks limbs and does not
+    /// have to be: `HeaderInputs::new` reduces `state_root` and
+    /// `extrinsics_root` mod p, which is what the chain's own `Header::hash`
+    /// does with them. The strict decode used to refuse such a header here, so
+    /// a browser wallet could not anchor at a block the chain and
+    /// `crates/qnero-wallet/src/chain.rs` both hash happily.
+    #[test]
+    fn a_state_root_limb_over_the_modulus_hashes_as_the_reduced_root() {
+        let raw = anchor(non_canonical_root())
+            .to_header()
+            .expect("a Blake2 root is taken as raw bytes");
+        let reduced = anchor(reduced_root())
+            .to_header()
+            .expect("the reduced root is canonical either way");
+        assert_eq!(raw.block_hash(), reduced.block_hash());
+    }
+
+    /// The same for the second Blake2 field.
+    #[test]
+    fn an_extrinsics_root_limb_over_the_modulus_is_reduced_too() {
+        let mut raw = anchor(reduced_root());
+        raw.extrinsics_root = non_canonical_root();
+        let mut reduced = anchor(reduced_root());
+        reduced.extrinsics_root = reduced_root();
+        assert_eq!(
+            raw.to_header().expect("raw bytes").block_hash(),
+            reduced.to_header().expect("reduced bytes").block_hash()
+        );
+    }
+
+    /// The exact bytes the reduction produces, so the browser wallet and this
+    /// module can be held to one answer. `wallet-web/tests/anchor.test.ts`
+    /// asserts the same pair.
+    #[test]
+    fn the_reduction_matches_the_browser_wallets_parity_vector() {
+        let mut request = anchor(NON_CANONICAL_VECTOR.to_string());
+        request.extrinsics_root = NON_CANONICAL_VECTOR.to_string();
+        let header = request.to_header().expect("raw Blake2 bytes are taken");
+        assert_eq!(header.state_root.to_hex(), REDUCED_VECTOR);
+        assert_eq!(header.extrinsics_root.to_hex(), REDUCED_VECTOR);
+    }
+
+    /// The two Poseidon2 fields keep the strict decode. Their values are
+    /// circuit outputs, so a limb at or above p is a corrupt or invented
+    /// header.
+    #[test]
+    fn a_poseidon_field_over_the_modulus_is_still_refused_by_name() {
+        let mut request = anchor(reduced_root());
+        request.parent_hash = non_canonical_root();
+        let refused = request.to_header().expect_err("parent_hash is a digest");
+        assert!(refused.to_string().contains("parent_hash"), "{refused}");
+
+        let mut request = anchor(reduced_root());
+        request.zk_tree_root = non_canonical_root();
+        let refused = request.to_header().expect_err("zk_tree_root is a digest");
+        assert!(refused.to_string().contains("zk_tree_root"), "{refused}");
     }
 }

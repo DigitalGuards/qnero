@@ -36,7 +36,7 @@ use qnero_wallet::keys::create_seed;
 use qnero_wallet::metadata::ChainMetadata;
 use qnero_wallet::rpc::RpcClient;
 use qnero_wallet::units::qnr;
-use qnero_wallet::wallet::{EntryRhoCheck, MerkleSource, Wallet, NUM_LEAF_PROOFS};
+use qnero_wallet::wallet::{EntryRhoCheck, HighFee, MerkleSource, Wallet, NUM_LEAF_PROOFS};
 
 /// `pallet-balances` and its first call. Stable indices in this runtime, and
 /// `runtime/tests/call_filter.rs` is what fails if either moves.
@@ -128,7 +128,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
     // proving.
     let memo = "payment to B";
     let fee = alice
-        .preflight(&metadata, &bob_address, 300, None, memo)
+        .preflight(&metadata, &bob_address, 300, None, memo, HighFee::Refuse)
         .map(|plan| plan.fee)
         .expect("the spend is fundable");
     let payment = alice
@@ -141,6 +141,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
             Some(fee),
             memo,
             MerkleSource::Local,
+            HighFee::Refuse,
         )
         .expect("the payment settles");
     println!(
@@ -166,7 +167,14 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
     // value and randomness out of a ciphertext A wrote.
     let back_memo = "back to A";
     let back_fee = bob
-        .preflight(&metadata, &alice_address, 100, None, back_memo)
+        .preflight(
+            &metadata,
+            &alice_address,
+            100,
+            None,
+            back_memo,
+            HighFee::Refuse,
+        )
         .map(|plan| plan.fee)
         .expect("B can fund the payment back");
     let back = bob
@@ -179,6 +187,7 @@ fn a_shield_a_payment_and_a_payment_back_settle_end_to_end() {
             Some(back_fee),
             back_memo,
             MerkleSource::Local,
+            HighFee::Refuse,
         )
         .expect("the payment back settles");
     println!(
@@ -390,7 +399,14 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
 
     let memo = "mined and spent";
     let fee = miner
-        .preflight(&metadata, &recipient_address, 5, None, memo)
+        .preflight(
+            &metadata,
+            &recipient_address,
+            5,
+            None,
+            memo,
+            HighFee::Refuse,
+        )
         .map(|plan| plan.fee)
         .expect("the spend is fundable");
     let payment = miner
@@ -403,6 +419,7 @@ fn the_miner_is_paid_in_notes_and_a_transparent_transfer_is_refused() {
             Some(fee),
             memo,
             MerkleSource::Local,
+            HighFee::Refuse,
         )
         .expect("the payment settles");
     println!(
