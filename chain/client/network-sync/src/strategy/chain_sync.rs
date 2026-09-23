@@ -85,6 +85,19 @@ const MAX_DOWNLOAD_AHEAD: u32 = 2048;
 /// remain bounded by the block request limit. Older bookmarks can be reconstructed from the tip.
 const MAX_FORK_SYNC_ANCHORS: usize = 2048;
 
+/// Fork targets held at once. Upstream bounds this map by pruning targets at or below the finalized
+/// number; this chain never finalizes past genesis, so that prune never fires and the map is capped
+/// here instead. A full map admits a new target only by displacing the one farthest from the best
+/// queued block.
+const MAX_FORK_TARGETS: usize = 256;
+
+/// Fork targets a single peer may hold open, so one connection cannot fill the map.
+const MAX_FORK_TARGETS_PER_PEER: usize = 8;
+
+/// Backward-walk bookmarks held across every fork target together. A walk that would pass this
+/// ceiling recycles its own oldest bookmark, as a walk at `MAX_FORK_SYNC_ANCHORS` already does.
+const MAX_TOTAL_FORK_SYNC_ANCHORS: usize = 4 * MAX_FORK_SYNC_ANCHORS;
+
 /// Maximum blocks to look backwards. The gap is the difference between the highest block and the
 /// common block of a node.
 const MAX_BLOCKS_TO_LOOK_BACKWARDS: u32 = MAX_DOWNLOAD_AHEAD / 2;
@@ -297,6 +310,7 @@ impl<B: BlockT> ForkTarget<B> {
 		blocks: &[BlockData<B>],
 		peer: &PeerId,
 		finalized: NumberFor<B>,
+		other_anchors: usize,
 		known_parent: impl Fn(&B::Hash) -> bool,
 	) -> Result<bool, BadPeer> {
 		let first = blocks
@@ -332,13 +346,72 @@ impl<B: BlockT> ForkTarget<B> {
 		// discard the farthest bookmark and reconstruct that gap from the tip later.
 		// This bounds memory at the cost of another backward pass through the gap.
 		if last.hash() != tip {
-			if self.pending.len() == MAX_FORK_SYNC_ANCHORS {
+			if !self.pending.is_empty() &&
+				(self.pending.len() == MAX_FORK_SYNC_ANCHORS ||
+					other_anchors.saturating_add(self.pending.len()) >=
+						MAX_TOTAL_FORK_SYNC_ANCHORS)
+			{
 				self.pending.remove(0);
 			}
 			self.pending.push((last.hash(), *last.number()));
 		}
 		self.cursor = Some((*first.parent_hash(), first.number().saturating_sub(One::one())));
 		Ok(false)
+	}
+}
+
+/// Add `peers` to the fork target for `hash`, creating it when the caps allow.
+///
+/// A peer already holding `MAX_FORK_TARGETS_PER_PEER` targets is not added to another. A new
+/// target on a full map displaces the entry farthest from `best_queued`, or is dropped when it
+/// is no nearer than that entry.
+fn admit_fork_target<B: BlockT>(
+	fork_targets: &mut HashMap<B::Hash, ForkTarget<B>>,
+	best_queued: NumberFor<B>,
+	hash: B::Hash,
+	number: NumberFor<B>,
+	parent_hash: Option<B::Hash>,
+	peers: impl IntoIterator<Item = PeerId>,
+	metrics: Option<&Metrics>,
+) {
+	let existing = fork_targets.get(&hash);
+	let peers: Vec<PeerId> = peers
+		.into_iter()
+		.filter(|peer| {
+			existing.map_or(false, |target| target.peers.contains(peer)) ||
+				fork_targets.values().filter(|target| target.peers.contains(peer)).count() <
+					MAX_FORK_TARGETS_PER_PEER
+		})
+		.collect();
+	if peers.is_empty() {
+		return
+	}
+	if let Some(target) = fork_targets.get_mut(&hash) {
+		target.peers.extend(peers);
+		return
+	}
+	let distance =
+		|n: NumberFor<B>| if n > best_queued { n - best_queued } else { best_queued - n };
+	if fork_targets.len() >= MAX_FORK_TARGETS {
+		let farthest = fork_targets
+			.iter()
+			.max_by_key(|(_, target)| distance(target.number))
+			.map(|(hash, target)| (*hash, distance(target.number)));
+		match farthest {
+			Some((evicted, far)) if far > distance(number) => {
+				fork_targets.remove(&evicted);
+				if let Some(metrics) = metrics {
+					metrics.fork_targets.dec();
+				}
+			},
+			_ => return,
+		}
+	}
+	let mut target = ForkTarget::new(number, parent_hash);
+	target.peers.extend(peers);
+	fork_targets.insert(hash, target);
+	if let Some(metrics) = metrics {
+		metrics.fork_targets.inc();
 	}
 }
 
@@ -558,17 +631,15 @@ where
 				hash,
 				announce.summary(),
 			);
-			self.fork_targets
-				.entry(hash)
-				.or_insert_with(|| {
-					if let Some(metrics) = &self.metrics {
-						metrics.fork_targets.inc();
-					}
-
-					ForkTarget::new(number, Some(*announce.header.parent_hash()))
-				})
-				.peers
-				.insert(peer_id);
+			admit_fork_target(
+				&mut self.fork_targets,
+				self.best_queued_number,
+				hash,
+				number,
+				Some(*announce.header.parent_hash()),
+				[peer_id],
+				self.metrics.as_ref(),
+			);
 		}
 
 		peer_info
@@ -622,17 +693,15 @@ where
 			}
 		}
 
-		self.fork_targets
-			.entry(*hash)
-			.or_insert_with(|| {
-				if let Some(metrics) = &self.metrics {
-					metrics.fork_targets.inc();
-				}
-
-				ForkTarget::new(number, None)
-			})
-			.peers
-			.extend(peers);
+		admit_fork_target(
+			&mut self.fork_targets,
+			self.best_queued_number,
+			*hash,
+			number,
+			None,
+			peers,
+			self.metrics.as_ref(),
+		);
 	}
 
 	fn request_justification(&mut self, hash: &B::Hash, number: NumberFor<B>) {
@@ -1384,14 +1453,18 @@ where
 							return Err(BadPeer(*peer_id, rep::NO_BLOCK));
 						}
 						validate_blocks::<B>(&blocks, peer_id, Some(request))?;
+						let anchors: usize =
+							self.fork_targets.values().map(|target| target.pending.len()).sum();
 						if let Some(target) = self.fork_targets.get_mut(&tip) {
 							let queue = &self.queue_blocks;
 							let client = &self.client;
+							let other_anchors = anchors.saturating_sub(target.pending.len());
 							if !target.accept_response(
 								tip,
 								&blocks,
 								peer_id,
 								client.info().finalized_number,
+								other_anchors,
 								|parent| {
 									queue.contains(parent) ||
 										matches!(
@@ -1522,17 +1595,15 @@ where
 									peer.best_hash,
 									peer_id,
 								);
-								self.fork_targets
-									.entry(peer.best_hash)
-									.or_insert_with(|| {
-										if let Some(metrics) = &self.metrics {
-											metrics.fork_targets.inc();
-										}
-
-										ForkTarget::new(peer.best_number, None)
-									})
-									.peers
-									.insert(*peer_id);
+								admit_fork_target(
+									&mut self.fork_targets,
+									self.best_queued_number,
+									peer.best_hash,
+									peer.best_number,
+									None,
+									[*peer_id],
+									self.metrics.as_ref(),
+								);
 							}
 							peer.state = PeerSyncState::Available;
 							return Ok(());
@@ -3016,7 +3087,7 @@ mod security_tests {
 			validate_blocks::<TestBlock>(&blocks, &peer, Some(request)).unwrap();
 			let target = targets.get_mut(&tip).unwrap();
 			if target
-				.accept_response(tip, &blocks, &peer, 0, |hash| known.contains(hash))
+				.accept_response(tip, &blocks, &peer, 0, 0, |hash| known.contains(hash))
 				.unwrap()
 			{
 				for block in blocks {
@@ -3099,5 +3170,100 @@ mod security_tests {
 		assert_eq!(block_import_origin(false, true, false), BlockOrigin::NetworkBroadcast);
 		assert_eq!(block_import_origin(false, true, true), BlockOrigin::NetworkInitialSync);
 		assert_eq!(block_import_origin(true, false, false), BlockOrigin::NetworkInitialSync);
+	}
+
+	fn hash_of(n: u64) -> H256 {
+		H256::from_low_u64_be(n)
+	}
+
+	/// One peer cannot hold more than its share of the fork map.
+	#[test]
+	fn a_single_peer_holds_at_most_its_share_of_fork_targets() {
+		let mut targets = HashMap::<H256, ForkTarget<TestBlock>>::new();
+		let peer = PeerId::random();
+		for n in 1..=(MAX_FORK_TARGETS_PER_PEER as u64 * 4) {
+			admit_fork_target::<TestBlock>(
+				&mut targets,
+				100,
+				hash_of(n),
+				100 + n,
+				None,
+				[peer],
+				None,
+			);
+		}
+		assert_eq!(targets.len(), MAX_FORK_TARGETS_PER_PEER);
+		// Joining a target it already holds is still allowed.
+		let held = *targets.keys().next().unwrap();
+		admit_fork_target::<TestBlock>(&mut targets, 100, held, 101, None, [peer], None);
+		assert_eq!(targets.len(), MAX_FORK_TARGETS_PER_PEER);
+	}
+
+	/// Announcements from many peers cannot grow the map past its cap, and a
+	/// full map keeps the targets nearest the best queued block.
+	#[test]
+	fn the_fork_map_is_capped_and_keeps_the_nearest_targets() {
+		let mut targets = HashMap::<H256, ForkTarget<TestBlock>>::new();
+		let best = 1_000u64;
+		// Far-future junk fills the map first.
+		for n in 0..MAX_FORK_TARGETS as u64 {
+			admit_fork_target::<TestBlock>(
+				&mut targets,
+				best,
+				hash_of(1_000_000 + n),
+				best + 10_000 + n,
+				None,
+				[PeerId::random()],
+				None,
+			);
+		}
+		assert_eq!(targets.len(), MAX_FORK_TARGETS);
+		// A target farther than everything held is dropped.
+		admit_fork_target::<TestBlock>(
+			&mut targets,
+			best,
+			hash_of(9),
+			best + 1_000_000,
+			None,
+			[PeerId::random()],
+			None,
+		);
+		assert!(!targets.contains_key(&hash_of(9)));
+		// A target near the tip displaces the farthest entry.
+		admit_fork_target::<TestBlock>(
+			&mut targets,
+			best,
+			hash_of(7),
+			best + 1,
+			None,
+			[PeerId::random()],
+			None,
+		);
+		assert!(targets.contains_key(&hash_of(7)));
+		assert!(!targets.contains_key(&hash_of(1_000_000 + MAX_FORK_TARGETS as u64 - 1)));
+		assert_eq!(targets.len(), MAX_FORK_TARGETS);
+	}
+
+	/// A walk recycles its own oldest bookmark once every target together
+	/// holds the global anchor ceiling.
+	#[test]
+	fn fork_walk_anchors_respect_the_global_ceiling() {
+		let chain = fork_blocks(8);
+		let tip = chain.last().unwrap().hash;
+		let peer = PeerId::random();
+		let walk = |other_anchors: usize| {
+			let mut target = ForkTarget::<TestBlock>::new(8, None);
+			target.pending.push((H256::repeat_byte(1), 7));
+			target.cursor = Some((chain[5].hash, 5));
+			let blocks = vec![chain[4].clone(), chain[5].clone()];
+			assert!(!target
+				.accept_response(tip, &blocks, &peer, 0, other_anchors, |_| false)
+				.unwrap());
+			target.pending.len()
+		};
+		// Below the ceiling the walk keeps a new bookmark.
+		assert_eq!(walk(0), 2);
+		// At the ceiling it recycles its own oldest one instead.
+		assert_eq!(walk(MAX_TOTAL_FORK_SYNC_ANCHORS), 1);
 	}
 }

@@ -948,6 +948,14 @@ where
 	// `Extensions`. Drop it too; the node re-registers a gated,
 	// wire-compatible replacement.
 	rpc_api.remove_method("archive_v1_call");
+	// The archive storage subscriptions walk a caller-chosen historical state
+	// with no trust gate and no item cap: `descendantsValues` over the empty key
+	// parks one blocking thread per subscription until the whole trie is read,
+	// and a subscriber that stops reading keeps it parked after disconnect. No
+	// client of this chain uses them, so they are removed outright.
+	for method in ARCHIVE_STORAGE_METHODS {
+		rpc_api.remove_method(method);
+	}
 	// Additional [`RpcModule`]s defined in the node to fit the specific blockchain
 	let extra_rpcs = rpc_builder(task_executor.clone())?;
 	rpc_api.merge(extra_rpcs).map_err(|e| Error::Application(e.into()))?;
@@ -962,9 +970,26 @@ where
 			));
 		}
 	}
+	for method in ARCHIVE_STORAGE_METHODS {
+		if rpc_api.method_names().any(|n| n == method) {
+			return Err(Error::Application(
+				format!("`{method}` walks historical state unbounded and must stay unregistered")
+					.into(),
+			));
+		}
+	}
 
 	Ok(rpc_api)
 }
+
+/// RPC-v2 archive storage subscriptions and their unsubscribe names, removed
+/// from every node's RPC module. See `gen_rpc_module`.
+pub const ARCHIVE_STORAGE_METHODS: [&str; 4] = [
+	"archive_v1_storage",
+	"archive_v1_stopStorage",
+	"archive_v1_storageDiff",
+	"archive_v1_storageDiff_stopStorageDiff",
+];
 
 /// Parameters to pass into [`build_network`].
 pub struct BuildNetworkParams<'a, Block, Net, TxPool, IQ, Client>

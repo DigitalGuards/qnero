@@ -45,9 +45,12 @@ queue's verifier only and never by `import_block` or by the node's own blocks:
   pinned in their own slots and never evicted by a fill a peer forces.
 
 A refusal is `randomx: budget refusal for block #N ...` at warn level, once a
-minute per budget with the count of what the minute hid. It travels the
-ordinary verification-failed path, so sync drops the sending peer and offers
-the branch again later; the block is valid or invalid independently of it, and
+minute per budget with the count of what the minute hid. A side-branch refusal
+comes after the seal is proven, so it travels the import-error path: sync
+restarts and offers the branch again later, and the sending peer keeps its
+reputation and its connection. A seed-fill refusal comes before any seal check,
+so it travels the verification-failed path and the sender is penalised and
+dropped. The block is valid or invalid independently of either, and
 an honest heavier chain is admitted at the budget's rate and can never be
 refused for good. Four counters on the Prometheus endpoint say what the budgets
 are doing: `qnero_pow_side_branch_charged_total`,
@@ -164,8 +167,8 @@ execute is about `8 * (A/H) * 30` blocks an hour for free plus the budgeted
 900 an hour, at roughly 22 KB of archive per block, and four cache fills in a
 burst then one per 150 s. An honest chain that carries `N` cheap blocks (a
 minority partition whose hashrate returned) imports `min(N, 1024)` at once and
-the rest at the budgeted rate, each exhausted batch costing the serving peer one
-drop and the node one sync restart; a partition holding under a ninth of the
+the rest at the budgeted rate, each exhausted batch costing the node one sync
+restart and the serving peer nothing; a partition holding under a ninth of the
 hash settles below the free line within about two and a half days and is charged
 from then on. Two follow-ups remain open: an ancestor search
 that recognises a known side-branch block, so budgeted recovery re-downloads
