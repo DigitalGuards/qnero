@@ -312,6 +312,33 @@ li a,
   max-width: 940px;
 }
 
+/* Links to the other Qnero apps. */
+.foot {
+  padding: var(--space-4);
+  border-top: 1px solid var(--border);
+  background: var(--bg-deep);
+}
+
+.foot__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  max-width: 940px;
+  font-size: var(--fs-ui);
+}
+
+.foot__link {
+  color: var(--text-secondary);
+}
+
+.foot__link:hover {
+  color: var(--text-primary);
+}
+
+.foot__link[aria-current='page'] {
+  color: var(--text-primary);
+}
+
 @media (max-width: 640px) {
   /* A phone gets the columns that carry the answer. The ones that fall out are
      the widest cells in the row and the ones a reader did not come for. */

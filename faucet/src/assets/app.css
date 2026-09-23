@@ -588,3 +588,26 @@ code {
     width: 100%;
   }
 }
+
+/* Links to the other Qnero apps. */
+.foot {
+  margin-top: var(--space-5);
+  padding-block: var(--space-4);
+  border-top: 1px solid var(--border, currentColor);
+}
+.foot__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  font-size: 0.875rem;
+}
+.foot__nav a {
+  color: var(--text-secondary, inherit);
+  text-decoration: none;
+}
+.foot__nav a:hover {
+  text-decoration: underline;
+}
+.foot__nav a[aria-current='page'] {
+  color: var(--text-primary, inherit);
+}

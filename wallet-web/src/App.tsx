@@ -41,6 +41,7 @@ import { Session, type ConnectionState } from './app/session';
 import { Notice } from './components/UI/Notice';
 import { Panel } from './components/UI/Panel';
 import { TabBar } from './components/TabBar';
+import { AppLinks } from './components/AppLinks';
 import { Landing } from './screens/Landing';
 import { CreateWallet } from './screens/CreateWallet';
 import { RestoreWallet } from './screens/RestoreWallet';
@@ -1486,11 +1487,10 @@ export function App(): ReactNode {
           )}
         </main>
 
-        {!open && !wizard && (
-          <footer className="mt-6 text-meta text-muted">
-            keys in this browser · proofs in a worker · no server
-          </footer>
-        )}
+        <footer className="mt-6 grid gap-2 text-meta text-muted">
+          {!open && !wizard && <p className="m-0">keys in this browser · proofs in a worker · no server</p>}
+          <AppLinks />
+        </footer>
       </div>
 
       {open && <TabBar />}

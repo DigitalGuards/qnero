@@ -1508,3 +1508,8 @@ tbody tr:hover td.col-self {
   flex-direction: column;
   justify-content: center;
 }
+
+/* The row that links the other Qnero apps, below the site's own pages. */
+.footer-apps__label {
+  color: var(--text-muted);
+}

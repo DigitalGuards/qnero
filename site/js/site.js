@@ -1,5 +1,5 @@
 /*
- * qnero.io: the theme toggle, and nothing else.
+ * qnero.io: the theme toggle, and the footer links to the other apps.
  *
  * The palette is decided in CSS. This file records one reader's choice and
  * lets the choice win over the system setting in both directions. A reader
@@ -73,3 +73,21 @@
     });
   });
 })();
+
+/*
+ * The footer's links to the other apps, pointed at the deployment serving this
+ * page. The markup carries the project's own hosts, so a reader with no script
+ * still has somewhere to go; a copy served from another apex links to its own
+ * wallet, explorer and faucet.
+ */
+(function () {
+  'use strict';
+  var host = location.hostname;
+  if (!host || host === 'localhost' || /^[0-9.]+$/.test(host) || host.indexOf('.') < 0) return;
+  var links = document.querySelectorAll('a[data-host]');
+  for (var i = 0; i < links.length; i++) {
+    var sub = links[i].getAttribute('data-host');
+    links[i].href = 'https://' + (sub ? sub + '.' : '') + host + '/';
+  }
+})();
+
