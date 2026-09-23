@@ -4,6 +4,7 @@ import { href, type Route } from '../app/router';
 import { isReading, useChain } from '../app/chainContext';
 import { formatCount } from '../lib/units';
 import { ThemeToggle } from './ThemeToggle';
+import { APPS, appUrl } from '../lib/appLinks';
 
 const NAV: { label: string; route: Route; match: Route['name'][] }[] = [
   { label: 'Chain', route: { name: 'home' }, match: ['home'] },
@@ -115,6 +116,21 @@ export function Layout({ current, children }: { current: Route['name']; children
       <main className="main" id="main" tabIndex={-1}>
         <div className="main__inner">{children}</div>
       </main>
+      <footer className="foot">
+        <nav className="foot__nav" aria-label="Qnero apps">
+          {APPS.map((app) =>
+            app.host === 'explorer' ? (
+              <span key={app.label} className="foot__link" aria-current="page">
+                {app.label}
+              </span>
+            ) : (
+              <a key={app.label} className="foot__link" href={appUrl(app.host, location.hostname)}>
+                {app.label}
+              </a>
+            ),
+          )}
+        </nav>
+      </footer>
     </>
   );
 }
