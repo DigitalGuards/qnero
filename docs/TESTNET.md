@@ -513,6 +513,8 @@ limit zones count the whole internet as one caller:
 - `limit_req zone=rpc_calls` becomes 240 calls a minute shared by everybody.
 - `limit_req zone=faucet_claim` becomes 6 claims a minute shared by everybody, so one
   abusive client locks every other claimant out.
+- `limit_req zone=faucet_read` becomes 120 reads a minute shared by everybody, which one
+  page load and one polling claim can use on their own.
 
 Measured on nginx 1.24.0 with these files: twelve callers carrying twelve
 distinct `CF-Connecting-IP` headers got eight 200s and four 429s with no list,
