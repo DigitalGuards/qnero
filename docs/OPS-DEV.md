@@ -5918,7 +5918,8 @@ Nothing of the bundle was deployed, so the review's runtime findings were fixed
 in place and the spec was regenerated from the fixed tree. The genesis hash
 moved with it, to
 `0x4dd537e588961989767628c781844aaa819b9a996872a5d97d14818a252c2414`, read off a
-dry start of the committed file. `build-testnet-spec.sh` ran with
+dry start of the committed file. It is superseded by the canonical-path
+regeneration in the entry after this one. `build-testnet-spec.sh` ran with
 `QNERO_BOOTNODES` unset, so the seed node's entry is still the one field the
 deployment wrote, and it sits outside genesis. The file grew by 1 002 bytes,
 all of it `:code`.
@@ -5995,3 +5996,58 @@ their `SubstrateWeight` figures, which is what the note in
 What is left is the host, and none of it was touched here. The runbook's
 "On the host" list is still the order, and the expected-genesis value it writes
 into the monitor is the hash above.
+
+## CI's first run, and a spec that reproduces from one path, 2026-09-23
+
+The root workflow ran for the first time on `3bb222f` and failed three jobs,
+none of them on a regression the review introduced.
+
+The root workspace's clippy refused a `Vec<(Vec<u8>, Vec<u8>)>` in
+`qnero-state-proof` and the same type in the wallet's test support under
+`-D warnings`. Both name `qnero_state_proof::StorageEntry` now.
+
+The chain workspace ran its tests in the dev profile, where two things fail
+that the release profile passes. `pallet-zk-tree`'s depth clamp test drives the
+tree past `CIRCUIT_MAX_TREE_DEPTH` on purpose, and the `defensive!` that
+reports it panics under debug assertions; the test expects that panic in debug
+and checks the clamp in release. The stratum session tests hold a 1 to 1.5 s
+share deadline around a RandomX hash, and an unoptimized hash does not finish
+inside it, every run. The job runs `cargo test --workspace --release` now, as
+this runbook always ran the node's tests. Measured here: the dev-profile run passed 2 418 and failed three (the two
+stratum tests and the spec comparison below), and the release run passed 2 390
+with the spec comparison its one failure.
+
+The spec job failed `runtime_wasm_uses_portable_source_paths` and
+`the_committed_testnet_spec_is_what_this_binary_exports`, and the second
+reproduces on this workstation: the release node built in this checkout
+exports a `:code` of 1 233 446 hex characters against the committed 1 235 576,
+from the same commit. The cause is the build path. `substrate-wasm-builder`
+writes a manifest under `target/release/wbuild/qnero-runtime` that names every
+chain crate by absolute path, and cargo hashes a path dependency's absolute
+location into `-C metadata`, so symbol hashes, and after them the optimised
+module and its compressed bytes, move with the directory the checkout sits in.
+The spec committed at `3bb222f` was exported from a worktree under
+`.claude/worktrees/`, and no other checkout reproduces it. Remapping keeps
+paths out of the bytes and has no effect on that hash.
+
+So the spec is built at one fixed path, the way srtool builds at `/build`.
+`scripts/build-canonical-node.sh` checks HEAD out as a detached worktree at
+`/tmp/qnero-spec-build` and builds the release node there;
+`scripts/build-testnet-spec.sh` exports from that binary;
+`testnet_spec.rs` compares the committed spec only from a build under that
+path, skipping elsewhere and refusing under `QNERO_REQUIRE_WASM`; and the CI
+job makes the same worktree and tests inside it. The two failure messages
+now name the leaked path with the bytes around it and the genesis keys that
+differ with their sizes, because the first run's output said neither.
+
+Regenerated from the canonical build of `91c0b8f`, the committed spec
+produces genesis
+`0xed049ca688fb1fb386edaaf61310a477dabf82c857faae82d76e5554f2779f83`, read off a
+40-second dry start. Only `:code` moved. Whether GitHub's runner exports the
+same bytes from that path is what the next CI run answers, and it is the only
+check of reproducibility across machines this repository has.
+
+A node takes its genesis from the spec file it is started with, so a binary
+built in any directory joins the chain the committed spec defines. The canonical
+build is what exporting or checking that spec needs.
+
