@@ -85,8 +85,11 @@ jobs:
         run: cargo clippy --locked --workspace -- -D warnings
       - name: check the feature gates
         run: cargo check --locked --workspace --features runtime-benchmarks,try-runtime
+      # Release, as docs/OPS-DEV.md runs the node's tests. The stratum tests
+      # hold a session against a 1 to 1.5 s share deadline around a RandomX
+      # hash, and an unoptimized hash outlasts that window.
       - name: test
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --release
 
   chain-spec:
     name: chain spec, against a real runtime wasm
@@ -94,17 +97,25 @@ jobs:
     timeout-minutes: 180
     defaults:
       run:
-        working-directory: chain
+        # The committed spec is reproducible only from a build at this path:
+        # the runtime wasm moves with the checkout directory, and
+        # scripts/build-canonical-node.sh explains why. The first step makes
+        # the worktree, and every later step runs inside it.
+        working-directory: /tmp/qnero-spec-build/chain
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/linux-build-deps
+      - name: the canonical worktree
+        working-directory: ${{ github.workspace }}
+        run: scripts/build-canonical-node.sh --no-build
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: chain-spec
-          workspaces: chain
+          workspaces: /tmp/qnero-spec-build/chain
       # No SKIP_WASM_BUILD anywhere in this job, and QNERO_REQUIRE_WASM makes
-      # the tests refuse to skip, so a binary that somehow carried a stub fails
-      # here instead of reporting a pass nobody read.
+      # the tests refuse to skip, so a binary that somehow carried a stub, or a
+      # build outside the canonical path, fails here instead of reporting a pass
+      # nobody read.
       #
       # `--release` is required, not a speed choice. `substrate-wasm-builder`
       # writes to `target/<outer profile>/wbuild`, and a dev-profile build

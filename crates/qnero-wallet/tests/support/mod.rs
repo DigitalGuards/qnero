@@ -199,7 +199,7 @@ pub struct NodeState {
     /// fields between syncs still gets a fresh chain.
     pub chain_cache: std::cell::RefCell<Option<(u64, Arc<ChainView>)>>,
     /// Immutable historical state used to build genuine RPC read proofs.
-    pub trie_history: std::cell::RefCell<BTreeMap<(u8, u32), Vec<(Vec<u8>, Vec<u8>)>>>,
+    pub trie_history: std::cell::RefCell<BTreeMap<(u8, u32), Vec<qnero_state_proof::StorageEntry>>>,
 }
 
 impl NodeState {

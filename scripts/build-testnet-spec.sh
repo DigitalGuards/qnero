@@ -34,7 +34,9 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-node="$here/chain/target/release/qnero-node"
+# The binary built at the canonical path. A node built in any other directory
+# carries a different runtime wasm; scripts/build-canonical-node.sh says why.
+node="/tmp/qnero-spec-build/chain/target/release/qnero-node"
 out="$here/chain/node/chain-specs/qnero-testnet.json"
 
 check=0
@@ -47,10 +49,10 @@ if [ ! -x "$node" ]; then
 $node is missing.
 
 The node is built on a workstation and copied to the host, never built there,
-so this script does not build it for you:
+and the spec is exported from the build at the canonical path, so this script
+does not build it for you:
 
-  cd chain
-  LIBCLANG_PATH=/usr/lib/llvm-18/lib nice -n 19 cargo build -j 4 --release -p qnero-node
+  LIBCLANG_PATH=/usr/lib/llvm-18/lib ./scripts/build-canonical-node.sh
 
 Do not build it with SKIP_WASM_BUILD set. That produces a binary with a stub
 runtime wasm, and every genesis it exports is that stub's.
