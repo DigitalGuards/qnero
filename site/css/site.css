@@ -1510,6 +1510,10 @@ tbody tr:hover td.col-self {
 }
 
 /* The row that links the other Qnero apps, below the site's own pages. */
+.footer-apps {
+  align-items: center;
+}
+
 .footer-apps__label {
   color: var(--text-muted);
 }

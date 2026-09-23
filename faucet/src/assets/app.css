@@ -608,6 +608,6 @@ code {
 .foot__nav a:hover {
   text-decoration: underline;
 }
-.foot__nav a[aria-current='page'] {
+.foot__nav [aria-current='page'] {
   color: var(--text-primary, inherit);
 }
