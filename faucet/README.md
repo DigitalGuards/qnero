@@ -23,7 +23,7 @@ A drip is therefore a job rather than a request. Everything else follows:
   `send` take `&mut self`, and the note store is one JSON file with no lock: two writers
   corrupt it and lose the `rho` and `r` that open the notes in it. Ownership is the lock, and
   the HTTP side reaches the wallet only through a bounded channel.
-- `POST /drip` answers `queued` and the page polls `GET /drip/{id}`. Holding a request open
+- `POST /drip` answers `queued` and the page polls `GET /drip/{token}`. Holding a request open
   for a proof plus a block would be a two-minute socket per claim in front of a server that
   can do one at a time.
 
@@ -103,8 +103,8 @@ pair. Both sides agreeing is the confirmation `docs/TESTNET.md` asks for.
 | `GET /` | the page, with `/app.css`, `/app.js` and `/favicon.svg` beside it |
 | `GET /health` | 200 when the worker is up, the node answered inside six minutes and the balance is above the floor; 503 otherwise, with `ready`, `nodeFresh`, `funded`, `balanceQuanta`, `balanceQnr` and `chainHead` saying which. The worker's minute tick is what keeps that freshness true with no traffic |
 | `GET /status` | the deep check: `configured`, `captchaEnabled`, `dripQuanta`, `dripQnr`, `cooldownHours`, `balanceQuanta`, `balanceQnr`, `notes`, `queued`, `queueCapacity`, `paidQuanta`, `paidQnr`, `chainHead`, `address`, `genesis` |
-| `POST /drip` | `{"address": "qn1...", "turnstileToken": "..."}` → 202 `{"status":"queued","id":N}` |
-| `GET /drip/{id}` | `queued`, `sent` with `includedAt`, or `failed` with a reason code, plus `phase` and `ahead` |
+| `POST /drip` | `{"address": "qn1...", "turnstileToken": "..."}` → 202 `{"status":"queued","token":"<32 hex characters>"}` |
+| `GET /drip/{token}` | `queued`, `sent` with `includedAt`, or `failed` with a reason code, plus `phase` and `ahead`. The token is the claim's whole handle: the ledger's rowid stays inside the process, and a path that is not 32 hex characters is a 404 |
 
 `phase` is the finer reading of a queued claim that the page's progress line
 shows: `queued` while somebody else's claim is in front of it, `proving` when

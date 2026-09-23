@@ -684,8 +684,8 @@ qnero-wallet keygen --file /tmp/probe.seed          # a throwaway wallet
 ADDR=$(qnero-wallet address --file /tmp/probe.seed | awk '{print $2}')
 curl -sS -X POST -H 'content-type: application/json' \
   -d "{\"address\":\"$ADDR\"}" https://faucet.<domain>/drip
-# -> {"status":"queued","id":N,...}
-curl -sS https://faucet.<domain>/drip/N              # poll until "sent"
+# -> {"status":"queued","token":"<32 hex characters>",...}
+curl -sS https://faucet.<domain>/drip/$TOKEN         # poll until "sent"
 qnero-wallet --node https://rpc.<domain> --file /tmp/probe.seed sync
 # -> received 1 note(s) worth 10.00 QNR
 ```

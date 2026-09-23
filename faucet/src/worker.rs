@@ -18,7 +18,7 @@
 //! request: a private batch proves in about 9.8 s and then waits up to one
 //! 120 s block to settle (`docs/BENCH.md`). So `POST /drip` records the claim,
 //! hands it to this thread and answers `queued`; the page polls
-//! `GET /drip/{id}`.
+//! `GET /drip/{token}`.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
