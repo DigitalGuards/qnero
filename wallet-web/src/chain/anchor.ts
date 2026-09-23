@@ -21,11 +21,48 @@
  * Goldilocks is not something a second implementation should exist for.
  */
 
-import { bytesToHex, hexToBytes, readCompact } from '../lib/hex';
+import { bytesToHex, hexToBytes, leBytesToBigInt, readCompact } from '../lib/hex';
 import { concatBytes, encodeCompact } from '../lib/scale';
 
 /** The digest blob length the header hash commits to. */
 export const DIGEST_LOGS_SIZE = 110;
+
+/** The Goldilocks modulus, `2^64 - 2^32 + 1`. */
+export const GOLDILOCKS_MODULUS = 0xffffffff00000001n;
+
+/**
+ * A Blake2-256 header root, as the four Goldilocks limbs the chain hashes.
+ *
+ * `stateRoot` and `extrinsicsRoot` are Blake2-256 outputs, so each of their
+ * four 8-byte little-endian limbs lands at or above the Goldilocks modulus
+ * about once in four billion, and the chain does not care: `HeaderInputs::new`
+ * reduces both roots mod p and `Header::hash` hashes what comes out. The
+ * prover module used to take them through a strict decode that refused a limb
+ * at or above p, so a wallet could not anchor at such a block at all.
+ *
+ * The reduction is one conditional subtraction, because `2p` overflows a u64,
+ * which is the same arithmetic `Goldilocks::as_canonical_u64` does. Doing it
+ * here means the bytes handed to the prover are already canonical, so a
+ * deployed module that still has the strict decode takes them and hashes them
+ * to the value the chain hashes.
+ */
+export function canonicalBlakeRoot(hex: string): string {
+  const bytes = hexToBytes(hex);
+  if (bytes.length !== 32) {
+    throw new Error(`a header root is ${bytes.length} bytes where a Blake2-256 output is 32`);
+  }
+  for (let limb = 0; limb < 4; limb += 1) {
+    const offset = limb * 8;
+    let value = leBytesToBigInt(bytes.subarray(offset, offset + 8));
+    if (value >= GOLDILOCKS_MODULUS) {
+      value -= GOLDILOCKS_MODULUS;
+    }
+    for (let byte = 0; byte < 8; byte += 1) {
+      bytes[offset + byte] = Number((value >> BigInt(8 * byte)) & 0xffn);
+    }
+  }
+  return strip(bytesToHex(bytes));
+}
 
 /** A header preimage, field for field, in the shape the prover takes. */
 export interface Anchor {
@@ -92,13 +129,21 @@ function strip(hex: string): string {
   return hex.startsWith('0x') ? hex.slice(2) : hex;
 }
 
-/** One header, as the anchor of a spend. */
+/**
+ * One header, as the anchor of a spend.
+ *
+ * The two Blake2 roots are reduced here, for the reason `canonicalBlakeRoot`
+ * gives: the chain reduces them and a prover module may refuse them raw. The
+ * two Poseidon2 fields go through untouched, because their limbs are circuit
+ * outputs and are canonical already; a header carrying one that is not is a
+ * header the prover should refuse.
+ */
 export function anchorFromHeader(header: RawChainHeader): Anchor {
   return {
     parent_hash: strip(header.parentHash),
     block_number: Number(BigInt(header.number)),
-    state_root: strip(header.stateRoot),
-    extrinsics_root: strip(header.extrinsicsRoot),
+    state_root: canonicalBlakeRoot(header.stateRoot),
+    extrinsics_root: canonicalBlakeRoot(header.extrinsicsRoot),
     zk_tree_root: strip(header.zkTreeRoot),
     digest_logs: strip(bytesToHex(digestBytes(header.digest.logs))),
   };

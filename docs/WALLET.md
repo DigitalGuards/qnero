@@ -1064,6 +1064,16 @@ refusal costs nothing:
    way to catch a wrong digest re-encoding, which otherwise costs a proof and
    comes back as `BlockHashMismatch`.
 
+   `stateRoot` and `extrinsicsRoot` are Blake2-256 outputs and go into that
+   hash as raw bytes reduced mod p, which is what the chain does with them: an
+   8-byte little-endian limb of a Blake2 output lands at or above the
+   Goldilocks modulus about once in four billion, and the chain hashes such a
+   header like any other. `parentHash` and `zkTreeRoot` are Poseidon2 outputs
+   and take the strict decode, because a non-canonical limb there is a corrupt
+   header. The browser wallet reduces both Blake2 roots itself before handing
+   them to the prover module, so a module staged by digest from an earlier
+   build takes bytes it can decode either way.
+
    Head-anchoring is also a privacy policy, and it is written down here because
    nothing else would stop a later change from breaking it. The anchor block is
    a public input of the settlement, so an observer reads the gap between
