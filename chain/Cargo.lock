@@ -8337,8 +8337,6 @@ dependencies = [
 [[package]]
 name = "sc-basic-authorship"
 version = "0.53.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d82f8b0c44c7f00108a8babea46397c3f15f1a90273098ab8b3ebbc7be10585a"
 dependencies = [
  "futures",
  "log",
