@@ -6,9 +6,9 @@
 #   ./scripts/stage-wasm.sh --threaded   that, plus the threaded one if it exists
 #
 # QNERO_WASM_PREBUILT=1 says the modules were built on another machine and
-# copied in, which this script then holds to a stronger standard than a local
-# build: both modules must be present, and every file the stage copies must
-# match a SHA-256 manifest. See "the prebuilt gate" below.
+# copied in. Both packages must be present and authenticated by an ML-DSA-87
+# release manifest, a separately trusted public key and an expected revision.
+# Copies come from the verifier's authenticated snapshot.
 #
 # The module is not imported by the bundle. It is three megabytes of wasm with
 # a generated ES-module wrapper, and the worker fetches it at runtime from
@@ -27,103 +27,47 @@ want_threaded=0
 [[ "${1:-}" == "--threaded" ]] && want_threaded=1
 
 prebuilt="${QNERO_WASM_PREBUILT:-0}"
-manifest="${QNERO_WASM_SHA256:-${app_dir}/wasm-prebuilt.sha256}"
+if [[ "${prebuilt}" != "0" && "${prebuilt}" != "1" ]]; then
+    echo "QNERO_WASM_PREBUILT must be 0 or 1. Nothing has been staged." >&2
+    exit 1
+fi
+source_dir="${crate_dir}/www"
+verified_parent=""
 
-# The prebuilt gate.
-#
-# A module built here comes out of the crate this script reads, so what it
-# exports and what is in it are both decided by the source tree. A module built
-# elsewhere is a file somebody copied in, and the export check below says only
-# that the names the crate declares appear in the generated glue: a module with
-# every export and other bytes in it passes that, and the glue is text anybody
-# can edit. So under this flag every file this script copies is pinned by
-# digest against a manifest the operator brings, and a manifest that is
-# missing, unreadable, incomplete or disagreeing refuses the stage.
-#
-# Every file, because the glue is what the seed goes through. `deriveAccount`
-# takes the seed as a JS string and hands it to the module through
-# `qnero_prover_wasm.js`, and the threaded package carries a `snippets/`
-# directory whose worker entry point the pool starter fetches at run time. A
-# gate that pinned the two `.wasm` files and let the JS beside them through
-# pinned the part that is hard to edit and left the part that is easy.
-#
-# The manifest is `sha256sum` output with paths relative to the crate's `www/`
-# directory. On the machine that built the modules:
-#
-#     cd crates/qnero-prover-wasm/www
-#     find pkg pkg-threaded -type f -print0 | sort -z \
-#         | xargs -0 sha256sum > wasm-prebuilt.sha256
-#
-# Point QNERO_WASM_SHA256 at it, or leave it at wallet-web/wasm-prebuilt.sha256.
-# A manifest listing more than the stage copies is fine and is checked as well;
-# a manifest missing one file the stage copies is refused by name.
-
-# The paths, relative to `www/`, that this script copies into `public/wasm/`.
-# The threaded tree is walked, because `cp -r` copies all of it, `snippets/`
-# included.
-staged_files() {
-    printf '%s\n' pkg/qnero_prover_wasm.js pkg/qnero_prover_wasm_bg.wasm
-    (cd "${crate_dir}/www" && find pkg-threaded -type f) | sed 's#^\./##'
+cleanup_verified() {
+    if [[ -n "${verified_parent}" ]]; then
+        rm -rf -- "${verified_parent}"
+    fi
 }
-
-# The paths a `sha256sum` manifest covers. A line is 64 hex characters, two
-# separator characters (the second is `*` in binary mode), then the path.
-manifest_files() {
-    grep -E '^[0-9a-fA-F]{64}[ \t]' "${manifest}" | cut -c67- | sed 's#^\./##'
-}
+trap cleanup_verified EXIT
 
 verify_manifest() {
-    if [[ ! -r "${manifest}" ]]; then
+    local verifier="${QNERO_RELEASE_VERIFIER:-${repo_dir}/target/release/qnero-release}"
+    local manifest="${QNERO_RELEASE_MANIFEST:-${source_dir}/wasm-prebuilt.release.json}"
+    local signature="${QNERO_RELEASE_SIGNATURE:-${manifest}.sig}"
+    local public_key="${QNERO_RELEASE_PUBLIC_KEY:-}"
+    local revision="${QNERO_RELEASE_REVISION:-}"
+    if [[ -z "${public_key}" || ! -r "${public_key}" || ! -x "${verifier}" ]]; then
         cat >&2 <<MSG
-QNERO_WASM_PREBUILT=1 and no readable SHA-256 manifest at
-${manifest}
-
-The modules were built on another machine, so the only thing tying these bytes
-to that build is their digest. Write the manifest on the machine that built
-them and bring it with them:
-
-    cd crates/qnero-prover-wasm/www
-    find pkg pkg-threaded -type f -print0 | sort -z \\
-        | xargs -0 sha256sum > wasm-prebuilt.sha256
-
-then point QNERO_WASM_SHA256 at it. Nothing has been staged.
+prebuilt prover packages require qnero-release and a separately trusted public
+release key. Build the verifier with cargo build --locked --release -p
+qnero-release and set QNERO_RELEASE_PUBLIC_KEY to your trusted key file.
+See docs/RELEASE-AUTH.md. Nothing has been staged.
 MSG
         exit 1
     fi
-    local missing
-    missing="$(comm -23 <(staged_files | sort -u) <(manifest_files | sort -u))"
-    if [[ -n "${missing}" ]]; then
-        {
-            echo "${manifest} leaves out files this script copies:"
-            echo
-            while IFS= read -r path; do
-                printf '    %s\n' "${path}"
-            done <<<"${missing}"
-            cat <<MSG
-
-The glue carries the seed and the worker snippets start the thread pool, so a
-manifest that pins the two modules and lets the JS beside them through pins the
-half that is hard to edit. Write it over the whole tree on the machine that
-built it:
-
-    cd crates/qnero-prover-wasm/www
-    find pkg pkg-threaded -type f -print0 | sort -z \\
-        | xargs -0 sha256sum > wasm-prebuilt.sha256
-
-Nothing has been staged.
-MSG
-        } >&2
+    if [[ -z "${revision}" ]]; then
+        revision="$(git -C "${repo_dir}" rev-parse HEAD)" || exit 1
+    fi
+    verified_parent="$(mktemp -d)"
+    if ! "${verifier}" verify --root "${source_dir}" --public-key "${public_key}" \
+        --revision "${revision}" --manifest "${manifest}" --signature "${signature}" \
+        --require-path pkg --require-path pkg-threaded \
+        --output-dir "${verified_parent}/bundle"; then
+        echo "prebuilt release authentication failed. Nothing has been staged." >&2
         exit 1
     fi
-    if ! (cd "${crate_dir}/www" && sha256sum --check --strict --quiet "${manifest}"); then
-        cat >&2 <<MSG
-a prebuilt prover file does not match ${manifest}. These are bytes this deploy
-did not build and cannot check any other way, so the stage is refused. Nothing
-has been staged.
-MSG
-        exit 1
-    fi
-    echo "every staged prover file matches ${manifest}"
+    source_dir="${verified_parent}/bundle"
 }
 
 if [[ ! -f "${crate_dir}/www/pkg/qnero_prover_wasm.js" ]]; then
@@ -159,8 +103,6 @@ MSG
     fi
 }
 
-check_exports "${crate_dir}/www/pkg/qnero_prover_wasm.js" single-threaded
-
 if [[ "${prebuilt}" == "1" ]]; then
     if [[ ! -f "${crate_dir}/www/pkg-threaded/qnero_prover_wasm.js" ]]; then
         cat >&2 <<MSG
@@ -182,15 +124,29 @@ MSG
     verify_manifest
 fi
 
+# Validate both export surfaces before changing public/wasm/. Prebuilt checks
+# read the verified snapshot, which is also the source of every later copy.
+check_exports "${source_dir}/pkg/qnero_prover_wasm.js" single-threaded
+if [[ ! -f "${source_dir}/pkg/qnero_prover_wasm_bg.wasm" ]]; then
+    echo "the single-threaded prover wasm is missing. Nothing has been staged." >&2
+    exit 1
+fi
+if [[ "${want_threaded}" == "1" && -f "${source_dir}/pkg-threaded/qnero_prover_wasm.js" ]]; then
+    check_exports "${source_dir}/pkg-threaded/qnero_prover_wasm.js" threaded
+    if [[ ! -f "${source_dir}/pkg-threaded/qnero_prover_wasm_bg.wasm" ]]; then
+        echo "the threaded prover wasm is missing. Nothing has been staged." >&2
+        exit 1
+    fi
+fi
+
 mkdir -p "${out_dir}"
-cp "${crate_dir}/www/pkg/qnero_prover_wasm.js" "${out_dir}/"
-cp "${crate_dir}/www/pkg/qnero_prover_wasm_bg.wasm" "${out_dir}/"
+cp "${source_dir}/pkg/qnero_prover_wasm.js" "${out_dir}/"
+cp "${source_dir}/pkg/qnero_prover_wasm_bg.wasm" "${out_dir}/"
 echo "staged the single-threaded prover into public/wasm/"
 
 if [[ "${want_threaded}" == "1" ]]; then
-    threaded_pkg="${crate_dir}/www/pkg-threaded"
+    threaded_pkg="${source_dir}/pkg-threaded"
     if [[ -f "${threaded_pkg}/qnero_prover_wasm.js" ]]; then
-        check_exports "${threaded_pkg}/qnero_prover_wasm.js" threaded
         rm -rf "${out_dir}/threaded"
         mkdir -p "${out_dir}/threaded"
         # Recursive: wasm-bindgen-rayon emits a `snippets/` directory beside

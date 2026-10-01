@@ -13,3 +13,6 @@ CLAUDE.md
 *.seed.store.json
 *.store.json
 *.store.json.tmp*
+
+# Offline release signing keys. Public verification keys may be published.
+*.release-key

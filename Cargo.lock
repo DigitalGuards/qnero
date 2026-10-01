@@ -2030,6 +2030,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "qnero-release"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "qp-rusty-crystals-dilithium",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
+]
+
+[[package]]
 name = "qnero-state-proof"
 version = "0.1.0"
 dependencies = [
