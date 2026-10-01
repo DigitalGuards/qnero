@@ -118,42 +118,31 @@ crate's surface is a wallet whose screens die on an export that is not there
 and nothing in the bundle can catch it: the module is fetched at runtime, never
 imported, never typed. On a machine that is not allowed to build wasm, build
 the two modules elsewhere, copy them into `crates/qnero-prover-wasm/www/pkg`
-and `www/pkg-threaded`, write a SHA-256 manifest on the machine that built
-them, and set the flag:
+and `www/pkg-threaded`, and authenticate them with an ML-DSA-87 release
+manifest. Follow [RELEASE-AUTH.md](RELEASE-AUTH.md) to build `qnero-release`,
+sign both package trees, and provision a separately trusted public key on the
+deploying machine. Copy the manifest and signature beside the modules.
 
 ```bash
-# on the machine that built the modules
-cd crates/qnero-prover-wasm/www
-find pkg pkg-threaded -type f -print0 | sort -z \
-    | xargs -0 sha256sum > wasm-prebuilt.sha256
-```
-
-The manifest covers the whole of both packages, because the stage copies more
-than the two `.wasm` files: both generated `qnero_prover_wasm.js` glue files
-and every file under `pkg-threaded/snippets/`. A manifest listing more than the
-stage copies is fine and is checked too.
-
-```bash
-# on the deploying machine, with the manifest copied in beside the modules
-QNERO_WASM_PREBUILT=1 QNERO_HOST=<user>@<host> QNERO_DOMAIN=<domain> \
+# on the deploying machine, after independently confirming the key and commit
+QNERO_WASM_PREBUILT=1 \
+QNERO_RELEASE_PUBLIC_KEY=/trusted/qnero-release.pub \
+QNERO_RELEASE_REVISION=<full-reviewed-commit> \
+QNERO_HOST=<user>@<host> QNERO_DOMAIN=<domain> \
   ./scripts/deploy-testnet.sh wallet
 ```
 
 It skips `build-wasm.sh` and `build-threaded-wasm.sh` and stages what is
-already in those two directories. What it does instead is stricter than a local
-build, because these are bytes the deploy did not produce:
+already in those two directories after checking their origin and bytes:
 
-- Every file the stage copies is pinned against the manifest, read from
-  `wallet-web/wasm-prebuilt.sha256` or from wherever `QNERO_WASM_SHA256`
-  points: the two `.wasm` modules, the two `qnero_prover_wasm.js` glue files
-  and everything under `pkg-threaded/snippets/`. A manifest that is missing,
-  unreadable, disagreeing, or silent about one of those files refuses the
-  stage and names what it left out. The export check alone does not cover
-  this: it reads every `js_name` the crate declares and refuses glue that is
-  missing one, and the glue is text, so a module with every export and other
-  bytes in it passes it. The glue is also what `deriveAccount` hands the seed
-  to, and the snippet is the worker entry point `initThreadPool` fetches at
-  run time, so those are the files worth editing.
+- The signed manifest covers both `.wasm` modules, both generated JavaScript
+  glue files and every file under `pkg-threaded/snippets/`. The trusted public
+  key and full expected commit are separate inputs. Changed bytes, omitted
+  files, a substituted signer or a different revision refuse staging.
+- Copies come from the verifier's authenticated snapshot. Both export
+  surfaces are checked before existing staged files are changed. The gate
+  authenticates the signer's asserted revision and bytes; build provenance
+  and the eventual host's behavior remain separate trust boundaries.
 - A missing `www/pkg-threaded` refuses as well, where a local build only warns
   and falls back. Under the flag it is a copy that did not finish, and staging
   it would ship a wallet proving a payment in 37.6 s where it takes 11.2 s.

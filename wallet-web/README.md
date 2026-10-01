@@ -18,6 +18,12 @@ nice -n 19 npm ci
 nice -n 19 npm run dev                 # http://127.0.0.1:5173
 ```
 
+For modules built on another machine, `QNERO_WASM_PREBUILT=1` requires
+ML-DSA-87 signed manifests, an independently trusted release key and an expected
+source commit. Both packages are verified and staged from an authenticated
+snapshot. See [release artifact authentication](../docs/RELEASE-AUTH.md) for
+the signing and staging commands and the browser-host trust boundary.
+
 The dev server and the preview server both send `Cross-Origin-Opener-Policy:
 same-origin` and `Cross-Origin-Embedder-Policy: require-corp`, which is what a
 page needs before `SharedArrayBuffer` exists and therefore before the threaded

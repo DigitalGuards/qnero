@@ -1,0 +1,18 @@
+[package]
+name = "qnero-release"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ML-DSA-87 authentication of Qnero release artifacts"
+
+[dependencies]
+anyhow = { workspace = true, features = ["std"] }
+clap = { workspace = true }
+hex = { workspace = true }
+qp-rusty-crystals-dilithium = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+zeroize = { workspace = true }

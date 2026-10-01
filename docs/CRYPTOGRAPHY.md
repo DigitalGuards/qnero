@@ -27,6 +27,7 @@ and the source configuration; it makes no uniform chain-wide security claim.
 | Transparent entry signatures | ML-DSA-87 through `qp-dilithium-crypto`. Shielded settlements use proof authorization and publish nullifiers. |
 | Header and state authentication | Poseidon2 for the custom header hash; Blake2-256 for the runtime's Substrate state trie, LayoutV1. State proofs authenticate values relative to a selected header. Wallets retain provider/checkpoint trust for chain selection and freshness. |
 | P2P transport | Vendored litep2p uses Clatter pqXX with ML-KEM-768, ChaChaPoly and SHA-256, plus signed identity binding. Wallet HTTP/WebSocket TLS is a separate deployment boundary and does not inherit the P2P suite. |
+| Release artifact authentication | `qnero-release` uses ML-DSA-87 with a release-specific context to sign source revision, artifact paths, sizes, SHA-512 digests and executable flags. Prebuilt browser prover staging requires a separately trusted public key and expected revision, and copies a verified snapshot. Official key provisioning, build provenance and host delivery remain separate responsibilities. See [RELEASE-AUTH.md](RELEASE-AUTH.md). |
 | Proof of work | Stock RandomX `rx/0` through the native engine. Honest-chain selection depends on cumulative work and availability; its security is separate from proof soundness and note confidentiality. |
 
 ML-KEM and ML-DSA are standardized in [FIPS 203](https://csrc.nist.gov/pubs/fips/203/final)

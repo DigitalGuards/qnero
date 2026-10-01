@@ -11,6 +11,7 @@ members = [
     "crates/qnero-circuit-builder",
     "crates/qnero-wallet",
     "crates/qnero-state-proof",
+    "crates/qnero-release",
     "crates/qnero-prover-wasm",
     "faucet",
 ]
